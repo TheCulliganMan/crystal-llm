@@ -71,6 +71,7 @@ apps/web/assets/audio/**/*.mp3
 apps/web/assets/audio/manifests/**/*.json
 .asm_to_wav_manifest.json
 content-packs/test/
+/content-packs/core-modular.crystalpack
 .DS_Store
 pokecrystal_disassembly/gfx/*
 .coverage

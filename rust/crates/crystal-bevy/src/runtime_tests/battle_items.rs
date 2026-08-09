@@ -27,7 +27,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -88,7 +88,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -590,6 +590,7 @@
             .expect("dispatch phone game shell");
         let dispatched_phone = dispatch_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimePhoneScript",
                 2,
                 ScriptRuntimeInputs::default(),
@@ -2250,9 +2251,12 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                origin_map_name: "RuntimeMap".to_string(),
                 species: "CYNDAQUIL".to_string(),
                 level: 5,
                 source_script: "RuntimeScript".to_string(),
+                startbattle_command_index: 4,
+                resume_command_index: 5,
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
@@ -2291,6 +2295,7 @@
 
         let state = GameState {
             battle: BattleMemory::Wild {
+                roaming_slot: None,
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "RuntimeMap".to_string(),
@@ -2350,9 +2355,12 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                origin_map_name: "RuntimeMap".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 5,
                 source_script: "MissingScript".to_string(),
+                startbattle_command_index: 4,
+                resume_command_index: 5,
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
@@ -2371,9 +2379,12 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                origin_map_name: "RuntimeMap".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 5,
                 source_script: "RuntimeWildScript".to_string(),
+                startbattle_command_index: 4,
+                resume_command_index: 5,
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
@@ -2892,16 +2903,14 @@
         assert!(error.contains("saved day_care.man.pokemon.species CYNDAQUIL is missing"));
 
         let mut state = GameState::default();
-        state
-            .roaming_pokemon
-            .push(crystal_core::state::RoamingPokemonState {
-                species: "CYNDAQUIL".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 1,
-                hp: 100,
-                dvs: 0,
-            });
+        state.roaming_pokemon[0] = crystal_core::state::RoamingPokemonState {
+            species: Some("CYNDAQUIL".to_string()),
+            level: 40,
+            map_group: 1,
+            map_number: 1,
+            hp: 1,
+            dvs_be: [0, 0],
+        };
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("roaming Pokemon species must exist in pack");
@@ -2909,35 +2918,31 @@
         assert!(error.contains("saved roaming_pokemon[0].species CYNDAQUIL is missing"));
 
         let mut state = GameState::default();
-        state
-            .roaming_pokemon
-            .push(crystal_core::state::RoamingPokemonState {
-                species: "CHIKORITA".to_string(),
-                level: 41,
-                map_group: 1,
-                map_number: 1,
-                hp: 100,
-                dvs: 0,
-            });
+        state.roaming_pokemon[0] = crystal_core::state::RoamingPokemonState {
+            species: Some("CHIKORITA".to_string()),
+            level: 41,
+            map_group: 1,
+            map_number: 1,
+            hp: 1,
+            dvs_be: [0, 0],
+        };
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("saved roaming level must match roaming definitions");
         let error = error_debug(error);
         assert!(error.contains(
-            "saved roaming_pokemon[0] CHIKORITA level 41 is not declared by compiled roaming Pokemon definitions"
+            "saved roaming_pokemon[0] CHIKORITA level 41 does not match catalog init slot"
         ));
 
         let mut state = GameState::default();
-        state
-            .roaming_pokemon
-            .push(crystal_core::state::RoamingPokemonState {
-                species: "CHIKORITA".to_string(),
-                level: 40,
-                map_group: 1,
-                map_number: 99,
-                hp: 100,
-                dvs: 0,
-            });
+        state.roaming_pokemon[0] = crystal_core::state::RoamingPokemonState {
+            species: Some("CHIKORITA".to_string()),
+            level: 40,
+            map_group: 1,
+            map_number: 99,
+            hp: 1,
+            dvs_be: [0, 0],
+        };
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("roaming Pokemon location must exist in pack map metadata");
@@ -2945,6 +2950,24 @@
         assert!(error.contains(
             "saved roaming_pokemon[0] location group 1 map 99 is missing from compiled runtime map metadata"
         ));
+
+        let mut state = GameState::default();
+        state.roaming_pokemon[0] = crystal_core::state::RoamingPokemonState {
+            species: Some("CHIKORITA".to_string()),
+            level: 40,
+            map_group: 1,
+            map_number: 1,
+            hp: u8::MAX,
+            dvs_be: [0, 0],
+        };
+        let error = runtime
+            .save_game(&save_path, state)
+            .expect_err("saved roaming HP must fit the exact species, level, and DVs");
+        let error = error_debug(error);
+        assert!(
+            error.contains("saved roaming_pokemon[0] hp 255 exceeds CHIKORITA level 40 max HP"),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state.mystery_gift.stored_item = Some("MISSING_ITEM".to_string());
@@ -4141,10 +4164,10 @@
             });
         let error = runtime
             .save_game(&save_path, state)
-            .expect_err("saved conditional queued event must match compiled command args");
+            .expect_err("conditional_event data cannot be persisted as a queued command");
         let error = format!("{error:#}");
         assert!(error.contains(
-            r#"saved script_runtime.command_queue[0].source_script RuntimePayloadScript:22 args ["EVENT_STALE", "RuntimeScript"] do not match compiled args ["EVENT_RUNTIME", "RuntimeScript"]"#
+            "command_queue[0].command conditional_event is not a saved queued command"
         ));
 
         let mut state = GameState::default();

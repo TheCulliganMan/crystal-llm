@@ -2,7 +2,12 @@ import fs from "fs";
 import path from "path";
 import type { Move } from "@pokecrystal/core/core/models/move";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
-import { stripAsmComment, writeJsonToTargets } from "./asm-utils";
+import {
+  parseAsmNumber,
+  splitAsmArgs,
+  stripAsmComment,
+  writeJsonToTargets,
+} from "./asm-utils";
 
 type FleeMonsData = {
   buckets: Record<string, string[]>;
@@ -18,15 +23,29 @@ export type EncounterMusicModifiers = {
   >;
 };
 
-export type RoamingPokemonDefinition = {
-  level: number;
+export type RoamingMapLocation = {
   mapGroup: number;
   mapNumber: number;
 };
-export type RoamingPokemonDefinitions = Record<
-  string,
-  RoamingPokemonDefinition
->;
+
+export type RoamingPokemonInitWrite = RoamingMapLocation & {
+  slot: number;
+  species: string;
+  level: number;
+  hp: number;
+};
+
+export type RoamingPokemonRoute = RoamingMapLocation & {
+  connections: RoamingMapLocation[];
+};
+
+export type RoamingPokemonCatalog = {
+  slotCount: 3;
+  inactiveMap: RoamingMapLocation;
+  initWrites: RoamingPokemonInitWrite[];
+  routes: RoamingPokemonRoute[];
+  jumpMask: 15;
+};
 
 export type BuenaPrizeDefinitions = Record<string, number>;
 
@@ -54,12 +73,20 @@ export type ShuckieGiftDefinition = {
 
 export type DratiniMoveSets = Record<string, string[]>;
 
+export type BugContestEncounter = {
+  weight: number;
+  species: string;
+  minLevel: number;
+  maxLevel: number;
+};
+
 export type BugContestConfig = {
   parkBalls: number;
   timerMinutes: number;
   timerSeconds: number;
   selectedContestantCount: number;
   contestantFlags: string[];
+  encounters: BugContestEncounter[];
 };
 
 export type BattleTowerRules = {
@@ -73,6 +100,32 @@ export type BattleTowerRules = {
   duplicateSpeciesFailureText: string;
   duplicateHeldItemFailureText: string;
   eggFailureText: string;
+  trainers: BattleTowerTrainerDefinition[];
+  monGroups: BattleTowerMonDefinition[][];
+};
+
+export type BattleTowerTrainerDefinition = {
+  index: number;
+  trainerClass: string;
+  name: string;
+  spriteConstant: string;
+};
+
+export type BattleTowerMonDefinition = {
+  species: string;
+  item: string | null;
+  moves: string[];
+  originalTrainerId: number;
+  experience: number;
+  statExp: number[];
+  dvs: number[];
+  pp: number[];
+  happiness: number;
+  pokerus: number[];
+  level: number;
+  status: number[];
+  stats: number[];
+  nickname: string;
 };
 
 export type OakRatingEntry = {
@@ -277,6 +330,16 @@ type PhoneContactRecord = {
   callerScript: string | null;
 };
 
+export type PermanentPhoneNumberDefinition = {
+  listIndex: number;
+};
+
+export type SpecialPhoneCallDefinition = {
+  condition: string;
+  contactId: string;
+  callerScript: string;
+};
+
 const CONTROL_CODE_REPLACEMENTS: Record<string, string> = {
   "<PLAYER>": "PLAYER",
   "<PKMN>": "PKMN",
@@ -354,7 +417,8 @@ const exactSpeciesFromFileStem = (
 const decodePhoneText = (payload: string): string => {
   let result = String(payload ?? "")
     .replace(/<LF>/g, "\n")
-    .replace(/@/g, "");
+    .replace(/@/g, "")
+    .replace(/#/g, "POKé");
   for (const [token, replacement] of Object.entries(
     CONTROL_CODE_REPLACEMENTS,
   )) {
@@ -801,7 +865,7 @@ const parseNonTrainerNames = (): Record<string, string[]> => {
   return entries;
 };
 
-const parseTrainerClassNames = (): Record<string, string> => {
+export const exportTrainerClassNames = (): Record<string, string> => {
   let classIds: string[] = [];
   for (const raw of readAsmLines(
     path.join("constants", "trainer_constants.asm"),
@@ -815,9 +879,12 @@ const parseTrainerClassNames = (): Record<string, string> => {
       classIds.push(classId);
     }
   }
-  if (classIds[0] === "TRAINER_NONE") {
-    classIds = classIds.slice(1);
+  if (classIds[0] !== "TRAINER_NONE") {
+    throw new Error(
+      `Trainer class constant table must begin with exact TRAINER_NONE, found '${classIds[0] ?? "<missing>"}'.`,
+    );
   }
+  classIds = classIds.slice(1);
   const classNames: string[] = [];
   for (const raw of readAsmLines(
     path.join("data", "trainers", "class_names.asm"),
@@ -841,14 +908,16 @@ const parseTrainerClassNames = (): Record<string, string> => {
   for (let index = 0; index < classIds.length; index += 1) {
     mapping[classIds[index]] = classNames[index];
   }
+  writeJsonToTargets("trainer_class_names.json", mapping, { indent: 2 });
   return mapping;
 };
 
-export const exportPhoneContacts = (): Record<string, PhoneContactRecord> => {
+export const exportPhoneContacts = (
+  classNames = exportTrainerClassNames(),
+): Record<string, PhoneContactRecord> => {
   const phoneConstants = parsePhoneConstants();
   const phoneRows = parsePhoneContactRows();
   const nonTrainerLines = parseNonTrainerNames();
-  const classNames = parseTrainerClassNames();
   if (phoneConstants.length !== phoneRows.length) {
     throw new Error(
       `Phone constant count ${phoneConstants.length} does not match contact table ${phoneRows.length}`,
@@ -908,7 +977,7 @@ export const exportPhoneContacts = (): Record<string, PhoneContactRecord> => {
 
 export const exportPermanentPhoneNumbers = (): Record<
   string,
-  Record<string, never>
+  PermanentPhoneNumberDefinition
 > => {
   const phoneConstants = parsePhoneConstants();
   const phoneRows = parsePhoneContactRows();
@@ -929,7 +998,7 @@ export const exportPermanentPhoneNumbers = (): Record<
       contactIdByTrainerLabel.set(trainerLabel, contactId);
     }
   }
-  const numbers: Record<string, Record<string, never>> = {};
+  const numbers: Record<string, PermanentPhoneNumberDefinition> = {};
   for (const raw of readAsmLines(
     path.join("data", "phone", "permanent_numbers.asm"),
   )) {
@@ -954,7 +1023,9 @@ export const exportPermanentPhoneNumbers = (): Record<
         `Permanent phone number '${resolvedContactId}' is exported more than once.`,
       );
     }
-    numbers[resolvedContactId] = {};
+    numbers[resolvedContactId] = {
+      listIndex: Object.keys(numbers).length,
+    };
   }
   writeJsonToTargets("permanent_phone_numbers.json", numbers, { indent: 2 });
   return numbers;
@@ -962,9 +1033,9 @@ export const exportPermanentPhoneNumbers = (): Record<
 
 export const exportSpecialPhoneCalls = (): Record<
   string,
-  Record<string, never>
+  SpecialPhoneCallDefinition
 > => {
-  const calls: Record<string, Record<string, never>> = {};
+  const callIds: string[] = [];
   let inSpecialCalls = false;
   for (const raw of readAsmLines(
     path.join("constants", "phone_constants.asm"),
@@ -984,41 +1055,149 @@ export const exportSpecialPhoneCalls = (): Record<
     }
     if (line.startsWith("const ")) {
       const callId = line.split(/\s+/)[1];
-      if (Object.hasOwn(calls, callId)) {
+      if (callIds.includes(callId)) {
         throw new Error(
           `Special phone call '${callId}' is exported more than once.`,
         );
       }
-      calls[callId] = {};
+      if (callId !== "SPECIALCALL_NONE") {
+        callIds.push(callId);
+      }
       continue;
     }
     if (line.startsWith("DEF NUM_SPECIALCALLS")) {
       break;
     }
   }
-  if (!Object.keys(calls).length) {
+  if (!callIds.length) {
     throw new Error(
       "No special phone calls were exported from constants/phone_constants.asm",
     );
+  }
+
+  const phoneConstants = parsePhoneConstants();
+  const phoneRows = parsePhoneContactRows();
+  const contactIdByTrainerLabel = new Map<string, string>();
+  for (
+    let index = 0;
+    index < Math.min(phoneConstants.length, phoneRows.length);
+    index += 1
+  ) {
+    const contactId = phoneConstants[index];
+    const trainerLabel = phoneRows[index].trainerLabel;
+    if (contactId && trainerLabel) {
+      contactIdByTrainerLabel.set(trainerLabel, contactId);
+    }
+  }
+  const declaredContactIds = new Set(
+    phoneConstants.filter((contactId): contactId is string =>
+      Boolean(contactId),
+    ),
+  );
+  const rows: Array<{
+    condition: string;
+    contactId: string;
+    callerScript: string;
+  }> = [];
+  for (const raw of readAsmLines(path.join("data", "phone", "special_calls.asm"))) {
+    const line = stripAsmComment(raw);
+    if (!line.startsWith("specialcall ")) {
+      continue;
+    }
+    const tokens = line
+      .slice("specialcall ".length)
+      .split(",")
+      .map((token) => token.trim());
+    if (tokens.length !== 3 || tokens.some((token) => !token)) {
+      throw new Error(`Malformed special phone call row: ${line}`);
+    }
+    const [condition, contactToken, callerScript] = tokens;
+    if (
+      condition !== "SpecialCallOnlyWhenOutside" &&
+      condition !== "SpecialCallWhereverYouAre"
+    ) {
+      throw new Error(
+        `Special phone call row has unsupported condition '${condition}'.`,
+      );
+    }
+    const contactId =
+      contactIdByTrainerLabel.get(contactToken) ??
+      (declaredContactIds.has(contactToken) ? contactToken : null);
+    if (!contactId) {
+      throw new Error(
+        `Special phone call contact '${contactToken}' does not match a declared phone contact id or trainer label.`,
+      );
+    }
+    rows.push({ condition, contactId, callerScript });
+  }
+  if (rows.length !== callIds.length) {
+    throw new Error(
+      `Special phone call constant count ${callIds.length} does not match table ${rows.length}.`,
+    );
+  }
+  const calls: Record<string, SpecialPhoneCallDefinition> = {};
+  for (let index = 0; index < callIds.length; index += 1) {
+    calls[callIds[index]] = rows[index];
   }
   writeJsonToTargets("special_phone_calls.json", calls, { indent: 2 });
   return calls;
 };
 
-export const exportNpcTrades = (): Record<string, Record<string, never>> => {
-  const trades: Record<string, Record<string, never>> = {};
-  for (const raw of readAsmLines(
+export type NpcTradeDefinition = {
+  dialogSet: string;
+  requestedSpecies: string;
+  offeredSpecies: string;
+  nickname: string;
+  dvs: [number, number];
+  heldItem: string;
+  originalTrainerId: number;
+  originalTrainerName: string;
+  genderRequirement: string;
+};
+
+export const exportNpcTrades = (): Record<string, NpcTradeDefinition> => {
+  const trades: Record<string, NpcTradeDefinition> = {};
+  const constants = readAsmLines(
     path.join("constants", "npc_trade_constants.asm"),
-  )) {
+  );
+  const ids = new Set(
+    constants
+      .map(stripAsmComment)
+      .filter((line) => line.startsWith("const NPC_TRADE_"))
+      .map((line) => line.split(/\s+/)[1]),
+  );
+  for (const raw of readAsmLines(path.join("data", "events", "npc_trades.asm"))) {
     const line = stripAsmComment(raw);
-    if (!line.startsWith("const NPC_TRADE_")) {
+    if (!line.startsWith("npctrade ")) {
       continue;
     }
-    const tradeId = line.split(/\s+/)[1];
+    const args = splitAsmArgs(line.slice("npctrade ".length));
+    if (args.length !== 10) {
+      throw new Error(`NPC trade row has ${args.length} fields, expected 10: ${line}`);
+    }
+    const index = Object.keys(trades).length;
+    const tradeId = [...ids][index];
+    if (!tradeId) {
+      throw new Error(`NPC trade row ${index} has no canonical constant id.`);
+    }
     if (Object.hasOwn(trades, tradeId)) {
       throw new Error(`NPC trade '${tradeId}' is exported more than once.`);
     }
-    trades[tradeId] = {};
+    const unquote = (value: string) => value.replace(/^"|"$/g, "");
+    trades[tradeId] = {
+      dialogSet: args[0],
+      requestedSpecies: args[1],
+      offeredSpecies: args[2],
+      nickname: unquote(args[3]),
+      dvs: [parseAsmNumber(args[4]), parseAsmNumber(args[5])],
+      heldItem: args[6],
+      originalTrainerId: parseAsmNumber(args[7]),
+      originalTrainerName: unquote(args[8]),
+      genderRequirement: args[9],
+    };
+  }
+  if (Object.keys(trades).length !== ids.size) {
+    throw new Error(`Exported ${Object.keys(trades).length} NPC trades, expected ${ids.size}.`);
   }
   if (!Object.keys(trades).length) {
     throw new Error(
@@ -1061,11 +1240,61 @@ export const exportSpecialRoutines = (): Record<
   return routines;
 };
 
-const parseInitRoamMons = (): Array<{
+const ROAMING_SLOT_COUNT = 3;
+const CANONICAL_ROAMING_INIT_WRITES = [
+  { slot: 0, field: "species", value: "RAIKOU" },
+  { slot: 1, field: "species", value: "ENTEI" },
+  { slot: 0, field: "level", value: 40 },
+  { slot: 1, field: "level", value: 40 },
+  { slot: 0, field: "mapGroup", value: "ROUTE_42" },
+  { slot: 0, field: "mapNumber", value: "ROUTE_42" },
+  { slot: 1, field: "mapGroup", value: "ROUTE_37" },
+  { slot: 1, field: "mapNumber", value: "ROUTE_37" },
+  { slot: 0, field: "hp", value: 0 },
+  { slot: 1, field: "hp", value: 0 },
+] as const;
+
+const CANONICAL_ROAMING_ROUTE_ROWS = [
+  ["ROUTE_29", "ROUTE_30", "ROUTE_46"],
+  ["ROUTE_30", "ROUTE_29", "ROUTE_31"],
+  ["ROUTE_31", "ROUTE_30", "ROUTE_32", "ROUTE_36"],
+  ["ROUTE_32", "ROUTE_36", "ROUTE_31", "ROUTE_33"],
+  ["ROUTE_33", "ROUTE_32", "ROUTE_34"],
+  ["ROUTE_34", "ROUTE_33", "ROUTE_35"],
+  ["ROUTE_35", "ROUTE_34", "ROUTE_36"],
+  ["ROUTE_36", "ROUTE_35", "ROUTE_31", "ROUTE_32", "ROUTE_37"],
+  ["ROUTE_37", "ROUTE_36", "ROUTE_38", "ROUTE_42"],
+  ["ROUTE_38", "ROUTE_37", "ROUTE_39", "ROUTE_42"],
+  ["ROUTE_39", "ROUTE_38"],
+  ["ROUTE_42", "ROUTE_43", "ROUTE_44", "ROUTE_37", "ROUTE_38"],
+  ["ROUTE_43", "ROUTE_42", "ROUTE_44"],
+  ["ROUTE_44", "ROUTE_42", "ROUTE_43", "ROUTE_45"],
+  ["ROUTE_45", "ROUTE_44", "ROUTE_46"],
+  ["ROUTE_46", "ROUTE_45", "ROUTE_29"],
+] as const;
+
+type RoamingInitField = "species" | "level" | "mapGroup" | "mapNumber" | "hp";
+
+type ParsedRoamingInitWrite = {
+  slot: number;
+  field: RoamingInitField;
+  value: string | number;
+};
+
+type SymbolicRoamingInitWrite = {
+  slot: number;
   species: string;
   level: number;
   mapConstant: string;
-}> => {
+  hp: number;
+};
+
+type SymbolicRoamingRoute = {
+  origin: string;
+  connections: string[];
+};
+
+const parseInitRoamMons = (): SymbolicRoamingInitWrite[] => {
   const lines = readAsmLines(path.join("engine", "overworld", "wildmons.asm"));
   const start = lines.findIndex(
     (line) => stripAsmComment(line) === "InitRoamMons:",
@@ -1089,151 +1318,398 @@ const parseInitRoamMons = (): Array<{
     .slice(start + 1, end)
     .map((line) => stripAsmComment(line).trim())
     .filter(Boolean);
-  const speciesBySlot = new Map<number, string>();
-  const levelBySlot = new Map<number, number>();
-  const mapBySlot = new Map<number, string>();
-  const setRoamingSlotValue = <T>(
-    target: Map<number, T>,
-    slot: number,
-    kind: string,
-    value: T,
-  ): void => {
-    if (target.has(slot)) {
-      throw new Error(`InitRoamMons slot ${slot} repeats ${kind} data.`);
-    }
-    target.set(slot, value);
-  };
   let register:
-    | { kind: "species"; value: string }
-    | { kind: "level"; value: number }
-    | { kind: "map"; value: string }
-    | { kind: "other" }
+    | { kind: "symbol"; value: string }
+    | { kind: "number"; value: number }
+    | { kind: "mapGroup"; value: string }
+    | { kind: "mapNumber"; value: string }
     | null = null;
+  const writes: ParsedRoamingInitWrite[] = [];
   for (const line of block) {
     let match = line.match(/^ld a, GROUP_([A-Z0-9_]+)$/);
     if (match) {
-      register = { kind: "map", value: match[1] };
+      register = { kind: "mapGroup", value: match[1] };
       continue;
     }
     match = line.match(/^ld a, MAP_([A-Z0-9_]+)$/);
     if (match) {
-      register = { kind: "other" };
+      register = { kind: "mapNumber", value: match[1] };
       continue;
     }
     match = line.match(/^ld a, ([0-9]+)$/);
     if (match) {
-      register = { kind: "level", value: Number.parseInt(match[1], 10) };
+      register = { kind: "number", value: Number.parseInt(match[1], 10) };
       continue;
     }
     match = line.match(/^ld a, ([A-Z0-9_]+)$/);
     if (match) {
-      register = { kind: "species", value: match[1] };
+      register = { kind: "symbol", value: match[1] };
       continue;
     }
-    match = line.match(/^ld \[wRoamMon([0-9]+)Species\], a$/);
-    if (match) {
-      if (register?.kind !== "species") {
-        throw new Error(
-          `Roaming Pokemon species store '${line}' has invalid register state.`,
-        );
-      }
-      setRoamingSlotValue(
-        speciesBySlot,
-        Number.parseInt(match[1], 10),
-        "species",
-        register.value,
-      );
+    if (line === "xor a") {
+      register = { kind: "number", value: 0 };
       continue;
     }
-    match = line.match(/^ld \[wRoamMon([0-9]+)Level\], a$/);
+    match = line.match(/^ld \[wRoamMon([0-9]+)([A-Za-z0-9_]+)\],\s*a$/);
     if (match) {
-      if (register?.kind !== "level") {
+      const slot = Number.parseInt(match[1], 10) - 1;
+      if (slot < 0 || slot >= ROAMING_SLOT_COUNT) {
         throw new Error(
-          `Roaming Pokemon level store '${line}' has invalid register state.`,
+          `InitRoamMons writes roaming slot ${slot}, outside exact 0..2 range.`,
         );
       }
-      setRoamingSlotValue(
-        levelBySlot,
-        Number.parseInt(match[1], 10),
-        "level",
-        register.value,
-      );
-      continue;
+      const fieldByRamName: Record<string, RoamingInitField | undefined> = {
+        Species: "species",
+        Level: "level",
+        MapGroup: "mapGroup",
+        MapNumber: "mapNumber",
+        HP: "hp",
+      };
+      const field = fieldByRamName[match[2]];
+      if (!field) {
+        throw new Error(
+          `InitRoamMons writes unsupported roaming field '${match[2]}'.`,
+        );
+      }
+      const requiredRegisterKind: Record<
+        RoamingInitField,
+        "symbol" | "number" | "mapGroup" | "mapNumber"
+      > = {
+        species: "symbol",
+        level: "number",
+        mapGroup: "mapGroup",
+        mapNumber: "mapNumber",
+        hp: "number",
+      };
+      if (!register || register.kind !== requiredRegisterKind[field]) {
+        throw new Error(
+          `InitRoamMons ${field} store '${line}' has invalid register state.`,
+        );
+      }
+      writes.push({ slot, field, value: register.value });
     }
-    match = line.match(/^ld \[wRoamMon([0-9]+)MapGroup\], a$/);
-    if (match) {
-      if (register?.kind !== "map") {
-        throw new Error(
-          `Roaming Pokemon map group store '${line}' has invalid register state.`,
-        );
-      }
-      setRoamingSlotValue(
-        mapBySlot,
-        Number.parseInt(match[1], 10),
-        "map group",
-        register.value,
+  }
+  if (writes.length !== CANONICAL_ROAMING_INIT_WRITES.length) {
+    throw new Error(
+      `InitRoamMons has ${writes.length} roaming field writes, expected exactly ${CANONICAL_ROAMING_INIT_WRITES.length}.`,
+    );
+  }
+  for (
+    let index = 0;
+    index < CANONICAL_ROAMING_INIT_WRITES.length;
+    index += 1
+  ) {
+    const actual = writes[index];
+    const expected = CANONICAL_ROAMING_INIT_WRITES[index];
+    if (
+      actual.slot !== expected.slot ||
+      actual.field !== expected.field ||
+      actual.value !== expected.value
+    ) {
+      throw new Error(
+        `InitRoamMons field write ${index} is slot ${actual.slot} ${actual.field}=${actual.value}, expected slot ${expected.slot} ${expected.field}=${expected.value}.`,
       );
     }
   }
-  return [...speciesBySlot.keys()]
-    .sort((left, right) => left - right)
-    .map((slot) => {
-      const species = speciesBySlot.get(slot);
-      const level = levelBySlot.get(slot);
-      const mapConstant = mapBySlot.get(slot);
-      if (!species || level === undefined || !mapConstant) {
-        throw new Error(
-          `InitRoamMons slot ${slot} is missing species, level, or map group data.`,
-        );
-      }
-      return { species, level, mapConstant };
+  const valueFor = (slot: number, field: RoamingInitField): string | number => {
+    const write = writes.find(
+      (candidate) => candidate.slot === slot && candidate.field === field,
+    );
+    if (!write) {
+      throw new Error(
+        `InitRoamMons slot ${slot} is missing exact ${field} write.`,
+      );
+    }
+    return write.value;
+  };
+  return [0, 1].map((slot) => {
+    const mapGroup = String(valueFor(slot, "mapGroup"));
+    const mapNumber = String(valueFor(slot, "mapNumber"));
+    if (mapGroup !== mapNumber) {
+      throw new Error(
+        `InitRoamMons slot ${slot} map group '${mapGroup}' does not match map number '${mapNumber}'.`,
+      );
+    }
+    return {
+      slot,
+      species: String(valueFor(slot, "species")),
+      level: Number(valueFor(slot, "level")),
+      mapConstant: mapGroup,
+      hp: Number(valueFor(slot, "hp")),
+    };
+  });
+};
+
+const parseNumRoamMonMaps = (): number => {
+  const values = readAsmLines(
+    path.join("constants", "pokemon_data_constants.asm"),
+  )
+    .map((line) => stripAsmComment(line).trim())
+    .map((line) => line.match(/^DEF NUM_ROAMMON_MAPS EQU (.+)$/)?.[1])
+    .filter((value): value is string => Boolean(value));
+  if (values.length !== 1) {
+    throw new Error(
+      `Expected exactly one NUM_ROAMMON_MAPS definition, found ${values.length}.`,
+    );
+  }
+  const count = parseAsmNumber(values[0]);
+  if (count !== CANONICAL_ROAMING_ROUTE_ROWS.length) {
+    throw new Error(
+      `NUM_ROAMMON_MAPS is ${count}, expected exact source count ${CANONICAL_ROAMING_ROUTE_ROWS.length}.`,
+    );
+  }
+  if ((count & (count - 1)) !== 0) {
+    throw new Error(
+      `NUM_ROAMMON_MAPS ${count} cannot define a maskbits jump mask.`,
+    );
+  }
+  return count;
+};
+
+const parseInactiveRoamingMap = (): RoamingMapLocation => {
+  const values = new Map<string, number>();
+  for (const raw of readAsmLines(
+    path.join("constants", "map_data_constants.asm"),
+  )) {
+    const line = stripAsmComment(raw).trim();
+    const match = line.match(/^DEF (GROUP_N_A|MAP_N_A)\s+EQU\s+(.+)$/);
+    if (!match) {
+      continue;
+    }
+    const [, name, valueToken] = match;
+    if (values.has(name)) {
+      throw new Error(
+        `Inactive roaming sentinel '${name}' is defined more than once.`,
+      );
+    }
+    values.set(name, parseAsmNumber(valueToken));
+  }
+  const exactSentinel = (name: "GROUP_N_A" | "MAP_N_A"): number => {
+    const value = values.get(name);
+    if (value === undefined) {
+      throw new Error(`Inactive roaming sentinel '${name}' is missing.`);
+    }
+    if (value !== -1) {
+      throw new Error(
+        `${name} is ${value}, expected exact inactive sentinel -1.`,
+      );
+    }
+    return value & 0xff;
+  };
+  return {
+    mapGroup: exactSentinel("GROUP_N_A"),
+    mapNumber: exactSentinel("MAP_N_A"),
+  };
+};
+
+const validateJumpRoamMonMask = (): void => {
+  const lines = readAsmLines(path.join("engine", "overworld", "wildmons.asm"));
+  const start = lines.findIndex(
+    (line) => stripAsmComment(line).trim() === "JumpRoamMon:",
+  );
+  if (start < 0) {
+    throw new Error(
+      "Unable to find JumpRoamMon in engine/overworld/wildmons.asm",
+    );
+  }
+  const end = lines.findIndex(
+    (line, index) =>
+      index > start && stripAsmComment(line).trim() === "_BackUpMapIndices:",
+  );
+  const block = lines
+    .slice(start + 1, end < 0 ? lines.length : end)
+    .map((line) => stripAsmComment(line).trim())
+    .filter(Boolean);
+  const maskOperands = block
+    .map((line) => line.match(/^maskbits (.+)$/)?.[1])
+    .filter((value): value is string => Boolean(value));
+  if (maskOperands.length !== 1 || maskOperands[0] !== "NUM_ROAMMON_MAPS") {
+    throw new Error("JumpRoamMon must mask with exact NUM_ROAMMON_MAPS.");
+  }
+  if (block.filter((line) => line === "cp NUM_ROAMMON_MAPS").length !== 1) {
+    throw new Error(
+      "JumpRoamMon must compare against exact NUM_ROAMMON_MAPS once.",
+    );
+  }
+};
+
+const parseRoamingRoutes = (): SymbolicRoamingRoute[] => {
+  const lines = readAsmLines(path.join("data", "wild", "roammon_maps.asm"));
+  const start = lines.findIndex(
+    (line) => stripAsmComment(line).trim() === "RoamMaps:",
+  );
+  if (start < 0) {
+    throw new Error("Unable to find RoamMaps in data/wild/roammon_maps.asm");
+  }
+  const rows: SymbolicRoamingRoute[] = [];
+  const origins = new Set<string>();
+  let foundEnd = false;
+  for (const raw of lines.slice(start + 1)) {
+    const line = stripAsmComment(raw).trim();
+    if (!line) {
+      continue;
+    }
+    if (line === "db -1") {
+      foundEnd = true;
+      break;
+    }
+    if (!line.startsWith("roam_map ")) {
+      throw new Error(`Unexpected RoamMaps source row '${line}'.`);
+    }
+    const args = splitAsmArgs(line.slice("roam_map ".length));
+    const connectionCount = args.length - 1;
+    if (connectionCount < 1 || connectionCount > 4) {
+      throw new Error(
+        `RoamMaps row ${rows.length} must declare 1..4 connections, found ${connectionCount}.`,
+      );
+    }
+    if (args.some((value) => !/^[A-Z][A-Z0-9_]*$/.test(value))) {
+      throw new Error(
+        `RoamMaps row ${rows.length} has malformed map constants.`,
+      );
+    }
+    const [origin, ...connections] = args;
+    if (origins.has(origin)) {
+      throw new Error(`RoamMaps repeats origin '${origin}'.`);
+    }
+    origins.add(origin);
+    rows.push({ origin, connections });
+  }
+  if (!foundEnd) {
+    throw new Error("RoamMaps is missing exact db -1 terminator.");
+  }
+  if (rows.length !== CANONICAL_ROAMING_ROUTE_ROWS.length) {
+    throw new Error(
+      `RoamMaps has ${rows.length} rows, expected exactly ${CANONICAL_ROAMING_ROUTE_ROWS.length}.`,
+    );
+  }
+  for (let index = 0; index < CANONICAL_ROAMING_ROUTE_ROWS.length; index += 1) {
+    const actual = rows[index];
+    const [expectedOrigin, ...expectedConnections] =
+      CANONICAL_ROAMING_ROUTE_ROWS[index];
+    if (actual.origin !== expectedOrigin) {
+      throw new Error(
+        `RoamMaps row ${index} origin '${actual.origin}' does not match canonical '${expectedOrigin}'.`,
+      );
+    }
+    if (
+      actual.connections.length !== expectedConnections.length ||
+      actual.connections.some(
+        (connection, connectionIndex) =>
+          connection !== expectedConnections[connectionIndex],
+      )
+    ) {
+      throw new Error(
+        `RoamMaps row ${index} connections '${actual.connections.join(", ")}' do not match canonical '${expectedConnections.join(", ")}'.`,
+      );
+    }
+  }
+  return rows;
+};
+
+const resolveRoamingMapLocations = (
+  runtimeMapMetadata: Record<string, RuntimeMapMetadataRecord>,
+): Map<string, RoamingMapLocation> => {
+  const constants = new Set<string>();
+  for (const row of CANONICAL_ROAMING_ROUTE_ROWS) {
+    for (const mapConstant of row) {
+      constants.add(mapConstant);
+    }
+  }
+  for (const initWrite of CANONICAL_ROAMING_INIT_WRITES) {
+    if (initWrite.field === "mapGroup" || initWrite.field === "mapNumber") {
+      constants.add(initWrite.value);
+    }
+  }
+  const locations = new Map<string, RoamingMapLocation>();
+  const constantsByLocation = new Map<string, string>();
+  for (const mapConstant of constants) {
+    const metadata = runtimeMapMetadata[mapConstant];
+    if (!metadata) {
+      throw new Error(
+        `Roaming map '${mapConstant}' is missing from runtime map metadata.`,
+      );
+    }
+    if (
+      !Number.isInteger(metadata.groupId) ||
+      metadata.groupId < 1 ||
+      metadata.groupId > 0xff
+    ) {
+      throw new Error(
+        `Roaming map '${mapConstant}' group ${metadata.groupId} is outside exact nonzero byte range.`,
+      );
+    }
+    if (
+      !Number.isInteger(metadata.mapId) ||
+      metadata.mapId < 1 ||
+      metadata.mapId > 0xff
+    ) {
+      throw new Error(
+        `Roaming map '${mapConstant}' number ${metadata.mapId} is outside exact nonzero byte range.`,
+      );
+    }
+    const key = `${metadata.groupId}:${metadata.mapId}`;
+    const duplicate = constantsByLocation.get(key);
+    if (duplicate) {
+      throw new Error(
+        `Roaming maps '${duplicate}' and '${mapConstant}' resolve to duplicate location ${key}.`,
+      );
+    }
+    constantsByLocation.set(key, mapConstant);
+    locations.set(mapConstant, {
+      mapGroup: metadata.groupId,
+      mapNumber: metadata.mapId,
     });
+  }
+  return locations;
 };
 
 export const exportRoamingPokemon = (
   runtimeMapMetadata: Record<string, RuntimeMapMetadataRecord>,
-): RoamingPokemonDefinitions => {
-  const definitions: RoamingPokemonDefinitions = {};
-  for (const definition of parseInitRoamMons()) {
-    const metadata = runtimeMapMetadata[definition.mapConstant];
-    if (!metadata) {
-      throw new Error(
-        `InitRoamMons references missing runtime map metadata '${definition.mapConstant}'.`,
-      );
-    }
-    if (definition.level < 1 || definition.level > 100) {
-      throw new Error(
-        `Roaming Pokemon ${definition.species} level ${definition.level} is outside Pokemon level range.`,
-      );
-    }
-    if (metadata.groupId < 0 || metadata.groupId > 0xff) {
-      throw new Error(
-        `Roaming Pokemon ${definition.species} map group ${metadata.groupId} is outside byte range.`,
-      );
-    }
-    if (metadata.mapId < 0 || metadata.mapId > 0xff) {
-      throw new Error(
-        `Roaming Pokemon ${definition.species} map number ${metadata.mapId} is outside byte range.`,
-      );
-    }
-    if (Object.prototype.hasOwnProperty.call(definitions, definition.species)) {
-      throw new Error(
-        `Duplicate roaming Pokemon species '${definition.species}'.`,
-      );
-    }
-    definitions[definition.species] = {
-      level: definition.level,
-      mapGroup: metadata.groupId,
-      mapNumber: metadata.mapId,
-    };
-  }
-  if (!Object.keys(definitions).length) {
+): RoamingPokemonCatalog => {
+  const count = parseNumRoamMonMaps();
+  const inactiveMap = parseInactiveRoamingMap();
+  const inactiveGroupCollision = Object.entries(runtimeMapMetadata).find(
+    ([, metadata]) => metadata.groupId === inactiveMap.mapGroup,
+  );
+  if (inactiveGroupCollision) {
     throw new Error(
-      "No roaming Pokemon definitions were exported from InitRoamMons.",
+      `Inactive roaming map group ${inactiveMap.mapGroup} collides with runtime map '${inactiveGroupCollision[0]}'.`,
     );
   }
-  writeJsonToTargets("roaming_pokemon.json", definitions, { indent: 2 });
-  return definitions;
+  validateJumpRoamMonMask();
+  const symbolicInitWrites = parseInitRoamMons();
+  const symbolicRoutes = parseRoamingRoutes();
+  const locations = resolveRoamingMapLocations(runtimeMapMetadata);
+  const locationFor = (mapConstant: string): RoamingMapLocation => {
+    const location = locations.get(mapConstant);
+    if (!location) {
+      throw new Error(`Roaming map '${mapConstant}' was not resolved.`);
+    }
+    return { ...location };
+  };
+  const jumpMask = count - 1;
+  if (jumpMask !== 15) {
+    throw new Error(`Roaming jump mask is ${jumpMask}, expected exact 15.`);
+  }
+  const catalog: RoamingPokemonCatalog = {
+    slotCount: 3,
+    inactiveMap,
+    initWrites: symbolicInitWrites.map((write) => ({
+      slot: write.slot,
+      species: write.species,
+      level: write.level,
+      ...locationFor(write.mapConstant),
+      hp: write.hp,
+    })),
+    routes: symbolicRoutes.map((route) => ({
+      ...locationFor(route.origin),
+      connections: route.connections.map(locationFor),
+    })),
+    jumpMask,
+  };
+  writeJsonToTargets("roaming_pokemon.json", catalog, { indent: 2 });
+  return catalog;
 };
 
 export const exportBuenaPrizes = (): BuenaPrizeDefinitions => {
@@ -1676,6 +2152,179 @@ const parseBugContestContestantFlags = (): string[] => {
   return flags;
 };
 
+type SourceBugContestEncounter = Omit<BugContestEncounter, "weight"> & {
+  sourceWeight: number;
+};
+
+const BUG_CONTEST_ENCOUNTER_SOURCE = path.join(
+  "data",
+  "wild",
+  "bug_contest_mons.asm",
+);
+
+const BUG_CONTEST_ENCOUNTER_CERTIFICATE: readonly SourceBugContestEncounter[] =
+  [
+    {
+      sourceWeight: 20,
+      species: "CATERPIE",
+      minLevel: 7,
+      maxLevel: 18,
+    },
+    {
+      sourceWeight: 20,
+      species: "WEEDLE",
+      minLevel: 7,
+      maxLevel: 18,
+    },
+    {
+      sourceWeight: 10,
+      species: "METAPOD",
+      minLevel: 9,
+      maxLevel: 18,
+    },
+    {
+      sourceWeight: 10,
+      species: "KAKUNA",
+      minLevel: 9,
+      maxLevel: 18,
+    },
+    {
+      sourceWeight: 5,
+      species: "BUTTERFREE",
+      minLevel: 12,
+      maxLevel: 15,
+    },
+    {
+      sourceWeight: 5,
+      species: "BEEDRILL",
+      minLevel: 12,
+      maxLevel: 15,
+    },
+    {
+      sourceWeight: 10,
+      species: "VENONAT",
+      minLevel: 10,
+      maxLevel: 16,
+    },
+    {
+      sourceWeight: 10,
+      species: "PARAS",
+      minLevel: 10,
+      maxLevel: 17,
+    },
+    {
+      sourceWeight: 5,
+      species: "SCYTHER",
+      minLevel: 13,
+      maxLevel: 14,
+    },
+    {
+      sourceWeight: 5,
+      species: "PINSIR",
+      minLevel: 13,
+      maxLevel: 14,
+    },
+    {
+      sourceWeight: -1,
+      species: "VENOMOTH",
+      minLevel: 30,
+      maxLevel: 40,
+    },
+  ];
+
+const parseBugContestEncounters = (): BugContestEncounter[] => {
+  let rawLines: string[];
+  try {
+    rawLines = readAsmLines(BUG_CONTEST_ENCOUNTER_SOURCE);
+  } catch {
+    throw new Error(
+      "Required Bug-Catching Contest encounter source data/wild/bug_contest_mons.asm could not be read.",
+    );
+  }
+
+  const lines = rawLines
+    .map((raw) => ({ raw, line: stripAsmComment(raw).trim() }))
+    .filter(({ line }) => line.length > 0);
+  if (lines[0]?.line !== "ContestMons:") {
+    throw new Error(
+      "Bug-Catching Contest encounter source must begin with exact ContestMons: label.",
+    );
+  }
+
+  const encounters = lines.slice(1).map(({ raw, line }, index) => {
+    const match = line.match(
+      /^db\s+(-?[0-9]+)\s*,\s*([A-Z][A-Z0-9_]*)\s*,\s*([0-9]+)\s*,\s*([0-9]+)$/,
+    );
+    if (!match) {
+      throw new Error(
+        `Malformed Bug-Catching Contest encounter row ${index + 1}: ${raw}`,
+      );
+    }
+    const sourceWeight = Number.parseInt(match[1], 10);
+    const minLevel = Number.parseInt(match[3], 10);
+    const maxLevel = Number.parseInt(match[4], 10);
+    if (sourceWeight !== -1 && (sourceWeight < 1 || sourceWeight > 0xfe)) {
+      throw new Error(
+        `Bug-Catching Contest encounter row ${index + 1} weight ${sourceWeight} is outside weighted byte range.`,
+      );
+    }
+    if (minLevel < 1 || minLevel > 100 || maxLevel < 1 || maxLevel > 100) {
+      throw new Error(
+        `Bug-Catching Contest encounter row ${index + 1} levels ${minLevel}-${maxLevel} are outside Pokemon level range.`,
+      );
+    }
+    if (minLevel > maxLevel) {
+      throw new Error(
+        `Bug-Catching Contest encounter row ${index + 1} minimum level ${minLevel} exceeds maximum level ${maxLevel}.`,
+      );
+    }
+    return {
+      sourceWeight,
+      weight: sourceWeight === -1 ? 0xff : sourceWeight,
+      species: match[2],
+      minLevel,
+      maxLevel,
+    };
+  });
+
+  if (encounters.length !== BUG_CONTEST_ENCOUNTER_CERTIFICATE.length) {
+    throw new Error(
+      `Bug-Catching Contest encounter table must contain exactly 10 weighted rows and one final sentinel row; found ${encounters.length} rows.`,
+    );
+  }
+  if (
+    encounters.at(-1)?.sourceWeight !== -1 ||
+    encounters.slice(0, -1).some(({ sourceWeight }) => sourceWeight === -1)
+  ) {
+    throw new Error(
+      "Bug-Catching Contest encounter sentinel must be the final row after 10 weighted rows.",
+    );
+  }
+
+  encounters.forEach((encounter, index) => {
+    const canonical = BUG_CONTEST_ENCOUNTER_CERTIFICATE[index];
+    if (
+      encounter.sourceWeight !== canonical.sourceWeight ||
+      encounter.species !== canonical.species ||
+      encounter.minLevel !== canonical.minLevel ||
+      encounter.maxLevel !== canonical.maxLevel
+    ) {
+      throw new Error(
+        `Bug-Catching Contest encounter row ${index + 1} changed canonical order or values.`,
+      );
+    }
+  });
+
+  return encounters.map(
+    ({ weight, species, minLevel, maxLevel }): BugContestEncounter => ({
+      weight,
+      species,
+      minLevel,
+      maxLevel,
+    }),
+  );
+};
+
 export const exportBugContestConfig = (): BugContestConfig => {
   const config = {
     parkBalls: parseScriptConstantNumber("BUG_CONTEST_BALLS"),
@@ -1683,6 +2332,7 @@ export const exportBugContestConfig = (): BugContestConfig => {
     timerSeconds: parseScriptConstantNumber("BUG_CONTEST_SECONDS"),
     selectedContestantCount: parseBugContestSelectedContestantCount(),
     contestantFlags: parseBugContestContestantFlags(),
+    encounters: parseBugContestEncounters(),
   };
   if (config.parkBalls < 1 || config.parkBalls > 0xff) {
     throw new Error(
@@ -1755,6 +2405,168 @@ const parsePokemonConstantOrder = (): string[] => {
     );
   }
   return species;
+};
+
+const exportBattleTowerDefinitions = (): {
+  trainers: BattleTowerTrainerDefinition[];
+  monGroups: BattleTowerMonDefinition[][];
+} => {
+  const requiredPaths = [
+    path.join("constants", "trainer_constants.asm"),
+    path.join("data", "trainers", "sprites.asm"),
+    path.join("data", "battle_tower", "classes.asm"),
+    path.join("data", "battle_tower", "parties.asm"),
+  ];
+  for (const source of requiredPaths) {
+    if (!fs.existsSync(path.join(getDisassemblyRoot(), source))) {
+      throw new Error(`Required Battle Tower source is missing: ${source}`);
+    }
+  }
+  const trainerConstants = readAsmLines(path.join("constants", "trainer_constants.asm"));
+  const trainerClasses = trainerConstants
+    .map((line) => stripAsmComment(line).trim().match(/^trainerclass\s+([A-Z0-9_]+)$/)?.[1])
+    .filter((value): value is string => Boolean(value) && value !== "TRAINER_NONE");
+  const spriteLines = readAsmLines(path.join("data", "trainers", "sprites.asm"))
+    .map((line) => stripAsmComment(line).trim())
+    .filter((line) => line.startsWith("db "))
+    .flatMap((line) => splitAsmArgs(line.slice(3)));
+  const classToSprite = new Map<string, string>();
+  trainerClasses.forEach((trainerClass, index) => {
+    const sprite = spriteLines[index];
+    if (sprite) classToSprite.set(trainerClass, sprite);
+  });
+  let trainerIndex = 0;
+  const trainers = readAsmLines(path.join("data", "battle_tower", "classes.asm"))
+    .map((line) => {
+      const match = stripAsmComment(line).trim().match(/^bt_trainer\s+([A-Z0-9_]+),\s*"([^"]+)"/);
+      if (!match) return undefined;
+      const [, trainerClass, name] = match;
+      const spriteConstant = classToSprite.get(trainerClass);
+      if (!spriteConstant) {
+        throw new Error(`Battle Tower trainer class '${trainerClass}' has no sprite mapping`);
+      }
+      return { index: trainerIndex++, trainerClass, name, spriteConstant };
+    })
+    .filter((value): value is BattleTowerTrainerDefinition => Boolean(value));
+  if (!trainers.length) throw new Error("Battle Tower trainer roster is empty");
+
+  const groups: BattleTowerMonDefinition[][] = [];
+  let current: BattleTowerMonDefinition[] = [];
+  let mon: Partial<BattleTowerMonDefinition> | undefined;
+  let stage = "";
+  let statExp: number[] = [];
+  let statValues: number[] = [];
+  const finishMon = () => {
+    if (!mon) return;
+    current.push({
+      species: String(mon.species ?? ""),
+      item: mon.item ?? null,
+      moves: mon.moves ?? [],
+      originalTrainerId: Number(mon.originalTrainerId ?? 0),
+      experience: Number(mon.experience ?? 0),
+      statExp: mon.statExp ?? [],
+      dvs: mon.dvs ?? [0, 0, 0, 0],
+      pp: mon.pp ?? [0, 0, 0, 0],
+      happiness: Number(mon.happiness ?? 0),
+      pokerus: mon.pokerus ?? [0, 0, 0],
+      level: Number(mon.level ?? 1),
+      status: mon.status ?? [0, 0],
+      stats: mon.stats ?? [],
+      nickname: String(mon.nickname ?? ""),
+    });
+    mon = undefined;
+    stage = "";
+  };
+  const number = (token: string): number => parseAsmNumber(token.trim());
+  for (const raw of readAsmLines(path.join("data", "battle_tower", "parties.asm"))) {
+    if (raw.trim().startsWith("; BattleTowerMons group")) {
+      if (current.length) groups.push(current);
+      current = [];
+      continue;
+    }
+    const stripped = stripAsmComment(raw).trim();
+    if (!stripped) continue;
+    if (stripped.startsWith("db ") && !mon) {
+      mon = { species: splitAsmArgs(stripped.slice(3))[0] };
+      stage = "item";
+      continue;
+    }
+    if (!mon) continue;
+    if (stage === "item" && stripped.startsWith("db ")) {
+      const item = splitAsmArgs(stripped.slice(3))[0];
+      mon.item = item === "NO_ITEM" || item === "0" ? null : item;
+      stage = "moves";
+      continue;
+    }
+    if (stage === "moves" && stripped.startsWith("db ")) {
+      mon.moves = [...(mon.moves ?? []), ...splitAsmArgs(stripped.slice(3))].slice(0, 4);
+      continue;
+    }
+    if (stage === "moves" && stripped.startsWith("dw ")) {
+      mon.originalTrainerId = number(stripped.slice(3));
+      stage = "experience";
+      continue;
+    }
+    if (stage === "experience" && stripped.startsWith("bigdt ")) {
+      mon.experience = number(stripped.split(/\s+/)[1]);
+      statExp = [];
+      stage = "statExp";
+      continue;
+    }
+    if (stage === "statExp" && stripped.startsWith("bigdw ")) {
+      statExp.push(number(stripped.split(/\s+/)[1]));
+      if (statExp.length >= 5) { mon.statExp = statExp; stage = "dvs"; }
+      continue;
+    }
+    if (stage === "dvs" && stripped.startsWith("dn ")) {
+      mon.dvs = splitAsmArgs(stripped.slice(3)).map(number);
+      stage = "pp";
+      continue;
+    }
+    if (stage === "pp" && stripped.startsWith("db ")) {
+      mon.pp = splitAsmArgs(stripped.slice(3)).map(number);
+      stage = "happiness";
+      continue;
+    }
+    if (stage === "happiness" && stripped.startsWith("db ")) {
+      mon.happiness = number(stripped.slice(3));
+      stage = "pokerus";
+      continue;
+    }
+    if (stage === "pokerus" && stripped.startsWith("db ")) {
+      mon.pokerus = splitAsmArgs(stripped.slice(3)).map(number);
+      stage = "level";
+      continue;
+    }
+    if (stage === "level" && stripped.startsWith("db ")) {
+      mon.level = number(stripped.slice(3));
+      stage = "status";
+      continue;
+    }
+    if (stage === "status" && stripped.startsWith("db ")) {
+      mon.status = splitAsmArgs(stripped.slice(3)).map(number);
+      statValues = [];
+      stage = "stats";
+      continue;
+    }
+    if (stage === "stats" && stripped.startsWith("bigdw ")) {
+      statValues.push(number(stripped.split(/\s+/)[1]));
+      if (statValues.length >= 7) { mon.stats = statValues; stage = "nickname"; }
+      continue;
+    }
+    if (stage === "nickname" && stripped.startsWith("dname ")) {
+      const nickname = stripped.match(/"([^"]+)"/)?.[1];
+      if (!nickname) throw new Error("Battle Tower mon nickname is missing");
+      mon.nickname = nickname;
+      finishMon();
+    }
+  }
+  if (mon) throw new Error("Battle Tower party parser ended mid-entry");
+  if (current.length) groups.push(current);
+  if (!groups.length || groups.some((group) => group.length === 0)) {
+    throw new Error("Battle Tower parties contain an empty group");
+  }
+  return { trainers, monGroups: groups };
 };
 
 export const exportBattleTowerRules = (): BattleTowerRules => {
@@ -1946,6 +2758,7 @@ export const exportBattleTowerRules = (): BattleTowerRules => {
     duplicateHeldItemFailureText,
     eggFailureText,
   ] = textLabels;
+  const definitions = exportBattleTowerDefinitions();
   const rules = {
     bannedSpecies,
     requiredPartyCount,
@@ -1957,6 +2770,7 @@ export const exportBattleTowerRules = (): BattleTowerRules => {
     duplicateSpeciesFailureText,
     duplicateHeldItemFailureText,
     eggFailureText,
+    ...definitions,
   };
   writeJsonToTargets("battle_tower_rules.json", rules, { indent: 2 });
   return rules;
@@ -3213,10 +4027,11 @@ export const exportRuntimeAssets = (): {
   pokedexEntries: Record<string, PokedexEntryData>;
   pokemonFrontpicAnimations: Record<string, FrontpicAnimProgram>;
   marts: Record<string, string[]>;
+  trainerClassNames: Record<string, string>;
   phoneContacts: Record<string, PhoneContactRecord>;
-  permanentPhoneNumbers: Record<string, Record<string, never>>;
-  specialPhoneCalls: Record<string, Record<string, never>>;
-  npcTrades: Record<string, Record<string, never>>;
+  permanentPhoneNumbers: Record<string, PermanentPhoneNumberDefinition>;
+  specialPhoneCalls: Record<string, SpecialPhoneCallDefinition>;
+  npcTrades: Record<string, NpcTradeDefinition>;
   specialRoutines: Record<string, Record<string, never>>;
 } => {
   const fleeMons = exportFleeMons();
@@ -3226,7 +4041,8 @@ export const exportRuntimeAssets = (): {
   const pokedexEntries = exportPokedexEntries();
   const pokemonFrontpicAnimations = exportPokemonFrontpicAnimations();
   const marts = exportMarts();
-  const phoneContacts = exportPhoneContacts();
+  const trainerClassNames = exportTrainerClassNames();
+  const phoneContacts = exportPhoneContacts(trainerClassNames);
   const permanentPhoneNumbers = exportPermanentPhoneNumbers();
   const specialPhoneCalls = exportSpecialPhoneCalls();
   const npcTrades = exportNpcTrades();
@@ -3239,6 +4055,7 @@ export const exportRuntimeAssets = (): {
     pokedexEntries,
     pokemonFrontpicAnimations,
     marts,
+    trainerClassNames,
     phoneContacts,
     permanentPhoneNumbers,
     specialPhoneCalls,

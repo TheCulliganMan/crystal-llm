@@ -248,8 +248,8 @@ fn visible_title_main_menu_fade_alpha(frame: u32) -> u16 {
 fn visible_title_main_menu_clock_strings(snapshot: &RuntimeShellSnapshot) -> (String, String) {
     let time = &snapshot.progression.time;
     let day = TITLE_MAIN_MENU_DAY_STRINGS[usize::from(time.day_of_week % 7)];
-    let hour = time.game_time_hours % 24;
-    let minute = time.game_time_minutes.min(59);
+    let hour = time.registers.hours;
+    let minute = time.registers.minutes;
     let period = if hour < MORN_HOUR {
         "NITE"
     } else if hour < DAY_HOUR {
@@ -270,21 +270,31 @@ fn spawn_visible_credits_screen(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
     credits: &VisibleCreditsScreen,
+    rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    let frame = render_visible_credits_frame(&runtime_shell.asset_root, credits, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * 4.0),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 0.1),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    if rendered_art.credits_sources.is_none() && rendered_art.credits_source_error.is_none() {
+        match load_visible_credits_sources(&runtime_shell.asset_root) {
+            Ok(sources) => rendered_art.credits_sources = Some(sources),
+            Err(error) => rendered_art.credits_source_error = Some(format!("{error:#}")),
+        }
+    }
+    if let Some(error) = rendered_art.credits_source_error.as_deref() {
+        anyhow::bail!(error.to_string());
+    }
+    let sources = rendered_art
+        .credits_sources
+        .as_ref()
+        .context("credits render sources are unavailable")?;
+    let frame = render_visible_credits_frame_from_sources(sources, credits, images)?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -292,21 +302,18 @@ fn spawn_visible_delete_save_screen(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
     delete_save: &VisibleDeleteSaveScreen,
+    rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let frame = load_delete_save_frame(&runtime_shell.asset_root, delete_save, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 6.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -314,21 +321,18 @@ fn spawn_visible_mystery_gift_screen(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
     mystery_gift: &VisibleMysteryGiftScreen,
+    rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let frame = load_mystery_gift_frame(&runtime_shell.asset_root, mystery_gift, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 6.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -522,14 +526,16 @@ fn spawn_trainer_card_screen(
     runtime_shell: &BevyRuntimeShell,
     rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     let key = trainer_card_art_key(
         snapshot,
         runtime_shell.trainer_card_page,
         runtime_shell.trainer_card_colon_visible,
         runtime_shell.trainer_card_badge_frame,
     );
-    if !rendered_art.trainer_card_cache.contains_key(&key) {
+    if !rendered_art.trainer_card_cache.contains_key(&key)
+        && !rendered_art.trainer_card_errors.contains_key(&key)
+    {
         match load_trainer_card_frame(
             &runtime_shell.asset_root,
             snapshot,
@@ -548,6 +554,13 @@ fn spawn_trainer_card_screen(
                     .insert(key.clone(), error.to_string());
             }
         }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.trainer_card_cache,
+            &mut rendered_art.trainer_card_errors,
+            &mut rendered_art.trainer_card_cache_order,
+            key.clone(),
+            images,
+        );
     }
     let Some(frame) = rendered_art.trainer_card_cache.get(&key).cloned() else {
         let error = rendered_art
@@ -555,21 +568,17 @@ fn spawn_trainer_card_screen(
             .get(&key)
             .cloned()
             .unwrap_or_else(|| "unknown Trainer Card render error".to_string());
-        error!("required Trainer Card frame could not be rendered: {error}");
-        return;
+        anyhow::bail!("required Trainer Card frame could not be rendered: {error}");
     };
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 4.2),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        4.2,
+        images,
+    )?;
+    Ok(())
 }
 
 fn load_trainer_card_frame(
@@ -1324,21 +1333,18 @@ fn spawn_visible_clock_reset_screen(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
     clock_reset: &VisibleClockResetScreen,
+    rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let frame = load_clock_reset_frame(&runtime_shell.asset_root, clock_reset, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 6.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -1524,19 +1530,14 @@ fn spawn_visible_gender_selection_screen(
     let Some(frame) = rendered_art.gender_cache.get(&key).cloned() else {
         return Ok(());
     };
-    let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * scale),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 6.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -1558,18 +1559,28 @@ fn load_gender_selection_frame(
     let frame = image::open(assets.join("gfx/frames/1.png"))
         .context("decode gender-selection textbox frame PNG")?
         .to_rgba8();
-    let background =
-        load_gender_selection_background(&assets.join("gfx/new_game/gender_screen.pal"))
-            .context("load gender-selection background palette")?;
+    let background = load_gender_selection_background(
+        &assets.join("gfx/new_game/gender_screen.pal"),
+        &assets.join("gfx/new_game/gender_screen.2bpp"),
+    )
+    .context("load gender-selection background tile and palette")?;
 
     let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
     let height = TIME_SET_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
     let mut data = vec![0_u8; width * height * 4];
-    for pixel in data.chunks_exact_mut(4) {
-        pixel[0] = background[0];
-        pixel[1] = background[1];
-        pixel[2] = background[2];
-        pixel[3] = 255;
+    for tile_y in 0..TIME_SET_SCREEN_TILE_HEIGHT {
+        for tile_x in 0..TIME_SET_SCREEN_TILE_WIDTH {
+            for row in 0..SOURCE_TILE_SIZE {
+                for column in 0..SOURCE_TILE_SIZE {
+                    let pixel = background[row * SOURCE_TILE_SIZE + column];
+                    let offset = ((tile_y * SOURCE_TILE_SIZE + row) * width
+                        + tile_x * SOURCE_TILE_SIZE
+                        + column)
+                        * 4;
+                    data[offset..offset + 4].copy_from_slice(&pixel);
+                }
+            }
+        }
     }
 
     draw_time_set_textbox(
@@ -1625,8 +1636,12 @@ fn load_gender_selection_frame(
     })
 }
 
-fn load_gender_selection_background(path: &Path) -> Result<[u8; 3]> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+fn load_gender_selection_background(
+    palette_path: &Path,
+    tile_path: &Path,
+) -> Result<[[u8; 4]; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE]> {
+    let text = std::fs::read_to_string(palette_path)
+        .with_context(|| format!("read {}", palette_path.display()))?;
     let mut colors = Vec::new();
     for raw in text.lines() {
         let line = raw.trim();
@@ -1640,17 +1655,39 @@ fn load_gender_selection_background(path: &Path) -> Result<[u8; 3]> {
             .collect::<Result<Vec<_>, _>>()
             .with_context(|| format!("parse gender palette line {line:?}"))?;
         if parts.len() == 3 {
-            colors.push([
-                gbc5_to_u8(parts[0]),
-                gbc5_to_u8(parts[1]),
-                gbc5_to_u8(parts[2]),
-            ]);
+            colors.push([gbc5_to_u8(parts[0]), gbc5_to_u8(parts[1]), gbc5_to_u8(parts[2]), 255]);
         }
     }
-    colors
-        .get(1)
-        .copied()
-        .with_context(|| format!("gender palette {} is missing color index 1", path.display()))
+    let palette: [[u8; 4]; 4] = colors
+        .try_into()
+        .map_err(|colors: Vec<[u8; 4]>| {
+            anyhow::anyhow!(
+                "gender palette {} must contain exactly four colors, found {}",
+                palette_path.display(),
+                colors.len()
+            )
+        })?;
+    let tile = std::fs::read(tile_path).with_context(|| format!("read {}", tile_path.display()))?;
+    if tile.len() != SOURCE_TILE_SIZE * 2 {
+        anyhow::bail!(
+            "gender background tile {} must contain exactly {} bytes, found {}",
+            tile_path.display(),
+            SOURCE_TILE_SIZE * 2,
+            tile.len()
+        );
+    }
+
+    let mut pixels = [[0_u8; 4]; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE];
+    for row in 0..SOURCE_TILE_SIZE {
+        let lo = tile[row * 2];
+        let hi = tile[row * 2 + 1];
+        for column in 0..SOURCE_TILE_SIZE {
+            let bit = 1 << (7 - column);
+            let color_index = (((hi & bit != 0) as usize) << 1) | (lo & bit != 0) as usize;
+            pixels[row * SOURCE_TILE_SIZE + column] = palette[color_index];
+        }
+    }
+    Ok(pixels)
 }
 
 fn gbc5_to_u8(value: u8) -> u8 {
@@ -1685,7 +1722,9 @@ fn spawn_visible_time_set_screen(
         visible_dialog: visible_time_set_visible_dialog(time_set),
         yes_no_index: time_set.yes_no_index,
     };
-    if !rendered_art.time_set_cache.contains_key(&key) {
+    if !rendered_art.time_set_cache.contains_key(&key)
+        && !rendered_art.time_set_errors.contains_key(&key)
+    {
         match load_time_set_frame(&runtime_shell.asset_root, time_set, images) {
             Ok(frame) => {
                 rendered_art.time_set_errors.remove(&key);
@@ -1697,23 +1736,25 @@ fn spawn_visible_time_set_screen(
                     .insert(key.clone(), error.to_string());
             }
         }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.time_set_cache,
+            &mut rendered_art.time_set_errors,
+            &mut rendered_art.time_set_cache_order,
+            key.clone(),
+            images,
+        );
     }
     let Some(frame) = rendered_art.time_set_cache.get(&key).cloned() else {
         return Ok(());
     };
-    let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * scale),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 6.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -2317,7 +2358,9 @@ fn spawn_visible_oak_intro_screen(
     let snapshot = runtime_shell.shell.snapshot()?;
     let trainer = &snapshot.trainer;
     let key = oak_intro_art_key(oak_intro, trainer.player_gender);
-    if !rendered_art.oak_intro_cache.contains_key(&key) {
+    if !rendered_art.oak_intro_cache.contains_key(&key)
+        && !rendered_art.oak_intro_errors.contains_key(&key)
+    {
         match load_oak_intro_screen_frame(
             &runtime_shell.asset_root,
             oak_intro,
@@ -2335,6 +2378,13 @@ fn spawn_visible_oak_intro_screen(
                     .insert(key.clone(), error.to_string());
             }
         }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.oak_intro_cache,
+            &mut rendered_art.oak_intro_errors,
+            &mut rendered_art.oak_intro_cache_order,
+            key.clone(),
+            images,
+        );
     }
     let Some(frame) = rendered_art.oak_intro_cache.get(&key).cloned() else {
         let error = rendered_art
@@ -2344,18 +2394,14 @@ fn spawn_visible_oak_intro_screen(
             .unwrap_or_else(|| "unknown Oak intro frame render error".to_string());
         anyhow::bail!("required Oak intro frame could not be rendered: {error}");
     };
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 1.0),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     Ok(())
 }
 
@@ -2561,8 +2607,17 @@ fn render_visible_credits_frame(
     credits: &VisibleCreditsScreen,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
-    let palettes = load_credits_palette_sets(asset_root)?;
-    let palette_set = palettes
+    let sources = load_visible_credits_sources(asset_root)?;
+    render_visible_credits_frame_from_sources(&sources, credits, images)
+}
+
+fn render_visible_credits_frame_from_sources(
+    sources: &CreditsRenderSources,
+    credits: &VisibleCreditsScreen,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let palette_set = sources
+        .palette_sets
         .get(usize::from(credits.scene_index & 0x03))
         .context("credits palette set missing")?;
     let bg_palette = &palette_set[0];
@@ -2577,7 +2632,7 @@ fn render_visible_credits_frame(
         CREDITS_SCREEN_HEIGHT,
         bg_palette[0],
     );
-    draw_visible_credits_mon_strip(asset_root, credits, bg_palette, &mut data)?;
+    draw_visible_credits_mon_strip(sources, credits, bg_palette, &mut data)?;
     fill_visible_credits_rect(
         &mut data,
         0,
@@ -2586,10 +2641,10 @@ fn render_visible_credits_frame(
         12 * SOURCE_TILE_SIZE,
         text_palette[0],
     );
-    draw_visible_credits_border_rows(asset_root, border_palette, &mut data)?;
-    draw_visible_credits_text(asset_root, credits, text_palette, &mut data)?;
+    draw_visible_credits_border_rows(sources, border_palette, &mut data);
+    draw_visible_credits_text(sources, credits, text_palette, &mut data)?;
     if credits.show_the_end || credits.awaiting_exit {
-        draw_visible_credits_the_end(asset_root, text_palette, &mut data)?;
+        draw_visible_credits_the_end(sources, text_palette, &mut data);
     }
     apply_visible_credits_line_scroll(credits, &mut data);
     let mut image = Image::new(
@@ -2607,6 +2662,29 @@ fn render_visible_credits_frame(
     Ok(SpriteFrame {
         handle: images.add(image),
         size: Vec2::new(CREDITS_SCREEN_WIDTH as f32, CREDITS_SCREEN_HEIGHT as f32),
+    })
+}
+
+fn load_visible_credits_sources(asset_root: &AssetRoot) -> Result<CreditsRenderSources> {
+    let mut mon_frames = Vec::with_capacity(4 * CREDITS_FRAMES_PER_SCENE);
+    for mon_index in 0..4 {
+        for frame_index in 0..CREDITS_FRAMES_PER_SCENE {
+            mon_frames.push(load_visible_credits_mon_frame_levels(
+                asset_root,
+                VisibleCreditsBorderFrame {
+                    mon_index,
+                    frame_index: frame_index as u8,
+                },
+            )?);
+        }
+    }
+    Ok(CreditsRenderSources {
+        palette_sets: load_credits_palette_sets(asset_root)?,
+        mon_frames,
+        border_tiles: load_visible_credits_border_tiles(asset_root)?,
+        font: load_visible_credits_font_tiles(asset_root)?,
+        copyright_tiles: load_visible_credits_copyright_tiles(asset_root)?,
+        the_end_levels: load_visible_credits_the_end_levels(asset_root)?,
     })
 }
 
@@ -2636,12 +2714,12 @@ fn load_credits_palette_sets(asset_root: &AssetRoot) -> Result<Vec<[Palette; 3]>
 }
 
 fn draw_visible_credits_mon_strip(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     credits: &VisibleCreditsScreen,
     palette: &Palette,
     target: &mut [u8],
 ) -> Result<()> {
-    let frame_levels = visible_credits_mon_frame_levels(asset_root, credits)?;
+    let frame_levels = visible_credits_mon_frame_levels(sources, credits)?;
     for x in (0..CREDITS_SCREEN_WIDTH).step_by(CREDITS_MON_FRAME_SIZE) {
         blit_visible_credits_levels(
             target,
@@ -2658,19 +2736,32 @@ fn draw_visible_credits_mon_strip(
 }
 
 fn visible_credits_mon_frame_levels(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     credits: &VisibleCreditsScreen,
 ) -> Result<Vec<u8>> {
     let mut levels = vec![2_u8; CREDITS_MON_FRAME_SIZE * CREDITS_MON_FRAME_SIZE];
     if let Some(frame) = credits.border_frame_top {
-        let frame_levels = load_visible_credits_mon_frame_levels(asset_root, frame)?;
+        let frame_levels = cached_visible_credits_mon_frame_levels(sources, frame)?;
         copy_visible_credits_frame_half(&mut levels, &frame_levels, 0);
     }
     if let Some(frame) = credits.border_frame_bottom {
-        let frame_levels = load_visible_credits_mon_frame_levels(asset_root, frame)?;
+        let frame_levels = cached_visible_credits_mon_frame_levels(sources, frame)?;
         copy_visible_credits_frame_half(&mut levels, &frame_levels, CREDITS_MON_FRAME_SIZE / 2);
     }
     Ok(levels)
+}
+
+fn cached_visible_credits_mon_frame_levels(
+    sources: &CreditsRenderSources,
+    frame: VisibleCreditsBorderFrame,
+) -> Result<&[u8]> {
+    let mon_index = usize::from(frame.mon_index % 4);
+    let frame_index = usize::from(frame.frame_index) % CREDITS_FRAMES_PER_SCENE;
+    sources
+        .mon_frames
+        .get(mon_index * CREDITS_FRAMES_PER_SCENE + frame_index)
+        .map(Vec::as_slice)
+        .context("cached credits mon frame is unavailable")
 }
 
 fn load_visible_credits_mon_frame_levels(
@@ -2728,10 +2819,15 @@ fn copy_visible_credits_frame_half(target: &mut [u8], source: &[u8], target_y: u
 }
 
 fn draw_visible_credits_border_rows(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     palette: &Palette,
     target: &mut [u8],
-) -> Result<()> {
+) {
+    draw_visible_credits_border_row(target, &sources.border_tiles, 4, 4, palette);
+    draw_visible_credits_border_row(target, &sources.border_tiles, 17, 0, palette);
+}
+
+fn load_visible_credits_border_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<u8>>> {
     let path = asset_root.runtime_assets().join("gfx/credits/border.png");
     let source = image::open(&path)
         .with_context(|| format!("decode credits border {}", path.display()))?
@@ -2745,7 +2841,7 @@ fn draw_visible_credits_border_rows(
             height
         );
     }
-    let tiles = (0..9)
+    (0..9)
         .map(|index| {
             extract_visible_credits_levels(
                 &source,
@@ -2755,10 +2851,7 @@ fn draw_visible_credits_border_rows(
                 SOURCE_TILE_SIZE,
             )
         })
-        .collect::<Result<Vec<_>>>()?;
-    draw_visible_credits_border_row(target, &tiles, 4, 4, palette);
-    draw_visible_credits_border_row(target, &tiles, 17, 0, palette);
-    Ok(())
+        .collect::<Result<Vec<_>>>()
 }
 
 fn draw_visible_credits_border_row(
@@ -2789,15 +2882,14 @@ fn draw_visible_credits_border_row(
 }
 
 fn draw_visible_credits_text(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     credits: &VisibleCreditsScreen,
     palette: &Palette,
     target: &mut [u8],
 ) -> Result<()> {
-    let font = load_visible_credits_font_tiles(asset_root)?;
     for line in &credits.lines {
         if line.token == "COPYRIGHT" {
-            draw_visible_credits_copyright(asset_root, credits, palette, target)?;
+            draw_visible_credits_copyright(sources, credits, palette, target);
             continue;
         }
         for (line_offset, tile_ids) in line.tiles.iter().enumerate() {
@@ -2806,7 +2898,7 @@ fn draw_visible_credits_text(
                 + line_offset * SOURCE_TILE_SIZE;
             for tile_id in tile_ids {
                 if *tile_id != 0x7f {
-                    let levels = font.levels.get(tile_id).with_context(|| {
+                    let levels = sources.font.levels.get(tile_id).with_context(|| {
                         format!("credits font tile 0x{tile_id:02x} unavailable")
                     })?;
                     blit_visible_credits_levels(
@@ -2828,11 +2920,35 @@ fn draw_visible_credits_text(
 }
 
 fn draw_visible_credits_copyright(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     credits: &VisibleCreditsScreen,
     palette: &Palette,
     target: &mut [u8],
-) -> Result<()> {
+) {
+    let draw_y = (6 + usize::from(
+        credits
+            .lines
+            .iter()
+            .find(|line| line.token == "COPYRIGHT")
+            .map(|line| line.line_index)
+            .unwrap_or(0),
+    ) * 2)
+        * SOURCE_TILE_SIZE;
+    for (tile_index, levels) in sources.copyright_tiles.iter().enumerate() {
+        blit_visible_credits_levels(
+            target,
+            levels,
+            SOURCE_TILE_SIZE,
+            SOURCE_TILE_SIZE,
+            (2 + tile_index) * SOURCE_TILE_SIZE,
+            draw_y,
+            palette,
+            false,
+        );
+    }
+}
+
+fn load_visible_credits_copyright_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<u8>>> {
     let path = asset_root.runtime_assets().join("gfx/splash/copyright.png");
     let source = image::open(&path)
         .with_context(|| format!("decode credits copyright {}", path.display()))?
@@ -2846,50 +2962,27 @@ fn draw_visible_credits_copyright(
             height
         );
     }
-    let draw_y = (6 + usize::from(
-        credits
-            .lines
-            .iter()
-            .find(|line| line.token == "COPYRIGHT")
-            .map(|line| line.line_index)
-            .unwrap_or(0),
-    ) * 2)
-        * SOURCE_TILE_SIZE;
-    for tile_index in 0..29 {
-        let levels = extract_visible_credits_levels(
-            &source,
-            tile_index * SOURCE_TILE_SIZE,
-            0,
-            SOURCE_TILE_SIZE,
-            SOURCE_TILE_SIZE,
-        )?;
-        blit_visible_credits_levels(
-            target,
-            &levels,
-            SOURCE_TILE_SIZE,
-            SOURCE_TILE_SIZE,
-            (2 + tile_index) * SOURCE_TILE_SIZE,
-            draw_y,
-            palette,
-            false,
-        );
-    }
-    Ok(())
+    (0..29)
+        .map(|tile_index| {
+            extract_visible_credits_levels(
+                &source,
+                tile_index * SOURCE_TILE_SIZE,
+                0,
+                SOURCE_TILE_SIZE,
+                SOURCE_TILE_SIZE,
+            )
+        })
+        .collect()
 }
 
 fn draw_visible_credits_the_end(
-    asset_root: &AssetRoot,
+    sources: &CreditsRenderSources,
     palette: &Palette,
     target: &mut [u8],
-) -> Result<()> {
-    let path = asset_root.runtime_assets().join("gfx/credits/theend.png");
-    let source = image::open(&path)
-        .with_context(|| format!("decode credits The End {}", path.display()))?
-        .to_rgba8();
-    let levels = extract_visible_credits_levels(&source, 0, 0, 64, 16)?;
+) {
     blit_visible_credits_levels(
         target,
-        &levels,
+        &sources.the_end_levels,
         64,
         16,
         6 * SOURCE_TILE_SIZE,
@@ -2897,7 +2990,14 @@ fn draw_visible_credits_the_end(
         palette,
         true,
     );
-    Ok(())
+}
+
+fn load_visible_credits_the_end_levels(asset_root: &AssetRoot) -> Result<Vec<u8>> {
+    let path = asset_root.runtime_assets().join("gfx/credits/theend.png");
+    let source = image::open(&path)
+        .with_context(|| format!("decode credits The End {}", path.display()))?
+        .to_rgba8();
+    extract_visible_credits_levels(&source, 0, 0, 64, 16)
 }
 
 fn load_visible_credits_font_tiles(asset_root: &AssetRoot) -> Result<CreditsFontTiles> {
@@ -3152,12 +3252,43 @@ fn visible_credits_screen_lines(credits: &VisibleCreditsScreen) -> Vec<String> {
 #[derive(SystemParam)]
 struct RenderEntityQueries<'w, 's> {
     tiles: Query<'w, 's, Entity, With<PlayfieldTile>>,
+    map_base_surfaces: Query<
+        'w,
+        's,
+        (),
+        (With<PlayfieldTile>, Without<PlayfieldPriorityTile>),
+    >,
+    map_priority_surfaces:
+        Query<'w, 's, (), (With<PlayfieldTile>, With<PlayfieldPriorityTile>)>,
     map_sprites: Query<
         'w,
         's,
         &'static mut Transform,
         (
             With<PlayfieldTile>,
+            Without<PlayerMarker>,
+            Without<VisibleObjectSprite>,
+            Without<DialogGlyphMarker>,
+            Without<LedgeShadowMarker>,
+            Without<PlayfieldMapBackingBase>,
+            Without<PlayfieldMapBackingPriorityAxis>,
+        ),
+    >,
+    map_backing_bases: Query<'w, 's, Entity, With<PlayfieldMapBackingBase>>,
+    map_backing_priorities: Query<
+        'w,
+        's,
+        (
+            &'static PlayfieldMapBackingPriorityAxis,
+            &'static mut Transform,
+            &'static mut Sprite,
+        ),
+        // These exclusions are semantic invariants and make the mutable
+        // transform query provably disjoint to Bevy's runtime validator.
+        (
+            With<PlayfieldMapBackingPriorityAxis>,
+            Without<PlayfieldTile>,
+            Without<PlayfieldMapBackingBase>,
             Without<PlayerMarker>,
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
@@ -3213,9 +3344,18 @@ struct RenderEntityQueries<'w, 's> {
     dialog_text_box_backgrounds: Query<'w, 's, Entity, With<SceneDialogTextBoxBackgroundMarker>>,
     intro_surfaces: Query<'w, 's, &'static mut Handle<Image>, With<VisibleIntroSurface>>,
     pokemon_pictures: Query<'w, 's, Entity, With<PokemonPictureMarker>>,
-    title_markers: Query<'w, 's, Entity, With<TitleScreenMarker>>,
+    // Generic title cleanup must never remove the one retained LCD entity.
+    // Its pixels are committed in place across every full-screen handoff and
+    // it is retired explicitly only after a valid overworld frame is staged.
+    title_markers: Query<
+        'w,
+        's,
+        Entity,
+        (With<TitleScreenMarker>, Without<VisibleIntroSurface>),
+    >,
     battlers: Query<'w, 's, Entity, With<BattleBattlerMarker>>,
     battle_commands: Query<'w, 's, Entity, With<BattleCommandMarker>>,
+    fixed_battle_canvases: Query<'w, 's, Entity, With<FixedBattleCanvasMarker>>,
 }
 
 fn set_overworld_map_scroll(
@@ -3227,15 +3367,141 @@ fn set_overworld_map_scroll(
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
             Without<LedgeShadowMarker>,
+            Without<PlayfieldMapBackingBase>,
+            Without<PlayfieldMapBackingPriorityAxis>,
+        ),
+    >,
+    map_backing_priorities: &mut Query<
+        (&PlayfieldMapBackingPriorityAxis, &mut Transform, &mut Sprite),
+        (
+            With<PlayfieldMapBackingPriorityAxis>,
+            Without<PlayfieldTile>,
+            Without<PlayfieldMapBackingBase>,
+            Without<PlayerMarker>,
+            Without<VisibleObjectSprite>,
+            Without<DialogGlyphMarker>,
+            Without<LedgeShadowMarker>,
         ),
     >,
     offset: Vec2,
 ) {
-    let Ok(mut transform) = map_sprites.get_single_mut() else {
-        return;
-    };
-    transform.translation.x = -TILE_SIZE * 0.5 + offset.x;
-    transform.translation.y = TILE_SIZE * 0.5 + offset.y;
+    // The composited viewport has a base layer and a priority layer.  Both
+    // are PlayfieldTile entities and must move as one LCD background during
+    // camera interpolation.  `get_single_mut` silently stopped scrolling as
+    // soon as the priority layer was introduced because this query then
+    // matched two entities.
+    for mut transform in map_sprites.iter_mut() {
+        // The composite is already the complete 640x576 playfield. Centering
+        // it at a half-tile offset exposed a 16px strip of ClearColor on the
+        // right and bottom edges; only the live camera interpolation belongs
+        // in this transform.
+        transform.translation.x = offset.x;
+        transform.translation.y = offset.y;
+    }
+
+    // Only the edge uncovered by the moving exact-size front composite may
+    // show the old priority map.  Drawing its complete transparent surface
+    // above the destination would resurrect stale roofs/trees wherever the
+    // replacement priority pixels are transparent.
+    for (axis, mut transform, mut sprite) in map_backing_priorities.iter_mut() {
+        let exposure = match axis {
+            PlayfieldMapBackingPriorityAxis::X => offset.x.abs().min(PLAYFIELD_WIDTH),
+            PlayfieldMapBackingPriorityAxis::Y => offset.y.abs().min(PLAYFIELD_HEIGHT),
+        };
+        if exposure <= f32::EPSILON {
+            sprite.rect = None;
+            sprite.custom_size = Some(Vec2::ZERO);
+            transform.translation = Vec3::new(0.0, 0.0, 2.39);
+            continue;
+        }
+
+        match axis {
+            PlayfieldMapBackingPriorityAxis::X if offset.x > 0.0 => {
+                sprite.rect = Some(Rect::new(0.0, 0.0, exposure, PLAYFIELD_HEIGHT));
+                sprite.custom_size = Some(Vec2::new(exposure, PLAYFIELD_HEIGHT));
+                transform.translation = Vec3::new(
+                    -PLAYFIELD_WIDTH * 0.5 + exposure * 0.5,
+                    0.0,
+                    2.39,
+                );
+            }
+            PlayfieldMapBackingPriorityAxis::X => {
+                sprite.rect = Some(Rect::new(
+                    PLAYFIELD_WIDTH - exposure,
+                    0.0,
+                    PLAYFIELD_WIDTH,
+                    PLAYFIELD_HEIGHT,
+                ));
+                sprite.custom_size = Some(Vec2::new(exposure, PLAYFIELD_HEIGHT));
+                transform.translation = Vec3::new(
+                    PLAYFIELD_WIDTH * 0.5 - exposure * 0.5,
+                    0.0,
+                    2.39,
+                );
+            }
+            PlayfieldMapBackingPriorityAxis::Y if offset.y > 0.0 => {
+                sprite.rect = Some(Rect::new(
+                    0.0,
+                    PLAYFIELD_HEIGHT - exposure,
+                    PLAYFIELD_WIDTH,
+                    PLAYFIELD_HEIGHT,
+                ));
+                sprite.custom_size = Some(Vec2::new(PLAYFIELD_WIDTH, exposure));
+                transform.translation = Vec3::new(
+                    0.0,
+                    -PLAYFIELD_HEIGHT * 0.5 + exposure * 0.5,
+                    2.39,
+                );
+            }
+            PlayfieldMapBackingPriorityAxis::Y => {
+                sprite.rect = Some(Rect::new(0.0, 0.0, PLAYFIELD_WIDTH, exposure));
+                sprite.custom_size = Some(Vec2::new(PLAYFIELD_WIDTH, exposure));
+                transform.translation = Vec3::new(
+                    0.0,
+                    PLAYFIELD_HEIGHT * 0.5 - exposure * 0.5,
+                    2.39,
+                );
+            }
+        }
+    }
+}
+
+fn sync_overworld_map_backing_image(
+    source: &Handle<Image>,
+    existing: Option<Handle<Image>>,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
+    let source_image = images.get(source)?.clone();
+    if let Some(handle) = existing
+        && handle.id() != source.id()
+    {
+        if let Some(target) = images.get_mut(&handle) {
+            target.clone_from(&source_image);
+        } else {
+            // Preserve the stable asset id already referenced by the backing
+            // entity even if an external asset cleanup removed its value.
+            images.insert(handle.id(), source_image);
+        }
+        return Some(handle);
+    }
+    Some(images.add(source_image))
+}
+
+fn sync_overworld_map_backing(rendered: &mut RenderedViewport, images: &mut Assets<Image>) {
+    if let Some(source) = rendered.map_texture.clone() {
+        rendered.map_backing_texture = sync_overworld_map_backing_image(
+            &source,
+            rendered.map_backing_texture.clone(),
+            images,
+        );
+    }
+    if let Some(source) = rendered.map_priority_texture.clone() {
+        rendered.map_backing_priority_texture = sync_overworld_map_backing_image(
+            &source,
+            rendered.map_backing_priority_texture.clone(),
+            images,
+        );
+    }
 }
 
 fn visible_effective_map_time_of_day<'a>(
@@ -3267,7 +3533,11 @@ fn render_playfield(
 ) {
     let RenderEntityQueries {
         tiles,
+        map_base_surfaces,
+        map_priority_surfaces,
         mut map_sprites,
+        map_backing_bases,
+        mut map_backing_priorities,
         players,
         mut player_sprites,
         mut ledge_shadows,
@@ -3285,6 +3555,7 @@ fn render_playfield(
         title_markers,
         battlers,
         battle_commands,
+        fixed_battle_canvases,
     } = entity_queries;
     if let Some(intro) = runtime_shell.intro_screen.clone() {
         let shell_render_key = shell_render_key(&runtime_shell);
@@ -3312,6 +3583,28 @@ fn render_playfield(
                 Some(frame) => {
                     if let Ok(mut texture) = intro_surfaces.get_single_mut() {
                         *texture = frame.handle;
+                        // A title/options/debug overlay can still be present
+                        // on the first retained title -> intro handoff. Clear
+                        // every predecessor except the retained LCD entity;
+                        // subsequent intro frames normally find no work here.
+                        let mut despawned = std::collections::HashSet::new();
+                        for entity in tiles
+                            .iter()
+                            .chain(players.iter())
+                            .chain(objects.iter())
+                            .chain(events.iter())
+                            .chain(prompts.iter())
+                            .chain(field_commands.iter())
+                            .chain(scene_dialogs.iter())
+                            .chain(pokemon_pictures.iter())
+                            .chain(title_markers.iter())
+                            .chain(battlers.iter())
+                            .chain(battle_commands.iter())
+                        {
+                            if despawned.insert(entity) {
+                                commands.entity(entity).despawn();
+                            }
+                        }
                         rendered.shell_render_key = Some(shell_render_key);
                         return;
                     }
@@ -3340,38 +3633,23 @@ fn render_playfield(
             // legitimately leave no intro entity.  Fall through once to make
             // a fresh surface; subsequent animation updates stay retained.
         }
-        for entity in tiles.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in players.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in objects.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in events.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in prompts.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in field_commands.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in scene_dialogs.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in pokemon_pictures.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in title_markers.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in battlers.iter() {
-            commands.entity(entity).despawn();
-        }
-        for entity in battle_commands.iter() {
-            commands.entity(entity).despawn();
+        let mut despawned = std::collections::HashSet::new();
+        for entity in tiles
+            .iter()
+            .chain(players.iter())
+            .chain(objects.iter())
+            .chain(events.iter())
+            .chain(prompts.iter())
+            .chain(field_commands.iter())
+            .chain(scene_dialogs.iter())
+            .chain(pokemon_pictures.iter())
+            .chain(title_markers.iter())
+            .chain(battlers.iter())
+            .chain(battle_commands.iter())
+        {
+            if despawned.insert(entity) {
+                commands.entity(entity).despawn();
+            }
         }
         rendered.map_name = None;
         rendered.tile = None;
@@ -3432,8 +3710,13 @@ fn render_playfield(
         rendered.state_hash = None;
         rendered.shell_render_key = Some(shell_render_key);
         rendered.title_active = true;
-        if let Err(error) =
-            spawn_visible_credits_screen(&mut commands, &runtime_shell, &credits, &mut images)
+        if let Err(error) = spawn_visible_credits_screen(
+            &mut commands,
+            &runtime_shell,
+            &credits,
+            &mut tileset_art,
+            &mut images,
+        )
         {
             record_visible_render_error(&mut commands, &mut runtime_shell, error);
         }
@@ -3486,6 +3769,7 @@ fn render_playfield(
             &mut commands,
             &runtime_shell,
             &delete_save,
+            &mut tileset_art,
             &mut images,
         ) {
             record_visible_render_error(&mut commands, &mut runtime_shell, error);
@@ -3539,6 +3823,7 @@ fn render_playfield(
             &mut commands,
             &runtime_shell,
             &mystery_gift,
+            &mut tileset_art,
             &mut images,
         ) {
             record_visible_render_error(&mut commands, &mut runtime_shell, error);
@@ -3592,6 +3877,7 @@ fn render_playfield(
             &mut commands,
             &runtime_shell,
             &clock_reset,
+            &mut tileset_art,
             &mut images,
         ) {
             record_visible_render_error(&mut commands, &mut runtime_shell, error);
@@ -3831,6 +4117,18 @@ fn render_playfield(
         }
         return;
     }
+    // A freshly spawned base/priority pair is deferred until this system
+    // completes. Keep the previous complete LCD presenter through that first
+    // field extraction, then retire it on the next update once both layers
+    // are independently query-visible. This check precedes the idle fast path
+    // so a visually stable field cannot strand the pending presenter.
+    if tileset_art.presented_fullscreen_release_pending
+        && !retained_field_fullscreen_active(&runtime_shell)
+        && map_base_surfaces.iter().next().is_some()
+        && map_priority_surfaces.iter().next().is_some()
+    {
+        remove_presented_fullscreen_entity(&mut commands, &mut tileset_art);
+    }
     // Avoid snapshot/checksum work on idle frames. Gameplay actions bump the
     // revision; walking animation and queued audio are the only visual work
     // that can legitimately require a refresh without a new snapshot.
@@ -3899,6 +4197,7 @@ fn render_playfield(
     } else {
         field_snapshot
     };
+    tileset_art.selected_window_frame_id = textbox_frame_id(snapshot.trainer.options.frame);
     if rendered
         .map_name
         .as_ref()
@@ -3909,6 +4208,13 @@ fn render_playfield(
     let terminal_battle_scene = retained_battle_presentation
         .then(|| runtime_shell.battle_message_scene.as_deref().cloned())
         .flatten();
+    let battle_transition_surface_active = runtime_shell.visible_battle_transition.is_some()
+        && !matches!(
+            runtime_shell.pending_overworld_step_boundary,
+            Some(PendingOverworldStepBoundary::WildBattle)
+        );
+    let battle_canvas_active = !battle_transition_surface_active
+        && (snapshot.battle.is_some() || terminal_battle_scene.is_some());
     let state_hash = snapshot.visual_state_hash;
     runtime_shell.battle_lcd_animation_active = snapshot.battle.is_some();
     let shell_render_key = battle_animated_shell_render_key(&snapshot, &runtime_shell);
@@ -3930,6 +4236,7 @@ fn render_playfield(
     let dialog_only_update = rendered.title_active == false
         && rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && rendered.tile == Some(snapshot.overworld.tile)
+        && rendered.world_key == Some(world_key)
         && snapshot.battle.is_none()
         && snapshot.ui.menu.is_none()
         && snapshot.pending_shop.is_none()
@@ -4089,12 +4396,15 @@ fn render_playfield(
                 &mut object_sprites,
             )
         {
+            let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
             set_overworld_map_scroll(
                 &mut map_sprites,
-                visible_overworld_camera_offset(&rendered, &runtime_shell),
+                &mut map_backing_priorities,
+                camera_offset,
             );
-            if runtime_shell.player_walk_frame_ticks == 0 {
+            if camera_offset == Vec2::ZERO {
                 rendered.walk_viewport_origin = None;
+                sync_overworld_map_backing(&mut rendered, &mut images);
             }
             rendered.state_hash = Some(state_hash);
             rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
@@ -4124,11 +4434,14 @@ fn render_playfield(
     // retained LCD surface; tearing it down exposes Bevy's clear colour for
     // a frame before its replacement is available.
     let retain_walking_viewport = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name);
-    if !retain_walking_viewport {
-        for entity in tiles.iter() {
-            commands.entity(entity).despawn();
-        }
-    }
+    // The two composited map entities are the LCD's persistent background
+    // surfaces, including across map-name changes.  Their image handles are
+    // updated in place below once the complete destination viewport has been
+    // validated and composed.  Queuing their despawn here is not safe: Bevy
+    // queries still see deferred-despawn entities later in this system, so the
+    // spawn-if-missing branch would observe the old pair and create no
+    // replacements.  After command application the destination could then be
+    // left with no map surface at all, exposing the window clear colour.
     let retain_player_sprite = retain_walking_viewport
         && runtime_shell.player_walk_frame_ticks > 0
         && rendered.player_sprite_facing == Some(snapshot.overworld.facing)
@@ -4165,8 +4478,33 @@ fn render_playfield(
     for entity in battlers.iter() {
         commands.entity(entity).despawn();
     }
+    // The opaque LCD canvas is the battle renderer's continuity anchor. Keep
+    // one instance alive while battlers, HUD, text, and animation objects are
+    // rebuilt around it. A deferred despawn/spawn pair is normally applied in
+    // one command flush, but retaining the canvas also protects an already
+    // presented battle if required art fails later in this update.
+    let retained_fixed_battle_canvas = battle_canvas_active
+        .then(|| fixed_battle_canvases.iter().next())
+        .flatten();
     for entity in battle_commands.iter() {
-        commands.entity(entity).despawn();
+        if Some(entity) != retained_fixed_battle_canvas {
+            commands.entity(entity).despawn();
+        }
+    }
+    if battle_canvas_active && retained_fixed_battle_canvas.is_none() {
+        commands.spawn((
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgb(248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0),
+                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(0.0, 0.0, 2.7),
+                ..default()
+            },
+            BattleCommandMarker,
+            FixedBattleCanvasMarker,
+        ));
     }
 
     let Some(map) = snapshot
@@ -4308,12 +4646,12 @@ fn render_playfield(
     };
     let map_visual_key = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        // Compiled map blocks and palette tables are immutable pack data.
-        // Hashing the complete block array here made every walking frame scan
-        // the whole map even though only the player transform changed.  The
-        // map name plus its immutable rendering parameters is the identity
-        // needed by the retained viewport cache.
+        // Palette tables are immutable pack data, but map blocks are not:
+        // callbacks, script changeblock commands, and field moves replace
+        // them at runtime. Hash every map that can contribute viewport pixels
+        // so the retained 2D surface is recomposed after such a write.
         map.map_name.hash(&mut hasher);
+        visible_map_block_identity(&snapshot).hash(&mut hasher);
         map.attributes.tileset_name.hash(&mut hasher);
         tileset_art_key.time_of_day.hash(&mut hasher);
         map.attributes.border_block.hash(&mut hasher);
@@ -4535,6 +4873,10 @@ fn render_playfield(
     let mut priority_viewport_tiles = Vec::with_capacity(
         usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
     );
+    let mut visual_tiles = Vec::with_capacity(
+        usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
+    );
+    let mut visual_tileset_ids = HashMap::<&str, Arc<str>>::new();
     for y in 0..VIEWPORT_TILES_Y {
         for x in 0..VIEWPORT_TILES_X {
             let map_x = i32::from(start_x) + i32::from(x);
@@ -4592,11 +4934,16 @@ fn render_playfield(
                 let sub_y = source_y.rem_euclid(i32::from(RENDER_METATILE_WIDTH)) as usize;
                 (source_map.attributes.border_block as u16, sub_x, sub_y)
             };
-            let Some(tile_handle) = tileset_art
+            let Some((source_tile_index, tile_handle)) = tileset_art
                 .cache
                 .get(&source_art_key)
                 .and_then(|art| {
-                    art.tile_handle_at_frame(
+                    let offset = usize::from(block)
+                        .checked_mul(METATILE_TILE_COUNT)?
+                        .checked_add(sub_y.checked_mul(RENDER_METATILE_WIDTH as usize)?)?
+                        .checked_add(sub_x)?;
+                    let tile_index = *art.metatile_layout.get(offset)?;
+                    let handle = art.tile_handle_at_frame(
                         block,
                         sub_x,
                         sub_y,
@@ -4605,7 +4952,8 @@ fn render_playfield(
                             .progression
                             .active_engine_flags
                             .contains("ENGINE_FOREST_IS_RESTLESS"),
-                    )
+                    )?;
+                    Some((tile_index, handle))
                 })
             else {
                 record_visible_render_error(
@@ -4622,7 +4970,10 @@ fn render_playfield(
                 return;
             };
             viewport_tile_handles.push(tile_handle.clone());
-            let Some(collision) = source_tileset.collision.get(&block.to_string()) else {
+            // Collision data remains private to the faithful 2D compositor:
+            // it selects the classic foreground-priority layer, but is never
+            // exported as optional-renderer height or shape information.
+            let Some(collision) = tileset_collision_tokens(source_tileset, block) else {
                 record_visible_render_error(
                     &mut commands,
                     &mut runtime_shell,
@@ -4656,6 +5007,25 @@ fn render_playfield(
                 + if sub_x < 2 { 0 } else { 1 };
             let priority = priority_collision_token(&collision[collision_index])
                 || (foreground_bottom && sub_y >= 1);
+            let visual_tileset_id = visual_tileset_ids
+                .entry(source_tileset.tileset_id.as_str())
+                .or_insert_with(|| Arc::from(source_tileset.tileset_id.as_str()))
+                .clone();
+            visual_tiles.push(crystal_render_api::VisualTile {
+                column: x as u32,
+                row: y as u32,
+                source: crystal_render_api::VisualTileSource {
+                    tileset_id: visual_tileset_id,
+                    metatile_id: block,
+                    subtile_column: u8::try_from(sub_x)
+                        .expect("4x4 metatile column always fits u8"),
+                    subtile_row: u8::try_from(sub_y)
+                        .expect("4x4 metatile row always fits u8"),
+                    tile_index: u16::from(source_tile_index),
+                },
+                texture: tile_handle.clone(),
+                priority,
+            });
             let priority_spec = if priority {
                 let Some(handle) = tileset_art
                     .cache
@@ -4689,63 +5059,51 @@ fn render_playfield(
             priority_viewport_tiles.push(priority_spec);
         }
     }
-    let viewport_texture = if let Some(active_texture) = rendered.map_texture.clone() {
-        // Keep the handle used by the visible playfield entity. Updating its
-        // pixels in place leaves the last complete frame drawable while the
-        // renderer uploads the new camera origin, rather than exposing a
-        // black clear frame between despawn and spawn.
-        compose_viewport_tiles(&viewport_tile_handles, Some(active_texture), &mut images)
-    } else {
-        let composite_key = (map_visual_key, start_x, start_y);
-        if let Some((_, handle)) = tileset_art
-            .viewport_composites
-            .iter()
-            .find(|(key, _)| *key == composite_key)
-        {
-            handle.clone()
-        } else {
-            let handle = compose_viewport_tiles(
-                &viewport_tile_handles,
-                // Cached composites are immutable entries. Reusing the previous
-                // image here would mutate an image already stored for another
-                // camera origin and make the cache return the wrong viewport.
-                None,
-                &mut images,
-            );
-            tileset_art
-                .viewport_composites
-                .push_back((composite_key, handle.clone()));
-            while tileset_art.viewport_composites.len() > 4 {
-                if let Some((_, evicted)) = tileset_art.viewport_composites.pop_front() {
-                    // Bevy does not reclaim an image merely because its
-                    // Handle was dropped. Explicitly remove evicted camera
-                    // composites so walking through a large map cannot grow
-                    // the GPU asset store without bound.
-                    images.remove(&evicted);
-                }
-            }
-            handle
-        }
-    };
+    let previous_viewport_origin = rendered.viewport_origin;
+    let origin_changing_walk = rendered.map_name.as_ref()
+        == Some(&snapshot.overworld.map_name)
+        && (runtime_shell.player_walk_frame_ticks > 0
+            || runtime_shell.visible_ledge_jump.is_some())
+        && previous_viewport_origin != Some((start_x, start_y));
+    if origin_changing_walk {
+        // Capture the complete source viewport before the persistent front
+        // handles are mutated into the destination.  Doing this only when an
+        // origin actually changes avoids copying 640x576 buffers on ordinary
+        // ambient-animation redraws.
+        sync_overworld_map_backing(&mut rendered, &mut images);
+    }
+    // There is exactly one mutable base-layer LCD image. Keeping its handle on
+    // the visible entity lets Bevy draw the previous complete viewport until
+    // the replacement upload is ready. A former origin cache stored this same
+    // active handle and then mutated it for later camera positions, so every
+    // cached entry silently aliased and returned whichever viewport was drawn
+    // last. Recompose into the sole active image instead of caching aliases.
+    let viewport_texture = compose_viewport_tiles(
+        &viewport_tile_handles,
+        rendered.map_texture.clone(),
+        &mut images,
+    );
     let priority_viewport_texture = compose_priority_viewport_tiles(
         &priority_viewport_tiles,
         rendered.map_priority_texture.clone(),
         &mut images,
     );
-    let previous_viewport_origin = rendered.viewport_origin;
     rendered.map_texture = Some(viewport_texture.clone());
     rendered.map_priority_texture = Some(priority_viewport_texture.clone());
+    rendered.visual_tiles = visual_tiles;
     rendered.viewport_origin = Some((start_x, start_y));
-    rendered.walk_viewport_origin = if rendered.map_name.as_ref()
-        == Some(&snapshot.overworld.map_name)
-        && (runtime_shell.player_walk_frame_ticks > 0
-        || runtime_shell.visible_ledge_jump.is_some())
-        && previous_viewport_origin != Some((start_x, start_y))
-    {
+    rendered.walk_viewport_origin = if origin_changing_walk {
         previous_viewport_origin
     } else {
         None
     };
+    // Seed the pair on the first map frame. Later origin changes refresh it
+    // from the complete old front immediately before recomposition above.
+    if rendered.map_backing_texture.is_none()
+        || rendered.map_backing_priority_texture.is_none()
+    {
+        sync_overworld_map_backing(&mut rendered, &mut images);
+    }
     rendered.map_visual_key = Some(map_visual_key);
     let mut visible_tileset_art_keys = vec![tileset_art_key.clone()];
     for connection in &map.attributes.connections {
@@ -4805,7 +5163,11 @@ fn render_playfield(
     schedule.dedup();
     runtime_shell.ambient_tileset_animation_schedule = schedule;
     let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
-    set_overworld_map_scroll(&mut map_sprites, camera_offset);
+    set_overworld_map_scroll(
+        &mut map_sprites,
+        &mut map_backing_priorities,
+        camera_offset,
+    );
     if can_update_positions_in_place
         && tiles.iter().count() == 2
         && update_overworld_sprite_positions(
@@ -4844,10 +5206,9 @@ fn render_playfield(
                     custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                     ..default()
                 },
-                // Match the center of the old per-tile layer: tile (0, 0) was
-                // centered at (-320, 288), so the 20x18 composite is centered at
-                // (-16, 16).
-                transform: Transform::from_xyz(-TILE_SIZE * 0.5, TILE_SIZE * 0.5, 0.0),
+                // Image pixel (0, 0) is already the playfield's top-left;
+                // center the complete 640x576 composite on the camera.
+                transform: Transform::from_xyz(0.0, 0.0, 0.0),
                 ..default()
             },
             PlayfieldTile,
@@ -4859,12 +5220,53 @@ fn render_playfield(
                     custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                     ..default()
                 },
-                transform: Transform::from_xyz(-TILE_SIZE * 0.5, TILE_SIZE * 0.5, 2.4),
+                transform: Transform::from_xyz(0.0, 0.0, 2.4),
                 ..default()
             },
             PlayfieldTile,
             PlayfieldPriorityTile,
         ));
+    }
+    if map_backing_bases.iter().next().is_none()
+        && let Some(texture) = rendered.map_backing_texture.clone()
+    {
+        commands.spawn((
+            SpriteBundle {
+                texture,
+                sprite: Sprite {
+                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    ..default()
+                },
+                // The front base is fully opaque wherever it overlaps.  This
+                // settled copy appears only in the edge uncovered by scroll.
+                transform: Transform::from_xyz(0.0, 0.0, -0.01),
+                ..default()
+            },
+            PlayfieldMapBackingBase,
+        ));
+    }
+    if map_backing_priorities.iter().next().is_none()
+        && let Some(texture) = rendered.map_backing_priority_texture.clone()
+    {
+        for axis in [
+            PlayfieldMapBackingPriorityAxis::X,
+            PlayfieldMapBackingPriorityAxis::Y,
+        ] {
+            commands.spawn((
+                SpriteBundle {
+                    texture: texture.clone(),
+                    sprite: Sprite {
+                        // Hidden while settled. set_overworld_map_scroll
+                        // reveals only the old edge uncovered by movement.
+                        custom_size: Some(Vec2::ZERO),
+                        ..default()
+                    },
+                    transform: Transform::from_xyz(0.0, 0.0, 2.39),
+                    ..default()
+                },
+                axis,
+            ));
+        }
     }
 
     if !retain_object_sprites {
@@ -4987,11 +5389,8 @@ fn render_playfield(
             false,
             &mut images,
         );
-        let rock_smash_target = runtime_shell.visible_rock_smash_target == Some(object_tile);
         let walking_frame =
-            if (object_sprite_is_animated(&object.spritemovedata) || rock_smash_target)
-                && sprite_frame.is_some()
-            {
+            if object_sprite_is_animated(&object.spritemovedata) && sprite_frame.is_some() {
                 sprite_frame_for_art(
                     &mut tileset_art,
                     &runtime_shell.asset_root,
@@ -5072,10 +5471,7 @@ fn render_playfield(
                     };
                     (remaining, total)
                 };
-                let target = (
-                    PLAYFIELD_LEFT + f32::from(view_x) * TILE_SIZE,
-                    PLAYFIELD_TOP - f32::from(view_y) * TILE_SIZE,
-                );
+                let target = render_tile_playfield_position(view_x, view_y);
                 if total_ticks == 0 {
                     record_visible_render_error(
                         &mut commands,
@@ -5101,10 +5497,7 @@ fn render_playfield(
                 // Moving OAM may begin just outside the LCD and enter during
                 // this stride. A static-position viewport clamp here would
                 // collapse that valid offscreen origin to the destination.
-                let from = (
-                    PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
-                    PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
-                );
+                let from = render_tile_playfield_position(from_view_x, from_view_y);
                 let total = f32::from(total_ticks);
                 let progress = (total - f32::from(remaining)) / total;
                 overworld_sprite_position_from_base(
@@ -5115,26 +5508,9 @@ fn render_playfield(
             } else {
                 overworld_sprite_position(view_x, view_y, frame.size)
             };
-            let rock_smash_action_frame = rock_smash_target
-                && runtime_shell
-                    .pending_field_notice_effect_frames
-                    .is_some_and(|remaining| remaining > 0 && remaining <= 10 && remaining % 2 == 1);
-            let visible_handle = if rock_smash_action_frame {
-                let Some(action_frame) = walking_frame.as_ref() else {
-                    record_visible_render_error(
-                        &mut commands,
-                        &mut runtime_shell,
-                        anyhow::anyhow!("Rock Smash target has no required action frame"),
-                    );
-                    return;
-                };
-                action_frame.handle.clone()
-            } else {
-                frame.handle.clone()
-            };
             commands.spawn((
                 SpriteBundle {
-                    texture: visible_handle,
+                    texture: frame.handle.clone(),
                     sprite: Sprite {
                         custom_size: Some(frame.size),
                         ..default()
@@ -5149,7 +5525,11 @@ fn render_playfield(
                         if objects_above_priority.contains(&index) {
                             2.41
                         } else {
-                            overworld_entity_depth(object_tile, Some(source_object_slot))
+                            overworld_entity_depth(
+                                object_tile,
+                                Some(source_object_slot),
+                                (start_x, start_y),
+                            )
                         },
                     ),
                     ..default()
@@ -5191,11 +5571,12 @@ fn render_playfield(
             return;
         }
         if runtime_debug_overlays_enabled() {
+            let (object_tile_x, object_tile_y) = render_tile_playfield_position(view_x, view_y);
             spawn_object_label(
                 &mut commands,
                 object,
-                PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE,
-                PLAYFIELD_TOP - view_y as f32 * TILE_SIZE,
+                object_tile_x,
+                object_tile_y,
             );
         }
     }
@@ -5245,10 +5626,8 @@ fn render_playfield(
                     })
                 });
             if visible {
-                let mut position = (
-                    PLAYFIELD_LEFT + f32::from(target_view_x) * TILE_SIZE,
-                    PLAYFIELD_TOP - f32::from(target_view_y) * TILE_SIZE,
-                );
+                let mut position =
+                    render_tile_playfield_position(target_view_x, target_view_y);
                 if let Some(from) = retained_origin {
                     let Some(remaining) = runtime_shell
                         .object_walk_frame_ticks_by_id
@@ -5292,10 +5671,7 @@ fn render_playfield(
                         );
                         return;
                     };
-                    let from = (
-                        PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
-                        PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
-                    );
+                    let from = render_tile_playfield_position(from_view_x, from_view_y);
                     let progress = (f32::from(total) - f32::from(remaining.min(total)))
                         / f32::from(total);
                     position.0 = from.0 + (position.0 - from.0) * progress;
@@ -5325,7 +5701,7 @@ fn render_playfield(
                         transform: Transform::from_xyz(
                             x,
                             y,
-                            overworld_entity_depth(target, None) - 0.000_001,
+                            overworld_entity_depth(target, None, (start_x, start_y)) - 0.000_001,
                         ),
                         ..default()
                     },
@@ -5702,7 +6078,11 @@ fn render_playfield(
                     transform: Transform::from_xyz(
                         player_x,
                         player_ground_y - frame.size.y * 0.5 + shadow.size.y * 0.5,
-                        overworld_entity_depth(player_depth_tile, None) - 0.000_001,
+                        overworld_entity_depth(
+                            player_depth_tile,
+                            None,
+                            (start_x, start_y),
+                        ) - 0.000_001,
                     ),
                     ..default()
                 },
@@ -5726,7 +6106,7 @@ fn render_playfield(
                 transform: Transform::from_xyz(
                     player_x,
                     player_y,
-                    overworld_entity_depth(player_depth_tile, None),
+                    overworld_entity_depth(player_depth_tile, None, (start_x, start_y)),
                 ),
                 ..default()
             },
@@ -5862,20 +6242,6 @@ fn render_playfield(
             rendered.map_texture.clone(),
             rendered.map_priority_texture.clone(),
         );
-    } else if snapshot.battle.is_some() || terminal_battle_scene.is_some() {
-        commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0),
-                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(0.0, 0.0, 2.7),
-                ..default()
-            },
-            BattleCommandMarker,
-            FixedBattleCanvasMarker,
-        ));
     }
 
     if runtime_shell.visible_battle_transition.is_none()
@@ -6167,6 +6533,23 @@ fn render_playfield(
         spawn_audio_status_label(&mut commands, &runtime_shell);
     }
 
+    // Every fallible overworld compositor and overlay has succeeded. Retire
+    // the title/full-screen presenter only now, after the destination map,
+    // player, objects, and UI have all been staged into this command buffer.
+    // Field-owned full-LCD screens keep the presenter until their UI closes.
+    // A cold map pair is deferred, so retain one extra extraction unless both
+    // layers were already visible at system start. The image allocation stays
+    // alive for the next title/credits sequence; only its ECS entity retires.
+    if !retained_field_fullscreen_active(&runtime_shell) {
+        if map_base_surfaces.iter().next().is_some()
+            && map_priority_surfaces.iter().next().is_some()
+        {
+            remove_presented_fullscreen_entity(&mut commands, &mut tileset_art);
+        } else if tileset_art.presented_fullscreen_entity.is_some() {
+            tileset_art.presented_fullscreen_release_pending = true;
+        }
+    }
+
     rendered.map_name = Some(snapshot.overworld.map_name.clone());
     rendered.tile = Some(snapshot.overworld.tile);
     rendered.world_key = Some(world_key);
@@ -6176,7 +6559,7 @@ fn render_playfield(
     rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
     rendered.dialog_key = dialog_key;
     rendered.shell_render_key = Some(shell_render_key);
-rendered.title_active = false;
+    rendered.title_active = false;
 }
 
 #[derive(Clone, Copy)]

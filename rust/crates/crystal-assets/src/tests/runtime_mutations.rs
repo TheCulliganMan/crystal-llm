@@ -544,6 +544,7 @@
                 &mut session,
                 [GameButton::A, GameButton::Right],
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("directed input");
 
@@ -564,6 +565,7 @@
                 &mut a_only_session,
                 [GameButton::A],
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("a-only input");
 
@@ -598,6 +600,7 @@
                 &mut session,
                 std::iter::empty(),
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("idle frame");
 
@@ -610,6 +613,293 @@
         assert_eq!(state.joypad, before_joypad);
     }
 
+    fn phone_scheduler_contact(
+        contact_id: &str,
+        map_constant: Option<&str>,
+        caller_time_mask: u8,
+        caller_script: Option<&str>,
+    ) -> PhoneContactRecord {
+        PhoneContactRecord {
+            contact_id: contact_id.to_string(),
+            trainer_class: None,
+            trainer_label: None,
+            lines: vec![format!("{contact_id}:")],
+            primary_label: contact_id.to_string(),
+            map_constant: map_constant.map(str::to_string),
+            callee_time_mask: 0,
+            callee_script: None,
+            caller_time_mask,
+            caller_script: caller_script.map(str::to_string),
+        }
+    }
+
+    fn phone_scheduler_metadata(phone_service: u8, environment: &str) -> RuntimeMapMetadata {
+        RuntimeMapMetadata {
+            constant: "ROUTE_29".to_string(),
+            name: "Route29".to_string(),
+            group_name: "GROUP_ROUTE_29".to_string(),
+            group_id: 1,
+            map_id: 1,
+            width: 2,
+            height: 1,
+            environment: environment.to_string(),
+            phone_service,
+        }
+    }
+
+    #[test]
+    fn special_phone_call_preempts_repel_and_every_count_step_counter() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([(
+                "ROUTE_29".to_string(),
+                phone_scheduler_metadata(0, "ROUTE"),
+            )]),
+            phone_contacts: PhoneContactCatalog(BTreeMap::from([(
+                "PHONE_ELM".to_string(),
+                phone_scheduler_contact(
+                    "PHONE_ELM",
+                    Some("ELMS_LAB"),
+                    0,
+                    Some("ElmPhoneCallerScript"),
+                ),
+            )])),
+            special_phone_calls: BTreeMap::from([(
+                "SPECIALCALL_MASTERBALL".to_string(),
+                SpecialPhoneCallRule {
+                    condition: "SpecialCallOnlyWhenOutside".to_string(),
+                    contact_id: "PHONE_ELM".to_string(),
+                    caller_script: "ElmPhoneCallerScript".to_string(),
+                },
+            )]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.script_runtime.special_phone_calls =
+            vec!["SPECIALCALL_MASTERBALL".to_string()];
+        state.repel_steps_remaining = 1;
+        state.active_repel_item = Some("REPEL".to_string());
+        state.step_events.step_count = 17;
+        state.step_events.poison_step_count = 29;
+        state.step_events.happiness_step_count = 41;
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("special call step");
+
+        assert_eq!(session.player.tile, TilePosition::new(1, 0));
+        assert!(matches!(
+            frame.phone_call.as_ref().map(|call| &call.kind),
+            Some(IncomingPhoneCallKind::Special { call_id })
+                if call_id == "SPECIALCALL_MASTERBALL"
+        ));
+        assert_eq!(frame.step_events, None);
+        assert_eq!(frame.wild_encounter, None);
+        assert_eq!(state.repel_steps_remaining, 1);
+        assert_eq!(state.active_repel_item.as_deref(), Some("REPEL"));
+        assert_eq!(state.step_events.step_count, 17);
+        assert_eq!(state.step_events.poison_step_count, 29);
+        assert_eq!(state.step_events.happiness_step_count, 41);
+        assert_eq!(
+            state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
+            Some("ElmPhoneCallerScript")
+        );
+        assert_eq!(state.script_runtime.call_stack.len(), 1);
+        assert_eq!(state.script_runtime.call_stack[0].source_script, "Script_ReceivePhoneCall");
+        assert_eq!(state.script_runtime.call_stack[0].next_command_index, 3);
+        assert_eq!(state.script_runtime.pending_delays[0].frames, 30);
+        assert_eq!(state.script_runtime.command_queue[0].target, "RingTwice_StartCall");
+    }
+
+    #[test]
+    fn ordinary_phone_scheduler_restarts_timer_filters_in_slot_order_and_uses_two_rng_calls() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        let contacts = [
+            ("PHONE_SAME", Some("ROUTE_29"), 0x2, "SameCallerScript"),
+            ("PHONE_NIGHT", Some("ROUTE_30"), 0x4, "NightCallerScript"),
+            ("PHONE_B", Some("ROUTE_30"), 0x2, "BCallerScript"),
+            ("PHONE_C", Some("ROUTE_31"), 0x2, "CCallerScript"),
+        ]
+        .into_iter()
+        .map(|(id, map, mask, script)| {
+            (
+                id.to_string(),
+                phone_scheduler_contact(id, map, mask, Some(script)),
+            )
+        })
+        .collect();
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([(
+                "ROUTE_29".to_string(),
+                phone_scheduler_metadata(0, "ROUTE"),
+            )]),
+            phone_contacts: PhoneContactCatalog(contacts),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.time.time_of_day = TimeOfDay::Day;
+        state.time.registers.hours = 12;
+        state.time.registers.minutes = 1;
+        state.script_runtime.phone_call_timer.initialized = true;
+        state.script_runtime.phone_call_timer.minutes_remaining = 1;
+        state.script_runtime.phone_call_timer.last_hour = 12;
+        state.script_runtime.phone_number_order = vec![
+            Some("PHONE_SAME".to_string()),
+            None,
+            Some("PHONE_NIGHT".to_string()),
+            Some("PHONE_B".to_string()),
+            Some("PHONE_C".to_string()),
+        ];
+        state.script_runtime.phone_numbers = [
+            "PHONE_SAME",
+            "PHONE_NIGHT",
+            "PHONE_B",
+            "PHONE_C",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        state.random_state = CrystalRandomState {
+            add: 0xff,
+            sub: 0x80,
+        };
+        let session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        // The expired timer leaves carry set for the chance call. The caller
+        // choice clears carry and samples the new hRandomAdd nibble.
+        let mut divider = ReplayDivider::new([0, 0, 1, 2]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+
+        let call = data
+            .check_ordinary_phone_call(&mut state, &session, &mut rng)
+            .expect("ordinary phone scheduler")
+            .expect("eligible caller");
+
+        assert_eq!(call.kind, IncomingPhoneCallKind::Ordinary);
+        assert_eq!(call.contact_id, "PHONE_B");
+        assert_eq!(rng.state(), CrystalRandomState { add: 1, sub: 0x7d });
+        assert_eq!(divider.remaining(), 0);
+        assert_eq!(
+            state.script_runtime.phone_call_timer.time_cycles_since_last_call,
+            0
+        );
+        assert_eq!(state.script_runtime.phone_call_timer.minutes_remaining, 20);
+        assert_eq!(
+            state
+                .script_runtime
+                .variables
+                .get("VAR_CALLERID")
+                .map(String::as_str),
+            Some("PHONE_B")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wPhoneCallerScript")
+                .map(String::as_str),
+            Some("BCallerScript")
+        );
+
+    }
+
+    #[test]
+    fn ordinary_phone_timer_restarts_before_service_gate_and_entrances_skip_it() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([(
+                "ROUTE_29".to_string(),
+                phone_scheduler_metadata(0x10, "ROUTE"),
+            )]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.random_state = CrystalRandomState {
+            add: 0xff,
+            sub: 0x80,
+        };
+        state.time.registers.minutes = 1;
+        state.script_runtime.phone_call_timer.initialized = true;
+        state.script_runtime.phone_call_timer.minutes_remaining = 1;
+        let session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+        let mut divider = ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+
+        assert_eq!(
+            data.check_ordinary_phone_call(&mut state, &session, &mut rng)
+                .expect("service-gated scheduler"),
+            None
+        );
+        assert_eq!(rng.state(), CrystalRandomState { add: 0, sub: 0x7f });
+        assert_eq!(divider.remaining(), 0);
+        assert_eq!(
+            state.script_runtime.phone_call_timer.time_cycles_since_last_call,
+            1
+        );
+        assert_eq!(state.script_runtime.phone_call_timer.minutes_remaining, 10);
+
+        let mut entrance_state = GameState::default();
+        entrance_state.random_state = CrystalRandomState {
+            add: 0xff,
+            sub: 0x80,
+        };
+        let mut entrance_session = session.clone();
+        for metatile in &mut entrance_session.tileset.metatiles {
+            metatile.collision = [permissions::DOOR; 4];
+        }
+        let mut entrance_divider = ReplayDivider::new([]);
+        let mut entrance_rng =
+            CrystalRandom::new(entrance_state.random_state, &mut entrance_divider);
+        assert_eq!(
+            data.check_ordinary_phone_call(
+                &mut entrance_state,
+                &entrance_session,
+                &mut entrance_rng,
+            )
+                .expect("entrance-gated scheduler"),
+            None
+        );
+        assert!(!entrance_state.script_runtime.phone_call_timer.initialized);
+        assert_eq!(
+            entrance_rng.state(),
+            CrystalRandomState {
+                add: 0xff,
+                sub: 0x80
+            }
+        );
+        assert_eq!(entrance_divider.remaining(), 0);
+    }
+
     #[test]
     fn empty_overworld_frame_does_not_bypass_forced_tile_movement_without_npcs() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
@@ -618,6 +908,20 @@
         let data = GameDataSet {
             maps: map_payload(vec![module]),
             tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([(
+                "ROUTE_29".to_string(),
+                RuntimeMapMetadata {
+                    constant: "ROUTE_29".to_string(),
+                    name: "Route29".to_string(),
+                    group_name: "GROUP_ROUTE_29".to_string(),
+                    group_id: 1,
+                    map_id: 1,
+                    width: 2,
+                    height: 1,
+                    environment: "ROUTE".to_string(),
+                    phone_service: 1,
+                },
+            )]),
             ..GameDataSet::default()
         };
         let mut state = GameState::default();
@@ -637,6 +941,7 @@
                 &mut session,
                 std::iter::empty(),
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("forced-current frame");
 
@@ -678,6 +983,7 @@
                 &mut session,
                 [GameButton::A, GameButton::Right],
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("locked overworld input");
 
@@ -704,6 +1010,7 @@
                 &mut session,
                 std::iter::empty(),
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect("locked idle frame");
         assert_eq!(idle_locked.snapshot.frame, 2);
@@ -717,6 +1024,320 @@
                 .map(|location| location.script.as_str()),
             Some("BlockingScript")
         );
+    }
+
+    #[test]
+    fn conditional_background_event_obeys_its_pret_event_flag_gate() {
+        let mut module = test_map_module("RocketBase", "ROCKET_BASE", None);
+        module.attributes.width = 2;
+        module.blocks = vec![0, 0];
+        module.events.bg_events = vec![BackgroundEvent {
+            x: 1,
+            y: 0,
+            event_type: "BGEVENT_IFNOTSET".to_string(),
+            script: "LockedDoorData".to_string(),
+        }];
+        module.scripts.insert(
+            ".Script@LockedDoorData".to_string(),
+            serde_json::json!([]),
+        );
+        module.script_runtime_commands = vec![ScriptRuntimeCommand {
+            command: "conditional_event".to_string(),
+            args: vec![
+                "EVENT_OPENED_LOCKED_DOOR".to_string(),
+                ".Script".to_string(),
+            ],
+            source_script: "LockedDoorData".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+
+        let mut clear_state = GameState::default();
+        let mut clear_session = data
+            .overworld_session("RocketBase", TilePosition::new(0, 0), 0)
+            .expect("clear-flag overworld session");
+        clear_session.player.facing = Direction::Right;
+        let clear = data
+            .apply_overworld_input(
+                &mut clear_state,
+                &mut clear_session,
+                [GameButton::A],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("clear-flag interaction");
+        let clear_interaction = clear.interaction.as_ref().expect("eligible door interaction");
+        assert_eq!(clear_interaction.script, "LockedDoorData");
+        assert_eq!(
+            data.resolve_overworld_interaction_dispatch(&clear_state, clear_interaction)
+                .expect("resolve conditional background dispatch")
+                .map(|interaction| interaction.script),
+            Some(".Script@LockedDoorData".to_string())
+        );
+
+        let mut set_state = GameState::default();
+        set_state
+            .flags
+            .set_event_flag("EVENT_OPENED_LOCKED_DOOR", true)
+            .expect("set door flag");
+        let mut set_session = data
+            .overworld_session("RocketBase", TilePosition::new(0, 0), 0)
+            .expect("set-flag overworld session");
+        set_session.player.facing = Direction::Right;
+        let set = data
+            .apply_overworld_input(
+                &mut set_state,
+                &mut set_session,
+                [GameButton::A],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("set-flag interaction check");
+        assert_eq!(set.interaction, None);
+    }
+
+    #[test]
+    fn hidden_item_background_event_disappears_after_collection() {
+        let mut module = test_map_module("HiddenItemMap", "HIDDEN_ITEM_MAP", None);
+        module.attributes.width = 2;
+        module.blocks = vec![0, 0];
+        module.events.bg_events = vec![BackgroundEvent {
+            x: 1,
+            y: 0,
+            event_type: "BGEVENT_ITEM".to_string(),
+            script: "HiddenPotion".to_string(),
+        }];
+        module.script_field_pickups = vec![ScriptFieldPickup {
+            command: "hiddenitem".to_string(),
+            item_id: Some("POTION".to_string()),
+            quantity: 1,
+            event_flag: Some("EVENT_GOT_HIDDEN_POTION".to_string()),
+            fruit_tree_id: None,
+            source_script: "HiddenPotion".to_string(),
+            command_index: 0,
+        }];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_GOT_HIDDEN_POTION", true)
+            .expect("set hidden-item flag");
+        let mut session = data
+            .overworld_session("HiddenItemMap", TilePosition::new(0, 0), 0)
+            .expect("hidden-item overworld session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::A],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("collected hidden-item interaction check");
+        assert_eq!(frame.interaction, None);
+    }
+
+    #[test]
+    fn trainer_sight_preempts_count_step_and_does_not_expire_repel() {
+        let mut module = test_map_module("TrainerRoute", "TRAINER_ROUTE", None);
+        module.attributes.width = 2;
+        module.blocks = vec![0, 0];
+        let mut trainer = test_object("ROUTE_TRAINER", "-1", 3, 0);
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        trainer.radius = 3;
+        trainer.script = "TrainerRouteYoungster".to_string();
+        trainer.sightline_direction_override = Some("LEFT".to_string());
+        module.objects = vec![trainer];
+        module.trainer_scripts.insert(
+            "TrainerRouteYoungster".to_string(),
+            TrainerBattleRequest::new("YOUNGSTER", "JOEY", "EVENT_BEAT_JOEY"),
+        );
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.repel_steps_remaining = 1;
+        state.active_repel_item = Some("REPEL".to_string());
+        let mut session = data
+            .overworld_session("TrainerRoute", TilePosition::new(0, 0), 0)
+            .expect("trainer-route session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("step into trainer sight");
+
+        assert_eq!(
+            frame
+                .trainer_sight
+                .as_ref()
+                .map(|interaction| interaction.script.as_str()),
+            Some("TrainerRouteYoungster")
+        );
+        assert_eq!(frame.step_events, None);
+        assert_eq!(state.repel_steps_remaining, 1);
+        assert_eq!(state.active_repel_item.as_deref(), Some("REPEL"));
+    }
+
+    #[test]
+    fn warp_preempts_hatch_ready_egg_and_count_step_counters() {
+        let mut source = test_map_module("WarpSource", "WARP_SOURCE", None);
+        source.blocks = vec![0];
+        source.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 1,
+            y: 0,
+            target_map_constant: "WARP_DESTINATION".to_string(),
+            target_map: "WARP_DESTINATION".to_string(),
+            target_warp_id: 1,
+        }];
+
+        let mut destination = test_map_module("WarpDestination", "WARP_DESTINATION", None);
+        destination.blocks = vec![0];
+        destination.attributes.map_events_label = Some("WarpDestination_MapEvents".to_string());
+        destination.events.warps = vec![WarpEvent {
+            index: 1,
+            x: 0,
+            y: 0,
+            target_map_constant: "WARP_SOURCE".to_string(),
+            target_map: "WARP_SOURCE".to_string(),
+            target_warp_id: 1,
+        }];
+
+        let mut tileset = test_tileset_definition();
+        tileset.collision.insert(
+            "0".to_string(),
+            vec![
+                "FLOOR".to_string(),
+                "WARP_PANEL".to_string(),
+                "FLOOR".to_string(),
+                "FLOOR".to_string(),
+            ],
+        );
+        let destination_attributes = destination.attributes.clone();
+        let data = GameDataSet {
+            maps: map_payload(vec![source, destination]),
+            map_attributes: BTreeMap::from([(
+                "WarpDestination".to_string(),
+                destination_attributes,
+            )]),
+            map_scripts: BTreeMap::from([(
+                "WarpDestination_MapEvents".to_string(),
+                serde_json::json!([
+                    {"command":"def_warp_events","args":[]},
+                    {"command":"warp_event","args":["0","0","WARP_SOURCE","1"]},
+                    {"command":"def_coord_events","args":[]},
+                    {"command":"def_bg_events","args":[]},
+                    {"command":"def_object_events","args":[]}
+                ]),
+            )]),
+            runtime_map_metadata: BTreeMap::from([
+                (
+                    "WARP_SOURCE".to_string(),
+                    test_runtime_map_metadata("WARP_SOURCE", "WarpSource"),
+                ),
+                (
+                    "WARP_DESTINATION".to_string(),
+                    test_runtime_map_metadata("WARP_DESTINATION", "WarpDestination"),
+                ),
+            ]),
+            tilesets: BTreeMap::from([("johto".to_string(), tileset)]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.step_events.step_count = 0x7f;
+        state.step_events.poison_step_count = 3;
+        let mut egg = Pokemon::new_for_tests(species(), 5, Dv::default());
+        egg.is_egg = true;
+        egg.happiness = 1;
+        state.storage.party.pokemon[0] = Some(egg);
+        let mut session = data
+            .overworld_session("WarpSource", TilePosition::new(0, 0), 0)
+            .expect("warp-source session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("step onto warp before CountStep");
+
+        assert_eq!(session.map.name, "WarpDestination");
+        assert!(frame.warp.is_some());
+        assert_eq!(frame.step_events, None);
+        assert_eq!(state.step_events.step_count, 0x7f);
+        assert_eq!(state.step_events.poison_step_count, 3);
+        let egg = state.storage.party.pokemon[0].as_ref().expect("ready egg");
+        assert!(egg.is_egg);
+        assert_eq!(egg.happiness, 1);
+    }
+
+    #[test]
+    fn coord_event_preempts_count_step_counters() {
+        let mut module = test_map_module("CoordRoute", "COORD_ROUTE", None);
+        module.attributes.width = 2;
+        module.blocks = vec![0, 0];
+        module.events.coord_events = vec![CoordEvent {
+            x: 1,
+            y: 0,
+            scene_id: String::new(),
+            script_name: "CoordRouteScene".to_string(),
+        }];
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.step_events.poison_step_count = 3;
+        state.step_events.step_count = 127;
+        let mut session = data
+            .overworld_session("CoordRoute", TilePosition::new(0, 0), 0)
+            .expect("coord-route session");
+        session.player.facing = Direction::Right;
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
+            .expect("step onto coord event");
+
+        assert_eq!(
+            frame
+                .coord_event
+                .as_ref()
+                .map(|event| event.script_name.as_str()),
+            Some("CoordRouteScene")
+        );
+        assert_eq!(frame.step_events, None);
+        assert_eq!(state.step_events.poison_step_count, 3);
+        assert_eq!(state.step_events.step_count, 127);
     }
 
     #[test]
@@ -743,7 +1364,13 @@
         session.player.facing = Direction::Right;
 
         let error = data
-            .apply_overworld_input(&mut state, &mut session, [GameButton::A], &BTreeSet::new())
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::A],
+                &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
+            )
             .expect_err("invalid background event coordinate must reject pack-backed input");
         let error = format!("{error:#}");
 
@@ -787,6 +1414,7 @@
                 &mut session,
                 [GameButton::Right],
                 &BTreeSet::new(),
+                &mut ReplayDivider::new([]),
             )
             .expect_err("invalid coord event coordinate must reject pack-backed input");
         let error = format!("{error:#}");
@@ -1436,6 +2064,11 @@
             &["mods/new/playability/main.json".to_string()]
         );
         assert!(files.entries(ContentPackCategory::Moves).is_empty());
+        assert!(
+            files
+                .entries(ContentPackCategory::TrainerClassNames)
+                .is_empty()
+        );
 
         json.remove("moves");
         let error = serde_json::from_value::<ContentPackFiles>(Value::Object(json))
@@ -1449,6 +2082,84 @@
             .expect_err("raw map script category must be explicit")
             .to_string();
         assert!(error.contains("missing field `map_scripts`"), "{error}");
+
+        let mut missing_trainer_class_names = empty_content_pack_files_json();
+        missing_trainer_class_names.remove("trainer_class_names");
+        let error = serde_json::from_value::<ContentPackFiles>(Value::Object(
+            missing_trainer_class_names,
+        ))
+        .expect_err("trainer class name category must be explicit")
+        .to_string();
+        assert!(
+            error.contains("missing field `trainer_class_names`"),
+            "{error}"
+        );
+
+        let mut missing_roaming_pokemon = empty_content_pack_files_json();
+        missing_roaming_pokemon.remove("roaming_pokemon");
+        let error = serde_json::from_value::<ContentPackFiles>(Value::Object(
+            missing_roaming_pokemon,
+        ))
+        .expect_err("raw roaming Pokemon category must be explicit")
+        .to_string();
+        assert!(error.contains("missing field `roaming_pokemon`"), "{error}");
+    }
+
+    #[test]
+    fn modpack_payload_requires_explicit_roaming_pokemon_catalog() {
+        let mut payload = ModpackPayload::default();
+        payload.battle_reward_rules = test_battle_reward_rules();
+        payload.battle_escape_rules = test_battle_escape_rules();
+        payload.step_event_rules = test_step_event_rules();
+        payload.field_moves = test_field_move_catalog();
+        payload.buena_password_categories = test_buena_password_categories();
+        payload.battle_stat_multipliers = test_battle_stat_multipliers();
+        payload.move_priorities = test_move_priorities();
+        payload.type_categories = test_type_categories();
+        payload.type_effectiveness = test_type_effectiveness();
+        payload.weather_modifiers = test_weather_modifiers();
+        payload.roaming_pokemon = roaming_catalog_for_tests("RAIKOU", "ENTEI");
+        let mut value = serde_json::to_value(payload)
+            .expect("serialize explicit default payload");
+        value
+            .as_object_mut()
+            .expect("modpack payload object")
+            .remove("roaming_pokemon");
+        let error = serde_json::from_value::<ModpackPayload>(value)
+            .expect_err("modpack payload must not default the roaming Pokemon catalog")
+            .to_string();
+        assert!(error.contains("missing field `roaming_pokemon`"), "{error}");
+    }
+
+    #[test]
+    fn game_data_requires_explicit_trainer_class_name_catalog() {
+        let mut data = GameDataSet::default();
+        data.battle_reward_rules = test_battle_reward_rules();
+        data.battle_escape_rules = test_battle_escape_rules();
+        data.step_event_rules = test_step_event_rules();
+        data.field_moves = test_field_move_catalog();
+        data.buena_password_categories = test_buena_password_categories();
+        data.battle_stat_multipliers = test_battle_stat_multipliers();
+        data.move_priorities = test_move_priorities();
+        data.type_categories = test_type_categories();
+        data.type_effectiveness = test_type_effectiveness();
+        data.weather_modifiers = test_weather_modifiers();
+        let value = serde_json::to_value(data).expect("serialize explicit empty game data");
+        serde_json::from_value::<GameDataSet>(value.clone())
+            .expect("exact game data round-trips with trainer class names");
+
+        let mut missing = value;
+        missing
+            .as_object_mut()
+            .expect("game data object")
+            .remove("trainer_class_names");
+        let error = serde_json::from_value::<GameDataSet>(missing)
+            .expect_err("trainer class name catalog must never default")
+            .to_string();
+        assert!(
+            error.contains("missing field `trainer_class_names`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2203,6 +2914,67 @@
             "{legacy_error}"
         );
 
+        let mut framed_v5 = std::fs::read(&path).expect("read current compiled pack");
+        framed_v5[COMPILED_GAME_PACK_VERSION_OFFSET..COMPILED_GAME_PACK_VERSION_OFFSET + 2]
+            .copy_from_slice(&5_u16.to_be_bytes());
+        let v5_error = decode_compiled_game_pack(&framed_v5, &path)
+            .expect_err("framed v5 compiled packs are rejected before payload decode")
+            .to_string();
+        assert!(
+            v5_error.contains("unsupported format version 5"),
+            "{v5_error}"
+        );
+
+        let current = std::fs::read(&path).expect("read current compiled pack frame");
+        let mut prior_shape: ciborium::Value = ciborium::from_reader(
+            &current[COMPILED_GAME_PACK_HEADER_LEN..],
+        )
+        .expect("decode current pack payload as CBOR value");
+        let ciborium::Value::Map(pack_fields) = &mut prior_shape else {
+            panic!("compiled pack payload must be a CBOR map");
+        };
+        let data = pack_fields
+            .iter_mut()
+            .find_map(|(key, value)| {
+                (key.as_text() == Some("data")).then_some(value)
+            })
+            .expect("compiled pack data field");
+        let ciborium::Value::Map(data_fields) = data else {
+            panic!("compiled pack data must be a CBOR map");
+        };
+        let bug_contest = data_fields
+            .iter_mut()
+            .find_map(|(key, value)| {
+                (key.as_text() == Some("bug_contest_config")).then_some(value)
+            })
+            .expect("compiled pack Bug Contest configuration field");
+        let ciborium::Value::Map(bug_contest_fields) = bug_contest else {
+            panic!("compiled Bug Contest configuration must be a CBOR map");
+        };
+        let before = bug_contest_fields.len();
+        bug_contest_fields.retain(|(key, _)| key.as_text() != Some("encounters"));
+        assert_eq!(
+            bug_contest_fields.len() + 1,
+            before,
+            "remove prior-v5 Bug Contest encounter table"
+        );
+        let mut prior_payload = Vec::new();
+        ciborium::into_writer(&prior_shape, &mut prior_payload)
+            .expect("encode prior-shape pack payload");
+        let mut prior_under_v6 = COMPILED_GAME_PACK_MAGIC.to_vec();
+        prior_under_v6.extend_from_slice(&COMPILED_GAME_PACK_FORMAT_VERSION.to_be_bytes());
+        prior_under_v6.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
+        prior_under_v6.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
+        prior_under_v6.extend_from_slice(&prior_payload);
+        let prior_shape_error = decode_compiled_game_pack(&prior_under_v6, &path)
+            .expect_err("v5 payload shape must not decode under the v6 frame")
+            .to_string();
+        assert!(
+            prior_shape_error.contains("missing field `encounters`")
+                || prior_shape_error.contains("missing field encounters"),
+            "{prior_shape_error}"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -2284,6 +3056,131 @@
             "{verify_error}"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn compiled_game_pack_identity_rejects_runtime_file_path_aliases() {
+        let data = GameDataSet::default();
+        let report = canonical_test_compile_report(&data, "base-game");
+        let cases = [
+            ("/absolute/runtime.bin", "must be relative"),
+            (r"C:\absolute\runtime.bin", "must be relative"),
+            (r"\\server\share\runtime.bin", "must be relative"),
+            (
+                "../parent/runtime.bin",
+                "must not traverse parent directories",
+            ),
+            (
+                r"data\..\parent\runtime.bin",
+                "must not traverse parent directories",
+            ),
+            (
+                "data/./current/runtime.bin",
+                "must not include current-directory components",
+            ),
+            (
+                r"data\.\current\runtime.bin",
+                "must not include current-directory components",
+            ),
+            (
+                "data//double/runtime.bin",
+                "must not contain empty path components",
+            ),
+            (
+                r"data\\double\runtime.bin",
+                "must not contain empty path components",
+            ),
+            (
+                "data/trailing/runtime.bin/",
+                "must not contain empty path components",
+            ),
+            (
+                r"data\trailing\runtime.bin\",
+                "must not contain empty path components",
+            ),
+            (
+                r"data\runtime.bin",
+                "must use forward-slash separators",
+            ),
+        ];
+
+        for (key, expected) in cases {
+            let pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report.clone())
+                .with_runtime_files_for_tests(BTreeMap::from([(
+                    key.to_string(),
+                    vec![0xaa],
+                )]));
+            let error = pack
+                .identity()
+                .expect_err("runtime-file path alias must invalidate pack identity")
+                .to_string();
+            assert!(error.contains(key) && error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn compiled_game_pack_identity_rejects_incomplete_vendor_runtime_bundle() {
+        let data = GameDataSet::default();
+        let report = canonical_test_compile_report(&data, "base-game");
+        let complete = REQUIRED_VENDOR_RUNTIME_FILE_KEYS
+            .iter()
+            .map(|&key| (key.to_string(), vec![0xaa]))
+            .collect::<BTreeMap<_, _>>();
+
+        let missing_key = REQUIRED_VENDOR_RUNTIME_FILE_KEYS[0];
+        let mut missing = complete.clone();
+        missing.remove(missing_key);
+        let missing_pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report.clone())
+            .with_runtime_files_for_tests(missing);
+        let missing_error = missing_pack
+            .identity()
+            .expect_err("incomplete vendor runtime bundle must be rejected")
+            .to_string();
+        assert!(
+            missing_error.contains("missing required vendor asset")
+                && missing_error.contains(missing_key),
+            "{missing_error}"
+        );
+
+        let empty_key = REQUIRED_VENDOR_RUNTIME_FILE_KEYS[1];
+        let mut empty = complete;
+        empty.insert(empty_key.to_string(), Vec::new());
+        let empty_pack = CompiledGamePack::new_unchecked_for_tests(data, report)
+            .with_runtime_files_for_tests(empty);
+        let empty_error = empty_pack
+            .identity()
+            .expect_err("empty vendor runtime asset must be rejected")
+            .to_string();
+        assert!(
+            empty_error.contains("must not be empty") && empty_error.contains(empty_key),
+            "{empty_error}"
+        );
+    }
+
+    #[test]
+    fn compiled_game_pack_identity_includes_runtime_file_bytes() {
+        let data = GameDataSet::default();
+        let report = canonical_test_compile_report(&data, "base-game");
+        let runtime_files_a = REQUIRED_VENDOR_RUNTIME_FILE_KEYS
+            .iter()
+            .map(|&key| (key.to_string(), vec![0xaa]))
+            .collect::<BTreeMap<_, _>>();
+        let mut runtime_files_b = runtime_files_a.clone();
+        runtime_files_b.insert(
+            REQUIRED_VENDOR_RUNTIME_FILE_KEYS[0].to_string(),
+            vec![0xbb],
+        );
+
+        let pack_a = CompiledGamePack::new_unchecked_for_tests(data.clone(), report.clone())
+            .with_runtime_files_for_tests(runtime_files_a);
+        let pack_b = CompiledGamePack::new_unchecked_for_tests(data, report)
+            .with_runtime_files_for_tests(runtime_files_b);
+
+        assert_ne!(
+            pack_a.identity().expect("pack A identity").content_hash,
+            pack_b.identity().expect("pack B identity").content_hash,
+            "runtime-file bytes must partition compiled-pack identity and materialization caches"
+        );
     }
 
     #[test]
@@ -4611,4 +5508,26 @@
                     .message
                     .contains("non-walkable tile (0, 0) on Route29")
         }));
+    }
+    #[test]
+    fn runtime_mutation_protocol_rejects_framed_v4_payload_without_compatibility_decode() {
+        let current = encode_runtime_mutation_command_payload(
+            &RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
+        )
+        .expect("encode current command payload");
+        let v4 = RuntimeCommandPayload::new(
+            "crystal_runtime_mutation_command_v4",
+            current.bytes().to_vec(),
+        )
+        .expect("construct well-formed legacy schema payload");
+
+        let error = decode_runtime_mutation_command_payload(&v4)
+            .expect_err("v4 command frames have no compatibility shim");
+
+        assert!(
+            error.to_string().contains(
+                "schema 'crystal_runtime_mutation_command_v4' does not match expected 'crystal_runtime_mutation_command_v5'"
+            ),
+            "{error:#}"
+        );
     }

@@ -1388,7 +1388,7 @@ export function loadAllItems(): Map<string, Item> {
         const data = loadMergedItemsSync();
         for (const itemObj of data as unknown[]) {
             const item = ItemSchema.parse(itemObj) as Item;
-            itemsMap.set(item.name, item);
+            itemsMap.set(item.script_name, item);
         }
     } catch (error: unknown) {
         throw new Error(

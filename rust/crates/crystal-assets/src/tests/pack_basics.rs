@@ -1,10 +1,10 @@
     use super::*;
     use crystal_core::map::MapConnection;
     use crystal_core::models::{
-        BaseStats, Item, MAX_BOX_MONS, MAX_PC_BOXES, PcBox, ability, egg_group, growth_rate,
+        BaseStats, Item, MAX_BOX_MONS, PcBox, ability, egg_group, growth_rate,
         item_pocket, pokemon_type,
     };
-    use crystal_core::random::Random;
+    use crystal_core::random::{CrystalRandomState, Random};
     use crystal_core::state::{GameState, ScriptRuntimeMemory};
     use crystal_core::systems::economy::{
         AmountComparison, MoneyAccount, check_coins, check_money, take_money,
@@ -20,6 +20,17 @@
     use crystal_core::systems::script_items::{
         ScriptItemGrantOutcome, check_script_item, grant_script_item, take_script_item,
     };
+
+    fn divider_trace_for_sub_values(values: impl IntoIterator<Item = u8>) -> RuntimeDividerTrace {
+        let mut previous_sub = 0_u8;
+        let mut samples = Vec::new();
+        for value in values {
+            samples.push(0);
+            samples.push(previous_sub.wrapping_sub(value));
+            previous_sub = value;
+        }
+        RuntimeDividerTrace::new(samples)
+    }
 
     fn test_battle_tower_trainers() -> Vec<BattleTowerTrainerDefinition> {
         vec![BattleTowerTrainerDefinition {
@@ -61,87 +72,59 @@
     }
 
     #[test]
-    fn standard_text_scripts_open_the_runtime_dialogue_surface() {
-        let data = AssetRoot::new(repository_root_for_tests())
-            .load_base_game_data()
-            .expect("load exported standard scripts");
-        for (script, expected_text) in [
-            ("DifficultBookshelfScript", "DifficultBookshelfText"),
-            ("PictureBookshelfScript", "PictureBookshelfText"),
-            ("MagazineBookshelfScript", "MagazineBookshelfText"),
-            ("TeamRocketOathScript", "TeamRocketOathText"),
-            ("IncenseBurnerScript", "IncenseBurnerText"),
-            ("MerchandiseShelfScript", "MerchandiseShelfText"),
-            ("WindowScript", "WindowText"),
-            ("HomepageScript", "HomepageText"),
-            ("TrashCanScript", "TrashCanText"),
-            ("PokecenterSignScript", "PokecenterSignText"),
-            ("MartSignScript", "MartSignText"),
-        ] {
-            let body = data
-                .compiled_standard_script_body(script)
-                .expect("compiled terminal standard-script body");
-            let mut state = GameState::default();
-            let result = apply_standard_script(&mut state, &BTreeMap::new(), script, body)
-                .expect("standard text script");
-
-            assert_eq!(result, expected_text);
-            assert!(state.script_runtime.text_window_open);
-            assert_eq!(
-                state
-                    .script_runtime
-                    .text_events
-                    .last()
-                    .and_then(|event| event.text_label.as_deref()),
-                Some(expected_text)
-            );
-            assert_eq!(
-                state
-                    .script_runtime
-                    .pending_text_wait
-                    .as_ref()
-                    .map(|wait| wait.command.as_str()),
-                Some("farjumptext")
-            );
-        }
-
-        let production_source = concat!(
-            include_str!("../lib.rs"),
-            include_str!("../content_pack.rs"),
-            include_str!("../map_modules.rs"),
-            include_str!("../runtime_pack.rs"),
-            include_str!("../verification.rs"),
+    fn standard_scripts_have_no_label_specific_runtime_dispatch() {
+        let pack = AssetRoot::new(repository_root_for_tests())
+            .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
+            .expect("load regenerated compiled game pack");
+        let catalog =
+            compiled_standard_script_catalog(pack.data()).expect("standard-script catalog");
+        let pointers = catalog
+            .get("StdScripts")
+            .and_then(Value::as_array)
+            .expect("standard-script pointer table");
+        let formerly_label_specific_sources = concat!(
             include_str!("../runtime_commands.rs"),
             include_str!("../game_data.rs"),
-            include_str!("../mutation_protocol.rs"),
-            include_str!("../merge.rs"),
-            include_str!("../script_parsing.rs"),
-        )
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source");
-        for removed_dispatch_label in [
-            "DifficultBookshelfScript\" =>",
-            "PictureBookshelfScript\" =>",
-            "MagazineBookshelfScript\" =>",
-            "TeamRocketOathScript\" =>",
-            "IncenseBurnerScript\" =>",
-            "MerchandiseShelfScript\" =>",
-            "WindowScript\" =>",
-            "HomepageScript\" =>",
-            "TrashCanScript\" =>",
-            "PokecenterSignScript\" =>",
-            "MartSignScript\" =>",
+            include_str!("../../../crystal-bevy/src/lib.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/battle_results.rs"),
+        );
+
+        for pointer in pointers {
+            let label = pointer
+                .get("args")
+                .and_then(Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(Value::as_str)
+                .expect("standard-script pointer label");
+            assert!(
+                !formerly_label_specific_sources.contains(&format!("\"{label}\"")),
+                "{label} has been reintroduced into label-specific runtime dispatch"
+            );
+        }
+        for removed_symbol in [
+            "ApplyStandardScript",
+            "StandardScriptApplied",
+            "apply_standard_script",
+            "is_runtime_standard_script_target",
+            "standard_receive_item",
+            "pokecenter_greeting",
+            "pokecenter_take",
+            "pokecenter_return",
+            "town_map_intro",
         ] {
-            assert!(!production_source.contains(removed_dispatch_label));
+            assert!(
+                !formerly_label_specific_sources.contains(removed_symbol),
+                "removed StandardScript compatibility path {removed_symbol} was reintroduced"
+            );
         }
     }
 
     #[test]
     fn compiled_standard_script_catalog_requires_exact_pointer_bodies() {
-        let data = AssetRoot::new(repository_root_for_tests())
-            .load_base_game_data()
-            .expect("load exported standard scripts");
+        let pack = AssetRoot::new(repository_root_for_tests())
+            .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
+            .expect("load regenerated compiled game pack");
+        let data = pack.data().clone();
         validate_compiled_standard_script_catalog(&data).expect("valid standard-script catalog");
         let catalog = compiled_standard_script_catalog(&data).expect("standard-script catalog");
         assert_eq!(
@@ -152,6 +135,31 @@
                 .len(),
             52
         );
+        let mut common_interpreter_labels = Vec::new();
+        for entry in catalog
+            .get("StdScripts")
+            .and_then(Value::as_array)
+            .expect("pointer table")
+        {
+            let label = entry
+                .get("args")
+                .and_then(Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(Value::as_str)
+                .expect("standard-script pointer label");
+            let body = catalog
+                .get(label)
+                .and_then(Value::as_array)
+                .expect("standard-script body");
+            match standard_script_execution_path(label, body)
+                .unwrap_or_else(|error| panic!("{label} must be executable: {error}"))
+            {
+                StandardScriptExecutionPath::CommonInterpreter => {
+                    common_interpreter_labels.push(label)
+                }
+            }
+        }
+        assert_eq!(common_interpreter_labels.len(), 52);
 
         let mut missing = data.clone();
         missing.story_events.retain(|payload| {
@@ -163,6 +171,37 @@
             .expect_err("missing catalog must fail")
             .to_string();
         assert!(error.contains("missing the StandardScripts"), "{error}");
+
+        let mut unsupported = data.clone();
+        let catalog = unsupported
+            .story_events
+            .iter_mut()
+            .find_map(|payload| payload.get_mut("StandardScripts"))
+            .and_then(Value::as_object_mut)
+            .expect("mutable standard-script catalog");
+        catalog.insert(
+            "DifficultBookshelfScript".to_string(),
+            serde_json::json!([{ "command": "legacy_typed_handler", "args": [] }]),
+        );
+        let error = validate_compiled_standard_script_catalog(&unsupported)
+            .expect_err("pointer without an executable body or typed handler must fail")
+            .to_string();
+        assert!(
+            error.contains("DifficultBookshelfScript has no executable runtime path"),
+            "{error}"
+        );
+        let mut diagnostics = Vec::new();
+        verify_standard_script_catalog(&unsupported, &mut diagnostics);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "invalid_runtime_standard_scripts");
+        assert_eq!(diagnostics[0].subject, "story_events:StandardScripts");
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("DifficultBookshelfScript has no executable runtime path"),
+            "{}",
+            diagnostics[0].message
+        );
 
         let mut stale = data;
         let catalog = stale
@@ -182,222 +221,206 @@
     }
 
     #[test]
-    fn progression_standard_scripts_apply_rocket_and_egg_state() {
-        let mut state = GameState::default();
-        apply_standard_script(&mut state, &BTreeMap::new(), "ReceiveTogepiEggScript", &[])
-            .expect("Togepi egg receive script");
-        assert!(
-            state
-                .script_runtime
-                .audio_events
-                .iter()
-                .any(|event| { event.audio_id.as_deref() == Some("SFX_GET_EGG") })
-        );
+    fn every_standard_script_pointer_is_a_common_interpreter_source() {
+        let pack = AssetRoot::new(repository_root_for_tests())
+            .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
+            .expect("load regenerated compiled game pack");
+        let data = pack.data();
+        let catalog = compiled_standard_script_catalog(data).expect("standard-script catalog");
+        let pointers = catalog
+            .get("StdScripts")
+            .and_then(Value::as_array)
+            .expect("standard-script pointer table");
 
-        apply_standard_script(&mut state, &BTreeMap::new(), "RadioTowerRocketsScript", &[])
-            .expect("Radio Tower Rocket script");
-        assert_eq!(
-            state
-                .flags
-                .engine_flags
-                .get("ENGINE_ROCKETS_IN_RADIO_TOWER"),
-            Some(&true)
-        );
-        assert_eq!(
-            state
-                .flags
-                .event_flags
-                .get("EVENT_RADIO_TOWER_ROCKET_TAKEOVER"),
-            Some(&false)
-        );
-        assert!(
-            state
-                .script_runtime
-                .special_phone_calls
-                .iter()
-                .any(|call| call == "SPECIALCALL_WEIRDBROADCAST")
-        );
-    }
-
-    #[test]
-    fn phone_standard_scripts_resolve_caller_specific_text_label() {
-        let mut state = GameState::default();
-        state.script_runtime.variables.insert(
-            "VAR_CALLERID".to_string(),
-            "PHONE_SCHOOLBOY_JACK".to_string(),
-        );
-        apply_standard_script(&mut state, &BTreeMap::new(), "AskNumber1MScript", &[])
-            .expect("phone ask-number script");
-        assert_eq!(
-            state
-                .script_runtime
-                .text_events
-                .last()
-                .and_then(|event| event.text_label.as_deref()),
-            Some("JackAskNumber1Text")
-        );
-    }
-
-    #[test]
-    fn happiness_standard_script_uses_asm_thresholds() {
-        for (happiness, expected) in [
-            (0, "HappinessText1"),
-            (49, "HappinessText1"),
-            (50, "HappinessText2"),
-            (149, "HappinessText2"),
-            (150, "HappinessText3"),
-        ] {
-            let mut state = GameState::default();
-            let mut pokemon = Pokemon::new_for_tests(species(), 5, Dv::default());
-            pokemon.happiness = happiness;
-            state.storage.party.pokemon[0] = Some(pokemon);
-            apply_standard_script(&mut state, &BTreeMap::new(), "HappinessCheckScript", &[])
-                .expect("happiness standard script");
+        for pointer in pointers {
+            let label = pointer
+                .get("args")
+                .and_then(Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(Value::as_str)
+                .expect("standard-script pointer label");
+            let body = catalog
+                .get(label)
+                .and_then(Value::as_array)
+                .expect("standard-script command body");
             assert_eq!(
-                state
-                    .script_runtime
-                    .text_events
-                    .last()
-                    .and_then(|event| event.text_label.as_deref()),
-                Some(expected)
+                standard_script_execution_path(label, body)
+                    .unwrap_or_else(|error| panic!("classify {label}: {error}")),
+                StandardScriptExecutionPath::CommonInterpreter,
+                "{label} still bypasses the compiled command interpreter"
+            );
+            assert_eq!(
+                data.compiled_script_body(label).and_then(Value::as_array),
+                Some(body),
+                "{label} is not addressable by the compiled command interpreter"
             );
         }
     }
 
     #[test]
-    fn happiness_standard_script_skips_leading_eggs_like_asm() {
-        let mut state = GameState::default();
-        let mut egg = Pokemon::new_for_tests(species(), 5, Dv::default());
-        egg.is_egg = true;
-        egg.happiness = 0;
-        let mut pokemon = Pokemon::new_for_tests(species(), 5, Dv::default());
-        pokemon.nickname = "BUDDY".to_string();
-        pokemon.happiness = 150;
-        let expected_species = pokemon.species.id.clone();
-        state.storage.party.pokemon[0] = Some(egg);
-        state.storage.party.pokemon[1] = Some(pokemon);
+    fn bug_contest_runtime_accepts_only_the_canonical_battle_type() {
+        assert!(battle_type_guarantees_escape("BATTLETYPE_CONTEST"));
+        for alias in ["CONTEST", "BATTLETYPE_BUG_CONTEST", "BATTLETYPE_PARK"] {
+            assert!(
+                !battle_type_guarantees_escape(alias),
+                "noncanonical battle type {alias} must not get contest escape behavior"
+            );
+        }
 
-        apply_standard_script(&mut state, &BTreeMap::new(), "HappinessCheckScript", &[])
-            .expect("happiness standard script");
+        let production_source = concat!(
+            include_str!("../game_data.rs"),
+            include_str!("../mutation_protocol.rs"),
+        );
+        for alias in ["CONTEST", "BATTLETYPE_BUG_CONTEST", "BATTLETYPE_PARK"] {
+            assert!(
+                !production_source.contains(&format!("\"{alias}\"")),
+                "runtime production paths must not accept {alias}"
+            );
+        }
+    }
 
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("150"));
-        assert_eq!(
-            state
-                .script_runtime
-                .named_buffers
-                .get("STRING_BUFFER_3")
-                .map(String::as_str),
-            Some("BUDDY")
+    #[test]
+    fn native_vendor_runtime_file_compilation_covers_every_renderer_dependency() {
+        let root = AssetRoot::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../..")
+                .canonicalize()
+                .expect("repository root"),
         );
-        assert_eq!(
-            state
-                .script_runtime
-                .variables
-                .get("wCurPartySpecies"),
-            Some(&expected_species)
+        let files = compile_runtime_files(&root).expect("compile native runtime files");
+        validate_compiled_runtime_files(&files).expect("complete native runtime file bundle");
+        for &key in REQUIRED_VENDOR_RUNTIME_FILE_KEYS {
+            assert!(
+                files.get(key).is_some_and(|bytes| !bytes.is_empty()),
+                "compiled native runtime files must include {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_vendor_runtime_file_inventory_matches_every_production_source_read() {
+        fn call_string_literals(source: &str, needle: &str) -> Vec<String> {
+            let mut literals = Vec::new();
+            let mut remaining = source;
+            while let Some(offset) = remaining.find(needle) {
+                remaining = &remaining[offset + needle.len()..];
+                let end = remaining
+                    .find('"')
+                    .unwrap_or_else(|| panic!("unterminated string literal after {needle}"));
+                literals.push(remaining[..end].to_string());
+                remaining = &remaining[end + 1..];
+            }
+            literals
+        }
+
+        fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let start = source
+                .find(start)
+                .unwrap_or_else(|| panic!("production source is missing {start}"));
+            let remaining = &source[start..];
+            let end = remaining
+                .find(end)
+                .unwrap_or_else(|| panic!("production source is missing {end}"));
+            &remaining[..end]
+        }
+
+        fn quoted_string_literals(source: &str) -> Vec<String> {
+            source
+                .split('"')
+                .enumerate()
+                .filter_map(|(index, value)| (index % 2 == 1).then(|| value.to_string()))
+                .collect()
+        }
+
+        let production_source = concat!(
+            include_str!("../../../crystal-bevy/src/main.rs"),
+            include_str!("../../../crystal-bevy/src/lib.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/deterministic_session.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/field_travel.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/trainer_card.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/title_menu.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/credits.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/script_callbacks.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/economy.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/battle_messages.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/battle_results.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/battle_entry.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/menu_rendering.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/render_mod.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/overworld_rendering.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/start_menu.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/bitmap_font.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/graphics_assets.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/field_pack.rs"),
+            include_str!("../../../crystal-bevy/src/bevy_shell/intro_renderer.rs"),
         );
+        let vendor_roots = call_string_literals(production_source, "resolve_vendor(\"");
         assert_eq!(
-            state
-                .script_runtime
-                .text_events
-                .last()
-                .and_then(|event| event.text_label.as_deref()),
-            Some("HappinessText3")
+            production_source.matches("resolve_vendor(").count(),
+            vendor_roots.len(),
+            "every production vendor resolver must use an auditable literal path"
+        );
+
+        let mut source_dependencies = std::collections::BTreeSet::new();
+        for relative in &vendor_roots {
+            if !matches!(
+                relative.as_str(),
+                "gfx/card_flip" | "gfx/slots" | "gfx/unown_puzzle"
+            ) {
+                source_dependencies.insert(format!("vendor/pokecrystal/{relative}"));
+            }
+        }
+
+        let card_flip = source_between(
+            production_source,
+            "fn load_card_flip_render_sources(",
+            "fn render_visible_card_flip_frame(",
+        );
+        for file in call_string_literals(card_flip, "root.join(\"") {
+            source_dependencies.insert(format!("vendor/pokecrystal/gfx/card_flip/{file}"));
+        }
+
+        let slots = source_between(
+            production_source,
+            "fn load_slot_machine_render_sources(",
+            "fn render_visible_slot_machine_frame(",
+        );
+        for file in call_string_literals(slots, "root.join(\"") {
+            source_dependencies.insert(format!("vendor/pokecrystal/gfx/slots/{file}"));
+        }
+
+        let unown = source_between(
+            production_source,
+            "fn load_unown_puzzle_render_sources(",
+            "fn render_visible_unown_puzzle_frame(",
+        );
+        for file in call_string_literals(unown, "root.join(\"") {
+            source_dependencies.insert(format!("vendor/pokecrystal/gfx/unown_puzzle/{file}"));
+        }
+        let puzzle_ids = source_between(
+            unown,
+            "for puzzle_id in [",
+            "] {",
+        );
+        for puzzle_id in quoted_string_literals(puzzle_ids) {
+            source_dependencies.insert(format!(
+                "vendor/pokecrystal/gfx/unown_puzzle/{puzzle_id}.png"
+            ));
+        }
+
+        let verified_dependencies = REQUIRED_VENDOR_RUNTIME_FILE_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            source_dependencies, verified_dependencies,
+            "pack verification must require exactly every production vendor filesystem read"
         );
     }
 
     #[test]
-    fn happiness_standard_script_does_not_treat_egg_nickname_as_species() {
-        let mut state = GameState::default();
-        let mut pokemon = Pokemon::new_for_tests(species(), 5, Dv::default());
-        pokemon.nickname = "EGG".to_string();
-        pokemon.happiness = 150;
-        state.storage.party.pokemon[0] = Some(pokemon);
-
-        apply_standard_script(&mut state, &BTreeMap::new(), "HappinessCheckScript", &[])
-            .expect("happiness standard script");
-
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("150"));
-        assert_eq!(
-            state
-                .script_runtime
-                .named_buffers
-                .get("STRING_BUFFER_3")
-                .map(String::as_str),
-            Some("EGG")
-        );
-    }
-
-    #[test]
-    fn game_corner_vendor_reaches_coin_case_branch_and_prompt() {
-        let mut no_case = GameState::default();
-        apply_standard_script(
-            &mut no_case,
-            &BTreeMap::new(),
-            "GameCornerCoinVendorScript",
-            &[],
-        )
-        .expect("coin vendor without case");
-        assert_eq!(
-            no_case
-                .script_runtime
-                .text_events
-                .last()
-                .and_then(|event| event.text_label.as_deref()),
-            Some("CoinVendor_NoCoinCaseText")
-        );
-        assert!(no_case.script_runtime.pending_yes_no.is_none());
-
-        let mut with_case = GameState::default();
-        with_case.bag.key_items.insert("COIN_CASE".to_string(), 1);
-        apply_standard_script(
-            &mut with_case,
-            &BTreeMap::new(),
-            "GameCornerCoinVendorScript",
-            &[],
-        )
-        .expect("coin vendor with case");
-        assert_eq!(
-            with_case
-                .script_runtime
-                .pending_yes_no
-                .as_ref()
-                .map(|prompt| prompt.command_index),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn game_corner_purchase_matches_money_and_coin_caps() {
-        let mut purchase = GameState::default();
-        purchase.money = 1_000;
-        assert_eq!(
-            resolve_coin_vendor_purchase(&mut purchase).expect("purchase"),
-            "CoinVendor_Buy50CoinsText"
-        );
-        assert_eq!(purchase.money, 0);
-        assert_eq!(purchase.coins, 50);
-
-        let mut poor = GameState::default();
-        poor.money = 999;
-        assert_eq!(
-            resolve_coin_vendor_purchase(&mut poor).expect("poor purchase"),
-            "CoinVendor_NotEnoughMoneyText"
-        );
-        assert_eq!(poor.money, 999);
-
-        let mut full = GameState::default();
-        full.money = 10_000;
-        full.coins = 9_950;
-        assert_eq!(
-            resolve_coin_vendor_purchase(&mut full).expect("full coin case"),
-            "CoinVendor_CoinCaseFullText"
-        );
-        assert_eq!(full.money, 10_000);
-    }
-
-    #[test]
-    fn regenerated_core_pack_embeds_native_presentation_files() {
+    fn regenerated_core_pack_embeds_exact_native_vendor_dependencies() {
         let root = AssetRoot::new(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../..")
@@ -407,22 +430,16 @@
         let pack = root
             .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
             .expect("load regenerated core pack");
-        assert!(!pack.runtime_files().is_empty());
-        assert!(
-            pack.runtime_files()
-                .keys()
-                .any(|path| path.ends_with(".png"))
-        );
-        assert!(
-            pack.runtime_files()
-                .keys()
-                .any(|path| path.ends_with(".2bpp"))
-        );
-        assert!(
-            pack.runtime_files()
-                .keys()
-                .any(|path| path.ends_with(".gbcpal"))
-        );
+        validate_compiled_runtime_files(pack.runtime_files())
+            .expect("regenerated pack native runtime file bundle");
+        for &key in REQUIRED_VENDOR_RUNTIME_FILE_KEYS {
+            assert!(
+                pack.runtime_files()
+                    .get(key)
+                    .is_some_and(|bytes| !bytes.is_empty()),
+                "regenerated core pack must include {key}"
+            );
+        }
     }
 
     #[test]
@@ -462,9 +479,6 @@
         );
     }
     use crystal_core::systems::script_scenes::apply_script_scene_command;
-    use crystal_core::systems::scripted_battles::{
-        ScriptedBattleEffects, apply_scripted_battle_effects_to_session,
-    };
     use crystal_core::systems::special_routines::{
         BUENA_PASSWORD_CATEGORY_ITEM, BUENA_PASSWORD_CATEGORY_MON, BUENA_PASSWORD_CATEGORY_MOVE,
     };
@@ -960,10 +974,10 @@
             data.story_events.push(serde_json::json!({
                 "StandardScripts": {
                     "StdScripts": [
-                        { "command": "add_stdscript", "args": ["TestStandardScript"] }
+                        { "command": "add_stdscript", "args": ["DifficultBookshelfScript"] }
                     ],
-                    "TestStandardScript": [
-                        { "command": "end", "args": [] }
+                    "DifficultBookshelfScript": [
+                        { "command": "farjumptext", "args": ["DifficultBookshelfText"] }
                     ]
                 }
             }));
@@ -1230,14 +1244,9 @@
             .buckets
             .insert("test".to_string(), vec!["RATTATA".to_string()]);
         data.buena_password_categories = test_buena_password_categories();
-        data.roaming_pokemon.insert(
-            "RATTATA".to_string(),
-            RoamingPokemonDefinition {
-                level: 5,
-                map_group: 1,
-                map_number: 1,
-            },
-        );
+        data.roaming_pokemon = roaming_catalog_for_tests("RATTATA", "RATTATA");
+        data.roaming_pokemon.init_writes[0].level = 5;
+        data.roaming_pokemon.init_writes[1].level = 5;
         data.buena_prizes.insert("POTION".to_string(), 1);
         data.kurt_apricorn_recipes
             .insert("POTION".to_string(), "POKE_BALL".to_string());
@@ -1263,6 +1272,7 @@
             timer_seconds: 0,
             selected_contestant_count: 1,
             contestant_flags: vec!["EVENT_BUG_CONTESTANT_1".to_string()],
+            encounters: bug_contest_encounters_for_tests(),
         });
         data.battle_tower_rules = Some(BattleTowerRules {
             banned_species: BTreeMap::new(),
@@ -1295,10 +1305,7 @@
             nickname: "EGG".to_string(),
             original_trainer_name: "ODD".to_string(),
         });
-        data.magikarp_lengths.push(MagikarpLengthEntry {
-            threshold: 100,
-            divisor: 1,
-        });
+        data.magikarp_lengths = magikarp_lengths_for_tests();
         data.happiness_data = Some(
             serde_json::from_value(serde_json::json!({
                 "changes": { "1": { "code": "GAIN_LEVEL", "low": 5, "mid": 3, "high": 2 } },
@@ -1407,6 +1414,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
@@ -1475,23 +1483,32 @@
             test_runtime_map_metadata("ROUTE_29", "PlayersHouse2F"),
         );
         data.special_routines = special_routine_rules(["WarpToSpawnPoint"]);
-        let player = crystal_core::models::Pokemon::new_for_tests(
+        let mut player = crystal_core::models::Pokemon::new_for_tests(
             species(),
             5,
             crystal_core::models::Dv::default(),
         );
+        let enemy = player.clone();
+        player.hp = 0;
         let mut state = GameState {
             last_spawn_identifier: Some(2),
+            money: 100,
+            battle_pay_day_money: 50,
             script_runtime: ScriptRuntimeMemory {
                 blackout_mod: Some("DARK_CAVE".to_string()),
                 ..ScriptRuntimeMemory::default()
             },
-            battle: BattleMemory::Wild {
+            battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
-                map_name: "Route30".to_string(),
-                enemy_pokemon: player.clone(),
-                enemy_party: vec![player.clone()],
+                origin_map_name: "Route30".to_string(),
+                species: enemy.species.id.clone(),
+                level: enemy.level,
+                source_script: "RockSmashScript".to_string(),
+                startbattle_command_index: 12,
+                resume_command_index: 13,
+                enemy_pokemon: enemy.clone(),
+                enemy_party: vec![enemy],
             },
             battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(0),
@@ -1499,6 +1516,19 @@
         };
         state.storage.party.pokemon[0] = Some(player);
         state.sync_party_from_storage();
+        state.script_runtime.next_script = Some(crystal_core::state::ScriptLocation {
+            origin_map_name: "Route30".to_string(),
+            script: "RockSmashScript".to_string(),
+        });
+        state.script_runtime.deferred_scripts.push(crystal_core::state::ScriptLocation {
+            origin_map_name: "Route30".to_string(),
+            script: "RockSmashScript".to_string(),
+        });
+        state.script_runtime.call_stack.push(crystal_core::state::ScriptReturnFrame {
+            origin_map_name: "Route30".to_string(),
+            source_script: "RockSmashScript".to_string(),
+            next_command_index: 13,
+        });
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "Route30".to_string(),
@@ -1519,6 +1549,23 @@
         );
         let audio_ids = BTreeSet::new();
 
+        let mut draw_state = state.clone();
+        crystal_core::battle::start::deactivate_battle_after_draw(&mut draw_state);
+        let mut draw_session = session.clone();
+        let draw_before = (draw_state.clone(), draw_session.clone());
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut draw_state,
+                &mut draw_session,
+                RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("DRAW terminal cannot be consumed as a whiteout");
+        assert!(error.to_string().contains("terminal result 0x02"), "{error:#}");
+        assert_eq!((draw_state, draw_session), draw_before);
+
         let outcome = data
             .apply_runtime_mutation_command(
                 &mut state,
@@ -1537,6 +1584,20 @@
         assert_eq!(recovery.map_name, "PlayersHouse2F");
         assert_eq!(state.script_runtime.blackout_mod, None);
         assert!(matches!(state.battle, BattleMemory::Inactive));
+        assert_eq!(state.battle_result, 1);
+        assert!(state.pending_static_wild_terminal.is_none());
+        assert_eq!(state.money, 50, "loss skips Pay Day before whiteout halves money");
+        assert!(state.script_runtime.next_script.is_none());
+        assert!(state.script_runtime.deferred_scripts.is_empty());
+        assert!(state.script_runtime.call_stack.is_empty());
+        assert!(state.script_runtime.command_queue.is_empty());
+        assert!(state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .all(|pokemon| pokemon.hp == pokemon.max_hp));
         assert_eq!(
             state
                 .script_runtime
@@ -1557,7 +1618,7 @@
     }
 
     #[test]
-    fn active_battle_escape_item_is_atomic_when_pay_day_claim_rejects() {
+    fn active_battle_escape_item_uses_draw_result_and_skips_pay_day() {
         let mut data = GameDataSet::default();
         let mut escape_item = test_item("POKE_DOLL");
         escape_item.battle_menu = "ITEMMENU_CURRENT".to_string();
@@ -1582,11 +1643,13 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
             battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(0),
+            money: 100,
             battle_pay_day_money: 50,
             ..GameState::default()
         };
@@ -1596,22 +1659,21 @@
             .add_item(&data.items["POKE_DOLL"], 1)
             .expect("add escape item");
 
-        let error = data
+        let outcome = data
             .use_bag_item_to_escape_active_wild_battle(&mut state, "POKE_DOLL")
-            .expect_err("missing MAX_MONEY must reject after staged escape item use");
+            .expect("Poke Doll exits the wild battle");
 
-        assert!(
-            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
-            "{error:#}"
-        );
-        assert_eq!(state.bag.quantity(&data.items["POKE_DOLL"]), 1);
-        assert!(state.script_runtime.item_use_events.is_empty());
-        assert!(matches!(state.battle, BattleMemory::Wild { .. }));
-        assert_eq!(state.battle_pay_day_money, 50);
+        assert!(outcome.escaped);
+        assert_eq!(state.bag.quantity(&data.items["POKE_DOLL"]), 0);
+        assert_eq!(state.script_runtime.item_use_events.len(), 1);
+        assert!(matches!(state.battle, BattleMemory::Inactive));
+        assert_eq!(state.battle_result, 2);
+        assert_eq!(state.money, 100, "DRAW skips CheckPayDay");
+        assert_eq!(state.battle_pay_day_money, 0);
     }
 
     #[test]
-    fn active_wild_battle_run_is_atomic_when_pay_day_claim_rejects() {
+    fn active_wild_battle_run_uses_draw_result_and_skips_pay_day() {
         let mut data = GameDataSet::default();
         data.battle_escape_rules = BattleEscapeRules {
             player_speed_multiplier: 32,
@@ -1635,28 +1697,28 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
             battle_active_party_index: Some(0),
             battle_active_enemy_party_index: Some(0),
             battle_escape_attempts: u8::MAX,
+            money: 100,
             battle_pay_day_money: 50,
             rng_seed: 7,
             ..GameState::default()
         };
         state.storage.party.pokemon[0] = Some(player);
-        let before = state.clone();
-
-        let error = data
+        let outcome = data
             .resolve_active_wild_battle_run(&mut state)
-            .expect_err("missing MAX_MONEY must reject after staged successful escape");
+            .expect("manual RUN succeeds at the saturated attempt count");
 
-        assert!(
-            format!("{error:#}").contains("currency constants missing MAX_MONEY"),
-            "{error:#}"
-        );
-        assert_eq!(state, before);
+        assert!(outcome.escaped);
+        assert!(matches!(state.battle, BattleMemory::Inactive));
+        assert_eq!(state.battle_result, 2);
+        assert_eq!(state.money, 100, "DRAW skips CheckPayDay");
+        assert_eq!(state.battle_pay_day_money, 0);
     }
 
     #[test]
@@ -1681,6 +1743,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
@@ -1692,8 +1755,9 @@
         state.storage.party.pokemon[0] = Some(player);
         let before = state.clone();
 
+        let mut divider = crystal_core::random::ReplayDivider::new([]);
         let error = data
-            .claim_active_wild_battle_rewards(&mut state, TimeOfDay::Day)
+            .claim_active_wild_battle_rewards(&mut state, TimeOfDay::Day, &mut divider)
             .expect_err("missing MAX_MONEY must reject after staged reward claim");
 
         assert!(
@@ -1754,6 +1818,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
@@ -1815,13 +1880,39 @@
     }
 
     #[test]
-    fn active_wild_capture_rejects_full_storage_without_consuming_ball_or_rng() {
+    fn active_wild_capture_rejects_full_current_box_without_routing_to_an_empty_box() {
         let mut data = GameDataSet::default();
         let mut ball = test_item("POKE_BALL");
         ball.pocket = item_pocket(ITEM_POCKET_BALL);
         ball.battle_menu = "ITEMMENU_CURRENT".to_string();
         ball.battle_usable = true;
         data.items.insert(ball.script_name.clone(), ball.clone());
+        data.capture_rules = CaptureRules {
+            fast_ball_species: BTreeSet::new(),
+            heavy_ball_modifiers: BTreeMap::new(),
+            ball_rules: [(
+                "POKE_BALL".to_string(),
+                CaptureBallRule {
+                    multiplier_numerator: 1,
+                    multiplier_denominator: 1,
+                    battle_type: String::new(),
+                    skip_hp_calc: false,
+                    use_heavy_ball_weight_modifier: false,
+                    use_level_ball_multiplier: false,
+                    require_same_species: false,
+                    require_same_gender: false,
+                    require_fast_species: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            guaranteed_capture_balls: BTreeSet::new(),
+            status_bonus: BTreeMap::new(),
+        };
+        data.capture_wobble_probabilities = vec![CaptureWobbleProbability {
+            catch_rate: u8::MAX,
+            chance: u8::MAX,
+        }];
         let pokemon = crystal_core::models::Pokemon::new_for_tests(
             species(),
             20,
@@ -1833,6 +1924,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
@@ -1844,13 +1936,13 @@
         for slot in &mut state.storage.party.pokemon {
             *slot = Some(pokemon.clone());
         }
-        for box_index in 0..MAX_PC_BOXES {
-            let mut pc_box = PcBox::new(box_index);
-            for slot in 0..MAX_BOX_MONS {
-                pc_box.set_slot(slot, Some(pokemon.clone()));
-            }
-            state.storage.pc_boxes.push(pc_box);
+        state.current_pc_box = 0;
+        let mut current_box = PcBox::new(state.current_pc_box);
+        for slot in 0..MAX_BOX_MONS {
+            current_box.set_slot(slot, Some(pokemon.clone()));
         }
+        state.storage.pc_boxes.push(current_box);
+        state.storage.pc_boxes.push(PcBox::new(1));
         state
             .bag
             .add_item(&ball, 1)
@@ -1867,6 +1959,7 @@
         assert_eq!(outcome.animation_shakes, 0);
         assert_eq!(state.rng_seed, rng_seed_before);
         assert_eq!(state.bag.quantity(&ball), 1);
+        assert_eq!(state.storage.pc_boxes[1].filled_slots(), 0);
         assert!(matches!(state.battle, BattleMemory::Wild { .. }));
     }
 
@@ -1888,6 +1981,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: enemy.clone(),
                 enemy_party: vec![enemy],
             },
@@ -1911,7 +2005,12 @@
         };
 
         let error = data
-            .complete_active_wild_capture(&mut state, &outcome, None)
+            .complete_active_wild_capture(
+                &mut state,
+                &outcome,
+                None,
+                &mut crystal_core::random::ReplayDivider::new([]),
+            )
             .expect_err("missing MAX_MONEY must reject after staged capture completion");
 
         assert!(
@@ -1944,6 +2043,7 @@
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "Route29".to_string(),
+                roaming_slot: None,
                 enemy_pokemon: pokemon.clone(),
                 enemy_party: vec![pokemon.clone()],
             },
@@ -1956,7 +2056,12 @@
         let mut party_state = make_state();
         party_state.storage.party.pokemon[0] = Some(pokemon.clone());
         let party_completion = data
-            .complete_active_wild_capture(&mut party_state, &outcome, Some("SPARKY"))
+            .complete_active_wild_capture(
+                &mut party_state,
+                &outcome,
+                Some("SPARKY"),
+                &mut crystal_core::random::ReplayDivider::new([]),
+            )
             .expect("complete named party capture");
         assert_eq!(party_completion.stored.as_ref().unwrap().pokemon.nickname, "SPARKY");
         assert_eq!(
@@ -1972,7 +2077,12 @@
             *slot = Some(pokemon.clone());
         }
         let pc_completion = data
-            .complete_active_wild_capture(&mut pc_state, &outcome, Some("BOXMON"))
+            .complete_active_wild_capture(
+                &mut pc_state,
+                &outcome,
+                Some("BOXMON"),
+                &mut crystal_core::random::ReplayDivider::new([]),
+            )
             .expect("complete named PC capture");
         let stored = pc_completion.stored.as_ref().unwrap();
         assert_eq!(stored.pokemon.nickname, "BOXMON");
@@ -2039,6 +2149,74 @@
     }
 
     #[test]
+    fn deferred_level_evolution_queues_same_level_target_move_when_moves_are_full() {
+        let mut data = GameDataSet::default();
+        let mut dragonair = species();
+        dragonair.id = "DRAGONAIR".to_string();
+        dragonair.int_id = 148;
+        let mut dragonite = species();
+        dragonite.id = "DRAGONITE".to_string();
+        dragonite.int_id = 149;
+        data.pokemon
+            .insert(dragonair.id.clone(), dragonair.clone());
+        data.pokemon
+            .insert(dragonite.id.clone(), dragonite.clone());
+        for move_id in ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER", "WING_ATTACK"] {
+            data.moves.insert(move_id.to_string(), test_move(move_id));
+        }
+        data.learnsets.insert(dragonair.id.clone(), Vec::new());
+        data.learnsets.insert(
+            dragonite.id.clone(),
+            vec![crystal_core::systems::learnsets::LearnsetEntry(
+                55,
+                "WING_ATTACK".to_string(),
+            )],
+        );
+        data.evolutions.0.insert(
+            dragonair.id.clone(),
+            vec![crystal_core::systems::evolution::EvolutionEntry::level(
+                dragonite.id.clone(),
+                55,
+            )],
+        );
+        data.evolutions
+            .0
+            .insert(dragonite.id.clone(), Vec::new());
+        let mut pokemon = crystal_core::models::Pokemon::new_for_tests(
+            dragonair,
+            55,
+            crystal_core::models::Dv::default(),
+        );
+        pokemon.moves = ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER"]
+            .into_iter()
+            .map(|move_id| crystal_core::models::LearnedMove {
+                name: move_id.to_string(),
+                current_pp: data.moves[move_id].pp,
+                pp_ups: 0,
+            })
+            .collect();
+        let moves_before = pokemon.moves.clone();
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(pokemon);
+
+        let report = data
+            .resolve_deferred_level_evolution(&mut state, 0, TimeOfDay::Day)
+            .expect("resolve Dragonair evolution");
+
+        let evolved = state.storage.party.pokemon[0].as_ref().expect("Dragonite");
+        assert_eq!(evolved.species.id, "DRAGONITE");
+        assert_eq!(evolved.moves, moves_before);
+        assert_eq!(report.pending_move_learns.len(), 1);
+        let pending = state.pending_move_learn.as_ref().expect("Wing Attack prompt");
+        assert_eq!(pending.party_index, 0);
+        assert_eq!(pending.species_id, "DRAGONITE");
+        assert_eq!(pending.level, 55);
+        assert_eq!(pending.learned_move.name, "WING_ATTACK");
+        assert_eq!(pending.learned_move.current_pp, 35);
+        assert!(!pending.defer_level_evolution);
+    }
+
+    #[test]
     fn party_item_pending_move_learn_guard_runs_before_item_mutation() {
         let data = GameDataSet::default();
         let mut state = crystal_core::state::GameState::default();
@@ -2074,6 +2252,7 @@
             pending_move_learns: Vec::new(),
             deferred_level_evolution: false,
             evolution_target: None,
+            evolution_cancel_snapshot: None,
             consumed: false,
         };
         data.require_no_existing_pending_move_learn_for_item_effect(&state, 0, &empty_effect)
@@ -2199,27 +2378,18 @@
                 loadtrainer_command_index: 3,
                 startbattle_command_index: 4,
                 request: TrainerBattleRequest::new("YOUNGSTER", "youngster_joey", ""),
-                reload_map_after_battle: false,
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
             },
             ScriptedTrainerBattle {
                 source_script: "BadTrainerIdScript".to_string(),
                 loadtrainer_command_index: 9,
                 startbattle_command_index: 10,
                 request: TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER JOEY", ""),
-                reload_map_after_battle: false,
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
             },
             ScriptedTrainerBattle {
                 source_script: "BadTrainerClassScript".to_string(),
                 loadtrainer_command_index: 11,
                 startbattle_command_index: 12,
                 request: TrainerBattleRequest::new("YOUNG STER", "YOUNGSTER_JOEY", ""),
-                reload_map_after_battle: false,
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
             },
         ];
         module.scripted_wild_battles = vec![
@@ -2228,33 +2398,18 @@
                 loadwildmon_command_index: 5,
                 startbattle_command_index: 6,
                 request: StaticWildBattleRequest::new(known_species_id.to_lowercase(), 10),
-                reload_map_after_battle: false,
-                pre_battle_event_flags: Vec::new(),
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
-                disappear_object_ids: Vec::new(),
             },
             ScriptedWildBattle {
                 source_script: "WildZeroScript".to_string(),
                 loadwildmon_command_index: 7,
                 startbattle_command_index: 8,
                 request: StaticWildBattleRequest::new(known_species_id, 0),
-                reload_map_after_battle: false,
-                pre_battle_event_flags: Vec::new(),
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
-                disappear_object_ids: Vec::new(),
             },
             ScriptedWildBattle {
                 source_script: "WildMalformedScript".to_string(),
                 loadwildmon_command_index: 13,
                 startbattle_command_index: 14,
                 request: StaticWildBattleRequest::new("HO OT", 10),
-                reload_map_after_battle: false,
-                pre_battle_event_flags: Vec::new(),
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
-                disappear_object_ids: Vec::new(),
             },
         ];
         data.maps.insert("Start".to_string(), module);
@@ -2317,18 +2472,12 @@
                 loadtrainer_command_index: 1,
                 startbattle_command_index: 2,
                 request: TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER_JOEY", ""),
-                reload_map_after_battle: false,
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
             },
             ScriptedTrainerBattle {
                 source_script: "BattleScript".to_string(),
                 loadtrainer_command_index: 3,
                 startbattle_command_index: 2,
                 request: TrainerBattleRequest::new("YOUNGSTER", "YOUNGSTER_JOEY", ""),
-                reload_map_after_battle: false,
-                post_battle_event_flags: Vec::new(),
-                post_battle_script_flags: Vec::new(),
             },
         ];
         let mut data = GameDataSet {
@@ -2458,52 +2607,6 @@
                 && diagnostic.message.contains("EVENT_HIDE_START_TRAINER")
                 && diagnostic.message.contains("EVENT_BEAT_START_TRAINER")
         }));
-    }
-
-    #[test]
-    fn verifier_rejects_scripted_battle_effects_that_cannot_apply_at_runtime() {
-        let mut module = test_map_module("Start", "START_MAP", None);
-        module.objects = vec![test_object("VISIBLE_NPC", "-1", 1, 1)];
-        module.scripted_wild_battles = vec![ScriptedWildBattle {
-            source_script: "WildScript".to_string(),
-            loadwildmon_command_index: 1,
-            startbattle_command_index: 2,
-            request: StaticWildBattleRequest::new("CHIKORITA", 5),
-            reload_map_after_battle: false,
-            pre_battle_event_flags: vec!["EVENT PRE".to_string()],
-            post_battle_event_flags: vec!["0".to_string()],
-            post_battle_script_flags: vec!["legacy_script_flag".to_string()],
-            disappear_object_ids: vec![
-                "MISSING_NPC".to_string(),
-                "VISIBLE_NPC".to_string(),
-                "BAD NPC".to_string(),
-            ],
-        }];
-        let data = GameDataSet {
-            maps: [("Start".to_string(), module)].into_iter().collect(),
-            ..GameDataSet::default()
-        };
-
-        let report = verify_game_data(
-            &AssetRoot::new(repository_root_for_tests()),
-            &data,
-            &PlayabilityRules::default(),
-        );
-
-        for code in [
-            "invalid_scripted_battle_effect_flag",
-            "unknown_scripted_battle_disappear_object",
-            "unhideable_scripted_battle_disappear_object",
-            "invalid_scripted_battle_disappear_object",
-        ] {
-            assert!(
-                report.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.code == code && diagnostic.subject == "Start:WildScript:2"
-                }),
-                "missing {code}: {:?}",
-                report.diagnostics
-            );
-        }
     }
 
     #[test]
@@ -3488,49 +3591,185 @@
     }
 
     #[test]
-    fn rock_smash_roll_rejects_target_outside_runtime_map_bounds_before_rng() {
-        let data = GameDataSet {
-            maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
+    fn rock_mon_encounter_runtime_command_replays_exactly_and_is_atomic() {
+        let standard_scripts: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                repository_root_for_tests()
+                    .join("apps/web/assets/data/story_events/StandardScripts.json"),
+            )
+            .expect("read StandardScripts export"),
+        )
+        .expect("parse StandardScripts export");
+        let mut data = GameDataSet {
+            maps: map_payload(vec![test_map_module("Route40", "ROUTE_40", None)]),
+            story_events: vec![standard_scripts],
             ..GameDataSet::default()
         };
-        let mut rng = Random::new(0x1234_5678);
-
-        let error = data
-            .roll_rock_smash_encounter("Route29", TilePosition::new(2, 0), &mut rng)
-            .expect_err("ROCK_SMASH target must fit compiled runtime map bounds");
-
-        assert!(
-            format!("{error:#}").contains(
-                "ROCK_SMASH encounter tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
-            ),
-            "{error:#}"
-        );
-        assert_eq!(rng.seed(), 0x1234_5678);
-    }
-
-    #[test]
-    fn rock_smash_roll_rejects_target_outside_explicit_runtime_map_bounds_before_rng() {
-        let mut module = test_map_module("Route29", "ROUTE_29", None);
-        module.attributes.width = 2;
-        module.attributes.height = 2;
-        module.blocks = vec![1, 1, 1, 1];
-        let data = GameDataSet {
-            maps: map_payload(vec![module]),
-            ..GameDataSet::default()
+        data.materialize_global_scripts()
+            .expect("materialize exact global Rock Smash scripts");
+        let mut state = GameState {
+            random_state: CrystalRandomState {
+                add: 0x12,
+                sub: 0x34,
+            },
+            ..GameState::default()
         };
-        let mut rng = Random::new(0x1234_5678);
-
-        let error = data
-            .roll_rock_smash_encounter("Route29", TilePosition::new(4, 0), &mut rng)
-            .expect_err("ROCK_SMASH target must fit compiled runtime map bounds");
-
-        assert!(
-            format!("{error:#}").contains(
-                "ROCK_SMASH encounter tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
-            ),
-            "{error:#}"
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "Route40".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
         );
-        assert_eq!(rng.seed(), 0x1234_5678);
+        let audio_ids = BTreeSet::new();
+        let command = RuntimeScriptCommandRef::new("Route40", "RockSmashScript", 8);
+
+        let no_table = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveRockMonEncounter(
+                    RuntimeRockMonEncounterCommand {
+                        command: command.clone(),
+                        divider_trace: RuntimeDividerTrace::new([]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("a map absent from RockMonMaps is an exact zero-read miss");
+        let RuntimeMutationResult::RockMonEncounterResolved(no_table) = no_table.result else {
+            panic!("expected RockMonEncounter result");
+        };
+        assert_eq!(no_table.chance_roll, None);
+        assert_eq!(state.random_state, CrystalRandomState { add: 0x12, sub: 0x34 });
+        assert_eq!(state.script_runtime.memory.get("wTempWildMonSpecies"), Some(&"0".to_string()));
+        assert_eq!(state.script_runtime.memory.get("wCurPartyLevel"), Some(&"0".to_string()));
+
+        let before_no_table_tail = state.clone();
+        let no_table_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveRockMonEncounter(
+                    RuntimeRockMonEncounterCommand {
+                        command: command.clone(),
+                        divider_trace: RuntimeDividerTrace::new([99]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("a zero-read miss must reject an injected divider tail");
+        assert!(no_table_tail.to_string().contains("1 unconsumed samples after 0 reads"));
+        assert_eq!(state, before_no_table_tail);
+
+        data.field_encounters.insert(
+            "Route40".to_string(),
+            FieldEncounterData::for_crystal(
+                "Route40",
+                None,
+                Some(FieldEncounterTable {
+                    common: vec![
+                        FieldEncounterEntry {
+                            weight: 90,
+                            species: "KRABBY".to_string(),
+                            level: 15,
+                            sleep_turns_by_time: BTreeMap::new(),
+                        },
+                        FieldEncounterEntry {
+                            weight: 10,
+                            species: "SHUCKLE".to_string(),
+                            level: 15,
+                            sleep_turns_by_time: BTreeMap::new(),
+                        },
+                    ],
+                    rare: Vec::new(),
+                }),
+            ),
+        );
+        state.random_state = CrystalRandomState::default();
+
+        let before_short = state.clone();
+        let short = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveRockMonEncounter(
+                    RuntimeRockMonEncounterCommand {
+                        command: command.clone(),
+                        divider_trace: RuntimeDividerTrace::new([255, 0, 89]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("a truncated conditional entry draw must reject atomically");
+        assert!(short.to_string().contains("divider replay exhausted after 3 samples"));
+        assert_eq!(state, before_short);
+
+        let before_miss_tail = state.clone();
+        let miss_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveRockMonEncounter(
+                    RuntimeRockMonEncounterCommand {
+                        command: command.clone(),
+                        divider_trace: RuntimeDividerTrace::new([3, 0, 77]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("a chance miss must reject an unused entry-roll byte");
+        assert!(miss_tail.to_string().contains("1 unconsumed samples after 2 reads"));
+        assert_eq!(state, before_miss_tail);
+
+        let hit = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ResolveRockMonEncounter(
+                    RuntimeRockMonEncounterCommand {
+                        command,
+                        divider_trace: RuntimeDividerTrace::new([255, 0, 89, 0]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("exact conditional RockMonEncounter trace applies once");
+        let RuntimeMutationResult::RockMonEncounterResolved(hit) = hit.result else {
+            panic!("expected RockMonEncounter result");
+        };
+        assert_eq!(hit.chance_roll, Some(0));
+        assert_eq!(hit.entry_roll, Some(90));
+        assert_eq!(
+            state.script_runtime.memory.get("wTempWildMonSpecies"),
+            Some(&"SHUCKLE".to_string())
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wCurPartyLevel"),
+            Some(&"15".to_string())
+        );
+        assert_eq!(state.random_state, CrystalRandomState { add: 90, sub: 255 });
     }
 
     fn resolved_test_wild_encounter_roll(map_name: &str, tile: TilePosition) -> WildEncounterRoll {
@@ -3543,6 +3782,7 @@
             encounter_roll: 0,
             slot_percent_roll: Some(0),
             level_roll: None,
+            roaming_slot: None,
             resolved: Some(ResolvedWildEncounter {
                 level: 5,
                 encounter: WildEncounter {
@@ -3552,7 +3792,6 @@
                 slot: 0,
             }),
             repelled_by: None,
-            rng_seed_after: 0,
         }
     }
 
@@ -3701,61 +3940,132 @@
     }
 
     #[test]
-    fn sweet_scent_roll_rejects_origin_outside_runtime_map_bounds_before_rng() {
-        let data = GameDataSet {
+    fn fishing_and_headbutt_starts_preserve_pret_battle_types() {
+        let mut data = GameDataSet {
             maps: map_payload(vec![test_map_module("Route29", "ROUTE_29", None)]),
             ..GameDataSet::default()
         };
-        let mut rng = Random::new(0x1234_5678);
-
-        let error = data
-            .roll_sweet_scent_encounter(
-                "Route29",
-                EncounterSurface::Grass,
-                TimeOfDay::Day,
-                TilePosition::new(2, 0),
-                &mut rng,
+        add_complete_runtime_pack_fixture(&mut data);
+        let landmark = data
+            .pokegear_landmarks
+            .landmarks
+            .first_mut()
+            .expect("test landmark");
+        landmark.region = "JOHTO".to_string();
+        data.audio.push(
+            ModpackAudioAsset::pcm(
+                "MUSIC_JOHTO_WILD_BATTLE",
+                "content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE.pcm",
+                ModpackAudioKind::Music,
+                test_pcm_format(),
             )
-            .expect_err("SWEET_SCENT origin must fit compiled runtime map bounds");
-
-        assert!(
-            format!("{error:#}").contains(
-                "SWEET_SCENT encounter tile (2, 0) is outside compiled map Route29 runtime tile bounds 2x2"
-            ),
-            "{error:#}"
+            .expect("wild music fixture"),
         );
-        assert_eq!(rng.seed(), 0x1234_5678);
-    }
+        data.audio.push(
+            ModpackAudioAsset::pcm(
+                "MUSIC_JOHTO_WILD_BATTLE_NIGHT",
+                "content-packs/test/music/MUSIC_JOHTO_WILD_BATTLE_NIGHT.pcm",
+                ModpackAudioKind::Music,
+                test_pcm_format(),
+            )
+            .expect("night wild music fixture"),
+        );
+        let mut caterpie = data.pokemon["NEW_MON"].clone();
+        caterpie.id = "CATERPIE".to_string();
+        caterpie.int_id = 10;
+        data.pokemon.insert(caterpie.id.clone(), caterpie);
+        data.learnsets.insert(
+            "CATERPIE".to_string(),
+            data.learnsets["NEW_MON"].clone(),
+        );
+        data.field_encounters.insert(
+            "Route29".to_string(),
+            FieldEncounterData::for_crystal(
+                "Route29",
+                Some(FieldEncounterTable {
+                    common: vec![FieldEncounterEntry {
+                        weight: 100,
+                        species: "CATERPIE".to_string(),
+                        level: 5,
+                        sleep_turns_by_time: BTreeMap::from([(TimeOfDay::Night, 7)]),
+                    }],
+                    rare: vec![FieldEncounterEntry {
+                        weight: 100,
+                        species: "CATERPIE".to_string(),
+                        level: 5,
+                        sleep_turns_by_time: BTreeMap::from([(TimeOfDay::Night, 7)]),
+                    }],
+                }),
+                None,
+            ),
+        );
 
-    #[test]
-    fn sweet_scent_roll_rejects_origin_outside_explicit_runtime_map_bounds_before_rng() {
-        let mut module = test_map_module("Route29", "ROUTE_29", None);
-        module.attributes.width = 2;
-        module.attributes.height = 2;
-        module.blocks = vec![1, 1, 1, 1];
-        let data = GameDataSet {
-            maps: map_payload(vec![module]),
-            ..GameDataSet::default()
+        let mut fishing_state = GameState::default();
+        let fishing = data
+            .start_fishing_battle(
+                &mut fishing_state,
+                "Route29",
+                TilePosition::new(0, 0),
+                WildEncounter {
+                    level: 5,
+                    species: "NEW_MON".to_string(),
+                },
+                TimeOfDay::Day,
+                0,
+                0,
+            )
+            .expect("fishing battle");
+        assert_eq!(fishing.battle_type, "BATTLETYPE_FISH");
+        assert!(matches!(
+            fishing_state.battle,
+            BattleMemory::Wild { ref battle_type, .. } if battle_type == "BATTLETYPE_FISH"
+        ));
+
+        let headbutt_roll = crystal_core::world::encounters::FieldEncounterRoll {
+            map_name: "Route29".to_string(),
+            kind: crystal_core::world::encounters::FieldEncounterKind::Headbutt,
+            target_tile_x: 0,
+            target_tile_y: 0,
+            score: Some(1),
+            chance_roll: 0,
+            entry_roll: Some(0),
+            resolved: Some(ResolvedWildEncounter {
+                level: 5,
+                encounter: WildEncounter {
+                    level: 5,
+                    species: "CATERPIE".to_string(),
+                },
+                slot: 0,
+            }),
         };
-        let mut rng = Random::new(0x1234_5678);
+        let mut tree_state = GameState::default();
+        tree_state.time.time_of_day = TimeOfDay::Night;
+        let tree = data
+            .start_field_encounter_battle(&mut tree_state, &headbutt_roll)
+            .expect("headbutt battle")
+            .expect("resolved headbutt encounter");
+        assert_eq!(tree.battle_type, "BATTLETYPE_TREE");
+        assert_eq!(tree.enemy_pokemon.status.as_deref(), Some("SLEEP"));
+        assert_eq!(tree.enemy_pokemon.sleep_turns, 7);
+        assert!(matches!(
+            tree_state.battle,
+            BattleMemory::Wild {
+                ref battle_type,
+                ref enemy_pokemon,
+                ..
+            } if battle_type == "BATTLETYPE_TREE"
+                && enemy_pokemon.status.as_deref() == Some("SLEEP")
+                && enemy_pokemon.sleep_turns == 7
+        ));
 
-        let error = data
-            .roll_sweet_scent_encounter(
-                "Route29",
-                EncounterSurface::Grass,
-                TimeOfDay::Day,
-                TilePosition::new(4, 0),
-                &mut rng,
-            )
-            .expect_err("SWEET_SCENT origin must fit compiled runtime map bounds");
-
-        assert!(
-            format!("{error:#}").contains(
-                "SWEET_SCENT encounter tile (4, 0) is outside compiled map Route29 runtime tile bounds 4x4"
-            ),
-            "{error:#}"
-        );
-        assert_eq!(rng.seed(), 0x1234_5678);
+        let mut day_tree_state = GameState::default();
+        day_tree_state.time.time_of_day = TimeOfDay::Day;
+        let day_tree = data
+            .start_field_encounter_battle(&mut day_tree_state, &headbutt_roll)
+            .expect("day headbutt battle")
+            .expect("resolved day headbutt encounter");
+        assert_eq!(day_tree.enemy_pokemon.status, None);
+        assert_eq!(day_tree.enemy_pokemon.sleep_turns, 0);
     }
 
     #[test]
@@ -3774,8 +4084,10 @@
             .expect("valid session");
         session.player.tile = TilePosition::new(4, 0);
 
+        let mut divider = ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
         let error = data
-            .check_wild_encounter_after_step(&mut state, &session)
+            .check_wild_encounter_after_step(&mut state, &session, &mut rng)
             .expect_err("wild encounter check must reject session tiles outside map bounds");
 
         assert!(
@@ -3788,36 +4100,153 @@
     }
 
     #[test]
+    fn new_game_spawn_projects_all_roaming_slots_to_catalog_inactive_before_partial_init() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.blocks = vec![1];
+        let spawn = test_runtime_spawn_point(0, "Route29");
+        let catalog = roaming_catalog_for_tests("RAIKOU", "ENTEI");
+        let mut raikou = species();
+        raikou.id = "RAIKOU".to_string();
+        let mut entei = species();
+        entei.id = "ENTEI".to_string();
+        let data = GameDataSet {
+            pokemon: [
+                ("RAIKOU".to_string(), raikou),
+                ("ENTEI".to_string(), entei),
+            ]
+            .into_iter()
+            .collect(),
+            maps: map_payload(vec![module]),
+            tilesets: [("johto".to_string(), test_tileset_definition())]
+                .into_iter()
+                .collect(),
+            runtime_map_metadata: [(
+                "ROUTE_29".to_string(),
+                test_runtime_map_metadata("ROUTE_29", "Route29"),
+            )]
+            .into_iter()
+            .collect(),
+            roaming_pokemon: catalog.clone(),
+            special_routines: special_routine_rules(["InitRoamMons"]),
+            ..GameDataSet::default()
+        };
+
+        let (mut state, _) = data
+            .start_overworld_session_from_spawn(&spawn, &BTreeSet::new())
+            .expect("start exact new-game spawn");
+        assert!(state.roaming_pokemon.iter().all(|roaming| {
+            roaming.species.is_none()
+                && roaming.map_group == catalog.inactive_map.map_group
+                && roaming.map_number == catalog.inactive_map.map_number
+                && roaming.level == 0
+                && roaming.hp == 0
+                && roaming.dvs_be == [0, 0]
+        }));
+
+        data.apply_special_routine(&mut state, "InitRoamMons", &BTreeSet::new())
+            .expect("apply partial source InitRoamMons writes");
+        assert_eq!(state.roaming_pokemon[0].species.as_deref(), Some("RAIKOU"));
+        assert_eq!(state.roaming_pokemon[1].species.as_deref(), Some("ENTEI"));
+        assert_eq!(state.roaming_pokemon[2].species, None);
+        assert_eq!(
+            (
+                state.roaming_pokemon[2].map_group,
+                state.roaming_pokemon[2].map_number,
+            ),
+            (
+                catalog.inactive_map.map_group,
+                catalog.inactive_map.map_number,
+            )
+        );
+    }
+
+    #[test]
+    fn saved_roaming_battle_requires_selected_slot_map_and_normal_battles_never_refind_roamers() {
+        let dvs = Dv::from_non_hp(1, 2, 3, 4);
+        let enemy = Pokemon::new_for_tests(species(), 40, dvs);
+        let mut other_metadata = test_runtime_map_metadata("OTHER_MAP", "OtherMap");
+        other_metadata.map_id = 2;
+        let data = GameDataSet {
+            roaming_pokemon: roaming_catalog_for_tests("NEW_MON", "NEW_MON"),
+            runtime_map_metadata: [("OTHER_MAP".to_string(), other_metadata)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let roaming = crystal_core::state::RoamingPokemonState {
+            species: Some("NEW_MON".to_string()),
+            level: 40,
+            map_group: 1,
+            map_number: 1,
+            hp: enemy.hp as u8,
+            dvs_be: [0x12, 0x34],
+        };
+
+        let roaming_error = data
+            .validate_saved_roaming_battle_origin_references("OtherMap", 0, &roaming, &enemy)
+            .expect_err("selected roaming slot must occupy the exact saved battle map")
+            .to_string();
+        assert!(
+            roaming_error.contains(
+                "saved roaming battle slot 0 location 1/1 does not match battle map OtherMap location 1/2"
+            ),
+            "{roaming_error}"
+        );
+
+        let normal_error = data
+            .validate_saved_wild_battle_origin_references(
+                "BATTLETYPE_NORMAL",
+                "OtherMap",
+                &enemy,
+            )
+            .expect_err("normal wild origins must not refind a matching roaming species and level")
+            .to_string();
+        assert!(
+            normal_error.contains(
+                "saved battle.wild OtherMap encounter NEW_MON:40 is missing from compiled wild encounter sources"
+            ),
+            "{normal_error}"
+        );
+    }
+
+    #[test]
     fn runtime_field_encounter_commands_reject_unused_payload_fields() {
-        let headbutt_error =
-            reject_field_encounter_surface("HEADBUTT", Some(EncounterSurface::Grass))
-                .expect_err("HEADBUTT command must not carry a surface payload");
-        assert!(
-            format!("{headbutt_error:#}")
-                .contains("HEADBUTT field move command must not declare surface"),
-            "{headbutt_error:#}"
-        );
-
-        let sweet_scent_error = reject_field_encounter_player_id("SWEET_SCENT", Some(12345))
-            .expect_err("SWEET_SCENT command must not carry player_id");
-        assert!(
-            format!("{sweet_scent_error:#}")
-                .contains("SWEET_SCENT field move command must not declare player_id"),
-            "{sweet_scent_error:#}"
-        );
-
-        let missing_rng_seed =
-            serde_json::from_value::<RuntimeFieldEncounterCommand>(serde_json::json!({
+        let headbutt_error = serde_json::from_value::<RuntimeHeadbuttFieldEncounterCommand>(
+            serde_json::json!({
                 "party_index": 0,
                 "player_id": 12345,
-                "surface": null
-            }))
-            .expect_err("field encounter commands must declare the post-mutation RNG seed");
+                "rng_seed_after": 7,
+                "surface": "grass"
+            }),
+        )
+        .expect_err("HEADBUTT command must not carry a surface payload");
         assert!(
-            missing_rng_seed
+            headbutt_error.to_string().contains("unknown field `surface`"),
+            "{headbutt_error}"
+        );
+
+        let sweet_scent_error = serde_json::from_value::<RuntimeSweetScentFieldMoveCommand>(
+            serde_json::json!({
+                "party_index": 0,
+                "divider_trace": { "samples": [] },
+                "player_id": 12345
+            }),
+        )
+        .expect_err("SWEET_SCENT command must not carry player_id");
+        assert!(
+            sweet_scent_error
                 .to_string()
-                .contains("missing field `rng_seed_after`"),
-            "{missing_rng_seed}"
+                .contains("unknown field `player_id`"),
+            "{sweet_scent_error}"
+        );
+
+        let missing_trace = serde_json::from_value::<RuntimeSweetScentFieldMoveCommand>(
+            serde_json::json!({ "party_index": 0 }),
+        )
+        .expect_err("Sweet Scent commands must declare their exact divider trace");
+        assert!(
+            missing_trace.to_string().contains("missing field `divider_trace`"),
+            "{missing_trace}"
         );
     }
 
@@ -3868,93 +4297,68 @@
     }
 
     #[test]
-    fn runtime_bug_contest_commands_compute_rank_and_use_exact_rng_payloads() {
+    fn runtime_bug_contest_commands_have_no_rank_authority_and_use_exact_rng_payloads() {
+        let judging_trace = RuntimeDividerTrace::new([1, 2]);
         let judging = RuntimeBugContestCommand {
             action: RuntimeBugContestAction::Judge,
-            rank: None,
-            rng_seed_after: Some(42),
+            divider_trace: Some(judging_trace.clone()),
         };
         assert_eq!(
-            runtime_bug_contest_rank(&judging).expect("computed judge rank"),
-            None
+            runtime_bug_contest_divider_trace(&judging).expect("judge divider trace"),
+            Some(&judging_trace)
         );
-        assert_eq!(runtime_bug_contest_rng_seed_after(&judging).expect("judge RNG seed"), Some(42));
         assert_eq!(runtime_bug_contest_action_name(judging.action), "judge");
 
-        let injected_rank = RuntimeBugContestCommand {
-            action: RuntimeBugContestAction::Judge,
-            rank: Some(3),
-            rng_seed_after: Some(42),
-        };
-        let injected_error = runtime_bug_contest_rank(&injected_rank)
-            .expect_err("judging must not accept a fabricated rank");
+        let injected_error = serde_json::from_value::<RuntimeBugContestCommand>(
+            serde_json::json!({
+                "action": "judge",
+                "rank": 3,
+                "divider_trace": { "samples": [1, 2] }
+            }),
+        )
+        .expect_err("Bug Contest commands must not expose a fabricated rank authority");
         assert!(
-            format!("{injected_error:#}").contains("Bug Contest judge command must not declare rank"),
-            "{injected_error:#}"
+            injected_error.to_string().contains("unknown field `rank`"),
+            "{injected_error}"
         );
 
-        for action in [
-            RuntimeBugContestAction::GiveParkBalls,
-            RuntimeBugContestAction::SelectContestants,
-            RuntimeBugContestAction::DropOffMons,
-            RuntimeBugContestAction::ReturnMons,
-            RuntimeBugContestAction::CheckPartyFull,
-        ] {
-            let command = RuntimeBugContestCommand {
-                action,
-                rank: Some(1),
-                rng_seed_after: None,
-            };
-            let error = runtime_bug_contest_rank(&command)
-                .expect_err("non-judging bug contest actions must not carry ignored rank");
-            assert!(
-                format!("{error:#}").contains(&format!(
-                    "Bug Contest {} command must not declare rank",
-                    runtime_bug_contest_action_name(action)
-                )),
-                "{error:#}"
-            );
-        }
-
+        let selecting_trace = RuntimeDividerTrace::new([3, 4]);
         let selecting = RuntimeBugContestCommand {
             action: RuntimeBugContestAction::SelectContestants,
-            rank: None,
-            rng_seed_after: Some(42),
+            divider_trace: Some(selecting_trace.clone()),
         };
         assert_eq!(
-            runtime_bug_contest_rng_seed_after(&selecting).expect("select RNG seed"),
-            Some(42)
+            runtime_bug_contest_divider_trace(&selecting).expect("select divider trace"),
+            Some(&selecting_trace)
         );
 
-        let missing_rng_seed = RuntimeBugContestCommand {
+        let missing_divider_trace = RuntimeBugContestCommand {
             action: RuntimeBugContestAction::SelectContestants,
-            rank: None,
-            rng_seed_after: None,
+            divider_trace: None,
         };
-        let missing_rng_error = runtime_bug_contest_rng_seed_after(&missing_rng_seed)
-            .expect_err("select contestants must carry the post-routine RNG seed");
+        let missing_trace_error = runtime_bug_contest_divider_trace(&missing_divider_trace)
+            .expect_err("select contestants must carry the authoritative divider trace");
         assert!(
-            format!("{missing_rng_error:#}")
-                .contains("Bug Contest select_contestants command requires rng_seed_after"),
-            "{missing_rng_error:#}"
+            format!("{missing_trace_error:#}")
+                .contains("Bug Contest select_contestants command requires divider_trace"),
+            "{missing_trace_error:#}"
         );
 
-        let unused_rng_seed = RuntimeBugContestCommand {
+        let unused_divider_trace = RuntimeBugContestCommand {
             action: RuntimeBugContestAction::GiveParkBalls,
-            rank: None,
-            rng_seed_after: Some(42),
+            divider_trace: Some(RuntimeDividerTrace::new([1, 2])),
         };
-        let unused_rng_error = runtime_bug_contest_rng_seed_after(&unused_rng_seed)
-            .expect_err("non-RNG bug contest actions must reject rng_seed_after");
+        let unused_trace_error = runtime_bug_contest_divider_trace(&unused_divider_trace)
+            .expect_err("non-RNG bug contest actions must reject divider traces");
         assert!(
-            format!("{unused_rng_error:#}")
-                .contains("Bug Contest give_park_balls command must not declare rng_seed_after"),
-            "{unused_rng_error:#}"
+            format!("{unused_trace_error:#}")
+                .contains("Bug Contest give_park_balls command must not declare divider_trace"),
+            "{unused_trace_error:#}"
         );
     }
 
     #[test]
-    fn bug_contest_select_contestants_rejects_stale_rng_seed_before_mutation() {
+    fn bug_contest_select_contestants_requires_an_atomic_exact_divider_trace() {
         let data = GameDataSet {
             special_routines: special_routine_rules(["SelectRandomBugContestContestants"]),
             bug_contest_config: Some(BugContestConfig {
@@ -3966,23 +4370,13 @@
                     "EVENT_BUG_CATCHING_CONTESTANT_1A".to_string(),
                     "EVENT_BUG_CATCHING_CONTESTANT_2A".to_string(),
                 ],
+                encounters: bug_contest_encounters_for_tests(),
             }),
             ..GameDataSet::default()
         };
-        let mut state = GameState {
-            rng_seed: 1,
-            ..GameState::default()
-        };
+        let mut state = GameState::default();
         let before = state.clone();
         let audio_ids = BTreeSet::new();
-        let mut preview = state.clone();
-        data.apply_special_routine(
-            &mut preview,
-            "SelectRandomBugContestContestants",
-            &audio_ids,
-        )
-        .expect("preview Bug Contest contestant selection");
-        assert_ne!(preview.rng_seed, 0);
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "RuntimeBugContestMap".to_string(),
@@ -4002,47 +4396,99 @@
             TilePosition::new(0, 0),
         );
 
-        let error = data
+        let exhausted = data
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
                 RuntimeMutationCommand::UseBugContest(RuntimeBugContestCommand {
                     action: RuntimeBugContestAction::SelectContestants,
-                    rank: None,
-                    rng_seed_after: Some(0),
+                    divider_trace: Some(RuntimeDividerTrace::new([0])),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("stale Bug Contest contestant RNG seed must reject");
+            .expect_err("exhausted Bug Contest divider trace must reject");
 
         assert!(
-            error
+            exhausted
                 .to_string()
-                .contains("use Bug Contest select_contestants rng_seed_after 0 does not match"),
-            "{error}"
+                .contains("divider replay exhausted after 1 samples"),
+            "{exhausted}"
         );
         assert_eq!(state, before);
+
+        let mut trace_with_tail = divider_trace_for_sub_values([0]);
+        trace_with_tail.samples.push(77);
+        let unused_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBugContest(RuntimeBugContestCommand {
+                    action: RuntimeBugContestAction::SelectContestants,
+                    divider_trace: Some(trace_with_tail),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused Bug Contest divider tail must reject");
+        assert!(
+            unused_tail
+                .to_string()
+                .contains("divider trace has 1 unconsumed samples after 2 reads"),
+            "{unused_tail}"
+        );
+        assert_eq!(state, before);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBugContest(RuntimeBugContestCommand {
+                    action: RuntimeBugContestAction::SelectContestants,
+                    divider_trace: Some(divider_trace_for_sub_values([0])),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("exact Bug Contest divider trace applies once");
+        let RuntimeMutationResult::BugContestUsed(special) = outcome.result else {
+            panic!("expected Bug Contest result");
+        };
+        assert_eq!(
+            special.effect,
+            SpecialRoutineEffect::SelectRandomBugContestContestants {
+                flags: vec!["EVENT_BUG_CATCHING_CONTESTANT_1A".to_string()],
+                random_state_after: CrystalRandomState::default(),
+            }
+        );
+        assert_eq!(state.random_state, CrystalRandomState::default());
+        assert_eq!(
+            state.bug_contest.selected_contestant_flags,
+            vec!["EVENT_BUG_CATCHING_CONTESTANT_1A".to_string()]
+        );
     }
 
     #[test]
     fn runtime_shuckie_commands_use_exact_party_payloads() {
+        let trace = RuntimeDividerTrace::new([1, 2, 3, 4]);
         let give = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Give,
             party_index: None,
-            rng_seed_after: Some(42),
+            divider_trace: Some(trace.clone()),
         };
         assert_eq!(runtime_shuckie_party_slot(&give).expect("give"), None);
         assert_eq!(
-            runtime_shuckie_rng_seed_after(&give).expect("give RNG seed"),
-            Some(42)
+            runtime_shuckie_divider_trace(&give).expect("give divider trace"),
+            Some(&trace)
         );
 
         let give_with_slot = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Give,
             party_index: Some(0),
-            rng_seed_after: Some(42),
+            divider_trace: Some(trace.clone()),
         };
         let give_error = runtime_shuckie_party_slot(&give_with_slot)
             .expect_err("GiveShuckle must not receive ignored party slot state");
@@ -4050,37 +4496,37 @@
             format!("{give_error:#}").contains("Shuckie give command must not declare party_index"),
             "{give_error:#}"
         );
-        let missing_rng_seed = RuntimeShuckieCommand {
+        let missing_divider_trace = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Give,
             party_index: None,
-            rng_seed_after: None,
+            divider_trace: None,
         };
-        let missing_rng_error = runtime_shuckie_rng_seed_after(&missing_rng_seed)
-            .expect_err("GiveShuckle must declare RNG boundary");
+        let missing_rng_error = runtime_shuckie_divider_trace(&missing_divider_trace)
+            .expect_err("GiveShuckle must declare divider boundary");
         assert!(
             format!("{missing_rng_error:#}")
-                .contains("Shuckie give command requires rng_seed_after"),
+                .contains("Shuckie give command requires divider_trace"),
             "{missing_rng_error:#}"
         );
 
         let return_selected = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Return,
             party_index: Some(2),
-            rng_seed_after: None,
+            divider_trace: None,
         };
         assert_eq!(
             runtime_shuckie_party_slot(&return_selected).expect("return selected"),
             Some(2)
         );
         assert_eq!(
-            runtime_shuckie_rng_seed_after(&return_selected).expect("return selected RNG"),
+            runtime_shuckie_divider_trace(&return_selected).expect("return selected divider"),
             None
         );
 
         let return_cancelled = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Return,
             party_index: None,
-            rng_seed_after: None,
+            divider_trace: None,
         };
         assert_eq!(
             runtime_shuckie_party_slot(&return_cancelled).expect("return cancelled"),
@@ -4089,30 +4535,35 @@
         let return_with_rng = RuntimeShuckieCommand {
             action: RuntimeShuckieAction::Return,
             party_index: Some(2),
-            rng_seed_after: Some(42),
+            divider_trace: Some(trace),
         };
-        let unused_rng_error = runtime_shuckie_rng_seed_after(&return_with_rng)
+        let unused_rng_error = runtime_shuckie_divider_trace(&return_with_rng)
             .expect_err("ReturnShuckie must not accept unused RNG state");
         assert!(
             format!("{unused_rng_error:#}")
-                .contains("Shuckie return command must not declare rng_seed_after"),
+                .contains("Shuckie return command must not declare divider_trace"),
             "{unused_rng_error:#}"
         );
     }
 
     #[test]
     fn generic_special_routine_command_enforces_rng_boundary() {
-        assert!(runtime_special_routine_requires_rng_boundary(
+        assert!(runtime_special_routine_requires_divider_trace(
             "SampleKenjiBreakCountdown"
         ));
-        assert!(!runtime_special_routine_requires_rng_boundary("HealParty"));
+        assert!(!runtime_special_routine_requires_legacy_seed_boundary(
+            "SampleKenjiBreakCountdown"
+        ));
+        assert!(!runtime_special_routine_requires_divider_trace(
+            "HealParty"
+        ));
 
         let data = GameDataSet {
             special_routines: special_routine_rules(["SampleKenjiBreakCountdown", "HealParty"]),
             ..GameDataSet::default()
         };
         let mut state = GameState {
-            rng_seed: 1,
+            random_state: CrystalRandomState { add: 0xff, sub: 0 },
             ..GameState::default()
         };
         let before = state.clone();
@@ -4136,7 +4587,7 @@
             TilePosition::new(0, 0),
         );
 
-        let missing = data
+        let wrong_command = data
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
@@ -4148,64 +4599,94 @@
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("generic RNG special must declare rng_seed_after");
+            .expect_err("exact RNG special must reject the legacy seed command");
         assert!(
-            missing.to_string().contains(
-                "special routine SampleKenjiBreakCountdown command requires rng_seed_after"
-            ),
-            "{missing}"
+            wrong_command
+                .to_string()
+                .contains("requires an authoritative divider trace command"),
+            "{wrong_command}"
         );
         assert_eq!(state, before);
 
-        let stale = data
+        let exhausted = data
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
-                RuntimeMutationCommand::ApplySpecialRoutine {
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
                     routine: "SampleKenjiBreakCountdown".to_string(),
-                    rng_seed_after: Some(0),
-                },
+                        divider_trace: RuntimeDividerTrace::new([0]),
+                    },
+                ),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("generic RNG special must reject stale rng_seed_after");
+            .expect_err("exact RNG special must reject an exhausted divider trace");
         assert!(
-            stale.to_string().contains(
-                "apply special routine SampleKenjiBreakCountdown rng_seed_after 0 does not match"
-            ),
-            "{stale}"
+            exhausted
+                .to_string()
+                .contains("divider replay exhausted after 1 samples"),
+            "{exhausted}"
         );
         assert_eq!(state, before);
 
-        let mut preview = state.clone();
-        data.apply_special_routine(&mut preview, "SampleKenjiBreakCountdown", &audio_ids)
-            .expect("preview Kenji countdown");
+        let unused_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
+                        routine: "SampleKenjiBreakCountdown".to_string(),
+                        divider_trace: RuntimeDividerTrace::new([0, 200, 77]),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("exact RNG special must reject an unused divider tail");
+        assert!(
+            unused_tail
+                .to_string()
+                .contains("divider trace has 1 unconsumed samples after 2 reads"),
+            "{unused_tail}"
+        );
+        assert_eq!(state, before);
+
         let outcome = data
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
-                RuntimeMutationCommand::ApplySpecialRoutine {
-                    routine: "SampleKenjiBreakCountdown".to_string(),
-                    rng_seed_after: Some(preview.rng_seed),
-                },
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
+                        routine: "SampleKenjiBreakCountdown".to_string(),
+                        divider_trace: RuntimeDividerTrace::new([0, 200]),
+                    },
+                ),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect("generic RNG special applies with exact rng_seed_after");
+            .expect("generic RNG special applies with an exact divider trace");
         let RuntimeMutationResult::SpecialRoutineApplied(special) = outcome.result else {
             panic!("expected generic special result");
         };
         let SpecialRoutineEffect::SampleKenjiBreakCountdown {
             value,
-            rng_seed_after,
+            random_state_after,
         } = special.effect
         else {
             panic!("expected Kenji countdown effect");
         };
-        assert_eq!(rng_seed_after, preview.rng_seed);
-        assert_eq!(state.rng_seed, preview.rng_seed);
+        assert_eq!(
+            random_state_after,
+            CrystalRandomState {
+                add: 0xff,
+                sub: 56
+            }
+        );
+        assert_eq!(state.random_state, random_state_after);
         assert_eq!(state.kenji_break_timer, value);
 
         let current_rng_seed = state.rng_seed;
@@ -4231,7 +4712,135 @@
     }
 
     #[test]
-    fn shuckie_give_rejects_stale_rng_seed_before_mutation() {
+    fn generic_unown_puzzle_requires_an_atomic_exact_divider_trace() {
+        let data = GameDataSet {
+            special_routines: special_routine_rules(["UnownPuzzle"]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .variables
+            .insert("_value".to_string(), "KABUTO".to_string());
+        let before = state.clone();
+        let audio_ids = BTreeSet::new();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeUnownPuzzleMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let mut exact_trace = divider_trace_for_sub_values(0_u8..16);
+        exact_trace.samples.pop();
+        let exhausted = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
+                        routine: "UnownPuzzle".to_string(),
+                        divider_trace: exact_trace,
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("truncated Unown puzzle divider trace must reject");
+        assert!(
+            exhausted
+                .to_string()
+                .contains("divider replay exhausted after 31 samples"),
+            "{exhausted}"
+        );
+        assert_eq!(state, before);
+
+        let mut trace_with_tail = divider_trace_for_sub_values(0_u8..16);
+        trace_with_tail.samples.push(77);
+        let unused_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
+                        routine: "UnownPuzzle".to_string(),
+                        divider_trace: trace_with_tail,
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused Unown puzzle divider tail must reject");
+        assert!(
+            unused_tail
+                .to_string()
+                .contains("divider trace has 1 unconsumed samples after 32 reads"),
+            "{unused_tail}"
+        );
+        assert_eq!(state, before);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyRandomSpecialRoutine(
+                    RuntimeRandomSpecialRoutineCommand {
+                        routine: "UnownPuzzle".to_string(),
+                        divider_trace: divider_trace_for_sub_values(0_u8..16),
+                    },
+                ),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("exact Unown puzzle divider trace applies once");
+        let RuntimeMutationResult::SpecialRoutineApplied(special) = outcome.result else {
+            panic!("expected generic special result");
+        };
+        let SpecialRoutineEffect::UnownPuzzle {
+            puzzle_id,
+            layout,
+            random_state_after,
+            ..
+        } = special.effect
+        else {
+            panic!("expected Unown puzzle effect");
+        };
+        assert_eq!(puzzle_id, "KABUTO");
+        assert_eq!(
+            layout,
+            vec![
+                vec![1, 2, 3, 4, 5, 6],
+                vec![7, 0, 0, 0, 0, 8],
+                vec![9, 0, 0, 0, 0, 10],
+                vec![11, 0, 0, 0, 0, 12],
+                vec![13, 0, 0, 0, 0, 14],
+                vec![15, 0, 0, 0, 0, 16],
+            ]
+        );
+        assert_eq!(
+            random_state_after,
+            CrystalRandomState { add: 0, sub: 15 }
+        );
+        assert_eq!(state.random_state, random_state_after);
+    }
+
+    #[test]
+    fn shuckie_give_requires_an_atomic_exact_divider_trace() {
         let mut data = GameDataSet {
             special_routines: special_routine_rules(["GiveShuckle"]),
             growth_rates: [(
@@ -4268,10 +4877,6 @@
         };
         let before = state.clone();
         let audio_ids = BTreeSet::new();
-        let mut preview = state.clone();
-        data.apply_special_routine(&mut preview, "GiveShuckle", &audio_ids)
-            .expect("preview Shuckie gift");
-        assert_ne!(preview.rng_seed, 0);
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "RuntimeShuckieMap".to_string(),
@@ -4298,17 +4903,39 @@
                 RuntimeMutationCommand::UseShuckie(RuntimeShuckieCommand {
                     action: RuntimeShuckieAction::Give,
                     party_index: None,
-                    rng_seed_after: Some(0),
+                    divider_trace: Some(RuntimeDividerTrace::new([])),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("stale Shuckie gift rng seed must reject");
+            .expect_err("exhausted Shuckie divider trace must reject");
         assert!(
             error
                 .to_string()
-                .contains("use Shuckie give rng_seed_after 0 does not match"),
+                .contains("divider replay exhausted after 0 samples"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseShuckie(RuntimeShuckieCommand {
+                    action: RuntimeShuckieAction::Give,
+                    party_index: None,
+                    divider_trace: Some(RuntimeDividerTrace::new([0; 5])),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused Shuckie divider tail must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("use Shuckie give divider trace has 1 unconsumed samples after 4 reads"),
             "{error}"
         );
         assert_eq!(state, before);
@@ -4320,13 +4947,13 @@
                 RuntimeMutationCommand::UseShuckie(RuntimeShuckieCommand {
                     action: RuntimeShuckieAction::Give,
                     party_index: None,
-                    rng_seed_after: Some(preview.rng_seed),
+                    divider_trace: Some(RuntimeDividerTrace::new([0; 4])),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect("Shuckie gift command applies with exact RNG seed");
+            .expect("Shuckie gift command applies with exact divider trace");
         let RuntimeMutationResult::ShuckieUsed(special) = outcome.result else {
             panic!("expected Shuckie result");
         };
@@ -4334,34 +4961,34 @@
             special.effect,
             SpecialRoutineEffect::GiveShuckle {
                 stored: true,
-                rng_seed_after: preview.rng_seed,
+                random_state_after: CrystalRandomState::default(),
             }
         );
         assert_eq!(state.storage.party.filled_slots(), 1);
-        assert_eq!(state.rng_seed, preview.rng_seed);
+        assert_eq!(state.random_state, CrystalRandomState::default());
     }
 
     #[test]
     fn runtime_odd_egg_command_requires_exact_rng_boundary() {
         let missing_rng_seed =
             serde_json::from_value::<RuntimeOddEggCommand>(serde_json::json!({}))
-                .expect_err("Odd Egg command must declare the post-mutation RNG seed");
+                .expect_err("Odd Egg command must declare the divider trace");
         assert!(
             missing_rng_seed
                 .to_string()
-                .contains("missing field `rng_seed_after`"),
+                .contains("missing field `divider_trace`"),
             "{missing_rng_seed}"
         );
 
         let command = serde_json::from_value::<RuntimeOddEggCommand>(serde_json::json!({
-            "rng_seed_after": 12345
+            "divider_trace": { "samples": [1, 2] }
         }))
-        .expect("Odd Egg command accepts exact RNG boundary");
-        assert_eq!(command.rng_seed_after, 12345);
+        .expect("Odd Egg command accepts exact divider boundary");
+        assert_eq!(command.divider_trace.samples, vec![1, 2]);
     }
 
     #[test]
-    fn odd_egg_command_rejects_stale_rng_seed_before_mutation() {
+    fn odd_egg_command_requires_an_atomic_exact_divider_trace() {
         let mut data = GameDataSet::default();
         add_runtime_species_and_move(&mut data);
         data.special_routines = special_routine_rules(["GiveOddEgg"]);
@@ -4382,11 +5009,7 @@
             ..GameState::default()
         };
         let before = state.clone();
-        let mut preview = state.clone();
         let audio_ids = BTreeSet::new();
-        data.apply_special_routine(&mut preview, "GiveOddEgg", &audio_ids)
-            .expect("preview Odd Egg");
-        assert_ne!(preview.rng_seed, 0);
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "RuntimeOddEggMap".to_string(),
@@ -4410,55 +5033,103 @@
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
-                RuntimeMutationCommand::GiveOddEgg(RuntimeOddEggCommand { rng_seed_after: 0 }),
+                RuntimeMutationCommand::GiveOddEgg(RuntimeOddEggCommand {
+                    divider_trace: RuntimeDividerTrace::new([]),
+                }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("stale Odd Egg rng seed must reject");
+            .expect_err("exhausted Odd Egg divider trace must reject");
 
         assert!(
             error
                 .to_string()
-                .contains("give Odd Egg rng_seed_after 0 does not match"),
+                .contains("divider replay exhausted after 0 samples"),
             "{error}"
         );
         assert_eq!(state, before);
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::GiveOddEgg(RuntimeOddEggCommand {
+                    divider_trace: RuntimeDividerTrace::new([0, 0, 1]),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused Odd Egg divider tail must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("give Odd Egg divider trace has 1 unconsumed samples after 2 reads"),
+            "{error}"
+        );
+        assert_eq!(state, before);
+
+        let outcome = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::GiveOddEgg(RuntimeOddEggCommand {
+                    divider_trace: RuntimeDividerTrace::new([0, 0]),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("Odd Egg command applies with exact divider trace");
+        let RuntimeMutationResult::OddEggGiven(special) = outcome.result else {
+            panic!("expected Odd Egg result");
+        };
+        assert!(matches!(
+            special.effect,
+            SpecialRoutineEffect::GiveOddEgg {
+                table_index: 0,
+                party_slot: 0,
+                random_state_after: CrystalRandomState { add: 0, sub: 0 },
+                ..
+            }
+        ));
+        assert_eq!(state.storage.party.filled_slots(), 1);
     }
 
     #[test]
     fn runtime_buena_password_command_requires_exact_rng_boundary() {
-        let missing_rng_seed =
+        let missing_divider_trace =
             serde_json::from_value::<RuntimeBuenaPasswordCommand>(serde_json::json!({
                 "guess": "TODAY"
             }))
-            .expect_err("Buena password command must declare the post-mutation RNG seed");
+            .expect_err("Buena password command must declare the divider trace");
         assert!(
-            missing_rng_seed
+            missing_divider_trace
                 .to_string()
-                .contains("missing field `rng_seed_after`"),
-            "{missing_rng_seed}"
+                .contains("missing field `divider_trace`"),
+            "{missing_divider_trace}"
         );
     }
 
     #[test]
     fn runtime_phone_random_special_command_requires_exact_rng_boundary() {
-        let missing_rng_seed =
+        let missing_divider_trace =
             serde_json::from_value::<RuntimePhoneCallerCommand>(serde_json::json!({
                 "special": "random_phone_wild_mon",
                 "contact_id": "PHONE_BIRDKEEPER_VANCE"
             }))
-            .expect_err("phone random special command must declare the post-mutation RNG seed");
+            .expect_err("phone random special command must declare its divider trace");
         assert!(
-            missing_rng_seed
+            missing_divider_trace
                 .to_string()
-                .contains("missing field `rng_seed_after`"),
-            "{missing_rng_seed}"
+                .contains("missing field `divider_trace`"),
+            "{missing_divider_trace}"
         );
     }
 
     #[test]
-    fn phone_random_special_command_rejects_stale_rng_seed_before_mutation() {
+    fn phone_random_special_command_requires_exact_consumed_divider_trace() {
         let mut rattata = species();
         rattata.id = "RATTATA".to_string();
         rattata.int_id = 19;
@@ -4518,20 +5189,9 @@
             )]),
             ..GameDataSet::default()
         };
-        let mut state = GameState {
-            rng_seed: 1,
-            ..GameState::default()
-        };
+        let mut state = GameState::default();
         let before = state.clone();
         let audio_ids = BTreeSet::new();
-        let mut preview = state.clone();
-        preview.script_runtime.variables.insert(
-            "VAR_CALLERID".to_string(),
-            "PHONE_BIRDKEEPER_VANCE".to_string(),
-        );
-        data.apply_special_routine(&mut preview, "RandomPhoneWildMon", &audio_ids)
-            .expect("preview phone random special");
-        assert_ne!(preview.rng_seed, 0);
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "RuntimePhoneMap".to_string(),
@@ -4551,25 +5211,47 @@
             TilePosition::new(0, 0),
         );
 
-        let error = data
+        let exhausted = data
             .apply_runtime_mutation_command(
                 &mut state,
                 &mut session,
                 RuntimeMutationCommand::ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand {
                     special: RuntimePhoneRandomSpecial::RandomPhoneWildMon,
                     contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
-                    rng_seed_after: 0,
+                    divider_trace: RuntimeDividerTrace::new([0]),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("stale phone random special rng seed must reject");
+            .expect_err("exhausted phone random divider trace must reject");
         assert!(
-            error.to_string().contains(
-                "apply phone random special RandomPhoneWildMon rng_seed_after 0 does not match"
-            ),
-            "{error}"
+            exhausted
+                .to_string()
+                .contains("divider replay exhausted after 1 samples"),
+            "{exhausted}"
+        );
+        assert_eq!(state, before);
+
+        let unused_tail = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand {
+                    special: RuntimePhoneRandomSpecial::RandomPhoneWildMon,
+                    contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
+                    divider_trace: RuntimeDividerTrace::new([0, 255, 17]),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused phone random divider tail must reject");
+        assert!(
+            unused_tail
+                .to_string()
+                .contains("divider trace has 1 unconsumed samples after 2 reads"),
+            "{unused_tail}"
         );
         assert_eq!(state, before);
 
@@ -4580,13 +5262,13 @@
                 RuntimeMutationCommand::ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand {
                     special: RuntimePhoneRandomSpecial::RandomPhoneWildMon,
                     contact_id: "PHONE_BIRDKEEPER_VANCE".to_string(),
-                    rng_seed_after: preview.rng_seed,
+                    divider_trace: RuntimeDividerTrace::new([0, 255]),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect("phone random special command applies with exact RNG seed");
+            .expect("phone random special command applies with exact divider trace");
         let RuntimeMutationResult::PhoneRandomSpecialApplied(special) = outcome.result else {
             panic!("expected phone random special result");
         };
@@ -4597,39 +5279,54 @@
                 map_name: "ROUTE_44".to_string(),
                 time_of_day: TimeOfDay::Night,
                 species: "RATTATA".to_string(),
-                rng_seed_after: preview.rng_seed,
+                random_state_after: CrystalRandomState { add: 0, sub: 1 },
             }
         );
+        assert_eq!(state.random_state, CrystalRandomState { add: 0, sub: 1 });
     }
 
     #[test]
-    fn buena_password_command_uses_exact_guess_and_rejects_stale_rng_seed_before_mutation() {
+    fn buena_password_command_uses_an_atomic_exact_divider_trace() {
         let mut data = GameDataSet::default();
         data.special_routines = special_routine_rules(["BuenasPassword"]);
-        data.buena_password_categories = BuenaPasswordCategories {
-            order: vec!["DailyWord".to_string()],
-            categories: BTreeMap::from([(
-                "DailyWord".to_string(),
+        let mut order = vec!["DailyWord".to_string()];
+        let mut categories = BTreeMap::from([(
+            "DailyWord".to_string(),
+            BuenaPasswordCategoryDefinition {
+                category_type: "BUENA_STRING".to_string(),
+                points: 10,
+                options: vec![
+                    "TODAY".to_string(),
+                    "TOMORROW".to_string(),
+                    "YESTERDAY".to_string(),
+                ],
+            },
+        )]);
+        for index in 1..11 {
+            let category_id = format!("DailyWord{index}");
+            order.push(category_id.clone());
+            categories.insert(
+                category_id,
                 BuenaPasswordCategoryDefinition {
                     category_type: "BUENA_STRING".to_string(),
-                    points: 10,
-                    options: vec!["TODAY".to_string()],
+                    points: 1,
+                    options: vec![
+                        format!("A{index}"),
+                        format!("B{index}"),
+                        format!("C{index}"),
+                    ],
                 },
-            )]),
+            );
+        }
+        data.buena_password_categories = BuenaPasswordCategories {
+            order,
+            categories,
         };
         let mut state = GameState {
             rng_seed: 1,
             ..GameState::default()
         };
         let audio_ids = BTreeSet::new();
-        let mut preview = state.clone();
-        preview
-            .script_runtime
-            .variables
-            .insert("BUENA_PASSWORD".to_string(), "TODAY".to_string());
-        data.apply_special_routine(&mut preview, "BuenasPassword", &audio_ids)
-            .expect("preview Buena password");
-        assert_ne!(preview.rng_seed, 0);
         let mut session = OverworldSession::with_events_and_objects(
             OverworldMapData {
                 name: "RuntimeBuenaMap".to_string(),
@@ -4656,17 +5353,38 @@
                 &mut session,
                 RuntimeMutationCommand::UseBuenaPassword(RuntimeBuenaPasswordCommand {
                     guess: Some("TODAY".to_string()),
-                    rng_seed_after: 0,
+                    divider_trace: RuntimeDividerTrace::new([]),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect_err("stale Buena password rng seed must reject");
+            .expect_err("exhausted Buena password divider trace must reject");
         assert!(
             error
                 .to_string()
-                .contains("use Buena password rng_seed_after 0 does not match"),
+                .contains("divider replay exhausted after 0 samples"),
+            "{error}"
+        );
+        assert_eq!(state, before_stale);
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::UseBuenaPassword(RuntimeBuenaPasswordCommand {
+                    guess: Some("TODAY".to_string()),
+                    divider_trace: RuntimeDividerTrace::new([0; 5]),
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unused Buena password divider tail must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("use Buena password divider trace has 1 unconsumed samples after 4 reads"),
             "{error}"
         );
         assert_eq!(state, before_stale);
@@ -4677,13 +5395,13 @@
                 &mut session,
                 RuntimeMutationCommand::UseBuenaPassword(RuntimeBuenaPasswordCommand {
                     guess: Some("TODAY".to_string()),
-                    rng_seed_after: preview.rng_seed,
+                    divider_trace: RuntimeDividerTrace::new([0; 4]),
                 }),
                 &audio_ids,
                 &audio_ids,
                 &audio_ids,
             )
-            .expect("Buena password command applies with exact RNG seed");
+            .expect("Buena password command applies with exact divider trace");
         let RuntimeMutationResult::BuenaPasswordUsed(special) = outcome.result else {
             panic!("expected Buena password result");
         };
@@ -4695,7 +5413,7 @@
                 correct: "TODAY".to_string(),
                 guess: Some("TODAY".to_string()),
                 matched: true,
-                rng_seed_after: preview.rng_seed,
+                random_state_after: CrystalRandomState::default(),
             }
         );
         assert_eq!(
@@ -4707,4 +5425,26 @@
             Some("TODAY")
         );
         assert!(!state.script_runtime.variables.contains_key("_buena_guess"));
+    }
+
+    #[test]
+    fn script_battle_result_accumulator_masks_only_capture_flags_and_keeps_win_loss_codes() {
+        for (raw_result, expected) in [(0x00, "0"), (0x01, "1"), (0x40, "0"), (0x81, "1")] {
+            let mut state = GameState {
+                battle_result: raw_result,
+                ..GameState::default()
+            };
+
+            set_script_battle_result_accumulator(&mut state);
+
+            assert_eq!(state.script_runtime.script_value.as_deref(), Some(expected));
+            assert_eq!(
+                state
+                    .script_runtime
+                    .variables
+                    .get("_value")
+                    .map(String::as_str),
+                Some(expected)
+            );
+        }
     }

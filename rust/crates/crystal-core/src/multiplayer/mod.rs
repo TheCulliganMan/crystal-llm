@@ -15,7 +15,7 @@ use crate::world::map::{Direction, TilePosition};
 
 pub type PlayerId = u64;
 pub type SessionId = String;
-pub const LINK_PROTOCOL_VERSION: u16 = 1;
+pub const LINK_PROTOCOL_VERSION: u16 = 2;
 pub const LINK_PREAMBLE_BYTE: u8 = 0x00;
 pub const LINK_PREAMBLE_RESPONSE: u8 = 0x61;
 const LINK_MESSAGE_MAGIC: &[u8; 12] = b"CRYSTALLINK\0";
@@ -3287,6 +3287,22 @@ pub enum InputJournalError {
     )]
     RuntimeCommandResultSessionMismatch { sequence: u64 },
     #[error(
+        "deterministic replay command sequence {actual} does not immediately follow {previous}"
+    )]
+    RuntimeCommandSequenceNotContiguous { previous: u64, actual: u64 },
+    #[error(
+        "deterministic replay has {results} command results for {commands} commands"
+    )]
+    RuntimeCommandResultCountMismatch { commands: usize, results: usize },
+    #[error(
+        "deterministic replay result at index {index} is for sequence {result_sequence}, expected command sequence {command_sequence}"
+    )]
+    RuntimeCommandResultRequestMismatch {
+        index: usize,
+        command_sequence: u64,
+        result_sequence: u64,
+    },
+    #[error(
         "deterministic replay command {sequence} expected frame {frame} is outside journal frames {start}..={terminal}"
     )]
     RuntimeCommandFrameOutsideJournal {
@@ -5077,6 +5093,45 @@ impl DeterministicReplayBundle {
                     frame,
                     start,
                     terminal,
+                });
+            }
+        }
+        if let Some(first) = self.runtime_commands.first() {
+            let actual = first.command().sequence();
+            if actual != 1 {
+                return Err(InputJournalError::RuntimeCommandSequenceNotContiguous {
+                    previous: 0,
+                    actual,
+                });
+            }
+        }
+        for commands in self.runtime_commands.windows(2) {
+            let previous = commands[0].command().sequence();
+            let actual = commands[1].command().sequence();
+            if previous.checked_add(1) != Some(actual) {
+                return Err(InputJournalError::RuntimeCommandSequenceNotContiguous {
+                    previous,
+                    actual,
+                });
+            }
+        }
+        if self.runtime_commands.len() != self.runtime_results.len() {
+            return Err(InputJournalError::RuntimeCommandResultCountMismatch {
+                commands: self.runtime_commands.len(),
+                results: self.runtime_results.len(),
+            });
+        }
+        for (index, (command, result)) in self
+            .runtime_commands
+            .iter()
+            .zip(&self.runtime_results)
+            .enumerate()
+        {
+            if result.result().request() != command.command() {
+                return Err(InputJournalError::RuntimeCommandResultRequestMismatch {
+                    index,
+                    command_sequence: command.command().sequence(),
+                    result_sequence: result.result().request().sequence(),
                 });
             }
         }
@@ -7942,7 +7997,7 @@ mod tests {
         let json = serde_json::to_string(&message).expect("serialize hello");
 
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":1"#));
+        assert!(json.contains(r#""protocol_version":2"#));
         assert!(json.contains(r#""id":"core-modular""#));
         assert_eq!(
             serde_json::from_str::<LinkMessage>(&json).expect("deserialize hello"),
@@ -7953,10 +8008,30 @@ mod tests {
 
     #[test]
     fn hello_json_deserialization_validates_exact_handshake_identity() {
-        let invalid_player = serde_json::from_value::<LinkMessage>(serde_json::json!({
+        let prior_protocol = serde_json::from_value::<LinkMessage>(serde_json::json!({
             "type": "hello",
             "session": {
                 "protocol_version": 1,
+                "session_id": "session-1",
+                "modpack": {
+                    "id": "core-modular",
+                    "hash": "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd"
+                },
+                "pack_content_hash": "0102030401020304010203040102030401020304010203040102030401020304"
+            },
+            "player": {
+                "id": 1,
+                "display_name": "P1"
+            }
+        }))
+        .expect_err("protocol v1 has no compatibility path under protocol v2")
+        .to_string();
+        assert!(prior_protocol.contains("protocol version 1"), "{prior_protocol}");
+
+        let invalid_player = serde_json::from_value::<LinkMessage>(serde_json::json!({
+            "type": "hello",
+            "session": {
+                "protocol_version": 2,
                 "session_id": "session-1",
                 "modpack": {
                     "id": "core-modular",
@@ -7979,7 +8054,7 @@ mod tests {
         let invalid_session = serde_json::from_value::<LinkMessage>(serde_json::json!({
             "type": "hello",
             "session": {
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "session_id": " legacy-session",
                 "modpack": {
                     "id": "core-modular",
@@ -8019,7 +8094,7 @@ mod tests {
         let nested_error = serde_json::from_value::<LinkMessage>(serde_json::json!({
             "type": "hello",
             "session": {
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "session_id": "session-1",
                 "modpack": {
                     "id": "core-modular",

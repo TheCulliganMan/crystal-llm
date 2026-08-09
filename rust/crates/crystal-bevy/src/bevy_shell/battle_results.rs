@@ -1,7 +1,7 @@
 fn finish_visible_inactive_battle_after_turn(
     runtime_shell: &mut BevyRuntimeShell,
     battle_before_turn: &crate::RuntimeBattleSnapshot,
-    scripted_static_wild: Option<(String, String)>,
+    scripted_static_wild: Option<VisibleStaticWildOrigin>,
     plain_reason: &str,
 ) -> Result<()> {
     if runtime_shell.shell.snapshot()?.battle.is_some() {
@@ -52,16 +52,19 @@ fn finish_visible_inactive_battle_after_turn(
         return resolve_visible_blackout(runtime_shell);
     }
     let player_name = runtime_shell.shell.snapshot()?.trainer.player_name;
-    queue_visible_pay_day_payout_for_battle(
-        runtime_shell,
-        battle_before_turn,
-        &player_name,
-    );
+    let base_result = runtime_shell.shell.session().state().battle_result & 0x3f;
+    if base_result == 0 {
+        queue_visible_pay_day_payout_for_battle(
+            runtime_shell,
+            battle_before_turn,
+            &player_name,
+        );
+    }
     reset_visible_battle_exit_state(runtime_shell);
     match &battle_before_turn.kind {
         RuntimeBattleKind::StaticWild { .. } => {
-            if let Some((map_name, source_script)) = scripted_static_wild {
-                complete_visible_scripted_wild_battle(runtime_shell, &map_name, &source_script)
+            if let Some(origin) = scripted_static_wild {
+                complete_visible_scripted_wild_battle(runtime_shell, &origin)
             } else {
                 restore_visible_overworld_after_battle_exit(runtime_shell, plain_reason)
             }
@@ -173,8 +176,15 @@ fn take_visible_next_script(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
         next.run.steps.len(),
         next.next_script.state_checksum
     ));
-    let reached_boundary = next.run.boundary.is_some()
-        || integrate_visible_compiled_script_run(runtime_shell, &next.run.steps)?;
+    // A compiled-script boundary only says that the core has paused.  Its
+    // mutations still need to be presented before returning: special routines
+    // such as PlayersHousePC create the menu boundary and the visible PC
+    // surface in the same step.  Short-circuiting here armed the following
+    // `iftrue` command without ever opening that surface, so the next frame
+    // closed the menu and the interaction appeared to do nothing.
+    let effects_reached_boundary =
+        integrate_visible_compiled_script_run(runtime_shell, &next.run.steps)?;
+    let reached_boundary = next.run.boundary.is_some() || effects_reached_boundary;
     arm_visible_active_script_cursor_from_run(runtime_shell, next.run.next_cursor);
     if reached_boundary {
         return Ok(());
@@ -953,7 +963,7 @@ fn integrate_visible_script_mutation_outcome(
         }
         RuntimeMutationResult::ScriptMovementApplied(movement) => {
             runtime_shell.last_audio_events.push(format!(
-                "script movement {} {} ({},{})->({},{}) steps={} facing={:?}",
+                "script movement {} {} ({},{})->({},{}) steps={} facing={:?} program={:?}",
                 movement.object_id,
                 movement.movement,
                 movement.previous_tile.x,
@@ -961,7 +971,8 @@ fn integrate_visible_script_mutation_outcome(
                 movement.tile.x,
                 movement.tile.y,
                 movement.steps_applied,
-                movement.facing
+                movement.facing,
+                movement.executed_steps
             ));
             let mut reported_visible_effect = false;
             for effect in &movement.effects {
@@ -1602,6 +1613,7 @@ fn activate_visible_special_routine_boundary(
             Ok(true)
         }
         SpecialRoutineEffect::PlayersHousePc { .. } => {
+            let player_name = runtime_shell.shell.snapshot()?.trainer.player_name;
             clear_visible_non_pc_surfaces(runtime_shell);
             runtime_shell.pc_hub_session_open = false;
             runtime_shell.pc_hub_cursor = None;
@@ -1618,6 +1630,7 @@ fn activate_visible_special_routine_boundary(
             runtime_shell.pc_item_action = None;
             runtime_shell.pc_item_quantity = None;
             runtime_shell.storage_cursor = None;
+            runtime_shell.field_notice = Some(format!("{player_name} turned on\nthe PC."));
             runtime_shell
                 .last_audio_events
                 .push("opened player's house PC".to_string());
@@ -2533,7 +2546,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             species,
             already_seen,
             script_value,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "RandomUnseenWildMon".to_string(),
             details: vec![
@@ -2542,7 +2555,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("species={}", species.as_deref().unwrap_or("-")),
                 format!("already_seen={already_seen}"),
                 format!("value={script_value}"),
-                format!("rng={rng_seed_after}"),
+                format!("random={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::RandomPhoneWildMon {
@@ -2550,7 +2563,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             map_name,
             time_of_day,
             species,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "RandomPhoneWildMon".to_string(),
             details: vec![
@@ -2558,7 +2571,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("map={map_name}"),
                 format!("time={time_of_day:?}"),
                 format!("species={species}"),
-                format!("rng={rng_seed_after}"),
+                format!("random={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::RandomPhoneMon {
@@ -2566,7 +2579,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             trainer_id,
             species,
             party_index,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "RandomPhoneMon".to_string(),
             details: vec![
@@ -2574,7 +2587,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("trainer={trainer_id}"),
                 format!("species={species}"),
                 format!("party_index={party_index}"),
-                format!("rng={rng_seed_after}"),
+                format!("random={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::ActivateFishingSwarm { value } => SpecialBoundaryDisplay {
@@ -2647,10 +2660,13 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
         },
         SpecialRoutineEffect::SampleKenjiBreakCountdown {
             value,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "SampleKenjiBreakCountdown".to_string(),
-            details: vec![format!("value={value}"), format!("rng={rng_seed_after}")],
+            details: vec![
+                format!("value={value}"),
+                format!("random={random_state_after:?}"),
+            ],
         },
         SpecialRoutineEffect::CheckLuckyNumberShowFlag { flag } => SpecialBoundaryDisplay {
             label: "CheckLuckyNumberShowFlag".to_string(),
@@ -2659,13 +2675,13 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
         SpecialRoutineEffect::ResetLuckyNumberShowFlag {
             lucky_number,
             lucky_number_day,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "ResetLuckyNumberShowFlag".to_string(),
             details: vec![
                 format!("number={lucky_number:05}"),
                 format!("day={lucky_number_day}"),
-                format!("rng={rng_seed_after}"),
+                format!("random={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::GsHealings { healings } => SpecialBoundaryDisplay {
@@ -2864,10 +2880,13 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
         },
         SpecialRoutineEffect::GiveShuckle {
             stored,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "GiveShuckle".to_string(),
-            details: vec![format!("stored={stored}"), format!("rng={rng_seed_after}")],
+            details: vec![
+                format!("stored={stored}"),
+                format!("rng={random_state_after:?}"),
+            ],
         },
         SpecialRoutineEffect::ReturnShuckie { party_slot, result } => SpecialBoundaryDisplay {
             label: "ReturnShuckie".to_string(),
@@ -2955,12 +2974,12 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
         },
         SpecialRoutineEffect::SelectRandomBugContestContestants {
             flags,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "SelectRandomBugContestContestants".to_string(),
             details: vec![
                 format!("flags={}", flags.join(",")),
-                format!("rng={rng_seed_after}"),
+                format!("random_state={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::ContestDropOffMons {
@@ -2988,7 +3007,11 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 ],
             }
         }
-        SpecialRoutineEffect::BugContestJudging { rank, placements } => SpecialBoundaryDisplay {
+        SpecialRoutineEffect::BugContestJudging {
+            rank,
+            placements,
+            random_state_after,
+        } => SpecialBoundaryDisplay {
             label: "BugContestJudging".to_string(),
             details: placements
                 .iter()
@@ -3007,6 +3030,9 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                     )
                 })
                 .chain(std::iter::once(format!("PLAYER RANK: {rank}")))
+                .chain(std::iter::once(format!(
+                    "random_state={random_state_after:?}"
+                )))
                 .collect(),
         },
         SpecialRoutineEffect::CheckMysteryGift { has_pending_item } => SpecialBoundaryDisplay {
@@ -3030,7 +3056,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             correct,
             guess,
             matched,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "BuenasPassword".to_string(),
             details: vec![
@@ -3039,7 +3065,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("correct={correct}"),
                 format!("guess={}", guess.as_deref().unwrap_or("-")),
                 format!("matched={matched}"),
-                format!("rng={rng_seed_after}"),
+                format!("rng={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::BuenaPrize {
@@ -3061,7 +3087,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             species,
             party_slot,
             shiny,
-            rng_seed_after,
+            random_state_after,
         } => SpecialBoundaryDisplay {
             label: "GiveOddEgg".to_string(),
             details: vec![
@@ -3069,7 +3095,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("species={species}"),
                 format!("party_slot={party_slot}"),
                 format!("shiny={shiny}"),
-                format!("rng={rng_seed_after}"),
+                format!("rng={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::UnownPrinter { unlocked } => SpecialBoundaryDisplay {
@@ -3081,7 +3107,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
             solved,
             moves,
             holding_piece,
-            rng_seed_after,
+            random_state_after,
             ..
         } => SpecialBoundaryDisplay {
             label: "UnownPuzzle".to_string(),
@@ -3090,7 +3116,7 @@ fn special_boundary_display(effect: &SpecialRoutineEffect) -> SpecialBoundaryDis
                 format!("solved={solved}"),
                 format!("moves={moves}"),
                 format!("holding={holding_piece:?}"),
-                format!("rng={rng_seed_after}"),
+                format!("random_state={random_state_after:?}"),
             ],
         },
         SpecialRoutineEffect::BankOfMom { money, moms_money, .. } => SpecialBoundaryDisplay {
@@ -3524,13 +3550,6 @@ fn dispatch_visible_overworld_interaction(
     // object and background events call PlayTalkObject, while the successful
     // tile-collision path converges on PlayClickSFX before script dispatch.
     queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
-    if matches!(
-        interaction.script.as_str(),
-        "StrengthBoulderScript" | "SmashRockScript"
-    ) && execute_visible_contextual_field_move(runtime_shell)?
-    {
-        return Ok(());
-    }
     record_visible_runtime_action(
         runtime_shell,
         format!(
@@ -3846,6 +3865,9 @@ fn settle_visible_overworld_arrival(
     runtime_shell: &mut BevyRuntimeShell,
     reason: &str,
 ) -> Result<()> {
+    if reason == "new_game" {
+        runtime_shell.shell.set_game_timer_counting(true)?;
+    }
     let connection_continuation = (reason == "map_connection").then(|| {
         (
             runtime_shell.overworld_held_direction,
@@ -4317,7 +4339,6 @@ fn reset_visible_selection_cursors(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.pending_field_notice_effect_frames = None;
     runtime_shell.visible_sweet_scent_delay = false;
-    runtime_shell.visible_rock_smash_target = None;
     runtime_shell.visible_cut_animation = None;
     runtime_shell.visible_whirlpool_animation = None;
     runtime_shell.visible_headbutt_animation = None;

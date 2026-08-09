@@ -933,6 +933,27 @@ describe("DataLoader menu asset loading", () => {
     expect(itemsMap.get("POTION")?.name).toBe("POTION");
   });
 
+  it("indexes items by their script constant instead of their display name", async () => {
+    jest.resetModules();
+    jest.spyOn(fs, "readFileSync").mockImplementation((pathLike, options) => {
+      const pathValue = String(pathLike);
+      if (pathValue.endsWith("items.json")) {
+        return JSON.stringify([
+          { ...ITEM_FIXTURE, name: "RED SCALE", script_name: "RED_SCALE" },
+        ]);
+      }
+      return REAL_READ_FILE_SYNC(pathLike, options as Parameters<typeof fs.readFileSync>[1]);
+    });
+
+    const { DataLoader, itemsMap } = await import("./data-loader");
+    const loader = new DataLoader();
+    loader.ensureMenuData();
+
+    expect(itemsMap.get("RED_SCALE")?.name).toBe("RED SCALE");
+    expect(loader.get_item("RED_SCALE")?.script_name).toBe("RED_SCALE");
+    expect(itemsMap.has("RED SCALE")).toBe(false);
+  });
+
   it("preserves definitive modpack move effect strings instead of enum-validating them", async () => {
     jest.resetModules();
     jest.doMock("./content-packs", () => {

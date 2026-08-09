@@ -640,6 +640,10 @@ pub struct DamageContext {
     /// Apply Crystal's pre-stage 12.5% badge boost to the selected defending stat.
     #[serde(default)]
     pub defender_badge_boost: bool,
+    /// Apply Crystal's 12.5% badge boost to damage after weather and before
+    /// STAB. The ROM adds at least one damage and saturates at 16 bits.
+    #[serde(default)]
+    pub attacker_type_badge_boost: bool,
     /// The original battler is Ditto holding Metal Powder. This cannot be
     /// inferred from the effective transformed Pokemon used for damage stats.
     #[serde(default)]
@@ -649,6 +653,11 @@ pub struct DamageContext {
     /// selected damage stats into the command's byte registers.
     #[serde(default)]
     pub defender_screen: bool,
+    /// `_BattleRandom` battles use `LINK_COLOSSEUM`; in that mode the ROM's
+    /// `TruncateHL_BC` returns after only one paired shift and exposes the low
+    /// bytes even when a stat remains wider than eight bits.
+    #[serde(default)]
+    pub link_colosseum: bool,
     /// Percentage added by a matching Gen II type-boosting held item. The ROM
     /// applies this to the post-division quotient before critical damage.
     #[serde(default)]
@@ -673,8 +682,10 @@ impl Default for DamageContext {
             random_roll: 255,
             attacker_badge_boost: false,
             defender_badge_boost: false,
+            attacker_type_badge_boost: false,
             defender_metal_powder: false,
             defender_screen: false,
+            link_colosseum: false,
             held_type_boost_percent: 0,
             pre_stab_multiplier: default_pre_stab_multiplier(),
             rage_counter: 0,
@@ -949,7 +960,7 @@ pub fn calculate_damage(
         defense_value = defense_value.wrapping_mul(2);
     }
     let (mut attack_value, mut defense_value) =
-        truncate_damage_stats(attack_value, defense_value);
+        truncate_damage_stats(attack_value, defense_value, context.link_colosseum);
     if context.defender_metal_powder
         || (defender.species.id == "DITTO" && defender.item.as_deref() == Some("METAL_POWDER"))
     {
@@ -984,6 +995,10 @@ pub fn calculate_damage(
         &move_data.move_type,
         weather_modifiers,
     )?;
+
+    if context.attacker_type_badge_boost {
+        damage = damage.saturating_add((damage / 8).max(1));
+    }
 
     if !context.is_confusion_damage
         && (move_data.move_type == attacker.species.type1
@@ -1033,10 +1048,20 @@ const fn default_pre_stab_multiplier() -> u8 {
     1
 }
 
-pub(crate) fn truncate_damage_stats(mut attack: u16, mut defense: u16) -> (u16, u16) {
+pub(crate) fn truncate_damage_stats(
+    mut attack: u16,
+    mut defense: u16,
+    link_colosseum: bool,
+) -> (u16, u16) {
     while attack > u16::from(u8::MAX) || defense > u16::from(u8::MAX) {
         attack = (attack >> 2).max(1);
         defense = (defense >> 2).max(1);
+        if link_colosseum {
+            // The link-only early return leaves the command's B/C byte
+            // registers authoritative. DamageCalc subsequently promotes a
+            // zero Defense byte to one, while a zero Attack byte stays zero.
+            return (attack & 0xff, (defense & 0xff).max(1));
+        }
     }
     (attack, defense)
 }
@@ -1085,17 +1110,19 @@ pub fn apply_weather_type_modifier(
             move_type: move_type.to_string(),
         });
     }
-    let Some(entry) = weather_modifiers
-        .type_modifiers
-        .get(weather_id)
-        .and_then(|modifiers| modifiers.get(move_type))
-    else {
+    let Some(modifiers) = weather_modifiers.type_modifiers.get(weather_id) else {
         return Err(DamageCalculationError::MissingWeatherModifier {
             weather,
             move_type: move_type.to_string(),
         });
     };
-    Ok(entry.apply_floor(damage))
+    // BattleCommand_DamageStats only branches for FIRE and WATER under rain
+    // or sun. Every other valid type retains the incoming damage unchanged;
+    // the sparse exported table represents those exceptional branches, not
+    // an exhaustive matrix requiring a synthetic ×1 entry for every type.
+    Ok(modifiers
+        .get(move_type)
+        .map_or(damage, |entry| entry.apply_floor(damage)))
 }
 
 fn distinct_defender_types(defender: &Pokemon) -> Vec<PokemonType> {
@@ -1842,6 +1869,20 @@ mod tests {
     }
 
     #[test]
+    fn weather_modifier_keeps_unlisted_valid_types_neutral() {
+        assert_eq!(
+            apply_weather_type_modifier(
+                40,
+                Weather::Sun,
+                pokemon_type("NORMAL"),
+                &weather_modifiers(),
+            )
+            .expect("ordinary types are neutral under sun"),
+            40
+        );
+    }
+
+    #[test]
     fn damage_applies_stab_type_multiplier_and_random_roll_deterministically() {
         let attacker = pokemon(
             "ATTACKER",
@@ -2111,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_defense_retains_gen_two_paired_stat_truncation() {
+    fn non_link_screen_defense_repeats_gen_two_paired_stat_truncation() {
         let attacker = pokemon(
             "ATTACKER",
             pokemon_type("NORMAL"),
@@ -2153,7 +2194,57 @@ mod tests {
         )
         .expect("damage with wrapped screen");
 
-        assert!(screened.damage > plain.damage);
+        assert!(screened.damage < plain.damage);
+    }
+
+    #[test]
+    fn link_colosseum_screen_exposes_the_single_shift_defense_wrap_bug() {
+        let attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 100, 78, 100, 80, 85),
+            50,
+        );
+        let mut defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 100, 80, 100, 100),
+            50,
+        );
+        defender.defense = 512;
+        let move_data = tackle(pokemon_type("NORMAL"), 60);
+
+        let ordinary = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                defender_screen: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("ordinary paired truncation");
+        let link = calculate_damage(
+            &attacker,
+            &defender,
+            &move_data,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext {
+                defender_screen: true,
+                link_colosseum: true,
+                ..DamageContext::default()
+            },
+        )
+        .expect("link single-shift truncation");
+
+        assert!(link.damage > ordinary.damage);
     }
 
     #[test]

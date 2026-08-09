@@ -126,17 +126,17 @@ pokecrystal-python/
 The generated data commands read from that checkout:
 
 ```bash
-npm run export:core
+./export
 node apps/web/scripts/prepare-public.js
 ```
 
-`npm run export:core` regenerates ASM-derived runtime data through the TypeScript exporter path. `node apps/web/scripts/prepare-public.js` exports runtime fallback assets, refreshes content-pack indexes, and regenerates the web and core asset manifest files required by the local runtime. `npm run audio:bundle --workspace @pokecrystal/web` compiles the disassembly audio sources into ignored browser MP3 files and manifests under `apps/web/assets/audio/`.
+`./export` builds the canonical `.crystalpack` through the Rust `crystal-assets` exporter. The export process does not invoke Node, npm, npx, or the TypeScript exporter. The launcher may be invoked by path from any working directory. `node apps/web/scripts/prepare-public.js` remains a separate web-development asset preparation command. `npm run audio:bundle --workspace @pokecrystal/web` compiles the disassembly audio sources into ignored browser MP3 files and manifests under `apps/web/assets/audio/`.
 
 Legacy root-level `pokecrystal_disassembly/` checkouts still work, but new clones should use `vendor/pokecrystal/`. If your `pret/pokecrystal` checkout lives outside this repo, leave it there and set:
 
 ```bash
 export POKECRYSTAL_DISASSEMBLY_ROOT=/absolute/path/to/pokecrystal
-npm run export:core
+./export
 ```
 
 ## Quick Start: TUI

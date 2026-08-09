@@ -1067,6 +1067,11 @@ fn consume_visible_runtime_flag_kind(
         // unskippable exactly as the old wStatusFlags value passed in B.
         let allow_skip = hall_of_fame.count > 1 || hall_of_fame.entries.len() > 1;
         open_visible_credits_screen(runtime_shell, allow_skip)?;
+        let credits = runtime_shell
+            .credits_screen
+            .as_mut()
+            .context("Hall of Fame credits did not open a credits screen")?;
+        credits.resume_game_timer_on_exit = true;
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
@@ -1225,71 +1230,6 @@ fn remove_visible_runtime_memory_entry(
     Ok(())
 }
 
-fn set_visible_clock_morning(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    update_visible_clock(runtime_shell, 6, 0, 0, "morning")
-}
-
-fn set_visible_clock_day(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    update_visible_clock(runtime_shell, 12, 0, 0, "day")
-}
-
-fn set_visible_clock_night(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    update_visible_clock(runtime_shell, 22, 0, 0, "night")
-}
-
-fn set_visible_manual_clock_evening(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    record_visible_runtime_action(
-        runtime_shell,
-        "clock:manual:evening:2000-01-01:6:00:00:0:20:30:0",
-    )?;
-    let update = runtime_shell.shell.set_manual_clock_time(
-        GameDate::new(2000, 1, 1),
-        6,
-        0,
-        0,
-        ClockTime::new(0, 20, 30, 0),
-    )?;
-    runtime_shell.last_audio_events.push(format!(
-        "manual clock evening tod={:?} day={} game={}:{} checksum={:?}",
-        update.time_of_day,
-        update.day_of_week,
-        update.game_time_hours,
-        update.game_time_minutes,
-        update.state_checksum
-    ));
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    Ok(())
-}
-
-fn update_visible_clock(
-    runtime_shell: &mut BevyRuntimeShell,
-    hour: u8,
-    minute: u8,
-    second: u8,
-    label: &str,
-) -> Result<()> {
-    record_visible_runtime_action(
-        runtime_shell,
-        format!("clock:update:{label}:2000-01-02:{hour:02}:{minute:02}:{second:02}"),
-    )?;
-    let update = runtime_shell.shell.update_clock_from_datetime(
-        GameDate::new(2000, 1, 2),
-        hour,
-        minute,
-        second,
-    )?;
-    runtime_shell.last_audio_events.push(format!(
-        "clock {label} tod={:?} day={} game={}:{} checksum={:?}",
-        update.time_of_day,
-        update.day_of_week,
-        update.game_time_hours,
-        update.game_time_minutes,
-        update.state_checksum
-    ));
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    Ok(())
-}
-
 fn initialize_visible_phone_numbers(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     record_visible_runtime_action(runtime_shell, "phone:init_permanent_numbers")?;
     let initialized = runtime_shell.shell.initialize_permanent_phone_numbers()?;
@@ -1321,6 +1261,7 @@ fn apply_selected_phone_command(runtime_shell: &mut BevyRuntimeShell) -> Result<
         command.command_index,
     )?;
     let applied = runtime_shell.shell.apply_compiled_script_command(
+        &command.map_name,
         &command.source_script,
         command.command_index,
         runtime_inputs,
@@ -1761,7 +1702,9 @@ fn apply_selected_compiled_script_command(
         explicit_compiled_script_runtime_inputs(runtime_shell, source_script, command_index)?;
     let phone_inputs =
         explicit_compiled_script_phone_inputs(runtime_shell, source_script, command_index);
+    let origin_map_name = runtime_shell.shell.current_map_name().to_string();
     runtime_shell.shell.apply_compiled_script_command(
+        &origin_map_name,
         source_script,
         command_index,
         runtime_inputs,
@@ -2055,6 +1998,7 @@ fn apply_selected_runtime_command_named(
         command.command_index,
     )?;
     let applied = runtime_shell.shell.apply_compiled_script_command(
+        &command.map_name,
         &command.source_script,
         command.command_index,
         runtime_inputs,
@@ -2190,42 +2134,37 @@ fn use_visible_day_care(
 }
 
 fn bug_contest_give_park_balls(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::GiveParkBalls, None)
+    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::GiveParkBalls)
 }
 
 fn bug_contest_select_contestants(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    use_visible_bug_contest(
-        runtime_shell,
-        RuntimeBugContestAction::SelectContestants,
-        None,
-    )
+    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::SelectContestants)
 }
 
 fn bug_contest_drop_off_mons(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::DropOffMons, None)
+    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::DropOffMons)
 }
 
 fn bug_contest_return_mons(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::ReturnMons, None)
+    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::ReturnMons)
 }
 
 fn bug_contest_check_party_full(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::CheckPartyFull, None)
+    use_visible_bug_contest(runtime_shell, RuntimeBugContestAction::CheckPartyFull)
 }
 
 fn use_visible_bug_contest(
     runtime_shell: &mut BevyRuntimeShell,
     action: RuntimeBugContestAction,
-    rank: Option<u8>,
 ) -> Result<()> {
     record_visible_runtime_action(
         runtime_shell,
-        format!("special:bug_contest:{action:?}:{rank:?}"),
+        format!("special:bug_contest:{action:?}"),
     )?;
-    let used = runtime_shell.shell.use_bug_contest(action, rank)?;
+    let used = runtime_shell.shell.use_bug_contest(action)?;
     runtime_shell.last_audio_events.push(format!(
-        "bug contest action={:?} rank={:?} outcome={:?} checksum={:?}",
-        action, rank, used.outcome.effect, used.state_checksum
+        "bug contest action={:?} outcome={:?} checksum={:?}",
+        action, used.outcome.effect, used.state_checksum
     ));
     activate_visible_special_boundary_if_needed(runtime_shell, &used.outcome.effect)?;
     Ok(())
@@ -3163,6 +3102,21 @@ fn use_selected_rare_candy(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             .last_audio_events
             .push(format!("rare candy pending move learn {}", learned.name));
     }
+    let source_name = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == party_index)
+        .map(|slot| slot.pokemon.nickname.clone())
+        .context("Rare Candy target disappeared from the pre-use party snapshot")?;
+    let evolution_result = used.item_effect.evolution_target.as_ref().map(|target_species| {
+        let evolving_message = format!("What? {source_name} is evolving!");
+        let evolved_message = format!(
+            "Congratulations! {source_name} evolved into {}!",
+            crate::core::models::pokemon_species_display_name(target_species)
+        );
+        (target_species.clone(), evolving_message, evolved_message)
+    });
     set_shell_action_status(
         runtime_shell,
         if used.item_effect.pending_move_learns.is_empty() {
@@ -3188,15 +3142,33 @@ fn use_selected_rare_candy(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     close_visible_field_pack_without_log(runtime_shell);
     runtime_shell.field_notice = Some(format!(
         "{} grew to level {}!",
-        snapshot
-            .party
-            .slots
-            .iter()
-            .find(|slot| slot.index == party_index)
-            .map(|slot| slot.pokemon.nickname.as_str())
-            .context("Rare Candy target disappeared from the pre-use party snapshot")?,
+        source_name,
         used.item_effect.level_after
     ));
+    if let Some((target_species, evolving_message, evolved_message)) = evolution_result {
+        runtime_shell
+            .field_notice_queue
+            .push_back(evolving_message.clone());
+        runtime_shell
+            .field_notice_queue
+            .push_back(evolved_message.clone());
+        if let Some(cancel_snapshot) = used.item_effect.evolution_cancel_snapshot.clone() {
+            runtime_shell.field_evolution_cancellation = Some(VisibleEvolutionCancellation {
+                party_index,
+                trigger_message: evolving_message,
+                evolved_message,
+                pending_move_messages: Vec::new(),
+                report: EvolutionReport {
+                    target_species: Some(target_species),
+                    events: vec![crate::core::systems::evolution::EvolutionEvent::Text(
+                        "EvolvingText",
+                    )],
+                    pending_move_learns: used.item_effect.pending_move_learns.clone(),
+                    cancel_snapshot: Some(cancel_snapshot),
+                },
+            });
+        }
+    }
     mark_runtime_snapshot_dirty(runtime_shell);
     if runtime_shell.shell.snapshot()?.pending_move_learn.is_none() {
         continue_visible_script_after_prompt(runtime_shell)?;

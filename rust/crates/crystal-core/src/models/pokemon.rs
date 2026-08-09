@@ -1009,11 +1009,8 @@ pub fn calculate_stat(
 ) -> Option<u16> {
     let base = base_stats.for_stat(stat)?;
     let dv = dvs.for_stat(stat)? as u16;
-    let mut exp_modifier = isqrt(stat_exp as u32).min(255) / 4;
-    if stat == Stat::Hp && stat_exp == u16::MAX {
-        exp_modifier += 1;
-    }
-    let interim_value = (base + dv) * 2 + exp_modifier as u16;
+    let exp_modifier = stat_exp_square_root(stat_exp) / 4;
+    let interim_value = (base + dv) * 2 + exp_modifier;
     let main_stat_component = (interim_value * level as u16) / 100;
     if stat == Stat::Hp {
         Some(main_stat_component + level as u16 + 10)
@@ -1102,6 +1099,13 @@ pub fn isqrt(n: u32) -> u32 {
         x += 1;
     }
     x
+}
+
+fn stat_exp_square_root(stat_exp: u16) -> u16 {
+    let stat_exp = u32::from(stat_exp);
+    let floor = isqrt(stat_exp);
+    let ceiling = floor + u32::from(floor * floor < stat_exp);
+    ceiling.min(255) as u16
 }
 
 #[cfg(test)]
@@ -1481,11 +1485,19 @@ mod tests {
     }
 
     #[test]
-    fn hp_stat_exp_uses_gen_two_max_exp_adjustment() {
+    fn stat_exp_uses_capped_ceiling_square_root() {
+        let species = chikorita();
+        let dvs = Dv::from_non_hp(15, 15, 15, 15);
+        let attack = calculate_stat(species.base_stats, 100, dvs, 10, Stat::Attack);
+        assert_eq!(attack, Some(134));
+    }
+
+    #[test]
+    fn max_stat_exp_uses_the_same_capped_modifier_for_hp() {
         let species = chikorita();
         let dvs = Dv::from_non_hp(15, 15, 15, 15);
         let maxed = calculate_stat(species.base_stats, 100, dvs, u16::MAX, Stat::Hp);
-        assert_eq!(maxed, Some(294));
+        assert_eq!(maxed, Some(293));
     }
 
     #[test]

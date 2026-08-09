@@ -23,6 +23,8 @@ fn prepare_visible_battle_entry_with_music_reset(
     runtime_shell.field_text_reveal = None;
     runtime_shell.battle_fanfare_messages.clear();
     runtime_shell.battle_evolution_cries.clear();
+    runtime_shell.battle_evolution_cancellations.clear();
+    runtime_shell.field_evolution_cancellation = None;
     runtime_shell.battle_sounds_after_messages.clear();
     runtime_shell.battle_message_scenes.clear();
     runtime_shell.battle_entry_messages_remaining = 0;
@@ -120,6 +122,11 @@ fn prepare_visible_battle_entry_with_music_reset(
                     }
                 }
             }
+            // Entry narration is already a retained battle presentation.
+            // Keep the exact battle-start snapshot behind those messages so
+            // the renderer never falls back to an absent scene (a blank/error
+            // frame) before the first text page is acknowledged.
+            runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
             if battle.battle_type == "BATTLETYPE_TUTORIAL" {
                 let actions = visible_battle_action_ids(&snapshot, battle);
                 if let Some(option_index) = actions
@@ -236,22 +243,47 @@ fn spawn_visible_battle_transition(
         return;
     }
 
-    let between_frames = match (transition.cave_environment, transition.stronger_enemy) {
-        (true, true) => 1,
-        _ => 2,
-    };
+    let (between_frames, outro_frames) =
+        match (transition.cave_environment, transition.stronger_enemy) {
+            (true, false) => (2, 15),
+            (true, true) => (1, 9),
+            (false, false) => (2, 61),
+            (false, true) => (2, 21),
+        };
     if effect_frame < flash_frames + between_frames {
         return;
     }
     let outro = effect_frame - flash_frames - between_frames;
+    if outro >= outro_frames {
+        // DoBattleTransition finishes by blacking every BG palette and holding
+        // that complete frame before battle setup takes over. Keep this as an
+        // explicit surface instead of retaining the final (sometimes partial)
+        // outro geometry beneath the white battle canvas handoff.
+        commands.spawn((
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::BLACK,
+                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(0.0, 0.0, 2.76),
+                ..default()
+            },
+            BattleCommandMarker,
+        ));
+        return;
+    }
+    // `outro == 0` is already the first call of the selected effect state:
+    // NextScene and the optional setup state are accounted for above.  Drive
+    // every effect from the one-based number of source calls that have run so
+    // the first mutation is visible and the final source mutation is not
+    // replaced prematurely by the terminal-black hold.
+    let effect_step = outro.saturating_add(1);
     match (transition.cave_environment, transition.stronger_enemy) {
         (true, true) => {
             // StartTrainerBattle_ZoomToBlack writes nine centered boxes in
             // one BG-map update apiece: 4x2 through the full 20x18 LCD.
-            let boxes = outro.min(9);
-            if boxes == 0 {
-                return;
-            }
+            let boxes = effect_step.min(9);
             let width_tiles = 2 + boxes * 2;
             let height_tiles = boxes * 2;
             commands.spawn((
@@ -264,7 +296,9 @@ fn spawn_visible_battle_transition(
                         )),
                         ..default()
                     },
-                    transform: Transform::from_xyz(-TILE_SIZE * 0.5, TILE_SIZE * 0.5, 2.7),
+                    // Tile (0, 0) now begins at the LCD edge, so the growing
+                    // even-sized box is centered on the camera itself.
+                    transform: Transform::from_xyz(0.0, 0.0, 2.7),
                     ..default()
                 },
                 BattleCommandMarker,
@@ -275,7 +309,7 @@ fn spawn_visible_battle_transition(
             // each of sixteen frames, then holds for three frames. Reproduce
             // the TypeScript transition's seed-zero LCG and rejection of
             // tiles already black in the trainer Poké Ball mask.
-            let calls = outro.min(16) * 12;
+            let calls = effect_step.min(16) * 12;
             let mut black = [false; 20 * 18];
             if transition.trainer_battle {
                 for y in 0..18 {
@@ -309,80 +343,94 @@ fn spawn_visible_battle_transition(
             // SpinToBlack has twenty wedge entries, each held for two LCD
             // delay frames after each write. The twentieth entry therefore
             // remains current for the source terminal hold as well.
-            let wedge_count = ((outro + 2) / 3).min(20);
+            let wedge_count = ((effect_step + 2) / 3).min(20);
             for wedge_index in 0..wedge_count {
                 spawn_visible_battle_transition_wedge(commands, wedge_index);
             }
         }
         (true, false) => {
-            // TypeScript samples the widened transition surface in two-line
-            // strips. The retained Bevy viewport is the equivalent complete
-            // source surface here; drawing every strip above the unsliced map
-            // prevents the old fabricated black curtain from leaking through.
+            // The retained Bevy viewport is the complete source surface. Draw
+            // every native scanline independently and wrap it like the Game
+            // Boy BG map when the transition changes SCX.
             if let Some(texture) = viewport_texture {
-                let mut counter = 0_u16;
-                let mut offset = 0_u16;
-                let mut amplitude = 0_u16;
-                for _ in 0..outro {
+                let mut counter = 0_u8;
+                let mut offset = 0_u8;
+                let mut amplitude = 0_u8;
+                for _ in 0..effect_step {
                     amplitude = counter;
+                    let previous_offset = offset;
                     offset = offset.wrapping_add(1);
-                    counter = counter.wrapping_add(offset);
+                    // StartTrainerBattle_SineWave increments the offset byte
+                    // in memory while A still contains its previous value;
+                    // that old value is what the counter adds this frame.
+                    counter = counter.wrapping_add(previous_offset);
                 }
-                let amplitude = (usize::from(amplitude) / 2 + 2).clamp(1, 12) as f32;
-                let phase_base = f32::from(offset & 0x3f) * std::f32::consts::PI / 32.0;
-                for source_y in (0..144).step_by(2) {
-                    let phase = phase_base + source_y as f32 * std::f32::consts::PI / 128.0;
-                    let shift = (phase.sin() * amplitude).trunc();
-                    commands.spawn((
-                        SpriteBundle {
-                            texture: texture.clone(),
-                            sprite: Sprite {
-                                rect: Some(Rect::new(
-                                    0.0,
-                                    source_y as f32 * (TILE_SIZE / 8.0),
-                                    PLAYFIELD_WIDTH,
-                                    (source_y as f32 + 2.0) * (TILE_SIZE / 8.0),
-                                )),
-                                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, TILE_SIZE / 4.0)),
-                                ..default()
-                            },
-                            transform: Transform::from_xyz(
-                                -TILE_SIZE * 0.5 + shift * (TILE_SIZE / 8.0),
-                                PLAYFIELD_TOP + TILE_SIZE * 0.375
-                                    - source_y as f32 * (TILE_SIZE / 8.0),
-                                2.65,
-                            ),
-                            ..default()
-                        },
-                        BattleCommandMarker,
-                    ));
-                    if let Some(priority) = priority_texture.as_ref() {
+                let source_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+                for source_y in 0..TITLE_SCREEN_HEIGHT {
+                    // The LCD override loop feeds angles 0, 2, 4, ... to
+                    // calc_sine_wave for successive scanlines. Each Bevy strip
+                    // is one native scanline and uses the raw counter amplitude.
+                    let angle = (source_y as u8).wrapping_mul(2);
+                    let shift = visible_battle_anim_sine(angle, amplitude) as f32;
+                    let shift = shift * source_scale;
+                    let wrap_shift = if shift > 0.0 {
+                        Some(shift - PLAYFIELD_WIDTH)
+                    } else if shift < 0.0 {
+                        Some(shift + PLAYFIELD_WIDTH)
+                    } else {
+                        None
+                    };
+                    for x in std::iter::once(shift).chain(wrap_shift) {
                         commands.spawn((
                             SpriteBundle {
-                                texture: priority.clone(),
+                                texture: texture.clone(),
                                 sprite: Sprite {
                                     rect: Some(Rect::new(
                                         0.0,
-                                        source_y as f32 * (TILE_SIZE / 8.0),
+                                        source_y as f32 * source_scale,
                                         PLAYFIELD_WIDTH,
-                                        (source_y as f32 + 2.0) * (TILE_SIZE / 8.0),
+                                        (source_y as f32 + 1.0) * source_scale,
                                     )),
-                                    custom_size: Some(Vec2::new(
-                                        PLAYFIELD_WIDTH,
-                                        TILE_SIZE / 4.0,
-                                    )),
+                                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, source_scale)),
                                     ..default()
                                 },
                                 transform: Transform::from_xyz(
-                                    -TILE_SIZE * 0.5 + shift * (TILE_SIZE / 8.0),
-                                    PLAYFIELD_TOP + TILE_SIZE * 0.375
-                                        - source_y as f32 * (TILE_SIZE / 8.0),
-                                    2.66,
+                                    x,
+                                    PLAYFIELD_TOP
+                                        - (source_y as f32 + 0.5) * source_scale,
+                                    2.65,
                                 ),
                                 ..default()
                             },
                             BattleCommandMarker,
                         ));
+                    }
+                    if let Some(priority) = priority_texture.as_ref() {
+                        for x in std::iter::once(shift).chain(wrap_shift) {
+                            commands.spawn((
+                                SpriteBundle {
+                                    texture: priority.clone(),
+                                    sprite: Sprite {
+                                        rect: Some(Rect::new(
+                                            0.0,
+                                            source_y as f32 * source_scale,
+                                            PLAYFIELD_WIDTH,
+                                            (source_y as f32 + 1.0) * source_scale,
+                                        )),
+                                        custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, source_scale)),
+                                        ..default()
+                                    },
+                                    transform: Transform::from_xyz(
+                                        x,
+                                        PLAYFIELD_TOP
+                                            - (source_y as f32 + 0.5) * source_scale,
+                                        2.66,
+                                    ),
+                                    ..default()
+                                },
+                                BattleCommandMarker,
+                            ));
+                        }
                     }
                 }
             }
@@ -391,6 +439,7 @@ fn spawn_visible_battle_transition(
 }
 
 fn spawn_visible_battle_transition_black_tile(commands: &mut Commands, x: usize, y: usize) {
+    let (tile_x, tile_y) = render_tile_playfield_position(x as i16, y as i16);
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
@@ -398,11 +447,7 @@ fn spawn_visible_battle_transition_black_tile(commands: &mut Commands, x: usize,
                 custom_size: Some(Vec2::splat(TILE_SIZE)),
                 ..default()
             },
-            transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + x as f32 * TILE_SIZE,
-                PLAYFIELD_TOP - y as f32 * TILE_SIZE,
-                2.7,
-            ),
+            transform: Transform::from_xyz(tile_x, tile_y, 2.7),
             ..default()
         },
         BattleCommandMarker,
@@ -437,6 +482,8 @@ fn spawn_visible_battle_transition_wedge(commands: &mut Commands, wedge_index: u
         let row_start_x = x;
         for _ in 0..width {
             if (0..20).contains(&x) && (0..18).contains(&y) {
+                let (tile_x, tile_y) =
+                    render_tile_playfield_position(i16::from(x), i16::from(y));
                 commands.spawn((
                     SpriteBundle {
                         sprite: Sprite {
@@ -444,11 +491,7 @@ fn spawn_visible_battle_transition_wedge(commands: &mut Commands, wedge_index: u
                             custom_size: Some(Vec2::splat(TILE_SIZE)),
                             ..default()
                         },
-                        transform: Transform::from_xyz(
-                            PLAYFIELD_LEFT + f32::from(x) * TILE_SIZE,
-                            PLAYFIELD_TOP - f32::from(y) * TILE_SIZE,
-                            2.7,
-                        ),
+                        transform: Transform::from_xyz(tile_x, tile_y, 2.7),
                         ..default()
                     },
                     BattleCommandMarker,
@@ -1565,6 +1608,8 @@ fn visible_retained_save_resume_replay_bundle(
         terminal_checksum,
     )
     .context("build retained deterministic replay bundle")?;
+    crate::validate_deterministic_replay_runtime_authority(&replay, LOCAL_PLAYER_ID)
+        .context("validate retained runtime replay command authority")?;
     SaveResumeReplayBundle::new(checkpoint, replay)
         .context("build retained save-resume replay bundle")
 }
@@ -5644,7 +5689,6 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pending_field_battle_entry.hash(&mut hasher);
     runtime_shell.pending_field_notice_effect_frames.hash(&mut hasher);
     runtime_shell.visible_sweet_scent_delay.hash(&mut hasher);
-    runtime_shell.visible_rock_smash_target.hash(&mut hasher);
     runtime_shell.visible_cut_animation.hash(&mut hasher);
     runtime_shell.visible_whirlpool_animation.hash(&mut hasher);
     runtime_shell.visible_headbutt_animation.hash(&mut hasher);
@@ -5750,6 +5794,31 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.battle_messages.hash(&mut hasher);
     runtime_shell.battle_fanfare_messages.hash(&mut hasher);
     runtime_shell.battle_evolution_cries.hash(&mut hasher);
+    for cancellation in &runtime_shell.battle_evolution_cancellations {
+        cancellation.party_index.hash(&mut hasher);
+        cancellation.trigger_message.hash(&mut hasher);
+        cancellation.evolved_message.hash(&mut hasher);
+        cancellation.pending_move_messages.hash(&mut hasher);
+        cancellation.report.target_species.hash(&mut hasher);
+        cancellation
+            .report
+            .cancel_snapshot
+            .as_ref()
+            .map(|pokemon| (&pokemon.species.id, pokemon.level, pokemon.item.as_deref()))
+            .hash(&mut hasher);
+    }
+    runtime_shell
+        .field_evolution_cancellation
+        .as_ref()
+        .map(|cancellation| {
+            (
+                cancellation.party_index,
+                cancellation.trigger_message.as_str(),
+                cancellation.evolved_message.as_str(),
+                cancellation.report.target_species.as_deref(),
+            )
+        })
+        .hash(&mut hasher);
     runtime_shell.battle_sounds_after_messages.hash(&mut hasher);
     runtime_shell.battle_hp_tween.hash(&mut hasher);
     runtime_shell.battle_exp_tween.hash(&mut hasher);
@@ -5877,6 +5946,7 @@ fn battle_animated_shell_render_key(
 fn overworld_render_world_key(snapshot: &RuntimeShellSnapshot) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     snapshot.overworld.map_name.hash(&mut hasher);
+    visible_map_block_identity(snapshot).hash(&mut hasher);
     snapshot.overworld.tile.hash(&mut hasher);
     snapshot.overworld.facing.hash(&mut hasher);
     snapshot.trainer.player_gender.hash(&mut hasher);
@@ -5898,6 +5968,117 @@ fn overworld_render_world_key(snapshot: &RuntimeShellSnapshot) -> u64 {
         facing.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Hash the authoritative blocks that can contribute pixels to the current
+/// viewport. Besides the active map, connection targets can be visible across
+/// an outdoor seam. Script `changeblock` commands and CUT/WHIRLPOOL replace
+/// these rows at runtime, so treating them as immutable leaves retained 2D
+/// surfaces stale after the gameplay state has already committed the change.
+fn visible_map_block_identity(snapshot: &RuntimeShellSnapshot) -> u64 {
+    visible_map_block_identity_from_catalog(&snapshot.overworld.map_name, &snapshot.maps)
+}
+
+fn visible_map_block_identity_from_catalog(
+    active_map_name: &str,
+    maps: &[crate::RuntimeMapCatalogSnapshot],
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    active_map_name.hash(&mut hasher);
+    let active = maps
+        .iter()
+        .find(|map| map.map_name == active_map_name);
+    active.map(|map| map.blocks.as_slice()).hash(&mut hasher);
+    if let Some(active) = active {
+        for connection in &active.attributes.connections {
+            connection.target_map.hash(&mut hasher);
+            maps
+                .iter()
+                .find(|map| map.map_name == connection.target_map)
+                .map(|map| map.blocks.as_slice())
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod visible_map_block_identity_tests {
+    use super::*;
+
+    fn map_snapshot(
+        map_name: &str,
+        blocks: Vec<u16>,
+        connections: Vec<crystal_core::map::MapConnection>,
+    ) -> crate::RuntimeMapCatalogSnapshot {
+        crate::RuntimeMapCatalogSnapshot {
+            map_name: map_name.to_string(),
+            id: map_name.to_string(),
+            attributes: crystal_core::map::MapAttributes {
+                tileset_name: "test".to_string(),
+                border_block: 0,
+                width: u16::try_from(blocks.len()).expect("test map width"),
+                height: 1,
+                connections,
+                time_of_day: None,
+                phone_service: 0,
+                phone_flag: false,
+                environment: Some("route".to_string()),
+                location: None,
+                music: None,
+                palette: None,
+                fishing_group: None,
+                map_constant: None,
+                map_group_constant: None,
+                blocks_label: None,
+                map_scripts_label: None,
+                map_events_label: None,
+                connection_flags: None,
+            },
+            metadata: None,
+            scenes: crystal_core::map::MapSceneTable::default(),
+            events: crystal_core::map::MapEvents::default(),
+            objects: Vec::new(),
+            blocks,
+        }
+    }
+
+    #[test]
+    fn visible_block_identity_tracks_active_and_connected_runtime_writes() {
+        let connection = crystal_core::map::MapConnection {
+            direction: "east".to_string(),
+            target_map: "Neighbor".to_string(),
+            offset: 0,
+        };
+        let baseline = vec![
+            map_snapshot("Active", vec![1, 2], vec![connection.clone()]),
+            map_snapshot("Neighbor", vec![3, 4], Vec::new()),
+            map_snapshot("Hidden", vec![5, 6], Vec::new()),
+        ];
+        let baseline_key = visible_map_block_identity_from_catalog("Active", &baseline);
+
+        let mut active_changed = baseline.clone();
+        active_changed[0].blocks[1] = 7;
+        assert_ne!(
+            baseline_key,
+            visible_map_block_identity_from_catalog("Active", &active_changed)
+        );
+
+        let mut neighbor_changed = baseline.clone();
+        neighbor_changed[1].blocks[0] = 8;
+        assert_ne!(
+            baseline_key,
+            visible_map_block_identity_from_catalog("Active", &neighbor_changed)
+        );
+
+        let mut hidden_changed = baseline;
+        hidden_changed[2].blocks[0] = 9;
+        assert_eq!(
+            baseline_key,
+            visible_map_block_identity_from_catalog("Active", &hidden_changed),
+            "an unrelated offscreen map must not invalidate the retained viewport"
+        );
+    }
 }
 
 fn overworld_render_position_key(snapshot: &RuntimeShellSnapshot) -> u64 {
@@ -6016,7 +6197,8 @@ fn update_overworld_sprite_positions(
             }
         },
     );
-    player_transform.translation.z = overworld_entity_depth(player_depth_tile, None);
+    player_transform.translation.z =
+        overworld_entity_depth(player_depth_tile, None, (start_x, start_y));
     if visible_ledge_jump.is_some()
         && let Ok((mut shadow_transform, shadow_sprite)) = ledge_shadows.get_single_mut()
     {
@@ -6025,7 +6207,7 @@ fn update_overworld_sprite_positions(
             player_y + camera_offset.y - player_size.y * 0.5
                 + shadow_sprite.custom_size.map_or(0.0, |size| size.y * 0.5);
         shadow_transform.translation.z =
-            overworld_entity_depth(player_depth_tile, None) - 0.000_001;
+            overworld_entity_depth(player_depth_tile, None, (start_x, start_y)) - 0.000_001;
     }
 
     let expected_visible_object_count = snapshot
@@ -6135,19 +6317,13 @@ fn update_overworld_sprite_positions(
                 return false;
             }
             if remaining > 0 {
-                let target = (
-                    PLAYFIELD_LEFT + f32::from(view_x) * TILE_SIZE,
-                    PLAYFIELD_TOP - f32::from(view_y) * TILE_SIZE,
-                );
+                let target = render_tile_playfield_position(view_x, view_y);
                 let Some((from_view_x, from_view_y)) =
                     runtime_event_view_tile(from, start_x, start_y)
                 else {
                     return false;
                 };
-                let from = (
-                    PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
-                    PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
-                );
+                let from = render_tile_playfield_position(from_view_x, from_view_y);
                 let total = f32::from(total_ticks);
                 let progress = (total - f32::from(remaining)) / total;
                 overworld_sprite_position_from_base(
@@ -6170,7 +6346,11 @@ fn update_overworld_sprite_positions(
         transform.translation.z = if rendered_object.above_priority {
             2.41
         } else {
-            overworld_entity_depth(object_tile, Some(source_object_slot))
+            overworld_entity_depth(
+                object_tile,
+                Some(source_object_slot),
+                (start_x, start_y),
+            )
         };
     }
     true
@@ -6180,7 +6360,11 @@ fn update_overworld_sprite_positions(
 /// then lower object slots on top. The player uses the sentinel largest slot,
 /// so an NPC wins an otherwise exact tie. Keep each subordinate component
 /// smaller than one unit of the preceding component.
-fn overworld_entity_depth(tile: TilePosition, object_index: Option<usize>) -> f32 {
+fn overworld_entity_depth(
+    tile: TilePosition,
+    object_index: Option<usize>,
+    viewport_origin: (i16, i16),
+) -> f32 {
     const Y_UNIT: f32 = 0.01;
     const X_UNIT: f32 = 0.000_01;
     const OBJECT_PRIORITY_UNIT: f32 = 0.000_000_3;
@@ -6190,7 +6374,15 @@ fn overworld_entity_depth(tile: TilePosition, object_index: Option<usize>) -> f3
         .map(|index| OBJECT_SLOT_LIMIT.saturating_sub(index.min(OBJECT_SLOT_LIMIT)) as f32)
         .unwrap_or(0.0)
         * OBJECT_PRIORITY_UNIT;
-    1.0 + f32::from(tile.y) * Y_UNIT + f32::from(tile.x) * X_UNIT + object_priority
+    // Only relative on-LCD position participates in OAM sorting. Absolute map
+    // rows made ordinary actors on tall stock maps exceed the priority-layer
+    // z=2.4 and draw through roofs. Clamp to the one-tile movement margin so
+    // even an entering/leaving actor remains strictly below priority tiles.
+    let column = (i32::from(tile.x) - i32::from(viewport_origin.0))
+        .clamp(-1, i32::from(VIEWPORT_TILES_X));
+    let row = (i32::from(tile.y) - i32::from(viewport_origin.1))
+        .clamp(-1, i32::from(VIEWPORT_TILES_Y));
+    1.0 + row as f32 * Y_UNIT + column as f32 * X_UNIT + object_priority
 }
 
 fn connection_composite_viewport_origin(
@@ -6332,7 +6524,7 @@ fn visible_object_indices_above_priority(
                 .checked_mul(usize::from(map.attributes.width))?
                 .checked_add(block_x)?;
             let block = *map.blocks.get(block_index)?;
-            let collision = tileset.collision.get(&block.to_string())?;
+            let collision = tileset_collision_tokens(tileset, block)?;
             let quadrant = usize::try_from(tile.y.rem_euclid(stride)).ok()?
                 .checked_mul(2)?
                 .checked_add(usize::try_from(tile.x.rem_euclid(stride)).ok()?)?;
@@ -6443,10 +6635,7 @@ fn visible_player_playfield_position_for_duration(
     // not apply the static-object visibility clamp to that retained origin:
     // Crystal scrolls the player in from offscreen over the complete step.
     let (from_view_x, from_view_y) = runtime_event_view_tile(from, start_x, start_y)?;
-    let from = (
-        PLAYFIELD_LEFT + f32::from(from_view_x) * TILE_SIZE,
-        PLAYFIELD_TOP - f32::from(from_view_y) * TILE_SIZE,
-    );
+    let from = render_tile_playfield_position(from_view_x, from_view_y);
     let total_frames = total_frames.max(1);
     let progress = f32::from(total_frames.saturating_sub(frames_remaining.min(total_frames)))
         / f32::from(total_frames);
@@ -6500,23 +6689,10 @@ fn spawn_visible_intro_screen(
             error
         )
     })?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                // The composed image is the native 160x144 LCD viewport.
-                // Keep its 10:9 aspect at the shell's four-times integer
-                // scale; using a square here distorted the intro horizontally
-                // and left black side columns between frames.
-                custom_size: Some(visible_intro_display_size()),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 1.0),
-            ..default()
-        },
-        TitleScreenMarker,
-        VisibleIntroSurface,
-    ));
+    // `intro_scene_frame_for_art_with_bundle` has already committed the pixels
+    // into the shell-wide retained LCD allocation. Only create its presenter
+    // when entering a full-screen sequence from the overworld.
+    ensure_presented_fullscreen_entity(commands, rendered_art, &frame, PRESENTED_FULLSCREEN_BASE_Z);
     Ok(())
 }
 
@@ -6538,34 +6714,26 @@ fn spawn_title_screen(
             rendered_art,
             images,
         )?;
-        commands.spawn((
-            SpriteBundle {
-                texture: frame.handle,
-                sprite: Sprite {
-                    custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(0.0, 0.0, 0.9),
-                ..default()
-            },
-            TitleScreenMarker,
-        ));
+        commit_presented_fullscreen_frame(
+            commands,
+            rendered_art,
+            &frame,
+            PresentedFullscreenFrameSource::Transient,
+            PRESENTED_FULLSCREEN_BASE_Z,
+            images,
+        )?;
         return Ok(());
     }
     if visible_title_main_menu_ready(title) {
         let frame = load_visible_title_main_menu_frame(runtime_shell, title, rendered_art, images)?;
-        commands.spawn((
-            SpriteBundle {
-                texture: frame.handle,
-                sprite: Sprite {
-                    custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(0.0, 0.0, 0.9),
-                ..default()
-            },
-            TitleScreenMarker,
-        ));
+        commit_presented_fullscreen_frame(
+            commands,
+            rendered_art,
+            &frame,
+            PresentedFullscreenFrameSource::Transient,
+            PRESENTED_FULLSCREEN_BASE_Z,
+            images,
+        )?;
         return Ok(());
     }
     let frame = title_screen_frame_for_art(rendered_art, &runtime_shell.asset_root, title, images)
@@ -6578,18 +6746,14 @@ fn spawn_title_screen(
                 .unwrap_or_else(|| "unknown title screen art load error".to_string());
             anyhow::anyhow!("required native title screen art could not be rendered: {error}")
         })?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * (TILE_SIZE / SOURCE_TILE_SIZE as f32)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 0.9),
-            ..default()
-        },
-        TitleScreenMarker,
-    ));
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        PRESENTED_FULLSCREEN_BASE_Z,
+        images,
+    )?;
     if runtime_debug_overlays_enabled() {
         let boot = runtime_shell.runtime.boot_summary();
         commands.spawn((

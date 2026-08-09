@@ -83,7 +83,12 @@ describe("exportTrainers", () => {
         ].join("\n") as never;
       }
       if (file.endsWith(path.join("data", "trainers", "attributes.asm"))) {
-        return "	db 4 ; base reward\n" as never;
+        return [
+          "	db POTION, NO_ITEM ; items",
+          "	db 4 ; base reward",
+          "	dw AI_BASIC | AI_STATUS",
+          "	dw CONTEXT_USE | SWITCH_SOMETIMES",
+        ].join("\n") as never;
       }
       throw new Error(`unexpected read ${file}`);
     });
@@ -104,6 +109,9 @@ describe("exportTrainers", () => {
         trainer_id: "YOUNGSTER_JOEY",
         trainer_class: "YOUNGSTER",
         base_reward: 4,
+        items: ["POTION", null],
+        ai_move_flags: (1 << 0) | (1 << 8),
+        ai_item_switch_flags: (1 << 6) | (1 << 2),
         encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER",
         party: [expect.objectContaining({ species: expect.objectContaining({ id: "CHIKORITA" }) })],
       }),

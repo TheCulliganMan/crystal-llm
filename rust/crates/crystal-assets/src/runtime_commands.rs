@@ -923,6 +923,8 @@ pub struct OverworldInputFrame {
     pub ledge_jump: Option<LedgeJumpOutcome>,
     #[serde(default)]
     pub grass_rustle: Option<OverworldGrassRustle>,
+    #[serde(default)]
+    pub phone_call: Option<IncomingPhoneCall>,
     pub step_events: Option<StepEventResult>,
     pub coord_event: Option<CoordEventTrigger>,
     pub trainer_sight: Option<OverworldInteraction>,
@@ -931,6 +933,23 @@ pub struct OverworldInputFrame {
     pub connection: Option<ConnectionTransition>,
     pub wild_encounter: Option<WildEncounterRoll>,
     pub wild_battle: Option<WildBattleStart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum IncomingPhoneCallKind {
+    Ordinary,
+    Special { call_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomingPhoneCall {
+    pub kind: IncomingPhoneCallKind,
+    pub contact_id: String,
+    pub caller_script: String,
+    pub receive_script: String,
+    pub delay_frames: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,7 +998,7 @@ pub struct GameDataSet {
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
     pub buena_password_categories: BuenaPasswordCategories,
-    pub roaming_pokemon: RoamingPokemonDefinitions,
+    pub roaming_pokemon: RoamingPokemonCatalog,
     pub buena_prizes: BuenaPrizeDefinitions,
     pub kurt_apricorn_recipes: KurtApricornRecipes,
     #[serde(deserialize_with = "required_nullable_value")]
@@ -1022,9 +1041,12 @@ pub struct GameDataSet {
     pub npcs: BTreeMap<String, Value>,
     pub pokegear_landmarks: PokegearLandmarksPayload,
     pub trainers: TrainerCatalog,
+    pub trainer_class_names: BTreeMap<String, String>,
     pub pokedex: Vec<Value>,
     pub story_events: Vec<Value>,
     pub phone_scripts: Vec<Value>,
+    #[serde(deserialize_with = "required_nullable_value")]
+    pub global_scripts: Option<GlobalScriptModule>,
     pub phone_contacts: PhoneContactCatalog,
     pub permanent_phone_numbers: BTreeMap<String, PermanentPhoneNumberRule>,
     pub special_phone_calls: BTreeMap<String, SpecialPhoneCallRule>,
@@ -1215,25 +1237,10 @@ pub struct RuntimeFlyCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeFieldEncounterCommand {
+pub struct RuntimeHeadbuttFieldEncounterCommand {
     pub party_index: usize,
-    pub player_id: Option<u16>,
-    pub surface: Option<EncounterSurface>,
+    pub player_id: u16,
     pub rng_seed_after: u32,
-}
-
-fn reject_field_encounter_surface(routine: &str, surface: Option<EncounterSurface>) -> Result<()> {
-    if surface.is_some() {
-        anyhow::bail!("{routine} field move command must not declare surface");
-    }
-    Ok(())
-}
-
-fn reject_field_encounter_player_id(routine: &str, player_id: Option<u16>) -> Result<()> {
-    if player_id.is_some() {
-        anyhow::bail!("{routine} field move command must not declare player_id");
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1269,12 +1276,14 @@ pub struct RuntimeBattleItemCommand {
 pub struct RuntimeCaptureCompletionCommand {
     pub outcome: CaptureOutcome,
     pub nickname: Option<String>,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeOverworldInputCommand {
     pub buttons: Vec<GameButton>,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1303,10 +1312,90 @@ pub struct RuntimePartyPokemonCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeDividerTrace {
+    pub samples: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSweetScentFieldMoveCommand {
+    pub party_index: usize,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+impl RuntimeDividerTrace {
+    pub fn new(samples: impl IntoIterator<Item = u8>) -> Self {
+        Self {
+            samples: samples.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRockMonEncounterCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeScriptedWildBattleStartCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeStaticWildBattleOrigin {
+    pub map_name: String,
+    pub source_script: String,
+    pub startbattle_command_index: usize,
+    pub resume_command_index: usize,
+    pub battle_type: String,
+    pub species: String,
+    pub level: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeScriptedWildBattleTerminal {
+    /// Exact persisted `wBattleResult`, including caught/box-full flag bits.
+    pub battle_result: u8,
+    /// Whether the base-WIN-only Pay Day/Pokerus cleanup already ran before
+    /// the source cursor was resumed.
+    pub win_cleanup_applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRockSmashMenuOutcome {
+    pub party_index: usize,
+    pub object_identifier: String,
+    pub next_script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRandomSpecialRoutineCommand {
+    pub routine: String,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeScriptedWildBattleCompletionCommand {
+    pub origin: RuntimeStaticWildBattleOrigin,
+    pub terminal: RuntimeScriptedWildBattleTerminal,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeTrainerBattleCompletionCommand {
     pub command: RuntimeScriptCommandRef,
     pub won: bool,
     pub can_lose: bool,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1323,6 +1412,7 @@ pub struct RuntimeClockUpdateCommand {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1333,6 +1423,36 @@ pub struct RuntimeManualClockCommand {
     pub now_minute: u8,
     pub now_second: u8,
     pub target: ClockTime,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGameTimerAdvanceCommand {
+    pub vblanks: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGameTimerCountingCommand {
+    pub counting: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGameLogicPauseCommand {
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeGameTimerOutcome {
+    pub counted: bool,
+    pub counting: bool,
+    pub logic_paused: bool,
+    pub hours: u16,
+    pub minutes: u8,
+    pub seconds: u8,
+    pub frames: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1410,6 +1530,31 @@ pub enum RuntimeLinkBattleResult {
 pub enum RuntimeGameCornerService {
     SlotMachine,
     CardFlip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGameCornerCommand {
+    pub service: RuntimeGameCornerService,
+    pub divider_trace: Option<RuntimeDividerTrace>,
+}
+
+fn runtime_game_corner_divider_trace(
+    command: &RuntimeGameCornerCommand,
+) -> Result<Option<&RuntimeDividerTrace>> {
+    match command.service {
+        RuntimeGameCornerService::CardFlip => command
+            .divider_trace
+            .as_ref()
+            .map(Some)
+            .with_context(|| "Card Flip command requires divider_trace"),
+        RuntimeGameCornerService::SlotMachine => {
+            if command.divider_trace.is_some() {
+                anyhow::bail!("Slot Machine command must not declare divider_trace");
+            }
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1619,28 +1764,20 @@ fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBugContestCommand {
     pub action: RuntimeBugContestAction,
-    pub rank: Option<u8>,
-    pub rng_seed_after: Option<u32>,
+    pub divider_trace: Option<RuntimeDividerTrace>,
 }
 
-fn runtime_bug_contest_rank(command: &RuntimeBugContestCommand) -> Result<Option<u8>> {
-    if command.rank.is_some() {
-        anyhow::bail!(
-            "Bug Contest {} command must not declare rank",
-            runtime_bug_contest_action_name(command.action)
-        );
-    }
-    Ok(None)
-}
-
-fn runtime_bug_contest_rng_seed_after(command: &RuntimeBugContestCommand) -> Result<Option<u32>> {
+fn runtime_bug_contest_divider_trace(
+    command: &RuntimeBugContestCommand,
+) -> Result<Option<&RuntimeDividerTrace>> {
     match command.action {
         RuntimeBugContestAction::SelectContestants | RuntimeBugContestAction::Judge => command
-            .rng_seed_after
+            .divider_trace
+            .as_ref()
             .map(Some)
             .with_context(|| {
                 format!(
-                    "Bug Contest {} command requires rng_seed_after",
+                    "Bug Contest {} command requires divider_trace",
                     runtime_bug_contest_action_name(command.action)
                 )
             }),
@@ -1648,9 +1785,9 @@ fn runtime_bug_contest_rng_seed_after(command: &RuntimeBugContestCommand) -> Res
         | RuntimeBugContestAction::DropOffMons
         | RuntimeBugContestAction::ReturnMons
         | RuntimeBugContestAction::CheckPartyFull => {
-            if command.rng_seed_after.is_some() {
+            if command.divider_trace.is_some() {
                 anyhow::bail!(
-                    "Bug Contest {} command must not declare rng_seed_after",
+                    "Bug Contest {} command must not declare divider_trace",
                     runtime_bug_contest_action_name(command.action)
                 );
             }
@@ -1681,7 +1818,7 @@ pub struct RuntimeKurtApricornCommand {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBuenaPasswordCommand {
     pub guess: Option<String>,
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1696,7 +1833,7 @@ pub struct RuntimeBuenaPrizeCommand {
 pub struct RuntimeShuckieCommand {
     pub action: RuntimeShuckieAction,
     pub party_index: Option<usize>,
-    pub rng_seed_after: Option<u32>,
+    pub divider_trace: Option<RuntimeDividerTrace>,
 }
 
 fn runtime_shuckie_party_slot(command: &RuntimeShuckieCommand) -> Result<Option<usize>> {
@@ -1711,15 +1848,18 @@ fn runtime_shuckie_party_slot(command: &RuntimeShuckieCommand) -> Result<Option<
     }
 }
 
-fn runtime_shuckie_rng_seed_after(command: &RuntimeShuckieCommand) -> Result<Option<u32>> {
+fn runtime_shuckie_divider_trace(
+    command: &RuntimeShuckieCommand,
+) -> Result<Option<&RuntimeDividerTrace>> {
     match command.action {
         RuntimeShuckieAction::Give => command
-            .rng_seed_after
+            .divider_trace
+            .as_ref()
             .map(Some)
-            .with_context(|| "Shuckie give command requires rng_seed_after"),
+            .with_context(|| "Shuckie give command requires divider_trace"),
         RuntimeShuckieAction::Return => {
-            if command.rng_seed_after.is_some() {
-                anyhow::bail!("Shuckie return command must not declare rng_seed_after");
+            if command.divider_trace.is_some() {
+                anyhow::bail!("Shuckie return command must not declare divider_trace");
             }
             Ok(None)
         }
@@ -1735,7 +1875,7 @@ pub struct RuntimeGiveDratiniCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeOddEggCommand {
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1798,6 +1938,7 @@ pub struct RuntimeLinkBattleRecordCommand {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLinkFriendReadyCommand {
     pub ready: bool,
+    pub serial_connection_status: LinkSerialConnectionStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1805,6 +1946,7 @@ pub struct RuntimeLinkFriendReadyCommand {
 pub struct RuntimeLinkTimeoutCommand {
     pub timeout: bool,
     pub other_player_link_mode: u8,
+    pub serial_connection_status: LinkSerialConnectionStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2012,7 +2154,7 @@ pub struct RuntimePcBagItemCheckCommand {
 pub struct RuntimePhoneCallerCommand {
     pub special: RuntimePhoneRandomSpecial,
     pub contact_id: String,
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2116,6 +2258,7 @@ pub struct RuntimeBattleTowerOpponentCommand {
     pub trainer_id: String,
     pub sprite_constant: String,
     pub target_object: String,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2183,10 +2326,6 @@ pub enum RuntimeMutationCommand {
         command: RuntimeScriptCommandRef,
         inputs: ScriptRuntimeInputs,
     },
-    ApplyStandardScript {
-        origin_map_name: String,
-        script: String,
-    },
     TakeNextScript,
     DrainScriptEventQueue(RuntimeScriptEventDrainCommand),
     DrainScriptRuntimeQueue(RuntimeScriptRuntimeQueueDrainCommand),
@@ -2215,16 +2354,16 @@ pub enum RuntimeMutationCommand {
         routine: String,
         rng_seed_after: Option<u32>,
     },
+    ApplyRandomSpecialRoutine(RuntimeRandomSpecialRoutineCommand),
     ResolveBugContestCaughtMon {
         keep_new: bool,
     },
     GrantScriptedGiftPokemon(RuntimeGiftPokemonCommand),
     AddPartyPokemon(RuntimePartyPokemonCommand),
-    StartScriptedWildBattle(RuntimeScriptCommandRef),
+    StartScriptedWildBattle(RuntimeScriptedWildBattleStartCommand),
     StartScriptedTrainerBattle(RuntimeScriptCommandRef),
-    CompleteScriptedWildBattle(RuntimeScriptCommandRef),
+    CompleteScriptedWildBattle(RuntimeScriptedWildBattleCompletionCommand),
     CompleteScriptedTrainerBattle(RuntimeTrainerBattleCompletionCommand),
-    ApplyScriptedTrainerBattleCompletionEffects(RuntimeScriptCommandRef),
     UseBagItem {
         item_id: String,
         context: ItemUseContext,
@@ -2251,9 +2390,10 @@ pub enum RuntimeMutationCommand {
     UseFlyFieldMove(RuntimeFlyCommand),
     UseDigFieldMove(RuntimeFieldPartyCommand),
     UseTeleportFieldMove(RuntimeFieldPartyCommand),
-    UseHeadbuttFieldMove(RuntimeFieldEncounterCommand),
-    UseRockSmashFieldMove(RuntimeFieldPartyCommand),
-    UseSweetScentFieldMove(RuntimeFieldEncounterCommand),
+    UseHeadbuttFieldMove(RuntimeHeadbuttFieldEncounterCommand),
+    QueueRockSmashFromMenu(RuntimeFieldPartyCommand),
+    ResolveRockMonEncounter(RuntimeRockMonEncounterCommand),
+    UseSweetScentFieldMove(RuntimeSweetScentFieldMoveCommand),
     UseBagItemOnPartyPokemon(RuntimePartyItemCommand),
     UseBagItemOnWholeParty(RuntimeItemCommand),
     UseBagItemOnPartyMove(RuntimePartyMoveItemCommand),
@@ -2272,11 +2412,14 @@ pub enum RuntimeMutationCommand {
     UseBagGuardSpecInActiveBattle(RuntimeItemCommand),
     AdvanceActiveTrainerBattle,
     ClaimActiveTrainerBattleRewardsNow,
-    ClaimActiveWildBattleRewardsNow,
+    ClaimActiveWildBattleRewardsNow(RuntimeDividerTrace),
     CastFishingRod {
         rod: String,
     },
     UseBagFishingRodInField(RuntimeItemCommand),
+    AdvanceGameTimerVBlanks(RuntimeGameTimerAdvanceCommand),
+    SetGameTimerCounting(RuntimeGameTimerCountingCommand),
+    SetGameLogicPaused(RuntimeGameLogicPauseCommand),
     UpdateClockFromDatetime(RuntimeClockUpdateCommand),
     SetManualClockTime(RuntimeManualClockCommand),
     ApplyScriptSwarm(RuntimeScriptCommandRef),
@@ -2329,7 +2472,7 @@ pub enum RuntimeMutationCommand {
     SeePartyPokemonSpecial(RuntimePartySlotCommand),
     TeachPartyMoveSpecial(RuntimeMoveTutorCommand),
     OpenBankOfMomSpecial,
-    OpenGameCornerSpecial(RuntimeGameCornerService),
+    OpenGameCornerSpecial(RuntimeGameCornerCommand),
     OpenDisplayLinkRecordSpecial,
     OpenTrainerHouseSpecial,
     OpenPhotoStudioSpecial(RuntimePartySlotCommand),
@@ -2702,7 +2845,7 @@ pub enum RuntimeScriptRuntimeMemoryEntryRemoved {
     PhoneNumber { key: String },
 }
 
-pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v1";
+pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v5";
 
 pub fn encode_runtime_mutation_command_payload(
     command: &RuntimeMutationCommand,
@@ -3014,491 +3157,84 @@ fn take_party_pokemon_compact(state: &mut GameState, party_index: usize) -> Resu
     Ok(pokemon)
 }
 
-fn apply_standard_script(
-    state: &mut GameState,
-    _moves: &BTreeMap<String, Move>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandardScriptExecutionPath {
+    CommonInterpreter,
+}
+
+fn standard_script_execution_path(
     script: &str,
     compiled_body: &[Value],
-) -> Result<String> {
-    if let Some(text_label) = terminal_standard_text_label(script, compiled_body)? {
-        return apply_standard_text_script(state, script, text_label);
+) -> Result<StandardScriptExecutionPath> {
+    if compiled_body.is_empty() {
+        anyhow::bail!("compiled standard script {script} has an empty command body");
     }
-    match script {
-        "TVScript" => apply_standard_text_script(state, script, "TVText"),
-        "ReceiveTogepiEggScript" => {
-            apply_standard_text_audio_script(state, script, "ReceivedItemText", "SFX_GET_EGG")
+    for (command_index, command) in compiled_body.iter().enumerate() {
+        let command_name = command
+            .get("command")
+            .and_then(Value::as_str)
+            .with_context(|| {
+                format!(
+                    "compiled standard script {script} command {command_index} has no command name"
+                )
+            })?;
+        if !standard_script_common_command_supported(command_name) {
+            anyhow::bail!(
+                "compiled standard script {script} has no executable runtime path: command {command_index} '{command_name}' is unsupported by the common interpreter"
+            );
         }
-        "GoldenrodRocketsScript" => {
-            state
-                .flags
-                .set_event_flag("EVENT_GOLDENROD_CITY_ROCKET_TAKEOVER", false)
-                .map_err(|error| anyhow::anyhow!("clear Goldenrod Rocket event: {error}"))?;
-            Ok("GoldenrodRocketsScript".to_string())
-        }
-        "RadioTowerRocketsScript" => {
-            for (flag, value) in [
-                ("ENGINE_ROCKETS_IN_RADIO_TOWER", true),
-                ("EVENT_GOLDENROD_CITY_CIVILIANS", true),
-                ("EVENT_RADIO_TOWER_BLACKBELT_BLOCKS_STAIRS", true),
-                ("EVENT_RADIO_TOWER_ROCKET_TAKEOVER", false),
-                ("EVENT_USED_THE_CARD_KEY_IN_THE_RADIO_TOWER", false),
-                ("EVENT_MAHOGANY_TOWN_POKEFAN_M_BLOCKS_EAST", true),
-            ] {
-                if flag.starts_with("ENGINE_") {
-                    state.flags.set_engine_flag(flag, value).map_err(|error| {
-                        anyhow::anyhow!("set Rocket engine flag {flag}: {error}")
-                    })?;
-                } else {
-                    state.flags.set_event_flag(flag, value).map_err(|error| {
-                        anyhow::anyhow!("set Rocket event flag {flag}: {error}")
-                    })?;
-                }
-            }
-            state
-                .script_runtime
-                .special_phone_calls
-                .push("SPECIALCALL_WEIRDBROADCAST".to_string());
-            Ok("RadioTowerRocketsScript".to_string())
-        }
-        "DayToTextScript" => {
-            let days = [
-                "SUNDAY",
-                "MONDAY",
-                "TUESDAY",
-                "WEDNESDAY",
-                "THURSDAY",
-                "FRIDAY",
-                "SATURDAY",
-            ];
-            let weekday = state
-                .script_runtime
-                .variables
-                .get("VAR_WEEKDAY")
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(i64::from(state.time.day_of_week));
-            let day = days[weekday.rem_euclid(days.len() as i64) as usize];
-            state
-                .script_runtime
-                .named_buffers
-                .insert("STRING_BUFFER_3".to_string(), day.to_string());
-            Ok(day.to_string())
-        }
-        "GymStatue1Script" => apply_standard_text_script(state, script, "GymStatue_CityGymText"),
-        "GymStatue2Script" => {
-            state.script_runtime.text_window_open = true;
-            for (command_index, (text_label, closes_text)) in [
-                ("GymStatue_CityGymText", false),
-                ("GymStatue_WinningTrainersText", true),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                state
-                    .script_runtime
-                    .text_events
-                    .push(ScriptTextRuntimeEvent {
-                        command: "farwritetext".to_string(),
-                        kind: ScriptTextRuntimeKind::Write,
-                        text_label: Some(text_label.to_string()),
-                        face_player: false,
-                        closes_text,
-                        source_script: script.to_string(),
-                        command_index,
-                    });
-            }
-            state.script_runtime.pending_text_wait = Some(ScriptTextWait {
-                command: "farwritetext".to_string(),
-                source_script: script.to_string(),
-                command_index: 1,
-            });
-            Ok("GymStatue_WinningTrainersText".to_string())
-        }
-        "ElevatorButtonScript" => {
-            for (index, audio_id) in ["SFX_READ_TEXT_2", "SFX_ELEVATOR_END"]
-                .into_iter()
-                .enumerate()
-            {
-                state
-                    .script_runtime
-                    .audio_events
-                    .push(ScriptAudioRuntimeEvent {
-                        command: "playsound".to_string(),
-                        kind: ScriptAudioRuntimeKind::SoundEffect,
-                        audio_id: Some(audio_id.to_string()),
-                        fade_frames: None,
-                        source_script: script.to_string(),
-                        command_index: index,
-                    });
-            }
-            Ok("ElevatorButtonScript".to_string())
-        }
-        "StrengthBoulderScript" => {
-            apply_standard_yes_no_text_script(state, script, "AskStrengthText")
-        }
-        "SmashRockScript" => {
-            apply_standard_yes_no_text_script(state, script, "AskRockSmashText")
-        }
-        "AskNumber1MScript" | "AskNumber1FScript" => {
-            apply_standard_phone_text_script(state, script, "AskNumber1Text")
-        }
-        "AskNumber2MScript" | "AskNumber2FScript" => {
-            apply_standard_phone_text_script(state, script, "AskNumber2Text")
-        }
-        "NumberAcceptedMScript" | "NumberAcceptedFScript" => {
-            apply_standard_phone_text_script(state, script, "NumberAcceptedText")
-        }
-        "NumberDeclinedMScript" | "NumberDeclinedFScript" => {
-            apply_standard_phone_text_script(state, script, "NumberDeclinedText")
-        }
-        "PhoneFullMScript" | "PhoneFullFScript" => {
-            apply_standard_phone_text_script(state, script, "PhoneFullText")
-        }
-        "RematchMScript" | "RematchFScript" => {
-            apply_standard_phone_text_script(state, script, "RematchText")
-        }
-        "GiftMScript" | "GiftFScript" => {
-            apply_standard_phone_text_script(state, script, "GiftText")
-        }
-        "PackFullMScript" | "PackFullFScript" => {
-            apply_standard_phone_text_script(state, script, "PackFullText")
-        }
-        "RematchGiftMScript" | "RematchGiftFScript" => {
-            apply_standard_phone_text_script(state, script, "RematchGiftText")
-        }
-        "RegisteredNumberMScript" => apply_registered_number_script(
-            state,
-            script,
-            "RegisteredNumber1Text",
-        ),
-        "RegisteredNumberFScript" => apply_registered_number_script(
-            state,
-            script,
-            "RegisteredNumber2Text",
-        ),
-        "HappinessCheckScript" => {
-            let pokemon = state
-                .storage
-                .party
-                .pokemon
-                .iter()
-                .flatten()
-                .find(|pokemon| {
-                    !pokemon.is_egg
-                        && pokemon.species.id != "EGG"
-                })
-                .context("HappinessCheckScript requires at least one non-Egg party Pokémon")?;
-            let happiness = pokemon.happiness;
-            let species = pokemon.species.id.clone();
-            let nickname = if pokemon.nickname.is_empty() {
-                species.clone()
-            } else {
-                pokemon.nickname.clone()
-            };
-            state
-                .script_runtime
-                .named_buffers
-                .insert("STRING_BUFFER_3".to_string(), nickname);
-            state
-                .script_runtime
-                .variables
-                .insert("wCurPartySpecies".to_string(), species);
-            state.script_runtime.script_value = Some(happiness.to_string());
-            state
-                .script_runtime
-                .variables
-                .insert("_value".to_string(), happiness.to_string());
-            let label = if happiness < 50 {
-                "HappinessText1"
-            } else if happiness < 150 {
-                "HappinessText2"
-            } else {
-                "HappinessText3"
-            };
-            apply_standard_text_script(state, script, label)
-        }
-        "GameCornerCoinVendorScript" => {
-            let has_coin_case = state
-                .bag
-                .key_items
-                .get("COIN_CASE")
-                .copied()
-                .unwrap_or_default()
-                > 0;
-            state.script_runtime.text_window_open = true;
-            if !has_coin_case {
-                return apply_standard_text_script(state, script, "CoinVendor_NoCoinCaseText");
-            }
-            state
-                .script_runtime
-                .text_events
-                .push(ScriptTextRuntimeEvent {
-                    command: "standard_farjumptext".to_string(),
-                    kind: ScriptTextRuntimeKind::Write,
-                    text_label: Some("CoinVendor_WelcomeText".to_string()),
-                    face_player: true,
-                    closes_text: false,
-                    source_script: script.to_string(),
-                    command_index: 0,
-                });
-            state
-                .script_runtime
-                .text_events
-                .push(ScriptTextRuntimeEvent {
-                    command: "standard_farjumptext".to_string(),
-                    kind: ScriptTextRuntimeKind::Write,
-                    text_label: Some("CoinVendor_IntroText".to_string()),
-                    face_player: true,
-                    closes_text: false,
-                    source_script: script.to_string(),
-                    command_index: 1,
-                });
-            state.script_runtime.pending_yes_no = Some(ScriptYesNoPrompt {
-                source_script: script.to_string(),
-                command_index: 2,
-            });
-            Ok("CoinVendor_IntroText".to_string())
-        }
-        "ReceiveItemScript" => {
-            let item_name = state
-                .script_runtime
-                .named_buffers
-                .get("STRING_BUFFER_4")
-                .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
-                .filter(|value| !value.is_empty())
-                .context(
-                    "ReceiveItemScript requires STRING_BUFFER_4 to contain the received item name",
-                )?;
-            let player_name = if state.player_name.is_empty() {
-                "PLAYER".to_string()
-            } else {
-                state.player_name.clone()
-            };
-            state.script_runtime.text_window_open = true;
-            state
-                .script_runtime
-                .audio_events
-                .push(ScriptAudioRuntimeEvent {
-                    command: "standard_receive_item".to_string(),
-                    kind: ScriptAudioRuntimeKind::SoundEffect,
-                    audio_id: Some("SFX_ITEM".to_string()),
-                    fade_frames: None,
-                    source_script: script.to_string(),
-                    command_index: 0,
-                });
-            state
-                .script_runtime
-                .text_events
-                .push(ScriptTextRuntimeEvent {
-                    command: "standard_receive_item".to_string(),
-                    kind: ScriptTextRuntimeKind::Write,
-                    text_label: None,
-                    face_player: false,
-                    closes_text: true,
-                    source_script: script.to_string(),
-                    command_index: 0,
-                });
-            state.script_runtime.pending_text_wait = Some(ScriptTextWait {
-                command: "standard_receive_item".to_string(),
-                source_script: script.to_string(),
-                command_index: 0,
-            });
-            Ok(format!("{player_name} received\n{item_name}."))
-        }
-        "PokecenterNurseScript" => {
-            let greeting = match state.time.time_of_day {
-                TimeOfDay::Morning => "NurseMornText",
-                TimeOfDay::Day => "NurseDayText",
-                TimeOfDay::Night => "NurseNiteText",
-            };
-            state.script_runtime.text_window_open = true;
-            state.script_runtime.text_events.push(ScriptTextRuntimeEvent {
-                command: "farwritetext".to_string(),
-                kind: ScriptTextRuntimeKind::Write,
-                text_label: Some(greeting.to_string()),
-                face_player: true,
-                closes_text: false,
-                source_script: script.to_string(),
-                command_index: 0,
-            });
-            // The promptbutton boundary is resolved below into NurseAskHealText.
-            // Healing must not happen until the player actually answers YES.
-            state.script_runtime.pending_text_wait = Some(ScriptTextWait {
-                command: "pokecenter_greeting".to_string(),
-                source_script: script.to_string(),
-                command_index: 0,
-            });
-            Ok(greeting.to_string())
-        }
-        other => anyhow::bail!("unsupported standard script {other}"),
     }
+    Ok(StandardScriptExecutionPath::CommonInterpreter)
 }
 
-fn terminal_standard_text_label<'a>(
-    script: &str,
-    compiled_body: &'a [Value],
-) -> Result<Option<&'a str>> {
-    if compiled_body.len() != 1 {
-        return Ok(None);
-    }
-    let command = &compiled_body[0];
-    if command.get("command").and_then(Value::as_str) != Some("farjumptext") {
-        return Ok(None);
-    }
-    let args = command
-        .get("args")
-        .and_then(Value::as_array)
-        .with_context(|| {
-            format!("compiled standard script {script} farjumptext args are not an array")
-        })?;
-    if args.len() != 1 {
-        anyhow::bail!(
-            "compiled standard script {script} farjumptext requires exactly one argument, found {}",
-            args.len()
-        );
-    }
-    let text_label = args[0]
-        .as_str()
-        .filter(|label| !label.is_empty())
-        .with_context(|| {
-            format!("compiled standard script {script} has an invalid farjumptext label")
-        })?;
-    Ok(Some(text_label))
-}
-
-/// Execute a standard `farjumptext` script as an actual visible runtime
-/// interaction. These scripts used to be accepted by the control compiler but
-/// errored when a player read a sign, shelf, or TV, making ordinary exploration
-/// fail outside the opening sequence.
-fn apply_standard_text_script(
-    state: &mut GameState,
-    script: &str,
-    text_label: &str,
-) -> Result<String> {
-    state.script_runtime.text_window_open = true;
-    state
-        .script_runtime
-        .text_events
-        .push(ScriptTextRuntimeEvent {
-            command: "farjumptext".to_string(),
-            kind: ScriptTextRuntimeKind::Write,
-            text_label: Some(text_label.to_string()),
-            face_player: false,
-            closes_text: true,
-            source_script: script.to_string(),
-            command_index: 0,
-        });
-    state.script_runtime.pending_text_wait = Some(ScriptTextWait {
-        command: "farjumptext".to_string(),
-        source_script: script.to_string(),
-        command_index: 0,
-    });
-    Ok(text_label.to_string())
-}
-
-fn apply_standard_text_audio_script(
-    state: &mut GameState,
-    script: &str,
-    text_label: &str,
-    audio_id: &str,
-) -> Result<String> {
-    let result = apply_standard_text_script(state, script, text_label)?;
-    state
-        .script_runtime
-        .audio_events
-        .push(ScriptAudioRuntimeEvent {
-            command: "playsound".to_string(),
-            kind: ScriptAudioRuntimeKind::SoundEffect,
-            audio_id: Some(audio_id.to_string()),
-            fade_frames: None,
-            source_script: script.to_string(),
-            command_index: 1,
-        });
-    Ok(result)
-}
-
-fn apply_standard_phone_text_script(
-    state: &mut GameState,
-    script: &str,
-    suffix: &str,
-) -> Result<String> {
-    let caller = state
-        .script_runtime
-        .variables
-        .get("VAR_CALLERID")
-        .context("phone standard script requires VAR_CALLERID")?;
-    let caller_name = caller
-        .rsplit('_')
-        .next()
-        .filter(|name| !name.is_empty())
-        .context("phone standard script has an empty caller name")?;
-    let caller = caller.clone();
-    let mut label = caller_name.to_ascii_lowercase();
-    if let Some(first) = label.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    label.push_str(suffix);
-    state
-        .script_runtime
-        .variables
-        .insert("_last_phone_contact".to_string(), caller);
-    apply_standard_text_script(state, script, &label)
-}
-
-fn apply_registered_number_script(
-    state: &mut GameState,
-    script: &str,
-    text_label: &str,
-) -> Result<String> {
-    let result = apply_standard_text_script(state, script, text_label)?;
-    state
-        .script_runtime
-        .audio_events
-        .push(ScriptAudioRuntimeEvent {
-            command: "playsound".to_string(),
-            kind: ScriptAudioRuntimeKind::SoundEffect,
-            audio_id: Some("SFX_REGISTER_PHONE_NUMBER".to_string()),
-            fade_frames: None,
-            source_script: script.to_string(),
-            command_index: 1,
-        });
-    Ok(result)
-}
-
-fn apply_standard_yes_no_text_script(
-    state: &mut GameState,
-    script: &str,
-    text_label: &str,
-) -> Result<String> {
-    state.script_runtime.text_window_open = true;
-    state
-        .script_runtime
-        .text_events
-        .push(ScriptTextRuntimeEvent {
-            command: "farwritetext".to_string(),
-            kind: ScriptTextRuntimeKind::Write,
-            text_label: Some(text_label.to_string()),
-            face_player: false,
-            closes_text: false,
-            source_script: script.to_string(),
-            command_index: 0,
-        });
-    state.script_runtime.pending_yes_no = Some(ScriptYesNoPrompt {
-        source_script: script.to_string(),
-        command_index: 0,
-    });
-    Ok(text_label.to_string())
-}
-
-fn resolve_coin_vendor_purchase(state: &mut GameState) -> Result<&'static str> {
-    if state.coins > 9_949 {
-        return Ok("CoinVendor_CoinCaseFullText");
-    }
-    if state.money < 1_000 {
-        return Ok("CoinVendor_NotEnoughMoneyText");
-    }
-    state.money -= 1_000;
-    state.coins = state.coins.saturating_add(50).min(9_999);
-    Ok("CoinVendor_Buy50CoinsText")
+fn standard_script_common_command_supported(command: &str) -> bool {
+    matches!(
+        command,
+        "applymovement"
+            | "checkevent"
+            | "checkflag"
+            | "checkitem"
+            | "checkphonecall"
+            | "checktime"
+            | "clearevent"
+            | "clearflag"
+            | "closetext"
+            | "db"
+            | "end"
+            | "endcallback"
+            | "faceplayer"
+            | "farjumptext"
+            | "farsjump"
+            | "farwritetext"
+            | "getcurlandmarkname"
+            | "getnum"
+            | "getstring"
+            | "ifequal"
+            | "iffalse"
+            | "ifless"
+            | "iftrue"
+            | "opentext"
+            | "pause"
+            | "playmusic"
+            | "playsound"
+            | "promptbutton"
+            | "readvar"
+            | "scall"
+            | "setevent"
+            | "setflag"
+            | "setmapscene"
+            | "setval"
+            | "sjump"
+            | "special"
+            | "specialphonecall"
+            | "turnobject"
+            | "variablesprite"
+            | "verbosegiveitem"
+            | "waitbutton"
+            | "waitsfx"
+            | "warp"
+            | "yesorno"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3523,7 +3259,6 @@ pub enum RuntimeMutationResult {
     ScriptObjectMutated(ScriptObjectMutationOutcome),
     ScriptMovementApplied(ScriptMovementOutcome),
     ScriptRuntimeApplied(ScriptRuntimeCommand, ScriptRuntimeOutcome),
-    StandardScriptApplied(String),
     NextScriptTaken(ScriptLocation),
     ScriptEventQueueDrained(RuntimeScriptEventDrainResult),
     ScriptRuntimeQueueDrained(RuntimeScriptRuntimeQueueDrainResult),
@@ -3553,9 +3288,8 @@ pub enum RuntimeMutationResult {
     PartyPokemonAdded(GiftPokemonOutcome),
     ScriptedWildBattleStarted(StaticWildBattleStart),
     ScriptedTrainerBattleStarted(TrainerBattleStartStatus),
-    ScriptedWildBattleCompleted(ScriptedBattleEffectsOutcome),
+    ScriptedWildBattleCompleted,
     ScriptedTrainerBattleCompleted(TrainerBattleCompletionOutcome),
-    ScriptedTrainerBattleCompletionEffectsApplied(ScriptedBattleEffectsOutcome),
     BagItemUsed(ItemUseOutcome),
     PendingMoveLearnReplaced(PendingMoveLearnRuntimeResolution),
     PendingMoveLearnDeclined(PendingMoveLearnRuntimeResolution),
@@ -3580,7 +3314,8 @@ pub enum RuntimeMutationResult {
     DigFieldMoveUsed(DigFieldMoveOutcome),
     TeleportFieldMoveUsed(TeleportFieldMoveOutcome),
     HeadbuttFieldMoveUsed(DirectFieldEncounterMoveOutcome),
-    RockSmashFieldMoveUsed(DirectFieldEncounterMoveOutcome),
+    RockSmashFromMenuQueued(RuntimeRockSmashMenuOutcome),
+    RockMonEncounterResolved(RockMonEncounterOutcome),
     SweetScentFieldMoveUsed(SweetScentFieldMoveOutcome),
     PartyPokemonItemUsed(ItemUseOutcome, BattleItemOutcome),
     WholePartyItemUsed(ItemUseOutcome, PartyItemOutcome),
@@ -3603,6 +3338,9 @@ pub enum RuntimeMutationResult {
     ActiveWildBattleRewardsClaimed(BattleRewardOutcome),
     FishingRodCast(FishingCastOutcome),
     BagFishingRodUsed(FishingRodItemUseOutcome),
+    GameTimerVBlanksAdvanced(RuntimeGameTimerOutcome),
+    GameTimerCountingSet(RuntimeGameTimerOutcome),
+    GameLogicPauseSet(RuntimeGameTimerOutcome),
     ClockUpdated,
     ManualClockSet,
     ScriptSwarmApplied(ScriptSwarmOutcome),
@@ -3741,7 +3479,6 @@ impl RuntimeMutationResult {
             Self::ScriptObjectMutated(_) => "script_object_mutated",
             Self::ScriptMovementApplied(_) => "script_movement_applied",
             Self::ScriptRuntimeApplied(_, _) => "script_runtime_applied",
-            Self::StandardScriptApplied(_) => "standard_script_applied",
             Self::NextScriptTaken(_) => "next_script_taken",
             Self::ScriptEventQueueDrained(_) => "script_event_queue_drained",
             Self::ScriptRuntimeQueueDrained(_) => "script_runtime_queue_drained",
@@ -3771,11 +3508,8 @@ impl RuntimeMutationResult {
             Self::PartyPokemonAdded(_) => "party_pokemon_added",
             Self::ScriptedWildBattleStarted(_) => "scripted_wild_battle_started",
             Self::ScriptedTrainerBattleStarted(_) => "scripted_trainer_battle_started",
-            Self::ScriptedWildBattleCompleted(_) => "scripted_wild_battle_completed",
+            Self::ScriptedWildBattleCompleted => "scripted_wild_battle_completed",
             Self::ScriptedTrainerBattleCompleted(_) => "scripted_trainer_battle_completed",
-            Self::ScriptedTrainerBattleCompletionEffectsApplied(_) => {
-                "scripted_trainer_battle_completion_effects_applied"
-            }
             Self::BagItemUsed(_) => "bag_item_used",
             Self::PendingMoveLearnReplaced(_) => "pending_move_learn_replaced",
             Self::PendingMoveLearnDeclined(_) => "pending_move_learn_declined",
@@ -3800,7 +3534,8 @@ impl RuntimeMutationResult {
             Self::DigFieldMoveUsed(_) => "dig_field_move_used",
             Self::TeleportFieldMoveUsed(_) => "teleport_field_move_used",
             Self::HeadbuttFieldMoveUsed(_) => "headbutt_field_move_used",
-            Self::RockSmashFieldMoveUsed(_) => "rock_smash_field_move_used",
+            Self::RockSmashFromMenuQueued(_) => "rock_smash_from_menu_queued",
+            Self::RockMonEncounterResolved(_) => "rock_mon_encounter_resolved",
             Self::SweetScentFieldMoveUsed(_) => "sweet_scent_field_move_used",
             Self::PartyPokemonItemUsed(_, _) => "party_pokemon_item_used",
             Self::WholePartyItemUsed(_, _) => "whole_party_item_used",
@@ -3823,6 +3558,9 @@ impl RuntimeMutationResult {
             Self::ActiveWildBattleRewardsClaimed(_) => "active_wild_battle_rewards_claimed",
             Self::FishingRodCast(_) => "fishing_rod_cast",
             Self::BagFishingRodUsed(_) => "bag_fishing_rod_used",
+            Self::GameTimerVBlanksAdvanced(_) => "game_timer_vblanks_advanced",
+            Self::GameTimerCountingSet(_) => "game_timer_counting_set",
+            Self::GameLogicPauseSet(_) => "game_logic_pause_set",
             Self::ClockUpdated => "clock_updated",
             Self::ManualClockSet => "manual_clock_set",
             Self::ScriptSwarmApplied(_) => "script_swarm_applied",
@@ -3982,13 +3720,11 @@ fn set_script_battle_result_accumulator(state: &mut GameState) {
         .insert("_value".to_string(), value);
 }
 
-fn set_script_trainer_battle_result_accumulator(state: &mut GameState, won: bool) {
-    let value = if won { "1" } else { "0" }.to_string();
-    state.script_runtime.script_value = Some(value.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("_value".to_string(), value);
+fn set_running_trainer_battle_script(state: &mut GameState, running: bool) {
+    state.script_runtime.memory.insert(
+        "wRunningTrainerBattleScript".to_string(),
+        if running { "-1" } else { "0" }.to_string(),
+    );
 }
 
 fn clear_transient_map_object_context(state: &mut GameState, session: &mut OverworldSession) {
@@ -4024,21 +3760,28 @@ fn ensure_runtime_command_rng_boundary(
     Ok(())
 }
 
-pub fn runtime_special_routine_requires_rng_boundary(routine: &str) -> bool {
+pub fn runtime_special_routine_requires_divider_trace(routine: &str) -> bool {
     matches!(
         routine,
         "SampleKenjiBreakCountdown"
             | "ResetLuckyNumberShowFlag"
-            | "CheckForLuckyNumberWinners"
-            | "PrintTodaysLuckyNumber"
             | "RandomUnseenWildMon"
             | "RandomPhoneWildMon"
             | "RandomPhoneMon"
-            | "BuenasPassword"
-            | "GiveShuckle"
+            | "UnownPuzzle"
             | "SelectRandomBugContestContestants"
+            | "BugContestJudging"
+            | "CardFlip"
+            | "GiveShuckle"
+            | "BuenasPassword"
+            | "LoadOpponentTrainerAndPokemonWithOTSprite"
             | "GiveOddEgg"
     )
+}
+
+pub fn runtime_special_routine_requires_legacy_seed_boundary(routine: &str) -> bool {
+    let _ = routine;
+    false
 }
 
 fn compiled_standard_script_catalog(data: &GameDataSet) -> Result<&serde_json::Map<String, Value>> {
@@ -4097,6 +3840,7 @@ fn validate_compiled_standard_script_catalog(data: &GameDataSet) -> Result<()> {
         if body.is_empty() {
             anyhow::bail!("compiled StdScripts pointer {label} has an empty command body");
         }
+        standard_script_execution_path(label, body)?;
     }
     Ok(())
 }

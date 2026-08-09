@@ -23,6 +23,20 @@ class TextOnlyNameEntryUiStub extends NameEntryUiStub {
   public readonly renderSnapshot = jest.fn();
 }
 
+class ScaledNameEntryUiStub extends BaseUI {
+  public readonly font = { renderText: jest.fn() };
+
+  constructor() {
+    super(400, 300, 1);
+  }
+
+  protected createScreenSurface(): Surface {
+    return new Surface(this.screenWidth, this.screenHeight);
+  }
+
+  update(): void {}
+}
+
 const makeSolidSurface = (
   width: number,
   height: number,
@@ -391,6 +405,23 @@ describe("NameEntryScreen", () => {
     screen.fillName("KRYSTAL");
 
     expect(screen.name).toBe("KRYSTAL");
+  });
+
+  it("clears the complete host target before centering one integer-scaled LCD", () => {
+    const ui = new ScaledNameEntryUiStub();
+    const screen = new NameEntryScreen(ui, "YOUR NAME?");
+
+    // Prove draw owns the whole target rather than accidentally succeeding
+    // because the fixture began blank like an unloaded overworld.
+    ui.screen.fill([255, 0, 0, 255]);
+    screen.draw();
+
+    // 160x144 scales to 320x288 in a 400x300 host and is centered at (40, 6).
+    expect(ui.screen.get_at([0, 0])).toEqual([255, 255, 255, 255]);
+    expect(ui.screen.get_at([39, 150])).toEqual([255, 255, 255, 255]);
+    expect(ui.screen.get_at([40, 6])).toEqual([10, 20, 30, 255]);
+    expect(ui.screen.get_at([359, 293])).toEqual([10, 20, 30, 255]);
+    expect(ui.screen.get_at([360, 294])).toEqual([255, 255, 255, 255]);
   });
 
   it("skips pixel tilemap composition when the renderer is pure text", () => {

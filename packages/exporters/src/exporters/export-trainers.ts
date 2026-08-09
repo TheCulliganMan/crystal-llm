@@ -125,7 +125,56 @@ function parseTrainerMetadata(): Array<[string, string]> {
   return orderedMetadata;
 }
 
-function parseTrainerClassBaseRewards(): Record<string, number> {
+type TrainerClassAttributes = {
+  items: Array<string | null>;
+  baseReward: number;
+  aiMoveFlags: number;
+  aiItemSwitchFlags: number;
+};
+
+const AI_MOVE_FLAG_BITS: Record<string, number> = {
+  AI_BASIC: 0,
+  AI_SETUP: 1,
+  AI_TYPES: 2,
+  AI_OFFENSIVE: 3,
+  AI_SMART: 4,
+  AI_OPPORTUNIST: 5,
+  AI_AGGRESSIVE: 6,
+  AI_CAUTIOUS: 7,
+  AI_STATUS: 8,
+  AI_RISKY: 9,
+};
+
+const AI_ITEM_SWITCH_FLAG_BITS: Record<string, number> = {
+  SWITCH_OFTEN: 0,
+  SWITCH_RARELY: 1,
+  SWITCH_SOMETIMES: 2,
+  ALWAYS_USE: 4,
+  UNKNOWN_USE: 5,
+  CONTEXT_USE: 6,
+};
+
+function parseTrainerFlagExpression(
+  expression: string,
+  bits: Record<string, number>,
+  label: string,
+): number {
+  const terms = expression.split("|").map((term) => term.trim()).filter(Boolean);
+  if (terms.length === 1 && terms[0] === "NO_AI") {
+    return 0;
+  }
+  let result = 0;
+  for (const term of terms) {
+    const bit = bits[term];
+    if (bit === undefined) {
+      throw new Error(`Unknown ${label} flag ${term}`);
+    }
+    result |= 1 << bit;
+  }
+  return result;
+}
+
+function parseTrainerClassAttributes(): Record<string, TrainerClassAttributes> {
   const root = getDisassemblyRoot();
   const constantsPath = path.join(root, "constants", "trainer_constants.asm");
   const attributesPath = path.join(root, "data", "trainers", "attributes.asm");
@@ -142,25 +191,48 @@ function parseTrainerClassBaseRewards(): Record<string, number> {
     }
   }
 
+  const items: Array<Array<string | null>> = [];
   const rewards: number[] = [];
+  const moveFlags: number[] = [];
+  const itemSwitchFlags: number[] = [];
   for (const raw of fs.readFileSync(attributesPath, "utf8").split(/\r?\n/)) {
     const line = stripInlineComment(raw).trim();
-    if (!line.startsWith("db ") || !raw.includes("base reward")) {
-      continue;
-    }
-    const token = line.slice(3).trim().split(/[,\s]+/)[0];
-    if (token) {
+    if (line.startsWith("db ") && raw.includes("items")) {
+      const values = line.slice(3).split(",").map((value) => value.trim());
+      if (values.length !== 2 || values.some((value) => !value)) {
+        throw new Error(`Invalid trainer item pair: ${raw}`);
+      }
+      items.push(values.map((value) => value === "NO_ITEM" ? null : value));
+    } else if (line.startsWith("db ") && raw.includes("base reward")) {
+      const token = line.slice(3).trim().split(/[,\s]+/)[0];
       rewards.push(parseAsmNumber(token));
+    } else if (line.startsWith("dw ")) {
+      if (moveFlags.length === itemSwitchFlags.length) {
+        moveFlags.push(parseTrainerFlagExpression(line.slice(3), AI_MOVE_FLAG_BITS, "trainer move AI"));
+      } else {
+        itemSwitchFlags.push(parseTrainerFlagExpression(
+          line.slice(3),
+          AI_ITEM_SWITCH_FLAG_BITS,
+          "trainer item/switch AI",
+        ));
+      }
     }
   }
 
-  if (classOrder.length !== rewards.length) {
+  if ([items.length, rewards.length, moveFlags.length, itemSwitchFlags.length]
+    .some((count) => count !== classOrder.length)) {
     throw new Error(
-      `Parsed trainer class rewards do not match trainer class count: ${rewards.length} != ${classOrder.length}`
+      `Parsed trainer attributes do not match trainer class count ${classOrder.length}: ` +
+      `items=${items.length} rewards=${rewards.length} move=${moveFlags.length} item_switch=${itemSwitchFlags.length}`
     );
   }
 
-  return Object.fromEntries(classOrder.map((trainerClass, index) => [trainerClass, rewards[index]]));
+  return Object.fromEntries(classOrder.map((trainerClass, index) => [trainerClass, {
+    items: items[index],
+    baseReward: rewards[index],
+    aiMoveFlags: moveFlags[index],
+    aiItemSwitchFlags: itemSwitchFlags[index],
+  }]));
 }
 
 export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string, PokemonSpecies>): Trainer[] {
@@ -322,7 +394,7 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
   flushTrainer();
 
   const metadata = parseTrainerMetadata();
-  const classBaseRewards = parseTrainerClassBaseRewards();
+  const classAttributes = parseTrainerClassAttributes();
   if (metadata.length !== trainers.length) {
     throw new Error(`Parsed trainer count does not match ASM trainer metadata count: ${trainers.length} != ${metadata.length}`);
   }
@@ -334,11 +406,14 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
       throw new Error(`Missing trainer encounter music for class ${trainers[index].trainer_class}`);
     }
     trainers[index].encounter_music = encounterMusic;
-    const baseReward = classBaseRewards[trainers[index].trainer_class];
-    if (!baseReward) {
-      throw new Error(`Missing trainer base reward for class ${trainers[index].trainer_class}`);
+    const attributes = classAttributes[trainers[index].trainer_class];
+    if (!attributes) {
+      throw new Error(`Missing trainer attributes for class ${trainers[index].trainer_class}`);
     }
-    trainers[index].base_reward = baseReward;
+    trainers[index].items = attributes.items;
+    trainers[index].base_reward = attributes.baseReward;
+    trainers[index].ai_move_flags = attributes.aiMoveFlags;
+    trainers[index].ai_item_switch_flags = attributes.aiItemSwitchFlags;
   }
   return trainers;
 }

@@ -3,8 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-use crate::battle::start::deactivate_battle;
-use crate::models::{Bag, CaptureStorageLocation, Item, PokedexState, Pokemon, PokemonStorage};
+use crate::battle::start::deactivate_battle_after_win;
+use crate::models::{
+    Bag, CaptureStorageLocation, Item, MAX_BOX_MONS, PokedexState, Pokemon, PokemonStorage,
+};
 use crate::random::Random;
 use crate::state::{BattleMemory, GameState};
 
@@ -19,6 +21,7 @@ pub struct CaptureRules {
 }
 
 const BATTLE_ONLY_CAPTURE_BALLS: &[&str] = &["SAFARI_BALL"];
+const FRIEND_BALL_HAPPINESS: u8 = 200;
 
 impl<'de> Deserialize<'de> for CaptureRules {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -689,22 +692,27 @@ pub fn capture_wobble_probability_issues(
 pub fn store_captured_pokemon(
     outcome: &CaptureOutcome,
     storage: &mut PokemonStorage,
-    pokemon: Pokemon,
+    current_pc_box: usize,
+    mut pokemon: Pokemon,
 ) -> Result<Option<StoredCapture>, String> {
     if !outcome.caught {
         return Ok(None);
     }
-    let location = storage.register_capture(pokemon.clone())?;
+    if outcome.ball_id.as_deref() == Some("FRIEND_BALL") {
+        pokemon.happiness = FRIEND_BALL_HAPPINESS;
+    }
+    let location = storage.register_capture_in_box(current_pc_box, pokemon.clone())?;
     Ok(Some(StoredCapture { pokemon, location }))
 }
 
 pub fn complete_captured_pokemon(
     outcome: &CaptureOutcome,
     storage: &mut PokemonStorage,
+    current_pc_box: usize,
     pokedex: &mut PokedexState,
     pokemon: Pokemon,
 ) -> Result<Option<StoredCapture>, String> {
-    let stored = store_captured_pokemon(outcome, storage, pokemon)?;
+    let stored = store_captured_pokemon(outcome, storage, current_pc_box, pokemon)?;
     if let Some(stored) = &stored {
         pokedex.record_caught_pokemon(&stored.pokemon);
     }
@@ -761,10 +769,7 @@ pub fn complete_active_wild_capture_result(
             location: 0,
         });
     }
-    if matches!(
-        battle_type.as_str(),
-        "BATTLETYPE_CONTEST" | "BATTLETYPE_BUG_CONTEST" | "BATTLETYPE_PARK"
-    ) {
+    if battle_type == "BATTLETYPE_CONTEST" {
         let mut contest_pokemon = enemy_pokemon;
         contest_pokemon.status = None;
         contest_pokemon.original_trainer_name = if state.player_name.is_empty() {
@@ -786,8 +791,8 @@ pub fn complete_active_wild_capture_result(
             state.bug_contest.caught_level = Some(contest_pokemon.level);
             state.bug_contest.caught_mon = Some(contest_pokemon.clone());
         }
-        state.battle_result |= 1 << 6;
-        deactivate_battle(state);
+        state.battle_result = 0;
+        deactivate_battle_after_win(state);
         state.sync_party_from_storage();
         return Ok(CaptureCompletion {
             stored: None,
@@ -797,8 +802,8 @@ pub fn complete_active_wild_capture_result(
     if battle_type == "BATTLETYPE_TUTORIAL" {
         // The Dude demo owns a temporary battle and bag. Crystal ends it after
         // the scripted catch without putting that Rattata in the player's save.
-        state.battle_result |= 1 << 6;
-        deactivate_battle(state);
+        state.battle_result = 0;
+        deactivate_battle_after_win(state);
         state.sync_party_from_storage();
         return Ok(CaptureCompletion {
             stored: None,
@@ -811,15 +816,25 @@ pub fn complete_active_wild_capture_result(
         state.player_name.clone()
     };
     enemy_pokemon.original_trainer_id = state.player_id;
+    let current_pc_box = state.current_pc_box;
     let stored = complete_captured_pokemon(
         outcome,
         &mut state.storage,
+        current_pc_box,
         &mut state.pokedex,
         enemy_pokemon,
     )?;
-    if stored.is_some() {
-        state.battle_result |= 1 << 6;
-        deactivate_battle(state);
+    if let Some(stored_capture) = stored.as_ref() {
+        state.battle_result = 0;
+        if battle_type == "BATTLETYPE_CELEBI" {
+            state.battle_result |= 1 << 6;
+        }
+        if let CaptureStorageLocation::Pc { box_index, .. } = &stored_capture.location
+            && state.storage.pc_boxes[*box_index].count == MAX_BOX_MONS
+        {
+            state.battle_result |= 1 << 7;
+        }
+        deactivate_battle_after_win(state);
     }
     state.sync_party_from_storage();
     Ok(CaptureCompletion {
@@ -1012,7 +1027,7 @@ fn clamp_catch_rate(value: i32, min: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, Dv, PokemonSpecies, pokemon_type};
+    use crate::models::{BaseStats, Dv, PARTY_SIZE, PcBox, PokemonSpecies, pokemon_type};
 
     fn wobble_probabilities() -> Vec<CaptureWobbleProbability> {
         vec![
@@ -1125,6 +1140,63 @@ mod tests {
         pokemon.hp = hp;
         pokemon.max_hp = max_hp;
         pokemon
+    }
+
+    fn successful_capture_outcome(state: &GameState) -> CaptureOutcome {
+        CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: state.rng_seed,
+            ball_id: Some("ULTRA_BALL".to_string()),
+        }
+    }
+
+    fn active_capture_state(
+        battle_type: &str,
+        fill_party: bool,
+        current_box_count: usize,
+    ) -> GameState {
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut state = GameState::default();
+        if fill_party {
+            for index in 0..PARTY_SIZE {
+                assert!(state.storage.party.add_pokemon(pokemon(
+                    &format!("PARTY_{index}"),
+                    255,
+                    5,
+                    20,
+                    20,
+                )));
+            }
+        }
+        if current_box_count != 0 {
+            state.storage.pc_boxes.push(PcBox::new(0));
+            for index in 0..current_box_count {
+                assert!(state.storage.pc_boxes[0].add_pokemon(pokemon(
+                    &format!("BOX_{index}"),
+                    255,
+                    5,
+                    20,
+                    20,
+                )));
+            }
+        }
+        state.sync_party_from_storage();
+        state.battle = BattleMemory::Wild {
+            battle_type: battle_type.to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        state
     }
 
     fn ball_rule(numerator: u16, denominator: u16) -> CaptureBallRule {
@@ -1787,7 +1859,7 @@ mod tests {
         )
         .expect("master ball capture should resolve");
         let mut storage = PokemonStorage::default();
-        let stored = store_captured_pokemon(&outcome, &mut storage, enemy.clone())
+        let stored = store_captured_pokemon(&outcome, &mut storage, 0, enemy.clone())
             .expect("store captured pokemon")
             .expect("captured");
 
@@ -1817,9 +1889,10 @@ mod tests {
         let mut storage = PokemonStorage::default();
         let mut pokedex = PokedexState::default();
 
-        let stored = complete_captured_pokemon(&outcome, &mut storage, &mut pokedex, enemy.clone())
-            .expect("complete captured pokemon")
-            .expect("captured");
+        let stored =
+            complete_captured_pokemon(&outcome, &mut storage, 0, &mut pokedex, enemy.clone())
+                .expect("complete captured pokemon")
+                .expect("captured");
 
         assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
         assert!(pokedex.has_seen("modpack-PIDGEY"));
@@ -1836,6 +1909,7 @@ mod tests {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
             enemy_pokemon: enemy.clone(),
             enemy_party: vec![enemy],
         };
@@ -1863,7 +1937,7 @@ mod tests {
         );
         assert!(state.pokedex.has_seen("PIDGEY"));
         assert!(state.pokedex.has_caught("PIDGEY"));
-        assert_eq!(state.battle_result & (1 << 6), 1 << 6);
+        assert_eq!(state.battle_result, 0, "ordinary party catch is base WIN");
         assert_eq!(state.battle, BattleMemory::Inactive);
         assert_eq!(state.battle_active_party_index, None);
         assert_eq!(
@@ -1875,15 +1949,158 @@ mod tests {
     }
 
     #[test]
+    fn capture_battle_result_preserves_only_canonical_celebi_and_box_full_bits() {
+        for (battle_type, box_before, expected) in [
+            ("BATTLETYPE_NORMAL", 18, 0x00),
+            ("BATTLETYPE_NORMAL", 19, 0x80),
+            ("BATTLETYPE_CELEBI", 19, 0xc0),
+        ] {
+            let mut state = active_capture_state(battle_type, true, box_before);
+            let outcome = successful_capture_outcome(&state);
+            let stored = complete_active_wild_capture(&mut state, &outcome)
+                .unwrap_or_else(|error| panic!("complete {battle_type} box catch: {error}"))
+                .expect("capture stores in current box");
+            assert!(matches!(stored.location, CaptureStorageLocation::Pc { .. }));
+            assert_eq!(state.battle_result, expected, "{battle_type} box {box_before}");
+        }
+
+        let mut celebi_party = active_capture_state("BATTLETYPE_CELEBI", false, 0);
+        let outcome = successful_capture_outcome(&celebi_party);
+        let stored = complete_active_wild_capture(&mut celebi_party, &outcome)
+            .expect("complete Celebi party catch")
+            .expect("Celebi stores in party");
+        assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(celebi_party.battle_result, 0x40);
+    }
+
+    #[test]
+    fn full_capture_storage_rejects_without_changing_battle_result_or_runtime_state() {
+        let mut state = active_capture_state("BATTLETYPE_NORMAL", true, MAX_BOX_MONS);
+        state.battle_result = 0;
+        let outcome = successful_capture_outcome(&state);
+        let before = state.clone();
+
+        let error = complete_active_wild_capture_result(&mut state, &outcome)
+            .expect_err("party plus selected full box rejects the capture completion");
+
+        assert!(error.contains("party and current PC box 1 are full"), "{error}");
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn friend_ball_capture_sets_party_pokemon_happiness_to_200() {
+        let mut enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        enemy.happiness = 42;
+        let mut state = GameState::default();
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        let outcome = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: state.rng_seed,
+            ball_id: Some("FRIEND_BALL".to_string()),
+        };
+
+        let stored = complete_active_wild_capture(&mut state, &outcome)
+            .expect("complete Friend Ball capture")
+            .expect("stored capture");
+
+        assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(stored.pokemon.happiness, FRIEND_BALL_HAPPINESS);
+        assert_eq!(
+            state.storage.party.pokemon[0]
+                .as_ref()
+                .map(|pokemon| pokemon.happiness),
+            Some(FRIEND_BALL_HAPPINESS)
+        );
+    }
+
+    #[test]
+    fn friend_ball_capture_sets_current_box_pokemon_happiness_to_200() {
+        let mut enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        enemy.happiness = 42;
+        let mut state = GameState::default();
+        for index in 0..PARTY_SIZE {
+            assert!(state.storage.party.add_pokemon(pokemon(
+                &format!("PARTY_{index}"),
+                255,
+                5,
+                20,
+                20
+            )));
+        }
+        state.current_pc_box = 1;
+        state.storage.pc_boxes.push(PcBox::new(0));
+        state
+            .storage
+            .pc_boxes
+            .push(PcBox::new(state.current_pc_box));
+        state.sync_party_from_storage();
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        let outcome = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: state.rng_seed,
+            ball_id: Some("FRIEND_BALL".to_string()),
+        };
+
+        let stored = complete_active_wild_capture(&mut state, &outcome)
+            .expect("complete Friend Ball capture")
+            .expect("stored capture");
+
+        assert_eq!(
+            stored.location,
+            CaptureStorageLocation::Pc {
+                box_index: state.current_pc_box,
+                slot: 0,
+            }
+        );
+        assert_eq!(stored.pokemon.happiness, FRIEND_BALL_HAPPINESS);
+        assert_eq!(state.storage.pc_boxes[0].filled_slots(), 0);
+        assert_eq!(
+            state.storage.pc_boxes[state.current_pc_box].pokemon[0]
+                .as_ref()
+                .map(|pokemon| pokemon.happiness),
+            Some(FRIEND_BALL_HAPPINESS)
+        );
+    }
+
+    #[test]
     fn bug_contest_capture_stays_in_contest_state_instead_of_storage() {
         let enemy = pokemon("SCYTHER", 255, 12, 1, 20);
         let mut state = GameState::default();
         state.player_name = "CHRIS".to_string();
         state.player_id = 0x1234;
         state.battle = BattleMemory::Wild {
-            battle_type: "BATTLETYPE_BUG_CONTEST".to_string(),
+            battle_type: "BATTLETYPE_CONTEST".to_string(),
             battle_music: "MUSIC_BUG_CATCHING_CONTEST".to_string(),
             map_name: "NATIONAL_PARK_BUG_CONTEST".to_string(),
+            roaming_slot: None,
             enemy_pokemon: enemy,
             enemy_party: Vec::new(),
         };
@@ -1919,8 +2136,58 @@ mod tests {
         assert_eq!(caught.original_trainer_id, 0x1234);
         assert_eq!(state.bug_contest.caught_species.as_deref(), Some("SCYTHER"));
         assert!(state.pokedex.has_caught("SCYTHER"));
+        assert_eq!(state.battle_result, 0);
         assert_eq!(state.battle, BattleMemory::Inactive);
         assert!(state.storage.party.pokemon.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn tutorial_capture_ends_with_plain_win_result_and_no_storage() {
+        let mut state = active_capture_state("BATTLETYPE_TUTORIAL", false, 0);
+        let outcome = successful_capture_outcome(&state);
+
+        let completion = complete_active_wild_capture_result(&mut state, &outcome)
+            .expect("complete tutorial capture");
+
+        assert!(completion.stored.is_none());
+        assert!(completion.contest_pokemon.is_none());
+        assert_eq!(state.battle_result, 0);
+        assert_eq!(state.battle, BattleMemory::Inactive);
+        assert!(state.storage.party.pokemon.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn noncanonical_contest_battle_types_do_not_enter_the_contest_capture_path() {
+        for battle_type in ["CONTEST", "BATTLETYPE_BUG_CONTEST", "BATTLETYPE_PARK"] {
+            let enemy = pokemon("SCYTHER", 255, 12, 1, 20);
+            let mut state = GameState::default();
+            state.battle = BattleMemory::Wild {
+                battle_type: battle_type.to_string(),
+                battle_music: "MUSIC_BUG_CATCHING_CONTEST".to_string(),
+                map_name: "NATIONAL_PARK_BUG_CONTEST".to_string(),
+                roaming_slot: None,
+                enemy_pokemon: enemy,
+                enemy_party: Vec::new(),
+            };
+            state.battle_active_party_index = Some(0);
+            state.battle_active_enemy_party_index = Some(0);
+            let outcome = CaptureOutcome {
+                caught: true,
+                blocked: false,
+                storage_full: false,
+                wobble_count: 4,
+                animation_shakes: 4,
+                final_catch_rate: u8::MAX,
+                rng_seed_after: state.rng_seed,
+                ball_id: None,
+            };
+
+            let completion = complete_active_wild_capture_result(&mut state, &outcome)
+                .unwrap_or_else(|error| panic!("complete {battle_type} capture: {error}"));
+            assert!(completion.contest_pokemon.is_none(), "{battle_type}");
+            assert!(completion.stored.is_some(), "{battle_type}");
+            assert!(state.bug_contest.caught_mon.is_none(), "{battle_type}");
+        }
     }
 
     #[test]
@@ -1939,7 +2206,7 @@ mod tests {
         let mut storage = PokemonStorage::default();
         let mut pokedex = PokedexState::default();
 
-        let stored = complete_captured_pokemon(&outcome, &mut storage, &mut pokedex, enemy)
+        let stored = complete_captured_pokemon(&outcome, &mut storage, 0, &mut pokedex, enemy)
             .expect("failed capture should be a no-op");
 
         assert_eq!(stored, None);

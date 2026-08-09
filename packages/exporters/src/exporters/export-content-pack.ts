@@ -35,6 +35,12 @@ import type { ExportedStepEventRules } from "./export-step-event-rules";
 import type { ExportedCaptureRules } from "./export-capture-rules";
 import type { ExportedFruitTreeCatalog } from "./export-fruit-trees";
 import type { CurrencyConstantsPayload } from "./export-currency-constants";
+import type {
+  BugContestConfig,
+  NpcTradeDefinition,
+  PermanentPhoneNumberDefinition,
+  SpecialPhoneCallDefinition,
+} from "./export-runtime-assets";
 
 const CONTENT_PACK_CATEGORIES = [
   "pokemon",
@@ -92,6 +98,7 @@ const CONTENT_PACK_CATEGORIES = [
   "marts",
   "currency_constants",
   "trainers",
+  "trainer_class_names",
   "pokedex",
   "pokedex_entries",
   "pokemon_frontpic_anim",
@@ -176,7 +183,7 @@ export type CoreExportPayload = {
   kurtApricornRecipes?: unknown;
   shuckieGift?: unknown;
   dratiniMoveSets?: unknown;
-  bugContestConfig?: unknown;
+  bugContestConfig?: BugContestConfig;
   battleTowerRules?: unknown;
   oakRatings?: unknown;
   oddEggDefinitions?: unknown;
@@ -206,9 +213,9 @@ export type CoreExportPayload = {
   initializeEvents?: unknown;
   storyEventScriptConstants?: unknown;
   phoneContacts?: Record<string, unknown>;
-  permanentPhoneNumbers?: Record<string, Record<string, never>>;
-  specialPhoneCalls?: Record<string, Record<string, never>>;
-  npcTrades?: Record<string, Record<string, never>>;
+  permanentPhoneNumbers?: Record<string, PermanentPhoneNumberDefinition>;
+  specialPhoneCalls?: Record<string, SpecialPhoneCallDefinition>;
+  npcTrades?: Record<string, NpcTradeDefinition>;
   specialRoutines?: Record<string, Record<string, never>>;
   asmText?: Record<string, string>;
   moveNames?: string[];
@@ -220,6 +227,7 @@ export type CoreExportPayload = {
   pokegearTownMapPaletteMap?: Record<string, string[]>;
   pokemonCries?: unknown;
   trainers: Trainer[];
+  trainerClassNames: Record<string, string>;
   pokedex: PokedexData[];
   npcData: NpcData;
   pokegearLandmarks: PokegearLandmarksPayload;
@@ -299,7 +307,7 @@ const requireStringField = (
   return value;
 };
 
-const alignRuntimeSpawnPoints = (
+export const alignRuntimeSpawnPoints = (
   runtimeSpawnPoints: unknown,
 ): Record<string, RuntimeSpawnPointPayload> => {
   if (
@@ -358,19 +366,24 @@ const alignRuntimeSpawnPoints = (
         `Runtime spawn point ${id} tile (${tileX}, ${tileY}) must match metatile/subtile-derived tile (${expectedTileX}, ${expectedTileY})`,
       );
     }
+    // Keep the exact ASM spawn tile.  The subtile is part of the spawn
+    // coordinate, not metadata that can be normalized away: the player starts
+    // at (3, 3) in PLAYERS_HOUSE_2F, while the containing metatile is (1, 1).
+    // Snapping to metatileX * 2 moved every new-game/fly/whiteout destination
+    // one tile up and left in the Rust runtime.
     aligned[id] = {
       identifier,
       mapConstant,
       mapName,
       groupId,
       mapId,
-      tileX: metatileX * 2,
-      tileY: metatileY * 2,
+      tileX,
+      tileY,
       groupName,
       metatileX,
       metatileY,
-      subtileX: 0,
-      subtileY: 0,
+      subtileX,
+      subtileY,
     };
   }
   return aligned;
@@ -1614,6 +1627,12 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       [trainerKey]: compactTrainerForContentPack(trainer),
     });
   }
+  writeCorePackEntry(
+    files.trainer_class_names,
+    "trainer_class_names",
+    "classes",
+    payload.trainerClassNames,
+  );
   for (const entry of payload.pokedex) {
     writeCorePackEntry(files.pokedex, "pokedex", entry.species, {
       [entry.species]: entry,
@@ -1772,6 +1791,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "pc_strings", prefix: "pc-strings" },
     { category: "menu_icons", prefix: "menu-icons" },
     { category: "trainers", prefix: "trainer" },
+    { category: "trainer_class_names", prefix: "trainer-class-names" },
     { category: "pokedex", prefix: "pokedex" },
     { category: "pokedex_entries", prefix: "pokedex-entries" },
     { category: "pokemon_frontpic_anim", prefix: "pokemon-frontpic-anim" },

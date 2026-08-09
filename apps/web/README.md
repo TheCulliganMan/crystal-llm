@@ -23,7 +23,7 @@ ASM-faithful Next.js and React app for the PokeCrystal runtime.
 - `npm run lint:eslint`: run ESLint for this workspace.
 - `npm run test`: run the Jest suite.
 - `npm run audio:bundle`: legacy/export utility for regenerating the ignored browser MP3/manifests bundle. Runtime playback uses direct PCM synthesis from `vendor/pokecrystal/audio` or `POKECRYSTAL_DISASSEMBLY_ROOT` and does not require this bundle.
-- `npm run export:core`: run the canonical core exporter path through `@pokecrystal/exporters`.
+- `../../export`: run the canonical core pack export through the Rust `crystal-assets` crate.
 - `npm run pw:install`: install Chromium for the Playwright harness.
 - `npm run pw:pages`: run route smoke coverage and visual baseline comparisons.
 - `npm run pw:pages:mobile`: run route and visual checks against mobile device profiles.

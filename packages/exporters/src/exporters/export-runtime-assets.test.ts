@@ -28,6 +28,7 @@ import {
   exportRoamingPokemon,
   exportRuntimeAssets,
   exportShuckieGift,
+  exportTrainerClassNames,
   timeTokenToMask,
 } from "./export-runtime-assets";
 
@@ -90,6 +91,205 @@ const writeBattleStatMultiplierFixtures = (
 
 const validBattleStatMultiplierRows = (): string[] =>
   Array.from({ length: 13 }, () => "\tdb 1, 1");
+
+const canonicalBugContestEncounterRows = [
+  "\tdb 20, CATERPIE,    7, 18",
+  "\tdb 20, WEEDLE,      7, 18",
+  "\tdb 10, METAPOD,     9, 18",
+  "\tdb 10, KAKUNA,      9, 18",
+  "\tdb  5, BUTTERFREE, 12, 15",
+  "\tdb  5, BEEDRILL,   12, 15",
+  "\tdb 10, VENONAT,    10, 16",
+  "\tdb 10, PARAS,      10, 17",
+  "\tdb  5, SCYTHER,    13, 14",
+  "\tdb  5, PINSIR,     13, 14",
+  "\tdb -1, VENOMOTH,   30, 40",
+] as const;
+
+const canonicalBugContestEncounters = [
+  { weight: 20, species: "CATERPIE", minLevel: 7, maxLevel: 18 },
+  { weight: 20, species: "WEEDLE", minLevel: 7, maxLevel: 18 },
+  { weight: 10, species: "METAPOD", minLevel: 9, maxLevel: 18 },
+  { weight: 10, species: "KAKUNA", minLevel: 9, maxLevel: 18 },
+  { weight: 5, species: "BUTTERFREE", minLevel: 12, maxLevel: 15 },
+  { weight: 5, species: "BEEDRILL", minLevel: 12, maxLevel: 15 },
+  { weight: 10, species: "VENONAT", minLevel: 10, maxLevel: 16 },
+  { weight: 10, species: "PARAS", minLevel: 10, maxLevel: 17 },
+  { weight: 5, species: "SCYTHER", minLevel: 13, maxLevel: 14 },
+  { weight: 5, species: "PINSIR", minLevel: 13, maxLevel: 14 },
+  { weight: 255, species: "VENOMOTH", minLevel: 30, maxLevel: 40 },
+] as const;
+
+const writeBugContestConfigFixtures = ({
+  timerSeconds = 0,
+  contestantCount = 3,
+  selectedContestantCount = 2,
+  encounterSourceLines = ["ContestMons:", ...canonicalBugContestEncounterRows],
+}: {
+  timerSeconds?: number;
+  contestantCount?: number;
+  selectedContestantCount?: number;
+  encounterSourceLines?: readonly string[];
+} = {}): void => {
+  writeFile(
+    path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
+    [
+      "DEF BUG_CONTEST_BALLS EQU 20",
+      "DEF BUG_CONTEST_MINUTES EQU 20",
+      `DEF BUG_CONTEST_SECONDS EQU ${timerSeconds}`,
+      `DEF NUM_BUG_CONTESTANTS EQU ${contestantCount}`,
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(
+      mockDisassemblyRoot,
+      "engine",
+      "events",
+      "bug_contest",
+      "contest_2.asm",
+    ),
+    [
+      "SelectRandomBugContestContestants:",
+      ".loop1",
+      "\tld c, NUM_BUG_CONTESTANTS",
+      `\tld c, ${selectedContestantCount}`,
+      ".loop2",
+      "CheckBugContestContestantFlag:",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
+    [
+      "BugCatchingContestantEventFlagTable:",
+      "\ttable_width 2",
+      ...Array.from(
+        { length: contestantCount },
+        (_, index) => `\tdw EVENT_BUG_CATCHING_CONTESTANT_${index + 1}A`,
+      ),
+      "\tassert_table_length NUM_BUG_CONTESTANTS",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "data", "wild", "bug_contest_mons.asm"),
+    [...encounterSourceLines, ""].join("\n"),
+  );
+};
+
+const canonicalRoamingRouteRows = [
+  ["ROUTE_29", "ROUTE_30", "ROUTE_46"],
+  ["ROUTE_30", "ROUTE_29", "ROUTE_31"],
+  ["ROUTE_31", "ROUTE_30", "ROUTE_32", "ROUTE_36"],
+  ["ROUTE_32", "ROUTE_36", "ROUTE_31", "ROUTE_33"],
+  ["ROUTE_33", "ROUTE_32", "ROUTE_34"],
+  ["ROUTE_34", "ROUTE_33", "ROUTE_35"],
+  ["ROUTE_35", "ROUTE_34", "ROUTE_36"],
+  ["ROUTE_36", "ROUTE_35", "ROUTE_31", "ROUTE_32", "ROUTE_37"],
+  ["ROUTE_37", "ROUTE_36", "ROUTE_38", "ROUTE_42"],
+  ["ROUTE_38", "ROUTE_37", "ROUTE_39", "ROUTE_42"],
+  ["ROUTE_39", "ROUTE_38"],
+  ["ROUTE_42", "ROUTE_43", "ROUTE_44", "ROUTE_37", "ROUTE_38"],
+  ["ROUTE_43", "ROUTE_42", "ROUTE_44"],
+  ["ROUTE_44", "ROUTE_42", "ROUTE_43", "ROUTE_45"],
+  ["ROUTE_45", "ROUTE_44", "ROUTE_46"],
+  ["ROUTE_46", "ROUTE_45", "ROUTE_29"],
+] as const;
+
+const roamingMapMetadata = {
+  ROUTE_29: { groupId: 24, mapId: 3 },
+  ROUTE_30: { groupId: 26, mapId: 1 },
+  ROUTE_31: { groupId: 26, mapId: 2 },
+  ROUTE_32: { groupId: 10, mapId: 1 },
+  ROUTE_33: { groupId: 8, mapId: 6 },
+  ROUTE_34: { groupId: 11, mapId: 1 },
+  ROUTE_35: { groupId: 10, mapId: 2 },
+  ROUTE_36: { groupId: 10, mapId: 3 },
+  ROUTE_37: { groupId: 10, mapId: 4 },
+  ROUTE_38: { groupId: 1, mapId: 12 },
+  ROUTE_39: { groupId: 1, mapId: 13 },
+  ROUTE_42: { groupId: 2, mapId: 5 },
+  ROUTE_43: { groupId: 9, mapId: 5 },
+  ROUTE_44: { groupId: 2, mapId: 6 },
+  ROUTE_45: { groupId: 5, mapId: 8 },
+  ROUTE_46: { groupId: 5, mapId: 9 },
+};
+
+const canonicalInitRoamMonsLines = [
+  "InitRoamMons:",
+  "\tld a, RAIKOU",
+  "\tld [wRoamMon1Species], a",
+  "\tld a, ENTEI",
+  "\tld [wRoamMon2Species], a",
+  "\tld a, 40",
+  "\tld [wRoamMon1Level], a",
+  "\tld [wRoamMon2Level], a",
+  "\tld a, GROUP_ROUTE_42",
+  "\tld [wRoamMon1MapGroup], a",
+  "\tld a, MAP_ROUTE_42",
+  "\tld [wRoamMon1MapNumber], a",
+  "\tld a, GROUP_ROUTE_37",
+  "\tld [wRoamMon2MapGroup], a",
+  "\tld a, MAP_ROUTE_37",
+  "\tld [wRoamMon2MapNumber], a",
+  "\txor a",
+  "\tld [wRoamMon1HP], a",
+  "\tld [wRoamMon2HP], a",
+  "\tret",
+  "CheckEncounterRoamMon:",
+] as const;
+
+const writeRoamingCatalogFixtures = ({
+  initLines = [...canonicalInitRoamMonsLines],
+  routeRows = canonicalRoamingRouteRows.map((row) => [...row]),
+  roamMapCount = 16,
+  maskOperand = "NUM_ROAMMON_MAPS",
+  inactiveGroup = -1,
+  inactiveNumber = -1,
+}: {
+  initLines?: string[];
+  routeRows?: string[][];
+  roamMapCount?: number;
+  maskOperand?: string;
+  inactiveGroup?: number;
+  inactiveNumber?: number;
+} = {}): void => {
+  writeFile(
+    path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
+    [
+      ...initLines,
+      "JumpRoamMon:",
+      "\tcall Random",
+      `\tmaskbits ${maskOperand}`,
+      "\tcp NUM_ROAMMON_MAPS",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "data", "wild", "roammon_maps.asm"),
+    [
+      "RoamMaps:",
+      ...routeRows.map((row) => `\troam_map ${row.join(", ")}`),
+      "\tdb -1 ; end",
+      "",
+    ].join("\n"),
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "constants", "pokemon_data_constants.asm"),
+    `DEF NUM_ROAMMON_MAPS EQU ${roamMapCount}\n`,
+  );
+  writeFile(
+    path.join(mockDisassemblyRoot, "constants", "map_data_constants.asm"),
+    [
+      `DEF GROUP_N_A EQU ${inactiveGroup}`,
+      `DEF MAP_N_A EQU ${inactiveNumber}`,
+      "DEF GROUP_NONE EQU 0",
+      "DEF MAP_NONE EQU 0",
+      "",
+    ].join("\n"),
+  );
+};
 
 const writeMinimalHappinessFixtures = (probabilityRows: string[]): void => {
   writeFile(
@@ -200,6 +400,14 @@ describe("exportRuntimeAssets", () => {
       ["\tconst NPC_TRADE_MIKE", "\tconst NPC_TRADE_KYLE", ""].join("\n"),
     );
     writeFile(
+      path.join(mockDisassemblyRoot, "data", "events", "npc_trades.asm"),
+      [
+        'npctrade TRADE_DIALOGSET_COLLECTOR, ABRA, MACHOP, "MUSCLE", $37, $66, GOLD_BERRY, 37460, "MIKE", TRADE_GENDER_EITHER',
+        'npctrade TRADE_DIALOGSET_COLLECTOR, BELLSPROUT, ONIX, "ROCKY", $96, $66, BITTER_BERRY, 48926, "KYLE", TRADE_GENDER_EITHER',
+        "",
+      ].join("\n"),
+    );
+    writeFile(
       path.join(mockDisassemblyRoot, "data", "phone", "phone_contacts.asm"),
       [
         "\tphone TRAINER_NONE, 0, 0, 0, 0, 0, 0",
@@ -212,16 +420,63 @@ describe("exportRuntimeAssets", () => {
       "\tdb PHONE_MOM\n\tdb -1\n",
     );
     writeFile(
+      path.join(mockDisassemblyRoot, "data", "phone", "special_calls.asm"),
+      [
+        "SpecialPhoneCallList:",
+        "\tspecialcall SpecialCallOnlyWhenOutside, PHONECONTACT_MOM, MomPhoneCallerScript",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
       path.join(mockDisassemblyRoot, "data", "phone", "non_trainer_names.asm"),
       '.mom: db "MOM:@"\n',
     );
     writeFile(
       path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
-      "trainerclass TRAINER_NONE\n",
+      "trainerclass TRAINER_NONE\ntrainerclass YOUNGSTER\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "sprites.asm"),
+      "db SPRITE_YOUNGSTER\n",
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "battle_tower", "classes.asm"),
+      'bt_trainer YOUNGSTER, "JOEY"\n',
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "battle_tower", "parties.asm"),
+      [
+        "; BattleTowerMons group 1",
+        "db CHIKORITA",
+        "db NO_ITEM",
+        "db TACKLE, NO_MOVE, NO_MOVE, NO_MOVE",
+        "dw 1234",
+        "bigdt 1000",
+        "bigdw 0",
+        "bigdw 0",
+        "bigdw 0",
+        "bigdw 0",
+        "bigdw 0",
+        "dn 8, 8, 8, 8",
+        "db 35, 0, 0, 0",
+        "db 70",
+        "db 0, 0",
+        "db 10",
+        "db 0, 0",
+        "bigdw 30",
+        "bigdw 30",
+        "bigdw 20",
+        "bigdw 20",
+        "bigdw 20",
+        "bigdw 20",
+        "bigdw 20",
+        'dname "CHIKORITA"',
+        "",
+      ].join("\n"),
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
-      "",
+      'li "YOUNGSTER"\n',
     );
     writeFile(
       path.join(mockDisassemblyRoot, "data", "events", "special_pointers.asm"),
@@ -384,14 +639,39 @@ describe("exportRuntimeAssets", () => {
       calleeTimeMask: 7,
       calleeScript: "MomPhoneCalleeScript",
     });
-    expect(permanentPhoneNumbers).toEqual({ PHONE_MOM: {} });
+    expect(permanentPhoneNumbers).toEqual({
+      PHONE_MOM: { listIndex: 0 },
+    });
     expect(specialPhoneCalls).toEqual({
-      SPECIALCALL_NONE: {},
-      SPECIALCALL_MASTERBALL: {},
+      SPECIALCALL_MASTERBALL: {
+        condition: "SpecialCallOnlyWhenOutside",
+        contactId: "PHONE_MOM",
+        callerScript: "MomPhoneCallerScript",
+      },
     });
     expect(npcTrades).toEqual({
-      NPC_TRADE_MIKE: {},
-      NPC_TRADE_KYLE: {},
+      NPC_TRADE_MIKE: {
+        dialogSet: "TRADE_DIALOGSET_COLLECTOR",
+        requestedSpecies: "ABRA",
+        offeredSpecies: "MACHOP",
+        nickname: "MUSCLE",
+        dvs: [55, 102],
+        heldItem: "GOLD_BERRY",
+        originalTrainerId: 37460,
+        originalTrainerName: "MIKE",
+        genderRequirement: "TRADE_GENDER_EITHER",
+      },
+      NPC_TRADE_KYLE: {
+        dialogSet: "TRADE_DIALOGSET_COLLECTOR",
+        requestedSpecies: "BELLSPROUT",
+        offeredSpecies: "ONIX",
+        nickname: "ROCKY",
+        dvs: [150, 102],
+        heldItem: "BITTER_BERRY",
+        originalTrainerId: 48926,
+        originalTrainerName: "KYLE",
+        genderRequirement: "TRADE_GENDER_EITHER",
+      },
     });
     expect(specialRoutines).toEqual({
       FadeOutMusic: {},
@@ -500,40 +780,179 @@ describe("exportRuntimeAssets", () => {
     );
   });
 
-  it("exports roaming Pokemon definitions from InitRoamMons using exact runtime map metadata", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
-      [
-        "InitRoamMons:",
-        "\tld a, RAIKOU",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, ENTEI",
-        "\tld [wRoamMon2Species], a",
-        "\tld a, 40",
-        "\tld [wRoamMon1Level], a",
-        "\tld [wRoamMon2Level], a",
-        "\tld a, GROUP_ROUTE_42",
-        "\tld [wRoamMon1MapGroup], a",
-        "\tld a, MAP_ROUTE_42",
-        "\tld [wRoamMon1MapNumber], a",
-        "\tld a, GROUP_ROUTE_37",
-        "\tld [wRoamMon2MapGroup], a",
-        "\tld a, MAP_ROUTE_37",
-        "\tld [wRoamMon2MapNumber], a",
-        "CheckEncounterRoamMon:",
-        "",
-      ].join("\n"),
-    );
+  it("exports one source-exact roaming catalog with partial ordered init writes and the full numeric graph", () => {
+    writeRoamingCatalogFixtures();
 
-    const roamers = exportRoamingPokemon({
-      ROUTE_42: { groupId: 2, mapId: 5 },
-      ROUTE_37: { groupId: 10, mapId: 4 },
-    });
+    const roamers = exportRoamingPokemon(roamingMapMetadata);
 
+    expect(Object.keys(roamers)).toEqual([
+      "slotCount",
+      "inactiveMap",
+      "initWrites",
+      "routes",
+      "jumpMask",
+    ]);
     expect(roamers).toEqual({
-      RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 },
-      ENTEI: { level: 40, mapGroup: 10, mapNumber: 4 },
+      slotCount: 3,
+      inactiveMap: { mapGroup: 255, mapNumber: 255 },
+      initWrites: [
+        {
+          slot: 0,
+          species: "RAIKOU",
+          level: 40,
+          mapGroup: 2,
+          mapNumber: 5,
+          hp: 0,
+        },
+        {
+          slot: 1,
+          species: "ENTEI",
+          level: 40,
+          mapGroup: 10,
+          mapNumber: 4,
+          hp: 0,
+        },
+      ],
+      routes: [
+        {
+          mapGroup: 24,
+          mapNumber: 3,
+          connections: [
+            { mapGroup: 26, mapNumber: 1 },
+            { mapGroup: 5, mapNumber: 9 },
+          ],
+        },
+        {
+          mapGroup: 26,
+          mapNumber: 1,
+          connections: [
+            { mapGroup: 24, mapNumber: 3 },
+            { mapGroup: 26, mapNumber: 2 },
+          ],
+        },
+        {
+          mapGroup: 26,
+          mapNumber: 2,
+          connections: [
+            { mapGroup: 26, mapNumber: 1 },
+            { mapGroup: 10, mapNumber: 1 },
+            { mapGroup: 10, mapNumber: 3 },
+          ],
+        },
+        {
+          mapGroup: 10,
+          mapNumber: 1,
+          connections: [
+            { mapGroup: 10, mapNumber: 3 },
+            { mapGroup: 26, mapNumber: 2 },
+            { mapGroup: 8, mapNumber: 6 },
+          ],
+        },
+        {
+          mapGroup: 8,
+          mapNumber: 6,
+          connections: [
+            { mapGroup: 10, mapNumber: 1 },
+            { mapGroup: 11, mapNumber: 1 },
+          ],
+        },
+        {
+          mapGroup: 11,
+          mapNumber: 1,
+          connections: [
+            { mapGroup: 8, mapNumber: 6 },
+            { mapGroup: 10, mapNumber: 2 },
+          ],
+        },
+        {
+          mapGroup: 10,
+          mapNumber: 2,
+          connections: [
+            { mapGroup: 11, mapNumber: 1 },
+            { mapGroup: 10, mapNumber: 3 },
+          ],
+        },
+        {
+          mapGroup: 10,
+          mapNumber: 3,
+          connections: [
+            { mapGroup: 10, mapNumber: 2 },
+            { mapGroup: 26, mapNumber: 2 },
+            { mapGroup: 10, mapNumber: 1 },
+            { mapGroup: 10, mapNumber: 4 },
+          ],
+        },
+        {
+          mapGroup: 10,
+          mapNumber: 4,
+          connections: [
+            { mapGroup: 10, mapNumber: 3 },
+            { mapGroup: 1, mapNumber: 12 },
+            { mapGroup: 2, mapNumber: 5 },
+          ],
+        },
+        {
+          mapGroup: 1,
+          mapNumber: 12,
+          connections: [
+            { mapGroup: 10, mapNumber: 4 },
+            { mapGroup: 1, mapNumber: 13 },
+            { mapGroup: 2, mapNumber: 5 },
+          ],
+        },
+        {
+          mapGroup: 1,
+          mapNumber: 13,
+          connections: [{ mapGroup: 1, mapNumber: 12 }],
+        },
+        {
+          mapGroup: 2,
+          mapNumber: 5,
+          connections: [
+            { mapGroup: 9, mapNumber: 5 },
+            { mapGroup: 2, mapNumber: 6 },
+            { mapGroup: 10, mapNumber: 4 },
+            { mapGroup: 1, mapNumber: 12 },
+          ],
+        },
+        {
+          mapGroup: 9,
+          mapNumber: 5,
+          connections: [
+            { mapGroup: 2, mapNumber: 5 },
+            { mapGroup: 2, mapNumber: 6 },
+          ],
+        },
+        {
+          mapGroup: 2,
+          mapNumber: 6,
+          connections: [
+            { mapGroup: 2, mapNumber: 5 },
+            { mapGroup: 9, mapNumber: 5 },
+            { mapGroup: 5, mapNumber: 8 },
+          ],
+        },
+        {
+          mapGroup: 5,
+          mapNumber: 8,
+          connections: [
+            { mapGroup: 2, mapNumber: 6 },
+            { mapGroup: 5, mapNumber: 9 },
+          ],
+        },
+        {
+          mapGroup: 5,
+          mapNumber: 9,
+          connections: [
+            { mapGroup: 5, mapNumber: 8 },
+            { mapGroup: 24, mapNumber: 3 },
+          ],
+        },
+      ],
+      jumpMask: 15,
     });
+    expect(roamers.initWrites).toHaveLength(2);
+    expect(roamers.initWrites.every((write) => !("dvs" in write))).toBe(true);
     const dataDir = path.join(mockAssetsRoot, "data");
     expect(
       JSON.parse(
@@ -542,108 +961,111 @@ describe("exportRuntimeAssets", () => {
     ).toEqual(roamers);
   });
 
-  it("rejects repeated InitRoamMons slot writes before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
-      [
-        "InitRoamMons:",
-        "\tld a, RAIKOU",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, ENTEI",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, 40",
-        "\tld [wRoamMon1Level], a",
-        "\tld a, GROUP_ROUTE_42",
-        "\tld [wRoamMon1MapGroup], a",
-        "\tld a, MAP_ROUTE_42",
-        "\tld [wRoamMon1MapNumber], a",
-        "CheckEncounterRoamMon:",
-        "",
-      ].join("\n"),
+  it("rejects reordered and extra InitRoamMons field writes", () => {
+    const reordered: string[] = [...canonicalInitRoamMonsLines];
+    [reordered[2], reordered[4]] = [reordered[4], reordered[2]];
+    writeRoamingCatalogFixtures({ initLines: reordered });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "InitRoamMons field write 0",
     );
 
-    expect(() =>
-      exportRoamingPokemon({
-        ROUTE_42: { groupId: 2, mapId: 5 },
-      }),
-    ).toThrow("InitRoamMons slot 1 repeats species data.");
-  });
-
-  it("rejects roaming Pokemon levels outside Pokemon range before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
-      [
-        "InitRoamMons:",
-        "\tld a, RAIKOU",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, 101",
-        "\tld [wRoamMon1Level], a",
-        "\tld a, GROUP_ROUTE_42",
-        "\tld [wRoamMon1MapGroup], a",
-        "\tld a, MAP_ROUTE_42",
-        "\tld [wRoamMon1MapNumber], a",
-        "CheckEncounterRoamMon:",
-        "",
-      ].join("\n"),
-    );
-
-    expect(() =>
-      exportRoamingPokemon({
-        ROUTE_42: { groupId: 2, mapId: 5 },
-      }),
-    ).toThrow(
-      "Roaming Pokemon RAIKOU level 101 is outside Pokemon level range.",
+    const withExtraWrite: string[] = [...canonicalInitRoamMonsLines];
+    withExtraWrite.splice(-2, 0, "\tld [wRoamMon3HP], a");
+    writeRoamingCatalogFixtures({ initLines: withExtraWrite });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "InitRoamMons has 11 roaming field writes, expected exactly 10.",
     );
   });
 
-  it("rejects roaming Pokemon map ids outside byte range before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
-      [
-        "InitRoamMons:",
-        "\tld a, RAIKOU",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, 40",
-        "\tld [wRoamMon1Level], a",
-        "\tld a, GROUP_ROUTE_42",
-        "\tld [wRoamMon1MapGroup], a",
-        "\tld a, MAP_ROUTE_42",
-        "\tld [wRoamMon1MapNumber], a",
-        "CheckEncounterRoamMon:",
-        "",
-      ].join("\n"),
+  it("rejects missing, duplicate, reordered, and unknown roaming route rows", () => {
+    const missing = canonicalRoamingRouteRows
+      .slice(0, -1)
+      .map((row) => [...row]);
+    writeRoamingCatalogFixtures({ routeRows: missing });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "RoamMaps has 15 rows, expected exactly 16.",
     );
 
-    expect(() =>
-      exportRoamingPokemon({
-        ROUTE_42: { groupId: 256, mapId: 5 },
-      }),
-    ).toThrow("Roaming Pokemon RAIKOU map group 256 is outside byte range.");
+    const duplicate = canonicalRoamingRouteRows.map((row) => [...row]);
+    duplicate[1][0] = duplicate[0][0];
+    writeRoamingCatalogFixtures({ routeRows: duplicate });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "RoamMaps repeats origin 'ROUTE_29'.",
+    );
+
+    const reordered = canonicalRoamingRouteRows.map((row) => [...row]);
+    [reordered[0], reordered[1]] = [reordered[1], reordered[0]];
+    writeRoamingCatalogFixtures({ routeRows: reordered });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "RoamMaps row 0 origin 'ROUTE_30' does not match canonical 'ROUTE_29'.",
+    );
+
+    const unknown: string[][] = canonicalRoamingRouteRows.map((row) => [
+      ...row,
+    ]);
+    unknown[0][1] = "ROUTE_99";
+    writeRoamingCatalogFixtures({ routeRows: unknown });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "RoamMaps row 0 connections",
+    );
   });
 
-  it("rejects roaming Pokemon map numbers outside byte range before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "engine", "overworld", "wildmons.asm"),
-      [
-        "InitRoamMons:",
-        "\tld a, RAIKOU",
-        "\tld [wRoamMon1Species], a",
-        "\tld a, 40",
-        "\tld [wRoamMon1Level], a",
-        "\tld a, GROUP_ROUTE_42",
-        "\tld [wRoamMon1MapGroup], a",
-        "\tld a, MAP_ROUTE_42",
-        "\tld [wRoamMon1MapNumber], a",
-        "CheckEncounterRoamMon:",
-        "",
-      ].join("\n"),
+  it("rejects bad roaming connection counts, jump masks, and map metadata", () => {
+    const badConnections = canonicalRoamingRouteRows.map((row) => [...row]);
+    badConnections[0] = [
+      "ROUTE_29",
+      "ROUTE_30",
+      "ROUTE_31",
+      "ROUTE_32",
+      "ROUTE_33",
+      "ROUTE_34",
+    ];
+    writeRoamingCatalogFixtures({ routeRows: badConnections });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "RoamMaps row 0 must declare 1..4 connections, found 5.",
     );
 
-    expect(() =>
-      exportRoamingPokemon({
-        ROUTE_42: { groupId: 2, mapId: 256 },
-      }),
-    ).toThrow("Roaming Pokemon RAIKOU map number 256 is outside byte range.");
+    writeRoamingCatalogFixtures({ maskOperand: "15" });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "JumpRoamMon must mask with exact NUM_ROAMMON_MAPS.",
+    );
+
+    writeRoamingCatalogFixtures();
+    const missingMetadata = { ...roamingMapMetadata } as Record<
+      string,
+      { groupId: number; mapId: number }
+    >;
+    delete missingMetadata.ROUTE_46;
+    expect(() => exportRoamingPokemon(missingMetadata)).toThrow(
+      "Roaming map 'ROUTE_46' is missing from runtime map metadata.",
+    );
+
+    const inactiveGroupCollision = {
+      ...roamingMapMetadata,
+      UNUSED_RUNTIME_MAP: { groupId: 0xff, mapId: 1 },
+    };
+    expect(() => exportRoamingPokemon(inactiveGroupCollision)).toThrow(
+      "Inactive roaming map group 255 collides with runtime map 'UNUSED_RUNTIME_MAP'.",
+    );
+  });
+
+  it("requires the canonical 16-row roaming count before deriving jumpMask 15", () => {
+    writeRoamingCatalogFixtures({ roamMapCount: 8 });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "NUM_ROAMMON_MAPS is 8, expected exact source count 16.",
+    );
+  });
+
+  it("parses the retired roaming map sentinel and rejects source mutation away from -1/-1", () => {
+    writeRoamingCatalogFixtures({ inactiveGroup: -2 });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "GROUP_N_A is -2, expected exact inactive sentinel -1.",
+    );
+
+    writeRoamingCatalogFixtures({ inactiveNumber: 0 });
+    expect(() => exportRoamingPokemon(roamingMapMetadata)).toThrow(
+      "MAP_N_A is 0, expected exact inactive sentinel -1.",
+    );
   });
 
   it("exports Buena prize definitions from exact ASM item/cost rows", () => {
@@ -1018,46 +1440,7 @@ describe("exportRuntimeAssets", () => {
   });
 
   it("exports Bug-Catching Contest config from exact ASM constants and flag table", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
-      [
-        "DEF BUG_CONTEST_BALLS EQU 20",
-        "DEF BUG_CONTEST_MINUTES EQU 20",
-        "DEF BUG_CONTEST_SECONDS EQU 0",
-        "DEF NUM_BUG_CONTESTANTS EQU 3",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(
-        mockDisassemblyRoot,
-        "engine",
-        "events",
-        "bug_contest",
-        "contest_2.asm",
-      ),
-      [
-        "SelectRandomBugContestContestants:",
-        ".loop1",
-        "\tld c, NUM_BUG_CONTESTANTS",
-        "\tld c, 2",
-        ".loop2",
-        "CheckBugContestContestantFlag:",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
-      [
-        "BugCatchingContestantEventFlagTable:",
-        "\ttable_width 2",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_1A",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_2A",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_3A",
-        "\tassert_table_length NUM_BUG_CONTESTANTS",
-        "",
-      ].join("\n"),
-    );
+    writeBugContestConfigFixtures();
 
     const config = exportBugContestConfig();
 
@@ -1071,6 +1454,7 @@ describe("exportRuntimeAssets", () => {
         "EVENT_BUG_CATCHING_CONTESTANT_2A",
         "EVENT_BUG_CATCHING_CONTESTANT_3A",
       ],
+      encounters: canonicalBugContestEncounters,
     });
     const dataDir = path.join(mockAssetsRoot, "data");
     expect(
@@ -1081,44 +1465,7 @@ describe("exportRuntimeAssets", () => {
   });
 
   it("rejects Bug-Catching Contest timer seconds outside clock range before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
-      [
-        "DEF BUG_CONTEST_BALLS EQU 20",
-        "DEF BUG_CONTEST_MINUTES EQU 20",
-        "DEF BUG_CONTEST_SECONDS EQU 60",
-        "DEF NUM_BUG_CONTESTANTS EQU 3",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(
-        mockDisassemblyRoot,
-        "engine",
-        "events",
-        "bug_contest",
-        "contest_2.asm",
-      ),
-      [
-        "SelectRandomBugContestContestants:",
-        ".loop1",
-        "\tld c, 2",
-        ".loop2",
-        "CheckBugContestContestantFlag:",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
-      [
-        "BugCatchingContestantEventFlagTable:",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_1A",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_2A",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_3A",
-        "\tassert_table_length NUM_BUG_CONTESTANTS",
-        "",
-      ].join("\n"),
-    );
+    writeBugContestConfigFixtures({ timerSeconds: 60 });
 
     expect(() => exportBugContestConfig()).toThrow(
       "Bug-Catching Contest timer seconds 60 is outside clock second range.",
@@ -1126,48 +1473,104 @@ describe("exportRuntimeAssets", () => {
   });
 
   it("rejects Bug-Catching Contest selected count above contestant flags before pack emission", () => {
-    writeFile(
-      path.join(mockDisassemblyRoot, "constants", "script_constants.asm"),
-      [
-        "DEF BUG_CONTEST_BALLS EQU 20",
-        "DEF BUG_CONTEST_MINUTES EQU 20",
-        "DEF BUG_CONTEST_SECONDS EQU 0",
-        "DEF NUM_BUG_CONTESTANTS EQU 2",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(
-        mockDisassemblyRoot,
-        "engine",
-        "events",
-        "bug_contest",
-        "contest_2.asm",
-      ),
-      [
-        "SelectRandomBugContestContestants:",
-        ".loop1",
-        "\tld c, 3",
-        ".loop2",
-        "CheckBugContestContestantFlag:",
-        "",
-      ].join("\n"),
-    );
-    writeFile(
-      path.join(mockDisassemblyRoot, "data", "events", "bug_contest_flags.asm"),
-      [
-        "BugCatchingContestantEventFlagTable:",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_1A",
-        "\tdw EVENT_BUG_CATCHING_CONTESTANT_2A",
-        "\tassert_table_length NUM_BUG_CONTESTANTS",
-        "",
-      ].join("\n"),
-    );
+    writeBugContestConfigFixtures({
+      contestantCount: 2,
+      selectedContestantCount: 3,
+    });
 
     expect(() => exportBugContestConfig()).toThrow(
       "Bug-Catching Contest selected contestant count 3 exceeds contestant flags 2.",
     );
   });
+
+  it("rejects a missing required Bug-Catching Contest encounter source", () => {
+    writeBugContestConfigFixtures();
+    fs.rmSync(
+      path.join(mockDisassemblyRoot, "data", "wild", "bug_contest_mons.asm"),
+    );
+
+    expect(() => exportBugContestConfig()).toThrow(
+      "Required Bug-Catching Contest encounter source data/wild/bug_contest_mons.asm could not be read.",
+    );
+  });
+
+  it.each([
+    {
+      name: "missing ContestMons label",
+      lines: [...canonicalBugContestEncounterRows],
+      message:
+        "Bug-Catching Contest encounter source must begin with exact ContestMons: label.",
+    },
+    {
+      name: "malformed row opcode",
+      lines: [
+        "ContestMons:",
+        canonicalBugContestEncounterRows[0].replace("db ", "dw "),
+        ...canonicalBugContestEncounterRows.slice(1),
+      ],
+      message: "Malformed Bug-Catching Contest encounter row 1:",
+    },
+    {
+      name: "reordered canonical rows",
+      lines: [
+        "ContestMons:",
+        canonicalBugContestEncounterRows[1],
+        canonicalBugContestEncounterRows[0],
+        ...canonicalBugContestEncounterRows.slice(2),
+      ],
+      message:
+        "Bug-Catching Contest encounter row 1 changed canonical order or values",
+    },
+    {
+      name: "altered canonical row values",
+      lines: [
+        "ContestMons:",
+        canonicalBugContestEncounterRows[0].replace("20,", "19,"),
+        ...canonicalBugContestEncounterRows.slice(1),
+      ],
+      message:
+        "Bug-Catching Contest encounter row 1 changed canonical order or values",
+    },
+    {
+      name: "missing terminator row",
+      lines: ["ContestMons:", ...canonicalBugContestEncounterRows.slice(0, -1)],
+      message:
+        "Bug-Catching Contest encounter table must contain exactly 10 weighted rows and one final sentinel row; found 10 rows.",
+    },
+    {
+      name: "early terminator row",
+      lines: [
+        "ContestMons:",
+        canonicalBugContestEncounterRows.at(-1)!,
+        ...canonicalBugContestEncounterRows.slice(1, -1),
+        canonicalBugContestEncounterRows[0],
+      ],
+      message:
+        "Bug-Catching Contest encounter sentinel must be the final row after 10 weighted rows.",
+    },
+    {
+      name: "extra row after terminator",
+      lines: [
+        "ContestMons:",
+        ...canonicalBugContestEncounterRows,
+        "\tdb 1, CATERPIE, 7, 7",
+      ],
+      message:
+        "Bug-Catching Contest encounter table must contain exactly 10 weighted rows and one final sentinel row; found 12 rows.",
+    },
+  ])(
+    "rejects $name instead of emitting a partial encounter table",
+    ({ lines, message }) => {
+      writeBugContestConfigFixtures({ encounterSourceLines: lines });
+
+      expect(() => exportBugContestConfig()).toThrow(message);
+      expect(
+        fs.existsSync(
+          path.join(mockAssetsRoot, "data", "bug_contest_config.json"),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("exports Battle Tower banned species from exact ASM ubers check", () => {
     writeFile(
@@ -1268,6 +1671,34 @@ describe("exportRuntimeAssets", () => {
       duplicateSpeciesFailureText: "TheMonMustAllBeDifferentKindsText",
       duplicateHeldItemFailureText: "TheMonMustNotHoldTheSameItemsText",
       eggFailureText: "YouCantTakeAnEggText",
+      trainers: [
+        {
+          index: 0,
+          trainerClass: "YOUNGSTER",
+          name: "JOEY",
+          spriteConstant: "SPRITE_YOUNGSTER",
+        },
+      ],
+      monGroups: [
+        [
+          {
+            species: "CHIKORITA",
+            item: null,
+            moves: ["TACKLE", "NO_MOVE", "NO_MOVE", "NO_MOVE"],
+            originalTrainerId: 1234,
+            experience: 1000,
+            statExp: [0, 0, 0, 0, 0],
+            dvs: [8, 8, 8, 8],
+            pp: [35, 0, 0, 0],
+            happiness: 70,
+            pokerus: [0, 0],
+            level: 10,
+            status: [0, 0],
+            stats: [30, 30, 20, 20, 20, 20, 20],
+            nickname: "CHIKORITA",
+          },
+        ],
+      ],
     });
     const dataDir = path.join(mockAssetsRoot, "data");
     expect(
@@ -1275,6 +1706,12 @@ describe("exportRuntimeAssets", () => {
         fs.readFileSync(path.join(dataDir, "battle_tower_rules.json"), "utf8"),
       ),
     ).toEqual(rules);
+    fs.unlinkSync(
+      path.join(mockDisassemblyRoot, "data", "battle_tower", "parties.asm"),
+    );
+    expect(() => exportBattleTowerRules()).toThrow(
+      "Required Battle Tower source is missing: data/battle_tower/parties.asm",
+    );
   });
 
   it("rejects Battle Tower party lengths outside party size range before pack emission", () => {
@@ -3067,6 +3504,60 @@ describe("exportRuntimeAssets", () => {
 
     expect(() => exportRuntimeAssets()).toThrow(
       "Trainer class id count 1 does not match class name count 0.",
+    );
+  });
+
+  it("exports trainer class display names in exact constant-table order", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      [
+        "trainerclass TRAINER_NONE",
+        "trainerclass COOLTRAINERM",
+        "trainerclass POKEMON_PROF",
+        "trainerclass CAL",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      [
+        '\tli "COOLTRAINER"',
+        '\tli "#MON PROF."',
+        '\tli "<PKMN> TRAINER"',
+        "",
+      ].join("\n"),
+    );
+
+    const names = exportTrainerClassNames();
+
+    expect(names).toEqual({
+      COOLTRAINERM: "COOLTRAINER",
+      POKEMON_PROF: "POKéMON PROF.",
+      CAL: "PKMN TRAINER",
+    });
+    expect(Object.keys(names)).toEqual(["COOLTRAINERM", "POKEMON_PROF", "CAL"]);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(mockAssetsRoot, "data", "trainer_class_names.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(names);
+  });
+
+  it("requires TRAINER_NONE to anchor the trainer class constant table", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "trainer_constants.asm"),
+      ["trainerclass YOUNGSTER", ""].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "class_names.asm"),
+      ['\tli "YOUNGSTER"', ""].join("\n"),
+    );
+
+    expect(() => exportTrainerClassNames()).toThrow(
+      "Trainer class constant table must begin with exact TRAINER_NONE, found 'YOUNGSTER'.",
     );
   });
 

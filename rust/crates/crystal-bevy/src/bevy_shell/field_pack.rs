@@ -1759,7 +1759,7 @@ fn format_special_details(snapshot: &RuntimeShellSnapshot, lines: &mut Vec<Strin
         special.happiness_data.is_some(),
         special.buena_password_categories.categories.len(),
         special.buena_prizes.len(),
-        special.roaming_pokemon.len()
+        special.roaming_pokemon.init_writes.len()
     ));
     lines.push(format!(
         "services heal={} pc={} delete={} name_rater={} tutor={} menu={} time={} story={} daycare={} noop={}",
@@ -1904,8 +1904,8 @@ fn format_special_details(snapshot: &RuntimeShellSnapshot, lines: &mut Vec<Strin
     for trade in special.npc_trades.keys().take(8) {
         lines.push(format!("npc_trade {trade}"));
     }
-    for species in special.roaming_pokemon.keys().take(8) {
-        lines.push(format!("roaming {species}"));
+    for write in special.roaming_pokemon.init_writes.iter().take(8) {
+        lines.push(format!("roaming {}", write.species));
     }
 }
 

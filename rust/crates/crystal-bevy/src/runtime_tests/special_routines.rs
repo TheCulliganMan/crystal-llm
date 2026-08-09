@@ -127,7 +127,10 @@
             }
         );
 
-        session.state.rng_seed = 1;
+        session.state.random_state =
+            crystal_core::random::CrystalRandomState { add: 0xff, sub: 0 };
+        session.divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
         let kenji = session
             .apply_special_routine(&runtime, "SampleKenjiBreakCountdown")
             .expect("kenji countdown");
@@ -136,14 +139,17 @@
             kenji.outcome.effect,
             SpecialRoutineEffect::SampleKenjiBreakCountdown {
                 value: 3,
-                rng_seed_after: 3_799_027_825
+                random_state_after: crystal_core::random::CrystalRandomState {
+                    add: 0xff,
+                    sub: 56
+                }
             }
         );
         assert_eq!(session.state.kenji_break_timer, 3);
         session.state.lucky_number_show_flag = true;
         session.state.time.current_day = 4;
         session.state.time.day_of_week = 4;
-        session.state.rng_seed = 1;
+        session.state.random_state = crystal_core::random::CrystalRandomState::default();
         let lucky_flag = session
             .apply_special_routine(&runtime, "CheckLuckyNumberShowFlag")
             .expect("check lucky flag");
@@ -153,6 +159,8 @@
             SpecialRoutineEffect::CheckLuckyNumberShowFlag { flag: true }
         );
 
+        session.divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 255, 0, 255]);
         let lucky_reset = session
             .apply_special_routine(&runtime, "ResetLuckyNumberShowFlag")
             .expect("reset lucky flag");
@@ -160,9 +168,9 @@
         assert_eq!(
             lucky_reset.outcome.effect,
             SpecialRoutineEffect::ResetLuckyNumberShowFlag {
-                lucky_number: 22638,
+                lucky_number: 258,
                 lucky_number_day: 4,
-                rng_seed_after: 474_902_163
+                random_state_after: crystal_core::random::CrystalRandomState { add: 2, sub: 2 }
             }
         );
         assert!(!session.state.lucky_number_show_flag);
@@ -174,8 +182,8 @@
         assert_eq!(
             lucky_print.outcome.effect,
             SpecialRoutineEffect::PrintTodaysLuckyNumber {
-                lucky_number: 22638,
-                formatted: "22638".to_string()
+                lucky_number: 258,
+                formatted: "00258".to_string()
             }
         );
         assert_eq!(
@@ -185,15 +193,15 @@
                 .named_buffers
                 .get("STRING_BUFFER_3")
                 .map(String::as_str),
-            Some("22638")
+            Some("00258")
         );
 
         let mut winner = wounded_runtime_pokemon("CHIKORITA");
-        winner.original_trainer_id = 41_538;
+        winner.original_trainer_id = 1_358;
         session
             .state
             .storage
-            .register_capture(winner)
+            .register_capture_in_box(0, winner)
             .expect("store lucky winner");
         session.state.sync_party_from_storage();
         let lucky_winner = session
@@ -203,7 +211,7 @@
         assert_eq!(
             lucky_winner.outcome.effect,
             SpecialRoutineEffect::CheckForLuckyNumberWinners {
-                lucky_number: 22638,
+                lucky_number: 258,
                 tier: 3,
                 source: Some(
                     crystal_core::systems::special_routines::LuckyNumberWinnerSource::Party
@@ -305,7 +313,7 @@
         session
             .state
             .storage
-            .register_capture(ho_oh)
+            .register_capture_in_box(0, ho_oh)
             .expect("store ho-oh");
         session.state.sync_party_from_storage();
         for flag in [
@@ -377,7 +385,7 @@
         session
             .state
             .storage
-            .register_capture(pokemon)
+            .register_capture_in_box(0, pokemon)
             .expect("store");
         session.state.sync_party_from_storage();
         let special = session
@@ -970,7 +978,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1033,7 +1041,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1101,7 +1109,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1168,7 +1176,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1237,7 +1245,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1302,7 +1310,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1363,12 +1371,12 @@
         session
             .state
             .storage
-            .register_capture(fainted)
+            .register_capture_in_box(0, fainted)
             .expect("register fainted");
         session
             .state
             .storage
-            .register_capture(active)
+            .register_capture_in_box(0, active)
             .expect("register active");
         session.state.sync_party_from_storage();
         session
@@ -1427,7 +1435,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1483,7 +1491,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1540,7 +1548,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1602,7 +1610,7 @@
         session
             .state
             .storage
-            .register_capture(fainted)
+            .register_capture_in_box(0, fainted)
             .expect("register fainted");
         session.state.sync_party_from_storage();
         session
@@ -1656,7 +1664,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1711,7 +1719,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1777,7 +1785,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1852,7 +1860,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -1920,7 +1928,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2000,7 +2008,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2095,7 +2103,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2156,12 +2164,12 @@
         session
             .state
             .storage
-            .register_capture(fainted)
+            .register_capture_in_box(0, fainted)
             .expect("register fainted");
         session
             .state
             .storage
-            .register_capture(healthy)
+            .register_capture_in_box(0, healthy)
             .expect("register healthy");
         session.state.sync_party_from_storage();
         session
@@ -2227,7 +2235,7 @@
         session
             .state
             .storage
-            .register_capture(healthy)
+            .register_capture_in_box(0, healthy)
             .expect("register healthy");
         session.state.sync_party_from_storage();
         session
@@ -2297,7 +2305,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2359,7 +2367,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2417,7 +2425,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2483,7 +2491,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2526,6 +2534,19 @@
         module.blocks = vec![0x5b, 0x00];
         data.map_attributes
             .insert("RuntimeMap".to_string(), module.attributes.clone());
+        let mut connected_map = runtime_map();
+        connected_map.id = "ConnectedMap".to_string();
+        connected_map.attributes.map_constant = None;
+        connected_map.attributes.blocks_label = Some("ConnectedMap_Blocks".to_string());
+        connected_map.attributes.map_scripts_label = Some("ConnectedMap_MapScripts".to_string());
+        connected_map.attributes.map_events_label = Some("ConnectedMap_MapEvents".to_string());
+        connected_map.blocks = vec![0x00, 0x00];
+        data.map_attributes.insert(
+            "ConnectedMap".to_string(),
+            connected_map.attributes.clone(),
+        );
+        data.maps
+            .insert("ConnectedMap".to_string(), connected_map);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -2544,7 +2565,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[1] = true;
@@ -2565,6 +2586,28 @@
                 .and_then(|overrides| overrides.get(&(0, 0)))
                 .copied(),
             Some(0x3c)
+        );
+        session
+            .state
+            .map_block_overrides
+            .entry("ConnectedMap".to_string())
+            .or_default()
+            .insert((1, 0), 0x5b);
+        let mut rendered_maps = runtime
+            .map_catalog_snapshot(&session.overworld.map, &session.state)
+            .into_iter();
+        let rendered_map = rendered_maps
+            .clone()
+            .find(|map| map.map_name == "RuntimeMap")
+            .expect("active render map snapshot");
+        assert_eq!(rendered_map.blocks, vec![0x3c, 0x00]);
+        let connected_map = rendered_maps
+            .find(|map| map.map_name == "ConnectedMap")
+            .expect("connected render map snapshot");
+        assert_eq!(
+            connected_map.blocks,
+            vec![0x00, 0x5b],
+            "saved block overrides must remain visible when a neighboring map is composited"
         );
 
         let resumed =
@@ -2616,7 +2659,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         let before = session.state.clone();
@@ -2677,7 +2720,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[6] = true;
@@ -2734,12 +2777,12 @@
         session
             .state
             .storage
-            .register_capture(strength_user)
+            .register_capture_in_box(0, strength_user)
             .expect("register strength user");
         session
             .state
             .storage
-            .register_capture(flash_user)
+            .register_capture_in_box(0, flash_user)
             .expect("register flash user");
         session.state.sync_party_from_storage();
         session.state.badges.johto[2] = true;
@@ -2807,7 +2850,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[3] = true;
@@ -2871,7 +2914,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[3] = true;
@@ -2937,7 +2980,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[7] = true;
@@ -2987,7 +3030,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[0] = true;
@@ -3045,7 +3088,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[5] = true;
@@ -3092,7 +3135,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.badges.johto[5] = true;
@@ -3141,7 +3184,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.last_spawn_identifier = Some(21);
@@ -3192,7 +3235,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.last_spawn_identifier = None;
@@ -3239,7 +3282,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.last_spawn_identifier = Some(21);
@@ -3286,7 +3329,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.overworld.player.facing = Direction::Down;
@@ -3313,12 +3356,13 @@
     }
 
     #[test]
-    fn runtime_rock_smash_field_move_uses_exact_field_encounter_table() {
+    fn runtime_rock_smash_party_menu_queues_the_common_script_and_overwrites_last_talked() {
         let root = temp_repository_root("field-move-rock-smash");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_scripted_battles();
         add_runtime_field_encounters(&mut data);
+        add_runtime_rock_smash_global_scripts(&mut data);
         let mut rock = runtime_object("RUNTIME_SMASHABLE_ROCK", "-1");
         rock.x = 0;
         rock.y = 1;
@@ -3334,50 +3378,95 @@
             identity(),
         )
         .expect("runtime");
-        let mut session = runtime
-            .start_overworld_session(&asset_root, 0)
-            .expect("overworld session");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0).expect("game shell");
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         player.moves = vec![LearnedMove {
             name: "ROCK_SMASH".to_string(),
             current_pp: 15,
             pp_ups: 0,
         }];
-        session
+        shell
+            .session_mut()
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
-        session.state.sync_party_from_storage();
-        session.state.rng_seed = 1;
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().state.script_runtime.last_talked_object =
+            Some("STALE_OBJECT".to_string());
+        shell.session_mut().overworld.last_talked_object_identifier =
+            Some("STALE_OBJECT".to_string());
+        let replay_base = shell.session().clone();
+        let retained_before = shell.retained_runtime_commands().len();
 
-        let use_result = session
-            .use_rock_smash_field_move(&runtime, 0)
-            .expect("use rock smash");
+        let dispatch = shell
+            .queue_rock_smash_from_menu(0)
+            .expect("queue RockSmashFromMenuScript");
 
         assert_eq!(
-            use_result.field_encounter.kind,
-            FieldEncounterKind::RockSmash
+            dispatch.next_script,
+            "RockSmashFromMenuScript"
         );
-        assert_eq!(use_result.field_encounter.target_tile_x, 0);
-        assert_eq!(use_result.field_encounter.target_tile_y, 1);
-        assert_eq!(use_result.field_encounter.chance_roll, 0);
-        assert_eq!(use_result.field_encounter.entry_roll, Some(88));
         assert_eq!(
-            use_result.removed_object_identifier.as_deref(),
+            dispatch.last_talked_object.as_deref(),
             Some("RUNTIME_SMASHABLE_ROCK")
         );
-        assert_eq!(use_result.removed_event_flag, None);
+        assert_eq!(
+            shell
+                .session()
+                .state()
+                .script_runtime
+                .last_talked_object
+                .as_deref(),
+            Some("RUNTIME_SMASHABLE_ROCK")
+        );
+        assert_eq!(
+            shell
+                .session()
+                .overworld
+                .last_talked_object_identifier
+                .as_deref(),
+            Some("RUNTIME_SMASHABLE_ROCK")
+        );
+        assert_eq!(
+            shell
+                .session()
+                .state()
+                .script_runtime
+                .memory
+                .get("wCurPartyMon"),
+            Some(&"0".to_string())
+        );
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
+        // The common RockSmashScript owns applymovementlasttalked/disappear;
+        // menu dispatch itself must not eagerly hide the target.
         assert!(
-            session
+            shell
+                .session()
                 .overworld
                 .visible_object_at(TilePosition::new(0, 1))
-                .is_none()
+                .is_some()
         );
-        let battle = use_result.wild_battle.expect("rock smash battle");
-        assert_eq!(battle.enemy_pokemon.species.id, "CHIKORITA");
-        assert_eq!(battle.enemy_pokemon.level, 15);
-        assert!(matches!(session.state.battle, BattleMemory::Wild { .. }));
+        let frame = &shell.retained_runtime_commands()[retained_before];
+        let recorded = crystal_assets::decode_runtime_mutation_command_frame(
+            frame,
+            replay_base.state(),
+        )
+        .expect("decode journaled Rock Smash menu dispatch");
+        assert_eq!(
+            recorded,
+            RuntimeMutationCommand::QueueRockSmashFromMenu(RuntimeFieldPartyCommand {
+                party_index: 0,
+            })
+        );
+        let mut remote = replay_base;
+        let replayed = remote
+            .apply_runtime_command_frame(&runtime, frame)
+            .expect("remote applies the same menu dispatch frame");
+        assert_eq!(remote.state(), shell.session().state());
+        assert_eq!(remote.overworld, shell.session().overworld);
+        assert_eq!(replayed.state_checksum, dispatch.state_checksum);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3409,7 +3498,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.rng_seed = 1;
@@ -3459,7 +3548,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.rng_seed = 1;
@@ -3516,7 +3605,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session.overworld.player.facing = Direction::Down;
@@ -3570,38 +3659,46 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.rng_seed = 1;
+        session.state.random_state = crystal_core::random::CrystalRandomState::default();
+        session.divider = crystal_core::random::RuntimeDividerSource::replay([
+            0, 0, // roaming selector
+            0, 0, // slot
+            0, 0, // level
+            0, 0, // held item
+            0, 0, // attack/defense
+            0, 0, // speed/special
+        ]);
 
         let use_result = session
-            .use_sweet_scent_field_move(&runtime, 0, EncounterSurface::Grass)
+            .use_sweet_scent_field_move(&runtime, 0)
             .expect("use sweet scent");
 
         assert_eq!(use_result.actor_party_index, 0);
         assert_eq!(use_result.actor_species, "CHIKORITA");
-        assert_eq!(use_result.wild_encounter.map_name, "RuntimeMap");
-        assert_eq!(use_result.wild_encounter.surface, EncounterSurface::Grass);
-        assert_eq!(use_result.wild_encounter.threshold, 255);
-        assert_eq!(use_result.wild_encounter.encounter_roll, 0);
-        assert_eq!(use_result.wild_encounter.slot_percent_roll, Some(17));
-        assert_eq!(use_result.wild_encounter.level_roll, Some(188));
-        let resolved = use_result
+        let wild_encounter = use_result
             .wild_encounter
+            .as_ref()
+            .expect("grass Sweet Scent encounter");
+        assert_eq!(wild_encounter.map_name, "RuntimeMap");
+        assert_eq!(wild_encounter.surface, EncounterSurface::Grass);
+        assert_eq!(wild_encounter.threshold, 255);
+        assert_eq!(wild_encounter.encounter_roll, 0);
+        assert_eq!(wild_encounter.slot_percent_roll, Some(0));
+        assert_eq!(wild_encounter.level_roll, Some(0));
+        let resolved = wild_encounter
             .resolved
             .clone()
             .expect("resolved");
         assert_eq!(resolved.encounter.species, "CHIKORITA");
-        assert_eq!(resolved.level, 16);
-        assert_eq!(use_result.wild_battle.enemy_pokemon.species.id, "CHIKORITA");
-        assert_eq!(use_result.wild_battle.enemy_pokemon.level, 16);
-        assert_eq!(use_result.wild_battle.encounter, use_result.wild_encounter);
+        assert_eq!(resolved.level, 14);
+        let wild_battle = use_result.wild_battle.as_ref().expect("Sweet Scent battle");
+        assert_eq!(wild_battle.enemy_pokemon.species.id, "CHIKORITA");
+        assert_eq!(wild_battle.enemy_pokemon.level, 14);
+        assert_eq!(&wild_battle.encounter, wild_encounter);
         assert!(matches!(session.state.battle, BattleMemory::Wild { .. }));
-        assert_eq!(
-            use_result.wild_battle.rng_seed_after,
-            session.state.rng_seed
-        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3636,19 +3733,24 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.rng_seed = 1;
+        for metatile in &mut session.overworld.tileset.metatiles {
+            metatile.collision = [
+                crystal_core::world::collision::permissions::FLOOR;
+                4
+            ];
+        }
+        session.divider = crystal_core::random::RuntimeDividerSource::replay([]);
         let before = session.state.clone();
 
-        let error = session
-            .use_sweet_scent_field_move(&runtime, 0, EncounterSurface::Water)
-            .expect_err("missing water table rejects sweet scent");
-        let error = error_debug(error);
-
-        assert!(error.contains("roll SWEET_SCENT encounter on RuntimeMap"));
-        assert_eq!(session.state, before);
+        let use_result = session
+            .use_sweet_scent_field_move(&runtime, 0)
+            .expect("Sweet Scent on a non-encounter tile is a no-battle outcome");
+        assert_eq!(use_result.wild_encounter, None);
+        assert_eq!(use_result.wild_battle, None);
+        assert_eq!(session.state.random_state, before.random_state);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3680,7 +3782,7 @@
         session
             .state
             .storage
-            .register_capture(Pokemon::new_for_tests(runtime_species(), 8, Dv::default()))
+            .register_capture_in_box(0, Pokemon::new_for_tests(runtime_species(), 8, Dv::default()))
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3769,7 +3871,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3838,7 +3940,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3896,7 +3998,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3963,7 +4065,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -4027,7 +4129,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session

@@ -12,7 +12,7 @@ This is a self-contained npm workspace TypeScript monorepo. Core game logic live
 - `npm run test`: run all Jest workspace tests.
 - `npm run lint`: run web ESLint.
 - `npm run test --workspace @pokecrystal/core`: run targeted core tests.
-- `npm run export:core`: regenerate runtime data through the TypeScript exporter.
+- `./export`: build the canonical game pack through the pure-Rust exporter.
 
 ## Docker Server Commands
 

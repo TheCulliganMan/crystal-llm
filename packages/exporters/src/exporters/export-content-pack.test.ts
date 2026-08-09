@@ -1,10 +1,27 @@
 import fs from "fs";
-import { exportCoreContentPack } from "./export-content-pack";
+import {
+  alignRuntimeSpawnPoints,
+  exportCoreContentPack,
+} from "./export-content-pack";
 
 const mockWriteJsonToTargets = jest.fn();
 const mockRemoveMatchingOutputs = jest.fn();
 const mockEnsureDir = jest.fn();
 const mockReadJsonAssetSync = jest.fn();
+
+const testBugContestEncounters = [
+  { weight: 20, species: "CATERPIE", minLevel: 7, maxLevel: 18 },
+  { weight: 20, species: "WEEDLE", minLevel: 7, maxLevel: 18 },
+  { weight: 10, species: "METAPOD", minLevel: 9, maxLevel: 18 },
+  { weight: 10, species: "KAKUNA", minLevel: 9, maxLevel: 18 },
+  { weight: 5, species: "BUTTERFREE", minLevel: 12, maxLevel: 15 },
+  { weight: 5, species: "BEEDRILL", minLevel: 12, maxLevel: 15 },
+  { weight: 10, species: "VENONAT", minLevel: 10, maxLevel: 16 },
+  { weight: 10, species: "PARAS", minLevel: 10, maxLevel: 17 },
+  { weight: 5, species: "SCYTHER", minLevel: 13, maxLevel: 14 },
+  { weight: 5, species: "PINSIR", minLevel: 13, maxLevel: 14 },
+  { weight: 255, species: "VENOMOTH", minLevel: 30, maxLevel: 40 },
+];
 
 const TEST_CONTENT_PACK_CATEGORIES = [
   "pokemon",
@@ -62,6 +79,7 @@ const TEST_CONTENT_PACK_CATEGORIES = [
   "marts",
   "currency_constants",
   "trainers",
+  "trainer_class_names",
   "pokedex",
   "pokedex_entries",
   "pokemon_frontpic_anim",
@@ -100,12 +118,25 @@ const strictFiles = (
     ...overrides,
   }) as Record<(typeof TEST_CONTENT_PACK_CATEGORIES)[number], string[]>;
 
+const testPcmFields = {
+  source: "pcm" as const,
+  pcm_format: {
+    sample_rate_hz: 44_100,
+    channels: 2,
+    bits_per_sample: 16,
+  },
+  pcm_frame_count: 1,
+  payload_hash: "fixture-pcm-hash",
+  loop_start_sample: null,
+  loop_end_sample: null,
+};
+
 const titleMusicAudioAsset = {
   MUSIC_TITLE: {
     id: "MUSIC_TITLE",
-    path: "content-packs/core-modular/music/MUSIC_TITLE.mid",
+    path: "content-packs/core-modular/music/MUSIC_TITLE.pcm",
     kind: "music" as const,
-    source: "midi" as const,
+    ...testPcmFields,
   },
 };
 
@@ -156,6 +187,18 @@ jest.mock("@pokecrystal/core/core/paths", () => ({
 }));
 
 describe("export-core-content-pack", () => {
+  it("preserves ASM spawn subtiles when aligning runtime spawn points", () => {
+    const aligned = alignRuntimeSpawnPoints(titleRuntimeSpawnPoints);
+    expect(aligned["0"]).toMatchObject({
+      tileX: 3,
+      tileY: 3,
+      metatileX: 1,
+      metatileY: 1,
+      subtileX: 1,
+      subtileY: 1,
+    });
+  });
+
   beforeEach(() => {
     mockWriteJsonToTargets.mockReset();
     mockRemoveMatchingOutputs.mockReset();
@@ -165,11 +208,11 @@ describe("export-core-content-pack", () => {
     jest.spyOn(fs, "writeFileSync").mockImplementation(() => undefined);
     jest.spyOn(fs, "rmSync").mockImplementation(() => undefined);
     jest.spyOn(fs, "existsSync").mockImplementation((pathLike) =>
-      String(pathLike).endsWith(".mid"),
+      String(pathLike).endsWith(".pcm"),
     );
     jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
-      if (String(pathLike).endsWith(".mid")) {
-        return Buffer.from("MThd0000");
+      if (String(pathLike).endsWith(".pcm")) {
+        return Buffer.alloc(4);
       }
       throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
     });
@@ -190,6 +233,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -225,6 +269,7 @@ describe("export-core-content-pack", () => {
         maps: {},
       },
       audioAssets: titleMusicAudioAsset,
+      trainerClassNames: {},
       trainers: [],
       pokedex: [],
       npcData: {},
@@ -259,6 +304,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -266,9 +312,9 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           MUSIC_ROUTE_29: {
             id: "MUSIC_ROUTE_30",
-            path: "content-packs/core-modular/music/MUSIC_ROUTE_30.mid",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_30.pcm",
             kind: "music",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
@@ -290,6 +336,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -297,9 +344,9 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           MUSIC_LEGACY_ROUTE_29: {
             id: "MUSIC_LEGACY_ROUTE_29",
-            path: "content-packs/core-modular/music/MUSIC_LEGACY_ROUTE_29.mid",
+            path: "content-packs/core-modular/music/MUSIC_LEGACY_ROUTE_29.pcm",
             kind: "music",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
@@ -321,6 +368,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -328,14 +376,14 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           CRY_NIDORAN_M: {
             id: "CRY_NIDORAN_M",
-            path: "content-packs/core-modular/sfx/CRY_NIDORAN_M.mid",
+            path: "content-packs/core-modular/sfx/CRY_NIDORAN_M.pcm",
             kind: "cry",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
     ).toThrow(
-      "Audio asset CRY_NIDORAN_M must live under cries: content-packs/core-modular/sfx/CRY_NIDORAN_M.mid",
+      "Audio asset CRY_NIDORAN_M must live under cries: content-packs/core-modular/sfx/CRY_NIDORAN_M.pcm",
     );
   });
 
@@ -354,6 +402,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -361,18 +410,18 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           SFX_TACKLE: {
             id: "SFX_TACKLE",
-            path: "content-packs/core-modular/sfx/SFX_POUND.mid",
+            path: "content-packs/core-modular/sfx/SFX_POUND.pcm",
             kind: "sound_effect",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
     ).toThrow(
-      "Audio asset SFX_TACKLE path must end with SFX_TACKLE.mid: content-packs/core-modular/sfx/SFX_POUND.mid",
+      "Audio asset SFX_TACKLE path must end with SFX_TACKLE.pcm: content-packs/core-modular/sfx/SFX_POUND.pcm",
     );
   });
 
-  it("rejects audio metadata when the generated MIDI payload is missing", () => {
+  it("rejects audio metadata when the generated PCM payload is missing", () => {
     mockStrictIndexAndEmptyMapBlocks();
     jest.spyOn(fs, "existsSync").mockImplementation(() => false);
 
@@ -388,6 +437,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -395,22 +445,22 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           MUSIC_ROUTE_29: {
             id: "MUSIC_ROUTE_29",
-            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
             kind: "music",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
     ).toThrow(
-      "Audio asset MUSIC_ROUTE_29 is missing generated MIDI file: content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+      "Audio asset MUSIC_ROUTE_29 is missing generated PCM file: content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
     );
   });
 
-  it("rejects generated audio payloads that are not MIDI files", () => {
+  it("rejects generated audio payloads that do not contain complete PCM frames", () => {
     mockStrictIndexAndEmptyMapBlocks();
     jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
-      if (String(pathLike).endsWith(".mid")) {
-        return Buffer.from("NOPE");
+      if (String(pathLike).endsWith(".pcm")) {
+        return Buffer.alloc(2);
       }
       throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
     });
@@ -427,6 +477,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -434,14 +485,14 @@ describe("export-core-content-pack", () => {
         audioAssets: {
           MUSIC_ROUTE_29: {
             id: "MUSIC_ROUTE_29",
-            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+            path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
             kind: "music",
-            source: "midi",
+            ...testPcmFields,
           },
         },
       }),
     ).toThrow(
-      "Audio asset MUSIC_ROUTE_29 generated MIDI file must start with MThd: content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+      "Audio asset MUSIC_ROUTE_29 generated PCM file must contain complete frames: content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
     );
   });
 
@@ -483,7 +534,28 @@ describe("export-core-content-pack", () => {
       evolutions: [{ species: "TOTODILE" } as never],
       wildEncounters: [{ map_name: "Route1" } as never],
       fleeMons: { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
-      roamingPokemon: { RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 } },
+      roamingPokemon: {
+        slotCount: 3,
+        inactiveMap: { mapGroup: 255, mapNumber: 255 },
+        initWrites: [
+          {
+            slot: 0,
+            species: "RAIKOU",
+            level: 40,
+            mapGroup: 2,
+            mapNumber: 5,
+            hp: 0,
+          },
+        ],
+        routes: [
+          {
+            mapGroup: 24,
+            mapNumber: 3,
+            connections: [{ mapGroup: 26, mapNumber: 1 }],
+          },
+        ],
+        jumpMask: 15,
+      },
       buenaPasswordCategories: {
         order: ["HealingItems"],
         categories: {
@@ -517,6 +589,7 @@ describe("export-core-content-pack", () => {
           "EVENT_BUG_CATCHING_CONTESTANT_1A",
           "EVENT_BUG_CATCHING_CONTESTANT_2A",
         ],
+        encounters: testBugContestEncounters,
       },
       battleTowerRules: {
         bannedSpecies: {
@@ -658,6 +731,7 @@ describe("export-core-content-pack", () => {
       ],
       pcStrings: { PCString_ChooseaPKMN: "Choose a PKMN." },
       menuIcons: { TOTODILE: "ICON_TOTODILE" },
+      trainerClassNames: { YOUNGSTER: "YOUNGSTER" },
       trainers: [
         { trainer_id: "YOUNGSTER_JOE", name: "Youngster Joe" } as never,
       ],
@@ -726,9 +800,9 @@ describe("export-core-content-pack", () => {
         ...titleMusicAudioAsset,
         MUSIC_ROUTE_29: {
           id: "MUSIC_ROUTE_29",
-          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
           kind: "music",
-          source: "midi",
+          ...testPcmFields,
         },
       },
     });
@@ -751,7 +825,7 @@ describe("export-core-content-pack", () => {
     );
     expect(fs.rmSync).not.toHaveBeenCalled();
     expect(fs.writeFileSync).not.toHaveBeenCalledWith(
-      "/mock/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+      "/mock/assets/data/content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
       expect.any(Buffer),
     );
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
@@ -759,9 +833,9 @@ describe("export-core-content-pack", () => {
       {
         MUSIC_ROUTE_29: {
           id: "MUSIC_ROUTE_29",
-          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
           kind: "music",
-          source: "midi",
+          ...testPcmFields,
         },
       },
       { indent: 2 },
@@ -810,7 +884,28 @@ describe("export-core-content-pack", () => {
             { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
           ],
           roaming_pokemon: [
-            { RAIKOU: { level: 40, mapGroup: 2, mapNumber: 5 } },
+            {
+              slotCount: 3,
+              inactiveMap: { mapGroup: 255, mapNumber: 255 },
+              initWrites: [
+                {
+                  slot: 0,
+                  species: "RAIKOU",
+                  level: 40,
+                  mapGroup: 2,
+                  mapNumber: 5,
+                  hp: 0,
+                },
+              ],
+              routes: [
+                {
+                  mapGroup: 24,
+                  mapNumber: 3,
+                  connections: [{ mapGroup: 26, mapNumber: 1 }],
+                },
+              ],
+              jumpMask: 15,
+            },
           ],
           buena_password_categories: [
             {
@@ -850,6 +945,7 @@ describe("export-core-content-pack", () => {
                 "EVENT_BUG_CATCHING_CONTESTANT_1A",
                 "EVENT_BUG_CATCHING_CONTESTANT_2A",
               ],
+              encounters: testBugContestEncounters,
             },
           ],
           battle_tower_rules: [
@@ -1079,17 +1175,17 @@ describe("export-core-content-pack", () => {
             {
               MUSIC_TITLE: {
                 id: "MUSIC_TITLE",
-                path: "content-packs/core-modular/music/MUSIC_TITLE.mid",
+                path: "content-packs/core-modular/music/MUSIC_TITLE.pcm",
                 kind: "music",
-                source: "midi",
+                ...testPcmFields,
               },
             },
             {
               MUSIC_ROUTE_29: {
                 id: "MUSIC_ROUTE_29",
-                path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+                path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
                 kind: "music",
-                source: "midi",
+                ...testPcmFields,
               },
             },
           ]),
@@ -1234,6 +1330,14 @@ describe("export-core-content-pack", () => {
           }),
         }),
         expect.objectContaining({
+          id: "module-trainer-class-names-classes",
+          files: expect.objectContaining({
+            trainer_class_names: [
+              "content-packs/core-modular/trainer_class_names/classes.json",
+            ],
+          }),
+        }),
+        expect.objectContaining({
           id: "module-pokedex-TOTODILE",
           files: expect.objectContaining({
             pokedex: ["content-packs/core-modular/pokedex/TOTODILE.json"],
@@ -1254,6 +1358,11 @@ describe("export-core-content-pack", () => {
     expect(
       packs.find((pack) => pack.id === "module-route-stale"),
     ).toBeUndefined();
+    expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
+      "content-packs/core-modular/trainer_class_names/classes.json",
+      { YOUNGSTER: "YOUNGSTER" },
+      { indent: 2 },
+    );
     expect(packs.filter((pack) => pack.id.startsWith("module-"))).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: "module-route-Route1", enabled: false }),
@@ -1292,6 +1401,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},
@@ -1303,7 +1413,7 @@ describe("export-core-content-pack", () => {
   it("does not coerce route module map names when linking map files", () => {
     jest.spyOn(fs, "existsSync").mockImplementation((pathLike) => {
       return (
-        String(pathLike).endsWith("/maps") || String(pathLike).endsWith(".mid")
+        String(pathLike).endsWith("/maps") || String(pathLike).endsWith(".pcm")
       );
     });
     jest.spyOn(fs, "readdirSync").mockImplementation((pathLike) => {
@@ -1381,6 +1491,7 @@ describe("export-core-content-pack", () => {
         NewBarkTown: { environment: "TOWN", connections: [] },
       },
       items: [],
+      trainerClassNames: {},
       trainers: [],
       pokedex: [],
       npcData: {
@@ -1466,6 +1577,7 @@ describe("export-core-content-pack", () => {
       mapDimensions: {},
       mapAttributes: {},
       items: [],
+      trainerClassNames: { YOUNGSTER: "YOUNGSTER" },
       trainers: [
         {
           trainer_id: "YOUNGSTER_JOE",
@@ -1558,6 +1670,7 @@ describe("export-core-content-pack", () => {
       mapDimensions: {},
       mapAttributes: {},
       items: [],
+      trainerClassNames: { BUG_CATCHER: "BUG CATCHER" },
       trainers: [
         {
           trainer_id: "BUG_CATCHER_AL",
@@ -1644,6 +1757,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [
           {
             trainer_id: "BROKEN",
@@ -1680,6 +1794,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: { BUG_CATCHER: "BUG CATCHER" },
         trainers: [
           {
             trainer_id: "BROKEN_HP",
@@ -1712,6 +1827,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: { BUG_CATCHER: "BUG CATCHER" },
         trainers: [
           {
             trainer_id: "BROKEN_BASE_HP",
@@ -1739,7 +1855,7 @@ describe("export-core-content-pack", () => {
       return (
         String(pathLike).endsWith("/maps") ||
         String(pathLike).endsWith("/tilesets") ||
-        String(pathLike).endsWith(".mid")
+        String(pathLike).endsWith(".pcm")
       );
     });
     jest.spyOn(fs, "readdirSync").mockImplementation((pathLike) => {
@@ -1786,6 +1902,7 @@ describe("export-core-content-pack", () => {
         NewRoute: { tileset_name: "johto", blocks_label: "NewRoute_Blocks" },
       },
       items: [],
+      trainerClassNames: {},
       trainers: [],
       pokedex: [],
       npcData: { NewRoute: [] },
@@ -1882,6 +1999,7 @@ describe("export-core-content-pack", () => {
           NewRoute: { tileset_name: "johto", blocks_label: "NewRoute_Blocks" },
         },
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: { NewRoute: [] },
@@ -1913,6 +2031,7 @@ describe("export-core-content-pack", () => {
         mapDimensions: {},
         mapAttributes: {},
         items: [],
+        trainerClassNames: {},
         trainers: [],
         pokedex: [],
         npcData: {},

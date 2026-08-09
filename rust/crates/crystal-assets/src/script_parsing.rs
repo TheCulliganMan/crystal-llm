@@ -52,10 +52,23 @@ fn parse_script_runtime_commands(
                 continue;
             };
             let args = script_command_args(map_name, script_name, command_name, entry)?;
-            if args.len() != *expected {
+            let arity_is_valid = if command_name == "ret" {
+                args.len() <= 1
+            } else {
+                args.len() == *expected
+            };
+            if !arity_is_valid {
                 anyhow::bail!(
                     "Malformed {command_name} command in {script_name} for {map_name}: expected {expected} args, found {}.",
                     args.len()
+                );
+            }
+            if command_name == "ret"
+                && let Some(condition) = args.first()
+                && ScriptRuntimeCpuCondition::from_asm_token(condition).is_none()
+            {
+                anyhow::bail!(
+                    "Malformed ret command in {script_name} for {map_name}: unknown CPU condition {condition}."
                 );
             }
             commands.push(ScriptRuntimeCommand {
@@ -1467,7 +1480,8 @@ fn parse_script_control_commands(
                         command_index: index,
                     });
                 }
-                "iftrue" | "iffalse" | "sjump" | "jump" | "scall" | "sdefer" => {
+                "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall"
+                | "farscall" | "sdefer" => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
@@ -1568,11 +1582,10 @@ fn parse_script_movements(
             command
                 .movement
                 .as_deref()
-                .map(|movement| (movement, command.source_script.as_str()))
+                .map(|movement| (movement, script_label_parent(&command.source_script)))
         })
         .collect();
-    for (movement_label, source_script) in movement_refs {
-        let parent_script = script_label_parent(source_script);
+    for (movement_label, parent_script) in movement_refs {
         let local_label = format!("{movement_label}@{parent_script}");
         let exact_exists = scripts.contains_key(movement_label);
         let local_exists = movement_label.starts_with('.') && scripts.contains_key(&local_label);
@@ -1581,12 +1594,12 @@ fn parse_script_movements(
             (false, true) => local_label.as_str(),
             (false, false) => {
                 anyhow::bail!(
-                    "movement reference '{movement_label}' from {source_script} on {map_name} resolves to missing script"
+                    "movement reference '{movement_label}' from {parent_script} on {map_name} resolves to missing script"
                 );
             }
             (true, true) => {
                 anyhow::bail!(
-                    "ambiguous movement reference '{movement_label}' from {source_script} on {map_name}: both {movement_label} and {local_label} exist"
+                    "ambiguous movement reference '{movement_label}' from {parent_script} on {map_name}: both {movement_label} and {local_label} exist"
                 );
             }
         };
@@ -1679,7 +1692,7 @@ fn parse_script_movements(
         }
         movements.push(ScriptMovement {
             label: movement_label.to_string(),
-            source_script: Some(source_script.to_string()),
+            source_script: Some(parent_script.to_string()),
             steps,
         });
     }
@@ -1749,9 +1762,6 @@ fn parse_scripted_trainer_battles(
                         loadtrainer_command_index: index,
                         startbattle_command_index: None,
                         request,
-                        reload_map_after_battle: false,
-                        post_battle_event_flags: Vec::new(),
-                        post_battle_script_flags: Vec::new(),
                     });
                 }
                 "startbattle" => {
@@ -1772,35 +1782,6 @@ fn parse_scripted_trainer_battles(
                         pending.startbattle_command_index = Some(index);
                     }
                 }
-                "reloadmapafterbattle" => {
-                    if let Some(pending) = pending.as_mut() {
-                        pending.reload_map_after_battle = true;
-                    }
-                }
-                "setevent" => {
-                    if let Some(pending) = pending.as_mut() {
-                        let args = script_command_args(map_name, script_name, command_name, entry)?;
-                        if args.len() != 1 {
-                            anyhow::bail!(
-                                "Malformed setevent command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                                args.len()
-                            );
-                        }
-                        pending.post_battle_event_flags.push(args[0].to_string());
-                    }
-                }
-                "setflag" => {
-                    if let Some(pending) = pending.as_mut() {
-                        let args = script_command_args(map_name, script_name, command_name, entry)?;
-                        if args.len() != 1 {
-                            anyhow::bail!(
-                                "Malformed setflag command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                                args.len()
-                            );
-                        }
-                        pending.post_battle_script_flags.push(args[0].to_string());
-                    }
-                }
                 _ => {}
             }
         }
@@ -1818,9 +1799,6 @@ struct PendingScriptedTrainerBattle {
     loadtrainer_command_index: usize,
     startbattle_command_index: Option<usize>,
     request: TrainerBattleRequest,
-    reload_map_after_battle: bool,
-    post_battle_event_flags: Vec<String>,
-    post_battle_script_flags: Vec<String>,
 }
 
 impl PendingScriptedTrainerBattle {
@@ -1836,9 +1814,6 @@ impl PendingScriptedTrainerBattle {
             loadtrainer_command_index: self.loadtrainer_command_index,
             startbattle_command_index,
             request: self.request,
-            reload_map_after_battle: self.reload_map_after_battle,
-            post_battle_event_flags: self.post_battle_event_flags,
-            post_battle_script_flags: self.post_battle_script_flags,
         })
     }
 }
@@ -1853,7 +1828,6 @@ fn parse_scripted_wild_battles(
             continue;
         };
         let mut battle_type = "BATTLETYPE_NORMAL".to_string();
-        let mut event_flags_since_last_battle = Vec::new();
         let mut pending: Option<PendingScriptedWildBattle> = None;
 
         for (index, entry) in entries.iter().enumerate() {
@@ -1902,11 +1876,6 @@ fn parse_scripted_wild_battles(
                         loadwildmon_command_index: index,
                         startbattle_command_index: None,
                         request,
-                        reload_map_after_battle: false,
-                        pre_battle_event_flags: event_flags_since_last_battle.clone(),
-                        post_battle_event_flags: Vec::new(),
-                        post_battle_script_flags: Vec::new(),
-                        disappear_object_ids: Vec::new(),
                     });
                 }
                 "startbattle" => {
@@ -1927,49 +1896,6 @@ fn parse_scripted_wild_battles(
                         pending.startbattle_command_index = Some(index);
                     }
                 }
-                "reloadmapafterbattle" => {
-                    if let Some(pending) = pending.as_mut() {
-                        pending.reload_map_after_battle = true;
-                    }
-                }
-                "setevent" => {
-                    let args = script_command_args(map_name, script_name, command_name, entry)?;
-                    if args.len() != 1 {
-                        anyhow::bail!(
-                            "Malformed setevent command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                            args.len()
-                        );
-                    }
-                    if let Some(pending) = pending.as_mut() {
-                        pending.post_battle_event_flags.push(args[0].to_string());
-                    } else {
-                        event_flags_since_last_battle.push(args[0].to_string());
-                    }
-                }
-                "setflag" => {
-                    if let Some(pending) = pending.as_mut() {
-                        let args = script_command_args(map_name, script_name, command_name, entry)?;
-                        if args.len() != 1 {
-                            anyhow::bail!(
-                                "Malformed setflag command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                                args.len()
-                            );
-                        }
-                        pending.post_battle_script_flags.push(args[0].to_string());
-                    }
-                }
-                "disappear" => {
-                    if let Some(pending) = pending.as_mut() {
-                        let args = script_command_args(map_name, script_name, command_name, entry)?;
-                        if args.len() != 1 {
-                            anyhow::bail!(
-                                "Malformed disappear command in {script_name} for {map_name}: expected 1 arg, found {}.",
-                                args.len()
-                            );
-                        }
-                        pending.disappear_object_ids.push(args[0].to_string());
-                    }
-                }
                 _ => {}
             }
         }
@@ -1986,11 +1912,6 @@ struct PendingScriptedWildBattle {
     loadwildmon_command_index: usize,
     startbattle_command_index: Option<usize>,
     request: StaticWildBattleRequest,
-    reload_map_after_battle: bool,
-    pre_battle_event_flags: Vec<String>,
-    post_battle_event_flags: Vec<String>,
-    post_battle_script_flags: Vec<String>,
-    disappear_object_ids: Vec<String>,
 }
 
 impl PendingScriptedWildBattle {
@@ -2006,11 +1927,6 @@ impl PendingScriptedWildBattle {
             loadwildmon_command_index: self.loadwildmon_command_index,
             startbattle_command_index,
             request: self.request,
-            reload_map_after_battle: self.reload_map_after_battle,
-            pre_battle_event_flags: self.pre_battle_event_flags,
-            post_battle_event_flags: self.post_battle_event_flags,
-            post_battle_script_flags: self.post_battle_script_flags,
-            disappear_object_ids: self.disappear_object_ids,
         })
     }
 }
@@ -2048,7 +1964,7 @@ fn script_command_args<'a>(
 }
 
 fn trainer_command_optional_arg(value: &str) -> String {
-    if value == "0" {
+    if value == "0" || value == "-1" {
         String::new()
     } else {
         value.to_string()

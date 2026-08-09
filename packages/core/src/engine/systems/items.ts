@@ -220,10 +220,18 @@ export class ItemSystem {
       return undefined;
     }
     if ("itemData" in loader && loader.itemData) {
-      return loader.itemData;
+      if (loader.itemData instanceof Map) {
+        return loader.itemData.size > 0 ? loader.itemData : undefined;
+      }
+      return Object.keys(loader.itemData).length > 0 ? loader.itemData : undefined;
     }
     if ("item_data" in loader) {
-      return loader.item_data;
+      if (loader.item_data instanceof Map) {
+        return loader.item_data.size > 0 ? loader.item_data : undefined;
+      }
+      return loader.item_data && Object.keys(loader.item_data).length > 0
+        ? loader.item_data
+        : undefined;
     }
     return undefined;
   }

@@ -1442,10 +1442,10 @@ fn commit_visible_time_set_selection(
     time_set: &mut VisibleTimeSetScreen,
 ) -> Result<()> {
     let target = ClockTime::new(0, time_set.hour, time_set.minute, 0);
-    let update =
-        runtime_shell
-            .shell
-            .set_manual_clock_time(GameDate::new(2000, 1, 1), 0, 0, 0, target)?;
+    let rtc = required_native_rtc_sample(runtime_shell)?;
+    let update = runtime_shell.shell.set_manual_clock_time(
+        rtc.date, rtc.hour, rtc.minute, rtc.second, target,
+    )?;
     time_set.reaction_text = visible_time_set_reaction_text(time_set.hour, time_set.minute);
     record_visible_runtime_action(
         runtime_shell,
@@ -1459,8 +1459,8 @@ fn commit_visible_time_set_selection(
         time_set.hour,
         time_set.minute,
         update.time_of_day,
-        update.game_time_hours,
-        update.game_time_minutes
+        update.hour,
+        update.minute
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
@@ -1675,6 +1675,9 @@ fn open_visible_oak_final_sequence(
     oak_intro.scene_index = VISIBLE_OAK_INTRO_SCENES.len();
     oak_intro.scene_state = "oak_final".to_string();
     oak_intro.scene_phase = VisibleOakIntroPhase::Text;
+    // ASM returns from NamePlayer directly into OakText7 without clearing the
+    // tilemap, so the selected player/trainer portrait remains on screen.
+    oak_intro.current_sprite = Some("PLAYER".to_string());
     oak_intro.text_queue = VISIBLE_OAK_FINAL_TEXT
         .iter()
         .map(|page| page.replace("<PLAYER>", &player))
@@ -2175,11 +2178,19 @@ fn advance_visible_title_to_main_menu(runtime_shell: &mut BevyRuntimeShell) -> R
 }
 
 fn title_continue_save_path<'a>(
-    _runtime_shell: &BevyRuntimeShell,
+    runtime_shell: &BevyRuntimeShell,
     title: &'a TitleMenu,
 ) -> Option<&'a PathBuf> {
     let path = title.save_path.as_ref()?;
-    if path.exists() {
+    // An existing primary remains a candidate so Continue can report its
+    // validation error. Only a missing primary invokes canonical .bak recovery.
+    if path.exists()
+        || runtime_shell
+            .shell
+            .runtime()
+            .load_save_summary(path)
+            .is_ok()
+    {
         return Some(path);
     }
     None
@@ -2412,13 +2423,8 @@ fn confirm_visible_delete_save_screen(runtime_shell: &mut BevyRuntimeShell) -> R
         .as_ref()
         .and_then(|title| title.save_path.clone())
     {
-        Some(path) => match std::fs::remove_file(&path) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(error).with_context(|| format!("delete save {}", path.display()));
-            }
-        },
+        Some(path) => crystal_core::save::erase_save_game(&path)
+            .with_context(|| format!("delete save {}", path.display()))?,
         None => false,
     };
     runtime_shell
@@ -2443,8 +2449,8 @@ fn open_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> Resu
         phase: VisibleClockResetPhase::Confirm,
         confirm_selection: 1,
         day: time.day_of_week % 7,
-        hour: time.game_time_hours.min(23),
-        minute: time.game_time_minutes.min(59),
+        hour: time.registers.hours,
+        minute: time.registers.minutes,
     });
     if let Some(title) = runtime_shell.title_menu.as_mut() {
         title.clock_reset_trigger = false;
@@ -2550,18 +2556,19 @@ fn confirm_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> R
             Ok(())
         }
         VisibleClockResetPhase::SetMinute => {
+            let rtc = required_native_rtc_sample(runtime_shell)?;
             let update = runtime_shell.shell.set_manual_clock_time(
-                GameDate::new(2000, 1, 1),
-                0,
-                0,
-                0,
+                rtc.date,
+                rtc.hour,
+                rtc.minute,
+                rtc.second,
                 ClockTime::new(clock.day, clock.hour, clock.minute, 0),
             )?;
             runtime_shell.last_audio_events.push(format!(
                 "clock reset day={} game={}:{} checksum={:?}",
                 update.day_of_week,
-                update.game_time_hours,
-                update.game_time_minutes,
+                update.hour,
+                update.minute,
                 update.state_checksum
             ));
             close_visible_clock_reset_screen(runtime_shell, "confirm")
@@ -2607,6 +2614,7 @@ fn open_visible_credits_screen(
     runtime_shell.pending_special_sound = None;
     runtime_shell.credits_screen = Some(VisibleCreditsScreen {
         allow_skip,
+        resume_game_timer_on_exit: false,
         frame: 0,
         consumed_bytes: 0,
         awaiting_exit: false,

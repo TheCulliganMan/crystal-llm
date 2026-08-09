@@ -691,7 +691,7 @@ fn visible_pokegear_menu_entries(
             crate::core::world::encounters::TimeOfDay::Day => "DAY",
             crate::core::world::encounters::TimeOfDay::Night => "NITE",
         };
-        let hour_24 = time.game_time_hours % 24;
+        let hour_24 = time.registers.hours;
         let hour_12 = match hour_24 % 12 {
             0 => 12,
             hour => hour,
@@ -699,7 +699,7 @@ fn visible_pokegear_menu_entries(
         let meridiem = if hour_24 < 12 { "AM" } else { "PM" };
         return vec![
             format!("{day} {time_period}"),
-            format!("{hour_12:>2}:{:02}{meridiem}", time.game_time_minutes % 60),
+            format!("{hour_12:>2}:{:02}{meridiem}", time.registers.minutes),
         ];
     }
     if runtime_shell.pokegear_page == PokegearPage::Radio {
@@ -1265,7 +1265,10 @@ fn apply_visible_battle_screen_offset(
     runtime_shell: Res<BevyRuntimeShell>,
     mut battle_commands: Query<
         (Entity, &mut Transform),
-        (With<BattleCommandMarker>, Without<FixedBattleCanvasMarker>),
+        (
+            Or<(With<BattleCommandMarker>, With<BattleBattlerMarker>)>,
+            Without<FixedBattleCanvasMarker>,
+        ),
     >,
     mut applied_offsets: Local<HashMap<Entity, Vec3>>,
 ) {
@@ -5335,7 +5338,7 @@ fn spawn_visible_move_animation_objects(
     } else if let Some(capture) = runtime_shell
         .visible_capture_animation
         .as_ref()
-        .filter(|animation| animation.started || animation.complete)
+        .filter(|animation| animation.retained_objects_visible())
     {
         let mut object_events = Vec::new();
         if capture.blocked {
@@ -6109,11 +6112,13 @@ fn spawn_battle_command_menu(
         return Ok(());
     }
     if battle_window_frame_art(rendered_art, asset_root, images).is_none() {
+        let frame_id = rendered_art.selected_window_frame_id.clamp(1, 8);
         anyhow::bail!(
             "{}",
             rendered_art
-                .window_frame_error
-                .clone()
+                .window_frame_errors
+                .get(&frame_id)
+                .cloned()
                 .unwrap_or_else(|| "battle window frame art is unavailable".to_string())
         );
     }
@@ -6483,7 +6488,7 @@ fn spawn_visible_capture_animation(
     let Some(animation) = runtime_shell
         .visible_capture_animation
         .as_ref()
-        .filter(|animation| animation.started)
+        .filter(|animation| animation.ball_visible())
     else {
         return Ok(());
     };
@@ -7049,7 +7054,8 @@ fn spawn_battle_pack_screen(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.96, 0.96, 0.91),
+                // gfx/pack/pack.pal color zero: RGB 31,31,31.
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                 ..default()
             },
@@ -8073,7 +8079,7 @@ fn spawn_battle_window(
         commands.spawn((
             SpriteBundle {
                 sprite: Sprite {
-                    color: Color::rgb(0.91, 0.96, 0.86),
+                    color: Color::WHITE,
                     custom_size: Some(Vec2::new(
                         TILE_SIZE * (width_tiles - 2.0),
                         TILE_SIZE * (height_tiles - 2.0),
@@ -8241,13 +8247,31 @@ fn battle_window_frame_art<'a>(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Option<&'a WindowFrameArt> {
-    if rendered_art.window_frame_cache.is_none() && rendered_art.window_frame_error.is_none() {
-        match load_window_frame_art(asset_root, images) {
-            Ok(frame) => rendered_art.window_frame_cache = Some(frame),
-            Err(error) => rendered_art.window_frame_error = Some(error.to_string()),
+    let frame_id = rendered_art.selected_window_frame_id.clamp(1, 8);
+    window_frame_art(rendered_art, asset_root, images, frame_id)
+}
+
+fn window_frame_art<'a>(
+    rendered_art: &'a mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+    frame_id: u8,
+) -> Option<&'a WindowFrameArt> {
+    if !rendered_art.window_frame_cache.contains_key(&frame_id)
+        && !rendered_art.window_frame_errors.contains_key(&frame_id)
+    {
+        match load_window_frame_art(asset_root, frame_id, images) {
+            Ok(frame) => {
+                rendered_art.window_frame_cache.insert(frame_id, frame);
+            }
+            Err(error) => {
+                rendered_art
+                    .window_frame_errors
+                    .insert(frame_id, error.to_string());
+            }
         }
     }
-    rendered_art.window_frame_cache.as_ref()
+    rendered_art.window_frame_cache.get(&frame_id)
 }
 
 fn spawn_battle_window_frame_tiles(
@@ -8653,10 +8677,7 @@ fn battle_main_menu_entries_for_type(
     park_balls_remaining: u8,
     selected: usize,
 ) -> Vec<String> {
-    let labels = if matches!(
-        battle_type,
-        "BATTLETYPE_CONTEST" | "BATTLETYPE_BUG_CONTEST" | "BATTLETYPE_PARK"
-    ) {
+    let labels = if battle_type == "BATTLETYPE_CONTEST" {
         vec![
             "FIGHT".to_string(),
             "<PKMN>".to_string(),

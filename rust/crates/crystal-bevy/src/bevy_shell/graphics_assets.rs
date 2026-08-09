@@ -46,7 +46,9 @@ fn tileset_collision_tokens<'a>(
     tileset: &'a crate::RuntimeTilesetCatalogSnapshot,
     block: u16,
 ) -> Option<&'a [String]> {
-    let key = format!("{block:02X}");
+    // Exported ASM metatile ids are canonical lowercase hexadecimal (for
+    // example block 15 is keyed as "0f", not decimal "15" or "0F").
+    let key = format!("{block:02x}");
     tileset.collision.get(&key).map(|tokens| tokens.as_slice())
 }
 
@@ -130,6 +132,7 @@ fn spawn_bg_event_label(
         return;
     }
     let label = compact_scene_label(&bg.script, 18);
+    let (tile_x, tile_y) = render_tile_playfield_position(view_x, view_y);
     commands.spawn((
         Text2dBundle {
             text: Text::from_section(
@@ -141,8 +144,8 @@ fn spawn_bg_event_label(
                 },
             ),
             transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE - TILE_SIZE * 0.56,
-                PLAYFIELD_TOP - view_y as f32 * TILE_SIZE + TILE_SIZE * 0.52,
+                tile_x - TILE_SIZE * 0.56,
+                tile_y + TILE_SIZE * 0.52,
                 2.4,
             ),
             ..default()
@@ -170,6 +173,7 @@ fn spawn_warp_event_label(
         &format!("-> {}#{}", warp.target_map, warp.target_warp_id),
         18,
     );
+    let (tile_x, tile_y) = render_tile_playfield_position(view_x, view_y);
     commands.spawn((
         Text2dBundle {
             text: Text::from_section(
@@ -181,8 +185,8 @@ fn spawn_warp_event_label(
                 },
             ),
             transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE - TILE_SIZE * 0.58,
-                PLAYFIELD_TOP - view_y as f32 * TILE_SIZE - TILE_SIZE * 0.58,
+                tile_x - TILE_SIZE * 0.58,
+                tile_y - TILE_SIZE * 0.58,
                 2.4,
             ),
             ..default()
@@ -207,6 +211,7 @@ fn spawn_coord_event_label(
         return;
     }
     let label = compact_scene_label(&coord.script_name, 18);
+    let (tile_x, tile_y) = render_tile_playfield_position(view_x, view_y);
     commands.spawn((
         Text2dBundle {
             text: Text::from_section(
@@ -218,8 +223,8 @@ fn spawn_coord_event_label(
                 },
             ),
             transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE - TILE_SIZE * 0.58,
-                PLAYFIELD_TOP - view_y as f32 * TILE_SIZE,
+                tile_x - TILE_SIZE * 0.58,
+                tile_y,
                 2.4,
             ),
             ..default()
@@ -364,18 +369,22 @@ fn runtime_tile_playfield_position(
     if !(0..VIEWPORT_TILES_X).contains(&view_x) || !(0..VIEWPORT_TILES_Y).contains(&view_y) {
         return None;
     }
-    Some((
-        PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE,
-        PLAYFIELD_TOP - view_y as f32 * TILE_SIZE,
-    ))
+    Some(render_tile_playfield_position(view_x, view_y))
+}
+
+fn render_tile_playfield_position(view_x: i16, view_y: i16) -> (f32, f32) {
+    // PLAYFIELD_LEFT/TOP are the LCD edges. The composited map is centered on
+    // the camera, so runtime coordinates address the centre of the first
+    // 32x32 render tile one half-tile inward from those edges.
+    (
+        PLAYFIELD_LEFT + (view_x as f32 + 0.5) * TILE_SIZE,
+        PLAYFIELD_TOP - (view_y as f32 + 0.5) * TILE_SIZE,
+    )
 }
 
 fn overworld_sprite_position(view_x: i16, view_y: i16, sprite_size: Vec2) -> (f32, f32) {
-    overworld_sprite_position_from_base(
-        PLAYFIELD_LEFT + view_x as f32 * TILE_SIZE,
-        PLAYFIELD_TOP - view_y as f32 * TILE_SIZE,
-        sprite_size,
-    )
+    let (tile_x, tile_y) = render_tile_playfield_position(view_x, view_y);
+    overworld_sprite_position_from_base(tile_x, tile_y, sprite_size)
 }
 
 fn overworld_sprite_position_from_base(
@@ -486,6 +495,7 @@ fn play_pending_audio(
     // later in this same loop. Track the entities we spawn locally as well;
     // otherwise two queued music transitions can overlap for an entire song.
     let mut active_music_entities = music_audio.iter().collect::<Vec<_>>();
+    let mut active_transient_entities = transient_audio.iter().collect::<Vec<_>>();
     if runtime_shell.pending_music_stop {
         for entity in active_music_entities.drain(..) {
             commands.entity(entity).despawn();
@@ -494,7 +504,7 @@ fn play_pending_audio(
         // queued cry or sound effect from the previous surface continue over
         // the replacement track; that was the source of audible multi-song
         // and stale-cue overlap on macOS.
-        for entity in transient_audio.iter() {
+        for entity in active_transient_entities.drain(..) {
             commands.entity(entity).despawn();
         }
         #[cfg(not(test))]
@@ -519,7 +529,7 @@ fn play_pending_audio(
             native_audio.stop_music();
         }
         if !matches!(command.kind, ModpackAudioKind::Music) {
-            for entity in transient_audio.iter() {
+            for entity in active_transient_entities.drain(..) {
                 commands.entity(entity).despawn();
             }
             #[cfg(not(test))]
@@ -641,40 +651,6 @@ fn play_pending_audio(
                             })
                     }
                 }
-                AudioProgramSource::PcmFile {
-                    path,
-                    format,
-                    byte_len,
-                    payload_hash,
-                    ..
-                } => {
-                    if command.mode != ModpackAudioPlaybackMode::RawPcm {
-                        Err(anyhow::anyhow!(
-                            "audio program {} declared PCM file but queued as {:?}",
-                            command.audio_id,
-                            command.mode
-                        ))
-                    } else {
-                        std::fs::read(&path)
-                            .with_context(|| format!("read PCM audio file {}", path.display()))
-                            .and_then(|bytes| {
-                                if bytes.len() != byte_len
-                                    || format!("{:08x}", bevy_audio_fnv1a32(&bytes)) != payload_hash
-                                {
-                                    anyhow::bail!(
-                                        "PCM audio file {} does not match verified metadata",
-                                        path.display()
-                                    );
-                                }
-                                encode_pcm_for_bevy_audio(
-                                    &bytes,
-                                    format.sample_rate_hz,
-                                    format.channels,
-                                    format.bits_per_sample,
-                                )
-                            })
-                    }
-                }
                 AudioProgramSource::Midi(_) => Err(anyhow::anyhow!(
                     "MIDI audio is not supported; regenerate this content pack with PCM assets"
                 )),
@@ -727,7 +703,7 @@ fn play_pending_audio(
         };
         #[cfg(not(test))]
         let mut entity_commands = if matches!(command.kind, ModpackAudioKind::Music) {
-            for entity in transient_audio.iter() {
+            for entity in active_transient_entities.drain(..) {
                 commands.entity(entity).despawn();
             }
             native_audio.stop_transient();
@@ -744,7 +720,7 @@ fn play_pending_audio(
                 PlaybackSettings::DESPAWN
             };
             if matches!(command.kind, ModpackAudioKind::Music) {
-                for entity in transient_audio.iter() {
+                for entity in active_transient_entities.drain(..) {
                     commands.entity(entity).despawn();
                 }
                 commands.spawn((
@@ -782,6 +758,8 @@ fn play_pending_audio(
         }
         if matches!(command.kind, ModpackAudioKind::Music) {
             active_music_entities.push(new_audio_entity);
+        } else {
+            active_transient_entities.push(new_audio_entity);
         }
         runtime_shell.last_audio_events.push(format!(
             "played {:?} {} mode={:?} looped={}",

@@ -37,7 +37,7 @@
     "typecheck": "npm run lint:types",
     "lint:types": "node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
     "test": "node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/jest/bin/jest.js --config jest.config.js",
-    "export:core": "node ../../apps/web/scripts/run-with-bundled-node.js scripts/export-core.js"
+    "export:core": "../../export"
   },
   "dependencies": {
     "@pokecrystal/assets": "^1.0.0",

@@ -41,26 +41,16 @@ pub(super) fn compose_frame(
         }
     };
 
-    let Some(next_image) = images.remove(frame.handle.id()) else {
-        return None;
-    };
-    if let Some(surface) = rendered_art.intro_presented_surface.as_ref() {
-        let Some(image) = images.get_mut(&surface.handle) else {
-            return None;
-        };
-        // All intro frames are the same 160x144 RGBA LCD allocation.  Mutate
-        // its pixels in place so the ECS sprite and GPU handle never disappear
-        // between the palette, scroll, and OAM updates.
-        image.data = next_image.data;
-        return Some(surface.clone());
-    }
-    let handle = images.add(next_image);
-    let surface = SpriteFrame {
-        handle,
-        size: Vec2::new(TITLE_SCREEN_WIDTH as f32, TITLE_SCREEN_HEIGHT as f32),
-    };
-    rendered_art.intro_presented_surface = Some(surface.clone());
-    Some(surface)
+    // Intro is one producer of the shell-wide retained LCD surface. The same
+    // handle continues through title, new-game setup, and credits, eliminating
+    // the formerly fragile despawn/spawn handoff between those scenes.
+    present_fullscreen_frame(
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        images,
+    )
+    .ok()
 }
 
 /// Preserve every field in the semantic LCD state.  An earlier renderer

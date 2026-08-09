@@ -105,6 +105,10 @@ pub fn commit_overworld_snapshot(
     snapshot: &OverworldSnapshot,
     spawn_update: SpawnMemoryUpdate,
 ) {
+    snapshot
+        .frame
+        .checked_sub(state.frame_counter)
+        .expect("overworld snapshot frame cannot rewind the game-state frame cursor");
     state.overworld = crate::state::OverworldMemory::from_snapshot(snapshot);
     state.frame_counter = snapshot.frame;
     match spawn_update {
@@ -492,10 +496,12 @@ mod tests {
 
         commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Preserve);
         assert_eq!(state.frame_counter, 42);
+        assert_eq!(state.time.game_time_frames, 0);
         assert_eq!(state.last_spawn_identifier, Some(21));
         assert_eq!(state.overworld.snapshot_identity().unwrap().0, "Route29");
 
         commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Set(14));
+        assert_eq!(state.time.game_time_frames, 0);
         assert_eq!(state.last_spawn_identifier, Some(14));
 
         commit_overworld_snapshot(&mut state, &snapshot, SpawnMemoryUpdate::Clear);

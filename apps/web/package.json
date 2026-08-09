@@ -11,7 +11,7 @@
     "build": "POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js scripts/clean-next-artifacts.js && POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js ../../node_modules/next/dist/bin/next build --webpack",
     "build:node": "npm run build",
     "audio:bundle": "node scripts/run-with-bundled-node.js scripts/generate-audio-bundle.js",
-    "export:core": "npm run export:core --workspace @pokecrystal/exporters",
+    "export:core": "../../export",
     "export:runtime-fallbacks": "node scripts/run-with-bundled-node.js scripts/export-runtime-fallbacks.js",
     "smoke:assets": "node scripts/run-with-bundled-node.js scripts/smoke-runtime-assets.js",
     "smoke:mcp": "bash scripts/smoke-mcp-tools-local.sh",

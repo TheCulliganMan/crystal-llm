@@ -4259,23 +4259,9 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
         }
         return Ok(true);
     }
-    if runtime_shell_has_smashable_rock_target(runtime_shell, &snapshot)? {
-        if snapshot_has_field_move_actor_and_badge(
-            &snapshot,
-            &runtime_shell.shell,
-            "rock_smash",
-        )? {
-            open_visible_contextual_field_move_prompt(
-                runtime_shell,
-                PartyFieldMove::RockSmash,
-                "AskRockSmashText",
-            )?;
-        } else {
-            runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "MaySmashText")?);
-            mark_runtime_snapshot_dirty(runtime_shell);
-        }
-        return Ok(true);
-    }
+    // Smashable rocks are OBJECTTYPE_SCRIPT interactions. Their A-button
+    // path must continue through jumpstd SmashRockScript -> AskRockSmashScript;
+    // only an explicit party-menu selection queues RockSmashFromMenuScript.
     if snapshot_has_headbutt_target(&snapshot)?
         && snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "headbutt")?
     {
@@ -4440,17 +4426,6 @@ fn field_move_rule_allows_surf_target(shell: &RuntimeGameShell, permission: u8) 
         crate::core::world::collision::describe_collision(permission).terrain
             == crate::core::world::collision::Terrain::Water
             && !key.blocked_collisions.contains(&permission),
-    )
-}
-
-fn runtime_shell_has_smashable_rock_target(
-    runtime_shell: &BevyRuntimeShell,
-    snapshot: &RuntimeShellSnapshot,
-) -> Result<bool> {
-    runtime_shell_has_object_movement_target(
-        runtime_shell,
-        snapshot,
-        "SPRITEMOVEDATA_SMASHABLE_ROCK",
     )
 }
 
@@ -4996,11 +4971,6 @@ fn use_visible_headbutt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 
 fn use_visible_rock_smash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let (dx, dy) = snapshot.overworld.facing.delta();
-    let rock_smash_target = TilePosition::new(
-        snapshot.overworld.tile.x.checked_add(dx).context("Rock Smash target X overflow")?,
-        snapshot.overworld.tile.y.checked_add(dy).context("Rock Smash target Y overflow")?,
-    );
     let party_index = party_index_for_field_move_rule(
         &snapshot,
         &runtime_shell.shell,
@@ -5011,33 +4981,24 @@ fn use_visible_rock_smash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         runtime_shell,
         format!("field_move:rock_smash:{party_index}"),
     )?;
-    let field_move = runtime_shell.shell.use_rock_smash_field_move(party_index)?;
-    runtime_shell.visible_rock_smash_target = Some(rock_smash_target);
+    let dispatch = runtime_shell
+        .shell
+        .queue_rock_smash_from_menu(party_index)?;
     runtime_shell.last_audio_events.push(format!(
-        "field rock_smash party_index={} encounter={:?} battle={:?} checksum={:?}",
-        party_index, field_move.field_encounter, field_move.wild_battle, field_move.state_checksum
+        "field rock_smash party_index={} script={} last_talked={:?} checksum={:?}",
+        party_index,
+        dispatch.next_script,
+        dispatch.last_talked_object,
+        dispatch.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
-        format!(
-            "ROCK SMASH {:?} {:?}",
-            field_move.field_encounter, field_move.wild_battle
-        ),
+        format!("ROCK SMASH {}", dispatch.next_script),
     );
-    runtime_shell.pending_field_notice_sound = Some("SFX_STRENGTH".to_string());
-    runtime_shell.pending_field_notice_effect_frames = Some(30);
-    settle_visible_field_move_after_possible_battle(
-        runtime_shell,
-        &snapshot,
-        visible_field_move_use_text(&snapshot, party_index, "ROCK SMASH")?,
-    )?;
-    Ok(())
+    consume_visible_dispatched_field_script(runtime_shell)
 }
 
-fn use_visible_sweet_scent(
-    runtime_shell: &mut BevyRuntimeShell,
-    surface: EncounterSurface,
-) -> Result<()> {
+fn use_visible_sweet_scent(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let party_index = party_index_for_field_move_rule(
         &snapshot,
@@ -5047,15 +5008,14 @@ fn use_visible_sweet_scent(
     )?;
     record_visible_runtime_action(
         runtime_shell,
-        format!("field_move:sweet_scent:{party_index}:{surface:?}"),
+        format!("field_move:sweet_scent:{party_index}"),
     )?;
     let field_move = runtime_shell
         .shell
-        .use_sweet_scent_field_move(party_index, surface)?;
+        .use_sweet_scent_field_move(party_index)?;
     runtime_shell.last_audio_events.push(format!(
-        "field sweet_scent party_index={} surface={:?} encounter={:?} battle={:?} checksum={:?}",
+        "field sweet_scent party_index={} encounter={:?} battle={:?} checksum={:?}",
         party_index,
-        surface,
         field_move.wild_encounter,
         field_move.wild_battle,
         field_move.state_checksum
@@ -5067,7 +5027,12 @@ fn use_visible_sweet_scent(
             field_move.wild_encounter, field_move.wild_battle
         ),
     );
-    if field_move.wild_encounter.resolved.is_none() {
+    if field_move
+        .wild_encounter
+        .as_ref()
+        .and_then(|encounter| encounter.resolved.as_ref())
+        .is_none()
+    {
         runtime_shell.pending_sweet_scent_nothing_notice = true;
         runtime_shell
             .field_notice_queue
@@ -5089,35 +5054,7 @@ fn use_visible_sweet_scent(
 }
 
 fn use_visible_sweet_scent_current_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let Some(surface) = runtime_shell.shell.current_encounter_surface_checked()? else {
-        let snapshot = runtime_shell.shell.snapshot()?;
-        let party_index = party_index_for_field_move_rule(
-            &snapshot,
-            &runtime_shell.shell,
-            "sweet_scent",
-            runtime_shell.party_cursor,
-        )?;
-        record_visible_runtime_action(runtime_shell, "field_move:sweet_scent:no_surface")?;
-        runtime_shell
-            .last_audio_events
-            .push("Sweet Scent requires grass or surfable water under the player".to_string());
-        retain_visible_field_notice_scene(runtime_shell, &snapshot);
-        runtime_shell.field_notice = Some(visible_field_move_use_text(
-            &snapshot,
-            party_index,
-            "SWEET SCENT",
-        )?);
-        runtime_shell.pending_sweet_scent_nothing_notice = true;
-        runtime_shell
-            .field_notice_queue
-            .push_back(visible_asm_text(&snapshot, "SweetScentNothingText")?);
-        continue_visible_script_after_prompt(runtime_shell)?;
-        mark_runtime_snapshot_dirty(runtime_shell);
-        set_shell_action_status(runtime_shell, "SWEET SCENT CAN'T BE USED HERE");
-        trim_event_log(&mut runtime_shell.last_audio_events);
-        return Ok(());
-    };
-    use_visible_sweet_scent(runtime_shell, surface)
+    use_visible_sweet_scent(runtime_shell)
 }
 
 fn settle_visible_field_action_after_possible_battle(
@@ -5774,6 +5711,11 @@ fn should_offer_trainer_shift_switch(
     battle: &crate::RuntimeBattleSnapshot,
 ) -> bool {
     snapshot.trainer.options.battle_style == BattleStyle::Shift
+        // A simultaneous knockout has no active player battler to keep or
+        // recall. Crystal goes directly to the mandatory replacement flow;
+        // presenting the optional Shift prompt here aliases that forced-party
+        // cursor as a shift target and can trap the battle on a fainted row.
+        && !visible_active_battle_player_fainted(snapshot)
         && trainer_shift_switch_pending(snapshot, battle)
         && !battle.commands.switch_party_indices.is_empty()
 }
@@ -6232,6 +6174,7 @@ fn throw_visible_battle_ball_id(
             caught: outcome.caught,
             started: false,
             complete: false,
+            sprites_cleared: false,
             frame: 0,
         });
         if outcome.blocked {
@@ -6287,10 +6230,7 @@ fn throw_visible_battle_ball_id(
             )?;
             if matches!(
                 battle_type,
-                "BATTLETYPE_TUTORIAL"
-                    | "BATTLETYPE_CONTEST"
-                    | "BATTLETYPE_BUG_CONTEST"
-                    | "BATTLETYPE_PARK"
+                "BATTLETYPE_TUTORIAL" | "BATTLETYPE_CONTEST"
             ) {
                 complete_visible_standard_capture(
                     runtime_shell,
@@ -6361,7 +6301,7 @@ fn complete_visible_standard_capture(
     runtime_shell: &mut BevyRuntimeShell,
     outcome: crate::core::battle::capture::CaptureOutcome,
     nickname: Option<String>,
-    scripted_static_wild: Option<(String, String)>,
+    scripted_static_wild: Option<VisibleStaticWildOrigin>,
 ) -> Result<()> {
     let battle_before_completion = runtime_shell.shell.snapshot()?;
     let completion = runtime_shell
@@ -6439,12 +6379,18 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
     let Some(battle) = snapshot.battle.clone() else {
         return handle_visible_no_active_battle(runtime_shell, "claim_rewards");
     };
-    let reward_recipient_name = battle
+    let reward_recipient_index = battle
         .active_player_party_index
-        .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
+        .context("battle rewards are missing the active player party index")?;
+    let reward_recipient_name = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == reward_recipient_index)
         .map(|slot| slot.pokemon.nickname.clone())
         .context("battle rewards are missing the active player Pokemon")?;
     let map_name = snapshot.overworld.map_name.clone();
+    let scripted_static_origin = visible_static_wild_source(&snapshot, &battle);
     let plain_wild_battle = matches!(battle.kind, crate::RuntimeBattleKind::Wild { .. });
     let trainer_battle = matches!(battle.kind, crate::RuntimeBattleKind::Trainer { .. });
     let reward_action = match &battle.kind {
@@ -6477,6 +6423,7 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
             push_visible_battle_reward_events(
                 runtime_shell,
                 &rewards.outcome,
+                reward_recipient_index,
                 &reward_recipient_name,
             )?;
             queue_visible_pay_day_payout(runtime_shell, &snapshot);
@@ -6486,7 +6433,7 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
                 rewards.outcome, rewards.state_checksum
             )
         }
-        crate::RuntimeBattleKind::StaticWild { source_script, .. } => {
+        crate::RuntimeBattleKind::StaticWild { .. } => {
             let rewards = runtime_shell.shell.claim_active_wild_battle_rewards()?;
             stage_visible_battle_exp_tween(runtime_shell, &snapshot, &rewards.outcome)?;
             stage_visible_battle_level_stats(runtime_shell, &snapshot, &rewards.outcome)?;
@@ -6497,6 +6444,7 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
             push_visible_battle_reward_events(
                 runtime_shell,
                 &rewards.outcome,
+                reward_recipient_index,
                 &reward_recipient_name,
             )?;
             queue_visible_pay_day_payout(runtime_shell, &snapshot);
@@ -6508,7 +6456,9 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
             runtime_shell.last_audio_events.push(message);
             finish_visible_wild_battle_exit(
                 runtime_shell,
-                Some((map_name, source_script)),
+                Some(scripted_static_origin.context(
+                    "static wild reward completion lost its captured origin",
+                )?),
                 "wild_battle_victory",
             )?;
             return Ok(());
@@ -6524,6 +6474,7 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
             push_visible_battle_reward_events(
                 runtime_shell,
                 &rewards.outcome,
+                reward_recipient_index,
                 &reward_recipient_name,
             )?;
             retain_visible_pre_reward_battle_scene(runtime_shell, &snapshot);
@@ -6784,6 +6735,7 @@ fn stage_visible_battle_level_stats(
 fn push_visible_battle_reward_events(
     runtime_shell: &mut BevyRuntimeShell,
     outcome: &crate::core::systems::battle_rewards::BattleRewardOutcome,
+    party_index: usize,
     recipient_name: &str,
 ) -> Result<()> {
     if !outcome.recipient_outcomes.is_empty() {
@@ -6802,6 +6754,7 @@ fn push_visible_battle_reward_events(
             push_visible_battle_reward_events(
                 runtime_shell,
                 &projected,
+                recipient.party_index,
                 &recipient.nickname,
             )?;
         }
@@ -6841,7 +6794,13 @@ fn push_visible_battle_reward_events(
             .last_audio_events
             .push(format!("battle reward learned move {move_id}"));
     }
-    for learned in &outcome.pending_move_learns {
+    for learned in outcome.pending_move_learns.iter().filter(|learned| {
+        !outcome
+            .evolution
+            .pending_move_learns
+            .iter()
+            .any(|evolution_move| evolution_move.name == learned.name)
+    }) {
         let move_name = battle_move_display_name(&snapshot, &learned.name);
         runtime_shell.battle_messages.push_back(format!(
             "{} is\ntrying to learn\n{}.",
@@ -6860,6 +6819,32 @@ fn push_visible_battle_reward_events(
         );
         runtime_shell.battle_messages.push_back(evolving_message.clone());
         runtime_shell.battle_messages.push_back(evolved_message.clone());
+        let pending_move_messages = outcome
+            .evolution
+            .pending_move_learns
+            .iter()
+            .map(|learned| {
+                format!(
+                    "{} is\ntrying to learn\n{}.",
+                    recipient_name,
+                    battle_move_display_name(&snapshot, &learned.name)
+                )
+            })
+            .collect::<Vec<_>>();
+        runtime_shell
+            .battle_messages
+            .extend(pending_move_messages.iter().cloned());
+        if outcome.evolution.cancel_snapshot.is_some() {
+            runtime_shell.battle_evolution_cancellations.push_back(
+                VisibleEvolutionCancellation {
+                    party_index,
+                    trigger_message: evolving_message.clone(),
+                    evolved_message: evolved_message.clone(),
+                    pending_move_messages,
+                    report: outcome.evolution.clone(),
+                },
+            );
+        }
         runtime_shell
             .battle_evolution_cries
             .push_back((target_species.clone(), evolving_message.clone()));
@@ -8264,36 +8249,43 @@ fn close_shop_or_teleport(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
 }
 
-fn run_or_rock_smash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    if snapshot.battle.is_some() {
-        attempt_visible_battle_run(runtime_shell)
-    } else {
-        use_visible_rock_smash(runtime_shell)
-    }
-}
+type VisibleStaticWildOrigin = crate::RuntimeStaticWildBattleOrigin;
 
 fn visible_static_wild_source(
-    snapshot: &RuntimeShellSnapshot,
+    _snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Option<(String, String)> {
+) -> Option<VisibleStaticWildOrigin> {
     match &battle.kind {
-        crate::RuntimeBattleKind::StaticWild { source_script, .. } => {
-            Some((snapshot.overworld.map_name.clone(), source_script.clone()))
-        }
+        crate::RuntimeBattleKind::StaticWild {
+            origin_map_name,
+            source_script,
+            startbattle_command_index,
+            resume_command_index,
+            species,
+            level,
+            ..
+        } => Some(VisibleStaticWildOrigin {
+            map_name: origin_map_name.clone(),
+            source_script: source_script.clone(),
+            startbattle_command_index: *startbattle_command_index,
+            resume_command_index: *resume_command_index,
+            battle_type: battle.battle_type.clone(),
+            species: species.clone(),
+            level: *level,
+        }),
         _ => None,
     }
 }
 
 fn finish_visible_wild_battle_exit(
     runtime_shell: &mut BevyRuntimeShell,
-    scripted_static_wild: Option<(String, String)>,
+    scripted_static_wild: Option<VisibleStaticWildOrigin>,
     plain_reason: &str,
 ) -> Result<()> {
     reset_visible_battle_exit_state(runtime_shell);
-    if let Some((map_name, source_script)) = scripted_static_wild {
+    if let Some(origin) = scripted_static_wild {
         runtime_shell.pending_plain_battle_map_reload = false;
-        complete_visible_scripted_wild_battle(runtime_shell, &map_name, &source_script)
+        complete_visible_scripted_wild_battle(runtime_shell, &origin)
     } else {
         restore_visible_overworld_after_battle_exit(runtime_shell, plain_reason)
     }

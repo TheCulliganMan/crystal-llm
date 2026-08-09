@@ -37,9 +37,11 @@ fn main() -> Result<()> {
         Some(save_path) => BevyShellStart::LoadSave { save_path },
         None => BevyShellStart::Title {
             spawn_identifier: runtime.title_new_game_spawn_identifier()?,
-            save_path: default_save_path
-                .exists()
-                .then_some(default_save_path.clone()),
+            // Preserve existing-primary visibility; only a missing primary
+            // enters the core loader's validated primary-to-backup recovery.
+            save_path: (default_save_path.exists()
+                || runtime.load_save_summary(&default_save_path).is_ok())
+            .then_some(default_save_path.clone()),
         },
     };
 
@@ -222,11 +224,11 @@ mod tests {
         assert!(!runtime_source.contains("pub fn start_overworld_session_at_runtime_tile("));
         assert!(
             shell_source
-                .contains("#[cfg(test)]\n    NewGame {\n        spawn_identifier: u16,\n    }")
+                .contains("#[cfg(any(test, feature = \"location-tester\"))]\n    NewGame {\n        spawn_identifier: u16,\n    }")
         );
         assert!(
             shell_source.contains(
-                "#[cfg(test)]\n    NewGameAtRuntimeTile {\n        spawn_identifier: u16,"
+                "#[cfg(any(test, feature = \"location-tester\"))]\n    NewGameAtRuntimeTile {\n        spawn_identifier: u16,"
             )
         );
         assert!(asset_source.contains(

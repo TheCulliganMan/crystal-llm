@@ -21,10 +21,13 @@ bevy = { version = "0.14", optional = true, default-features = false, features =
     "wav",
     "x11",
 ] }
+chrono.workspace = true
 crystal-assets = { path = "../crystal-assets" }
 crystal-audio = { path = "../crystal-audio" }
 crystal-core = { path = "../crystal-core" }
 crystal-net = { path = "../crystal-net" }
+crystal-render-api = { path = "../crystal-render-api", optional = true }
+crystal-voxel-view = { path = "../crystal-voxel-view", optional = true }
 flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
@@ -33,7 +36,13 @@ thiserror.workspace = true
 
 [features]
 default = ["bevy-shell"]
-bevy-shell = ["dep:bevy"]
+bevy-shell = ["dep:bevy", "dep:crystal-render-api"]
+voxel-view = ["bevy-shell", "dep:crystal-voxel-view"]
+location-tester = ["voxel-view", "crystal-assets/test-fixtures"]
+
+[[example]]
+name = "render_at_location"
+required-features = ["location-tester"]
 
 [dev-dependencies]
 crystal-assets = { path = "../crystal-assets", features = ["test-fixtures"] }

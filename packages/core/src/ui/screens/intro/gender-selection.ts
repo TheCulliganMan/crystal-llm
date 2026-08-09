@@ -4,6 +4,7 @@ import { SCREEN_TILE_WIDTH, TEXTBOX_HEIGHT_TILES, TEXTBOX_Y_TILES } from "@pokec
 import { gbc5To8 } from "@pokecrystal/core/core/gbc-colors";
 import { PlayerGender } from "@pokecrystal/core/core/enums";
 import type { AudioEngine } from "@pokecrystal/core/engine/systems/audio";
+import { Surface } from "@pokecrystal/core/ui/game-engine";
 import type { FontRenderer as TextboxFontRenderer } from "@pokecrystal/core/ui/textbox";
 import {
   isConfirmEvent,
@@ -13,6 +14,8 @@ import {
 } from "@pokecrystal/core/input/controls";
 import {
   fillScreen,
+  SCREEN_HEIGHT,
+  SCREEN_WIDTH,
   TILE_SIZE,
 } from "./rendering";
 import { BootTextboxRenderer } from "./boot-textbox-renderer";
@@ -93,6 +96,30 @@ export class GenderSelectionScreen {
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
+    if (ctx.canvas.width === SCREEN_WIDTH && ctx.canvas.height === SCREEN_HEIGHT) {
+      this.drawNative(ctx);
+      return;
+    }
+
+    const surface = new Surface(SCREEN_WIDTH, SCREEN_HEIGHT);
+    this.drawNative(surface.getContext() as CanvasRenderingContext2D);
+
+    ctx.fillStyle = `rgb(${this.backgroundColor[0]}, ${this.backgroundColor[1]}, ${this.backgroundColor[2]})`;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+    const scale = Math.min(ctx.canvas.width / SCREEN_WIDTH, ctx.canvas.height / SCREEN_HEIGHT);
+    const width = Math.round(SCREEN_WIDTH * scale);
+    const height = Math.round(SCREEN_HEIGHT * scale);
+    const x = Math.floor((ctx.canvas.width - width) / 2);
+    const y = Math.floor((ctx.canvas.height - height) / 2);
+    const source = surface.getCanvasImageSource();
+    if (source) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(source, x, y, width, height);
+    }
+  }
+
+  private drawNative(ctx: CanvasRenderingContext2D): void {
     fillScreen(ctx, this.backgroundColor);
     this.drawQuestion(ctx);
     this.drawMenuBox(ctx);
@@ -159,21 +186,24 @@ export class GenderSelectionScreen {
 
   private loadBackgroundColor(): [number, number, number] {
     const palettePath = getAssetPath("gfx", "new_game", "gender_screen.pal");
-    if (fs.existsSync(palettePath)) {
-      const lines = fs.readFileSync(palettePath, "utf-8").split("\n");
-      for (const raw of lines) {
-        const line = raw.trim();
-        if (!line.startsWith("RGB")) {
-          continue;
-        }
-        const [rStr, gStr, bStr] = line.split("RGB")[1].trim().split(",");
-        const r = Number.parseInt(rStr, 10);
-        const g = Number.parseInt(gStr, 10);
-        const b = Number.parseInt(bStr, 10);
-        return [gbc5To8(r), gbc5To8(g), gbc5To8(b)];
+    const colors: [number, number, number][] = [];
+    const lines = fs.readFileSync(palettePath, "utf-8").split("\n");
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line.startsWith("RGB")) {
+        continue;
       }
+      const [rStr, gStr, bStr] = line.split("RGB")[1].trim().split(",");
+      const r = Number.parseInt(rStr, 10);
+      const g = Number.parseInt(gStr, 10);
+      const b = Number.parseInt(bStr, 10);
+      colors.push([gbc5To8(r), gbc5To8(g), gbc5To8(b)]);
     }
-    return [255, 255, 255];
+    const background = colors[1];
+    if (!background) {
+      throw new Error(`Gender selection palette ${palettePath} is missing color index 1.`);
+    }
+    return background;
   }
 
   getTextSnapshot(): TextSnapshotPayload {

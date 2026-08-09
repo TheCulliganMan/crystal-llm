@@ -1156,7 +1156,7 @@ mod tests {
             2,
             17,
             RuntimeCommandPayload::new(
-                "crystal_runtime_mutation_command_v1",
+                "crystal_runtime_mutation_command_v2",
                 br#"{"kind":"apply_overworld_input","payload":{"buttons":["a","right"]}}"#.to_vec(),
             )
             .expect("runtime command payload"),
@@ -1556,7 +1556,7 @@ mod tests {
         assert_eq!(decoded.session(), &session());
         assert_eq!(
             decoded.command().payload().schema(),
-            "crystal_runtime_mutation_command_v1"
+            "crystal_runtime_mutation_command_v2"
         );
         assert_eq!(
             decoded.command().payload().hash(),
@@ -1834,7 +1834,7 @@ mod tests {
         let bytes = br#"{"kind":"apply_overworld_input","payload":{"buttons":["a"]}}"#.to_vec();
         let actual = fnv1a32_bytes(&bytes);
         let payload = RuntimeCommandPayload::new_unchecked_for_tests(
-            "crystal_runtime_mutation_command_v1",
+            "crystal_runtime_mutation_command_v2",
             bytes,
             0x1111_1111,
         );

@@ -1,17 +1,17 @@
 {
-  "schema": 2,
-  "pack_format": 3,
-  "pack": "content-packs/core-modular.crystalpack",
-  "pack_sha256": "ad152c6826a647b3a01e4041f1bcf037bf4fc86f64ab9c8fad1797d6c6086c0a",
   "asm": {
-    "repository": "vendor/pokecrystal",
     "commit": "31880ea20ea44f79ebd459b1e735ae1f15db1671",
-    "tree": "7209c2b8f6510a1d7ca728142183f040543aec24",
     "input_manifest_sha256": "9c9dd8379075f295ccbc5e86c3f6b92f2a5469ef6a3b2fe9ef398b2fcc58d068",
-    "rom_sha1": "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133"
+    "repository": "vendor/pokecrystal",
+    "rom_sha1": "f4cd194bdee0d04ca4eac29e09b8e4e9d818c133",
+    "tree": "7209c2b8f6510a1d7ca728142183f040543aec24"
   },
+  "pack": "content-packs/core-modular.crystalpack",
+  "pack_format": 6,
+  "pack_sha256": "8593815ed058d0e9437beb3e4ba71792d09cbddbd7b9ff7b54734e4b5b5cdb7b",
+  "schema": 2,
   "toolchain": {
-    "rgbds": "1.0.1",
-    "exporter": "packages/exporters/scripts/export-core.js"
+    "exporter": "rust/crates/crystal-assets/src/bin/pack_core.rs",
+    "rgbds": "1.0.1"
   }
 }

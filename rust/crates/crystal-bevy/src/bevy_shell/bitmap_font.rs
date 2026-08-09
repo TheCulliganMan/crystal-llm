@@ -100,12 +100,25 @@ fn bitmap_font_tile_handle(
 
 fn load_window_frame_art(
     asset_root: &AssetRoot,
+    frame_id: u8,
     images: &mut Assets<Image>,
 ) -> Result<WindowFrameArt> {
-    let frame_path = asset_root.runtime_assets().join("gfx/frames/1.png");
+    anyhow::ensure!((1..=8).contains(&frame_id), "invalid textbox frame {frame_id}");
+    let frame_path = asset_root
+        .runtime_assets()
+        .join(format!("gfx/frames/{frame_id}.png"));
     let source = image::open(&frame_path)
         .with_context(|| format!("load battle window frame {}", frame_path.display()))?
         .to_rgba8();
+    let palette_path = asset_root
+        .runtime_assets()
+        .join("gfx/stats/party_menu_bg.pal");
+    let palette_source = std::fs::read_to_string(&palette_path)
+        .with_context(|| format!("read textbox palette {}", palette_path.display()))?;
+    let palette = parse_palette_file(&palette_source, None)?
+        .into_iter()
+        .next()
+        .with_context(|| format!("textbox palette {} is empty", palette_path.display()))?;
     let expected_width = BITMAP_FONT_TILE_SIZE * 3;
     let expected_height = BITMAP_FONT_TILE_SIZE * 2;
     if source.width() as usize != expected_width || source.height() as usize != expected_height {
@@ -119,17 +132,18 @@ fn load_window_frame_art(
         );
     }
     Ok(WindowFrameArt {
-        top_left: window_frame_tile(&source, 0, 0, images)?,
-        top_edge: window_frame_tile(&source, 1, 0, images)?,
-        top_right: window_frame_tile(&source, 2, 0, images)?,
-        side_edge: window_frame_tile(&source, 0, 1, images)?,
-        bottom_left: window_frame_tile(&source, 1, 1, images)?,
-        bottom_right: window_frame_tile(&source, 2, 1, images)?,
+        top_left: window_frame_tile(&source, &palette, 0, 0, images)?,
+        top_edge: window_frame_tile(&source, &palette, 1, 0, images)?,
+        top_right: window_frame_tile(&source, &palette, 2, 0, images)?,
+        side_edge: window_frame_tile(&source, &palette, 0, 1, images)?,
+        bottom_left: window_frame_tile(&source, &palette, 1, 1, images)?,
+        bottom_right: window_frame_tile(&source, &palette, 2, 1, images)?,
     })
 }
 
 fn window_frame_tile(
     source: &image::RgbaImage,
+    palette: &Palette,
     tile_x: usize,
     tile_y: usize,
     images: &mut Assets<Image>,
@@ -141,10 +155,9 @@ fn window_frame_tile(
         for col in 0..BITMAP_FONT_TILE_SIZE {
             let pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
             let target = (row * BITMAP_FONT_TILE_SIZE + col) * 4;
-            data[target] = pixel[0];
-            data[target + 1] = pixel[1];
-            data[target + 2] = pixel[2];
-            data[target + 3] = pixel[3];
+            let color = palette[palette_index_from_gray(pixel[0])];
+            data[target..target + 3].copy_from_slice(&color);
+            data[target + 3] = 255;
         }
     }
     let mut image = Image::new(
@@ -916,22 +929,31 @@ fn copy_source_tile_rgba(
             let source_pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
             let offset = (row * SOURCE_TILE_SIZE + col) * 4;
             let alpha = source_pixel[3];
-            if alpha == 0 {
-                target[offset + 3] = 0;
-                continue;
-            }
             if let Some(palette) = palette {
-                let palette_index = palette_index_from_gray(source_pixel[0]);
+                // Exported PNG alpha represents Game Boy colour zero. BG
+                // pixels are never transparent on hardware, so the base map
+                // layer must paint palette[0]; only the separately composed
+                // priority/OBJ layer clears colour zero below.
+                let palette_index = if alpha == 0 {
+                    0
+                } else {
+                    palette_index_from_gray(source_pixel[0])
+                };
                 let [red, green, blue] = palette[palette_index];
                 target[offset] = red;
                 target[offset + 1] = green;
                 target[offset + 2] = blue;
                 target[offset + 3] = 255;
             } else {
+                // Some source tilesets use their already-coloured PNG
+                // directly and therefore have no separate runtime palette
+                // bank. PNG alpha still marks Game Boy colour zero in that
+                // path; it is not transparency for a BG tile. Preserve the
+                // exported RGB value and make every base-layer pixel opaque.
                 target[offset] = source_pixel[0];
                 target[offset + 1] = source_pixel[1];
                 target[offset + 2] = source_pixel[2];
-                target[offset + 3] = alpha;
+                target[offset + 3] = 255;
             }
         }
     }
@@ -1048,13 +1070,18 @@ fn title_frame_for_art(
 }
 
 fn title_screen_art_key(title: &TitleMenu) -> TitleScreenArtKey {
+    let animation_frame = match title.phase {
+        // Entrance crystal placement changes continuously and SCX identifies
+        // each finite scroll step, so preserve its native frame counter.
+        VisibleTitlePhase::Entrance => title.frame,
+        // Once settled, the only moving title art is Suicune's four-frame
+        // loop. Bound the source cache to those four images instead of
+        // retaining a new 160x144 asset every eight ticks until timeout.
+        _ => ((title.frame / 8) % 4) * 8,
+    };
     TitleScreenArtKey {
         scx: title.scx,
-        // The native title Suicune frame advances every eight Game Boy
-        // frames.  Caching a separate fully assembled GPU image for every
-        // intermediate frame both wastes work and can exhaust the renderer
-        // during the intro-to-title handoff, producing a black surface.
-        frame: title.frame & !0x07,
+        frame: animation_frame,
         show_version_window: !matches!(title.phase, VisibleTitlePhase::Entrance),
     }
 }
@@ -1921,10 +1948,18 @@ fn blit_intro_source_tile(
                 (source_x + source_col) as u32,
                 (source_y + source_row) as u32,
             );
-            if source_pixel[3] == 0 {
+            // Exported PNGs encode Game Boy color zero as alpha, but BG tiles
+            // are never transparent on hardware. Only OAM/OBJ rendering may
+            // discard color zero; intro backgrounds such as Suicune's
+            // close-up must paint their palette-zero pixels.
+            if source_pixel[3] == 0 && transparent_zero {
                 continue;
             }
-            let palette_index = palette_index_from_gray(source_pixel[0]);
+            let palette_index = if source_pixel[3] == 0 {
+                0
+            } else {
+                palette_index_from_gray(source_pixel[0])
+            };
             if transparent_zero && palette_index == 0 {
                 continue;
             }
@@ -2135,7 +2170,7 @@ fn draw_native_title_background(
                 palette_bank
                     .first()
                     .context("title palette bank missing BG palette 0")?,
-                true,
+                false,
                 (6 + col) * SOURCE_TILE_SIZE,
                 (TITLE_SUICUNE_START_Y_TILE + row) * SOURCE_TILE_SIZE,
                 i16::from(title.scx),
@@ -3033,12 +3068,24 @@ fn emote_frame_for_art(
             .join("gfx/emotes")
             .join(format!("{asset_name}.png"));
         let loaded = (|| -> Result<SpriteFrame> {
-            let source = image::open(&path)
+            let mut source = image::open(&path)
                 .with_context(|| format!("decode emote PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
             if width == 0 || height == 0 {
                 anyhow::bail!("emote PNG {} is empty", path.display());
+            }
+            // Match TypeScript's EmoteSurfaceCache: the color in the source
+            // image's top-left pixel is the sprite background, not visible
+            // art. The checked-in 2-bit PNGs are opaque, so uploading them
+            // directly produces a large white square around every emote.
+            let background = *source.get_pixel(0, 0);
+            if background[3] != 0 {
+                for pixel in source.pixels_mut() {
+                    if *pixel == background {
+                        pixel[3] = 0;
+                    }
+                }
             }
             let mut image = Image::new(
                 Extent3d {

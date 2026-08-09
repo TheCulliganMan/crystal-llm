@@ -187,6 +187,7 @@ export function exportCoreData(): void {
     pokegearTownMapPaletteMap,
     pokemonCries,
     trainers,
+    trainerClassNames: runtimeAssets.trainerClassNames,
     pokedex,
     npcData,
     pokegearLandmarks,

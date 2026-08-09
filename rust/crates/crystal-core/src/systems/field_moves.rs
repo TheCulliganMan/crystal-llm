@@ -2326,7 +2326,7 @@ mod tests {
     fn storage_with(move_id: &str) -> PokemonStorage {
         let mut storage = PokemonStorage::default();
         storage
-            .register_capture(pokemon_with_move(move_id))
+            .register_capture_in_box(0, pokemon_with_move(move_id))
             .expect("register test pokemon");
         storage
     }

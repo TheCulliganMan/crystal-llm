@@ -31,7 +31,10 @@ const itemFixture = (overrides: Partial<Record<string, unknown>> = {}) => ({
   property: 'CANT_SELECT',
   pocket: ItemPocket.ITEM,
   field_menu: 'ITEMMENU_PARTY',
+  field_usable: true,
   battle_menu: 'ITEMMENU_PARTY',
+  battle_usable: true,
+  battle_capture_ball: null,
   consumable: true,
   tmhm_index: null,
   tmhm_move: null,
@@ -58,6 +61,16 @@ describe('ItemSchema', () => {
     const item = ItemSchema.parse(itemFixture({ effect: 'statusHeal' }));
 
     expect(item.effect).toBe('statusHeal');
+  });
+
+  it('accepts the exported field and battle usability metadata', () => {
+    const item = ItemSchema.parse(itemFixture({ battle_capture_ball: true }));
+
+    expect(item).toMatchObject({
+      field_usable: true,
+      battle_usable: true,
+      battle_capture_ball: true,
+    });
   });
 
   it('rejects legacy param keys instead of stripping them', () => {

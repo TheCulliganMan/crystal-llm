@@ -272,6 +272,11 @@ fn close_visible_credits_screen(
         "closed credits reason={reason} frame={} consumed={}",
         credits.frame, credits.consumed_bytes
     ));
+    if credits.resume_game_timer_on_exit {
+        // Script_halloffame restores GAME_TIMER_COUNTING_F immediately after
+        // Credits returns. RedCredits/Script_credits never changed the bit.
+        runtime_shell.shell.set_game_timer_counting(true)?;
+    }
     set_shell_action_status(runtime_shell, "CREDITS CLOSED");
     trim_event_log(&mut runtime_shell.last_audio_events);
     continue_visible_script_after_prompt(runtime_shell)
@@ -336,7 +341,7 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
                 player_name: state.player_name,
                 badge_count,
                 pokedex_count: has_pokedex.then(|| state.pokedex.caught_count()),
-                hours: u16::from(state.time.game_time_hours),
+                hours: state.time.game_time_hours,
                 minutes: state.time.game_time_minutes,
             });
             set_shell_action_status(runtime_shell, "CONTINUE DATA");
@@ -348,6 +353,12 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
                 runtime_shell.runtime.clone(),
                 title.spawn_identifier,
             )?;
+            runtime_shell.shell.set_runtime_journal_enabled(false);
+            runtime_shell
+                .shell
+                .session_mut()
+                .state_mut()
+                .set_game_timer_counting(false);
             runtime_shell.title_menu = None;
             reset_visible_navigation_state(runtime_shell);
             runtime_shell.last_field_pack_pocket = FieldPackPocket::Items;
@@ -1103,6 +1114,7 @@ fn finish_visible_capture_nickname(
     runtime_shell.pending_name_choice = None;
     if runtime_shell.battle_messages.is_empty() {
         runtime_shell.battle_message_scene = None;
+        runtime_shell.visible_capture_animation = None;
     }
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -2026,6 +2038,28 @@ fn push_visible_deferred_evolution_events(
         );
         runtime_shell.battle_messages.push_back(evolving_message.clone());
         runtime_shell.battle_messages.push_back(evolved_message.clone());
+        let pending_move_messages = evolution
+            .pending_move_learns
+            .iter()
+            .map(|learned| {
+                format!(
+                    "{} is\ntrying to learn\n{}.",
+                    recipient_name,
+                    battle_move_display_name(&snapshot, &learned.name)
+                )
+            })
+            .collect::<Vec<_>>();
+        if evolution.cancel_snapshot.is_some() {
+            runtime_shell.battle_evolution_cancellations.push_back(
+                VisibleEvolutionCancellation {
+                    party_index,
+                    trigger_message: evolving_message.clone(),
+                    evolved_message: evolved_message.clone(),
+                    pending_move_messages,
+                    report: evolution.clone(),
+                },
+            );
+        }
         runtime_shell
             .battle_evolution_cries
             .push_back((target_species.clone(), evolving_message.clone()));
@@ -2879,9 +2913,10 @@ fn explicit_compiled_script_runtime_inputs(
     source_script: &str,
     command_index: usize,
 ) -> Result<ScriptRuntimeInputs> {
+    let origin_map_name = runtime_shell.shell.current_map_name().to_string();
     runtime_shell
         .shell
-        .compiled_script_runtime_inputs(source_script, command_index)
+        .compiled_script_runtime_inputs(&origin_map_name, source_script, command_index)
 }
 
 fn explicit_compiled_script_phone_inputs(

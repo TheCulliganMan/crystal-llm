@@ -204,6 +204,9 @@ describe("core exporters integration", () => {
     const trainers = JSON.parse(fs.readFileSync(path.join(dataDir, "trainers.json"), "utf8")) as Array<{
       trainer_id?: string;
       base_reward?: number;
+      items?: Array<string | null>;
+      ai_move_flags?: number;
+      ai_item_switch_flags?: number;
       party?: unknown[];
     }>;
     expect(trainers).toEqual(
@@ -217,6 +220,13 @@ describe("core exporters integration", () => {
     );
     expect(trainers.find((trainer) => trainer.trainer_id === "JACK1")?.base_reward).toBe(8);
     expect(trainers.every((trainer) => typeof trainer.base_reward === "number" && trainer.base_reward > 0)).toBe(true);
+    expect(trainers.find((trainer) => trainer.trainer_id === "PRYCE1")).toEqual(
+      expect.objectContaining({
+        items: ["HYPER_POTION", null],
+        ai_move_flags: 979,
+        ai_item_switch_flags: 68,
+      }),
+    );
 
     const mapAttributes = JSON.parse(
       fs.readFileSync(path.join(dataDir, "map_attributes.json"), "utf8")

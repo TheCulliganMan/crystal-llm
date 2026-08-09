@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::battle::start::first_available_battle_party_index;
-use crate::models::pokemon::StatExperience;
+use crate::models::pokemon::{CaughtData, StatExperience};
 use crate::models::{
-    CaptureStorageLocation, Dv, Item, LearnedMove, MAX_BOX_MONS, Move, Party, Pokemon,
-    PokemonSpecies, TrainerCatalog, calculate_stats, create_pokemon_from_known_dvs,
+    Dv, Item, LearnedMove, MAX_BOX_MONS, MAX_PC_BOXES, Move, Party, Pokemon, PokemonSpecies,
+    TrainerCatalog, calculate_stats, create_pokemon_from_known_dvs,
 };
-use crate::random::Random;
+use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, Random};
 use crate::state::{
     BattleMemory, BattleTowerState, BuenasPasswordState, EventFlagError, GameState,
     LinkSerialConnectionStatus, MagikarpRecordState, MobileBattleTowerRecord, OverworldMemory,
@@ -136,21 +136,21 @@ pub enum SpecialRoutineEffect {
         species: Option<String>,
         already_seen: bool,
         script_value: u8,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     RandomPhoneWildMon {
         contact_id: String,
         map_name: String,
         time_of_day: TimeOfDay,
         species: String,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     RandomPhoneMon {
         contact_id: String,
         trainer_id: String,
         species: String,
         party_index: usize,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     ActivateFishingSwarm {
         value: u8,
@@ -188,7 +188,7 @@ pub enum SpecialRoutineEffect {
     },
     SampleKenjiBreakCountdown {
         value: u8,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     CheckLuckyNumberShowFlag {
         flag: bool,
@@ -196,7 +196,7 @@ pub enum SpecialRoutineEffect {
     ResetLuckyNumberShowFlag {
         lucky_number: u16,
         lucky_number_day: u8,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     CheckForLuckyNumberWinners {
         lucky_number: u16,
@@ -318,7 +318,7 @@ pub enum SpecialRoutineEffect {
     },
     GiveShuckle {
         stored: bool,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     ReturnShuckie {
         party_slot: Option<usize>,
@@ -339,7 +339,7 @@ pub enum SpecialRoutineEffect {
         quantity: u16,
     },
     InitRoamMons {
-        roamers: Vec<RoamingPokemonState>,
+        roamers: [RoamingPokemonState; ROAMING_POKEMON_SLOT_COUNT],
     },
     CheckMysteryGift {
         has_pending_item: bool,
@@ -357,7 +357,7 @@ pub enum SpecialRoutineEffect {
         correct: String,
         guess: Option<String>,
         matched: bool,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     BuenaPrize {
         item_id: String,
@@ -402,7 +402,7 @@ pub enum SpecialRoutineEffect {
     },
     SelectRandomBugContestContestants {
         flags: Vec<String>,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     ContestDropOffMons {
         result: u8,
@@ -423,6 +423,7 @@ pub enum SpecialRoutineEffect {
     BugContestJudging {
         rank: u8,
         placements: Vec<BugContestPlacement>,
+        random_state_after: CrystalRandomState,
     },
     LinkAction {
         action: u8,
@@ -474,6 +475,7 @@ pub enum SpecialRoutineEffect {
         party_size: usize,
         sprite_constant: String,
         target_object: String,
+        random_state_after: CrystalRandomState,
     },
     AskRememberPassword {
         remember: bool,
@@ -506,7 +508,7 @@ pub enum SpecialRoutineEffect {
         species: String,
         party_slot: usize,
         shiny: bool,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     BankOfMom {
         initialized: bool,
@@ -532,7 +534,7 @@ pub enum SpecialRoutineEffect {
         deck: Vec<String>,
         revealed: Vec<bool>,
         coins: u16,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     UnownPuzzle {
         puzzle_id: String,
@@ -540,7 +542,7 @@ pub enum SpecialRoutineEffect {
         moves: u16,
         layout: Vec<Vec<u8>>,
         holding_piece: Option<u8>,
-        rng_seed_after: u32,
+        random_state_after: CrystalRandomState,
     },
     UnusedMemoryGame {
         matched: bool,
@@ -593,6 +595,8 @@ pub struct BattleTowerRecentRecord {
 pub enum SpecialRoutineError {
     #[error("unsupported exact special routine {routine}")]
     UnsupportedRoutine { routine: String },
+    #[error("special routine {routine} requires an authoritative divider source")]
+    MissingDividerSource { routine: String },
     #[error("declared special routine {routine} is inactive in the definitive modpack scripts")]
     InactiveDeclaredRoutine { routine: String },
     #[error("special routine {routine} has invalid state: {message}")]
@@ -811,6 +815,32 @@ pub enum SpecialRoutineError {
     EmptyTrainerParty { routine: String, trainer_id: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RandomSpecialRoutineError<E> {
+    Routine(SpecialRoutineError),
+    Divider(E),
+}
+
+impl<E> From<SpecialRoutineError> for RandomSpecialRoutineError<E> {
+    fn from(error: SpecialRoutineError) -> Self {
+        Self::Routine(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for RandomSpecialRoutineError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Routine(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "special routine divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error
+    for RandomSpecialRoutineError<E>
+{
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LuckyNumberWinnerSource {
@@ -834,7 +864,7 @@ pub struct SpecialRoutineContext<'a> {
     pub growth_rates: &'a GrowthRateCatalog,
     pub item_catalog: &'a BTreeMap<String, Item>,
     pub runtime_spawn_points: &'a BTreeMap<String, RuntimeSpawnPointRef>,
-    pub roaming_pokemon: &'a RoamingPokemonDefinitions,
+    pub roaming_pokemon: &'a RoamingPokemonCatalog,
     pub buena_password_categories: &'a BuenaPasswordCategories,
     pub buena_prizes: &'a BuenaPrizeDefinitions,
     pub kurt_apricorn_recipes: &'a KurtApricornRecipes,
@@ -853,12 +883,22 @@ pub struct SpecialRoutineContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BugContestEncounterEntry {
+    pub weight: u8,
+    pub species: String,
+    pub min_level: u8,
+    pub max_level: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BugContestConfig {
     pub park_balls: u8,
     pub timer_minutes: u8,
     pub timer_seconds: u8,
     pub selected_contestant_count: usize,
     pub contestant_flags: Vec<String>,
+    pub encounters: Vec<BugContestEncounterEntry>,
 }
 
 impl<'de> Deserialize<'de> for BugContestConfig {
@@ -874,6 +914,7 @@ impl<'de> Deserialize<'de> for BugContestConfig {
             timer_seconds: u8,
             selected_contestant_count: usize,
             contestant_flags: Vec<String>,
+            encounters: Vec<BugContestEncounterEntry>,
         }
 
         let raw = RawConfig::deserialize(deserializer)?;
@@ -915,14 +956,84 @@ impl<'de> Deserialize<'de> for BugContestConfig {
                 )));
             }
         }
+        validate_bug_contest_encounters(&raw.encounters).map_err(serde::de::Error::custom)?;
         Ok(Self {
             park_balls: raw.park_balls,
             timer_minutes: raw.timer_minutes,
             timer_seconds: raw.timer_seconds,
             selected_contestant_count: raw.selected_contestant_count,
             contestant_flags: raw.contestant_flags,
+            encounters: raw.encounters,
         })
     }
+}
+
+impl<'de> Deserialize<'de> for BugContestEncounterEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RawEntry {
+            weight: u8,
+            species: String,
+            min_level: u8,
+            max_level: u8,
+        }
+
+        let raw = RawEntry::deserialize(deserializer)?;
+        require_special_token("bug contest encounter species", &raw.species)
+            .map_err(serde::de::Error::custom)?;
+        if raw.min_level == 0 || raw.min_level > raw.max_level || raw.max_level > 100 {
+            return Err(serde::de::Error::custom(format!(
+                "bug contest encounter {} has invalid level range {}..={}",
+                raw.species, raw.min_level, raw.max_level
+            )));
+        }
+        Ok(Self {
+            weight: raw.weight,
+            species: raw.species,
+            min_level: raw.min_level,
+            max_level: raw.max_level,
+        })
+    }
+}
+
+fn validate_bug_contest_encounters(
+    encounters: &[BugContestEncounterEntry],
+) -> Result<(), String> {
+    if encounters.len() != 11 {
+        return Err(format!(
+            "bug contest encounters must contain 10 weighted rows plus one sentinel, found {} rows",
+            encounters.len()
+        ));
+    }
+    let Some((sentinel, weighted)) = encounters.split_last() else {
+        return Err("bug contest encounters must include the final -1 sentinel row".to_string());
+    };
+    if sentinel.weight != u8::MAX {
+        return Err(format!(
+            "bug contest final encounter weight must be the normalized -1 sentinel 255, found {}",
+            sentinel.weight
+        ));
+    }
+    let mut total = 0u16;
+    for (index, entry) in weighted.iter().enumerate() {
+        if entry.weight == 0 || entry.weight == u8::MAX {
+            return Err(format!(
+                "bug contest encounter weight at index {index} must be 1..=254, found {}",
+                entry.weight
+            ));
+        }
+        total += u16::from(entry.weight);
+    }
+    if total != 100 {
+        return Err(format!(
+            "bug contest ordinary encounter weights must total 100, found {total}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -948,6 +1059,22 @@ pub enum BugContestConfigIssue {
     UnknownContestantFlag {
         index: usize,
         flag: String,
+    },
+    InvalidEncounterTable {
+        message: String,
+    },
+    InvalidEncounterSpecies {
+        index: usize,
+        species: String,
+    },
+    UnsupportedEncounterSpecies {
+        index: usize,
+        species: String,
+    },
+    InvalidEncounterLevelRange {
+        index: usize,
+        min_level: u8,
+        max_level: u8,
     },
 }
 
@@ -992,6 +1119,33 @@ pub fn bug_contest_config_issues(
             issues.push(BugContestConfigIssue::UnknownContestantFlag {
                 index,
                 flag: flag.clone(),
+            });
+        }
+    }
+    if let Err(message) = validate_bug_contest_encounters(&config.encounters) {
+        issues.push(BugContestConfigIssue::InvalidEncounterTable { message });
+    }
+    for (index, encounter) in config.encounters.iter().enumerate() {
+        if !is_exact_nonempty_special_token(&encounter.species) {
+            issues.push(BugContestConfigIssue::InvalidEncounterSpecies {
+                index,
+                species: encounter.species.clone(),
+            });
+        }
+        if encounter.species == "UNOWN" {
+            issues.push(BugContestConfigIssue::UnsupportedEncounterSpecies {
+                index,
+                species: encounter.species.clone(),
+            });
+        }
+        if encounter.min_level == 0
+            || encounter.min_level > encounter.max_level
+            || encounter.max_level > 100
+        {
+            issues.push(BugContestConfigIssue::InvalidEncounterLevelRange {
+                index,
+                min_level: encounter.min_level,
+                max_level: encounter.max_level,
             });
         }
     }
@@ -1726,7 +1880,7 @@ pub fn odd_egg_definition_issues(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MagikarpLengthEntry {
     pub threshold: u16,
-    pub divisor: u16,
+    pub divisor: u8,
 }
 
 impl<'de> Deserialize<'de> for MagikarpLengthEntry {
@@ -1747,9 +1901,14 @@ impl<'de> Deserialize<'de> for MagikarpLengthEntry {
                 "magikarp length divisor must be nonzero",
             ));
         }
+        if raw.divisor > u16::from(u8::MAX) {
+            return Err(serde::de::Error::custom(
+                "magikarp length divisor must fit one source byte",
+            ));
+        }
         Ok(Self {
             threshold: raw.threshold,
-            divisor: raw.divisor,
+            divisor: raw.divisor as u8,
         })
     }
 }
@@ -1763,9 +1922,9 @@ impl<'de> Deserialize<'de> for MagikarpLengthTable {
         D: serde::Deserializer<'de>,
     {
         let entries = Vec::<MagikarpLengthEntry>::deserialize(deserializer)?;
-        if entries.is_empty() {
+        if entries.len() != 14 {
             return Err(serde::de::Error::custom(
-                "Magikarp length table must not be empty",
+                "Magikarp length table must contain exactly 14 source rows",
             ));
         }
         let mut previous_threshold = None;
@@ -1786,6 +1945,9 @@ impl<'de> Deserialize<'de> for MagikarpLengthTable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum MagikarpLengthTableIssue {
+    InvalidEntryCount {
+        actual: usize,
+    },
     InvalidDivisor {
         index: usize,
         threshold: u16,
@@ -1801,6 +1963,11 @@ pub fn magikarp_length_table_issues(
     entries: &[MagikarpLengthEntry],
 ) -> Vec<MagikarpLengthTableIssue> {
     let mut issues = Vec::new();
+    if entries.len() != 14 {
+        issues.push(MagikarpLengthTableIssue::InvalidEntryCount {
+            actual: entries.len(),
+        });
+    }
     let mut previous_threshold = None;
     for (index, entry) in entries.iter().enumerate() {
         if entry.divisor == 0 {
@@ -2661,78 +2828,286 @@ pub fn buena_prize_definition_issues(
     issues
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub const ROAMING_POKEMON_SLOT_COUNT: usize = 3;
+pub const ROAMING_POKEMON_ROUTE_COUNT: usize = 16;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RoamingPokemonDefinition {
-    pub level: u8,
-    pub map_group: u16,
-    pub map_number: u16,
+pub struct RoamingMapLocation {
+    pub map_group: u8,
+    pub map_number: u8,
 }
 
-impl<'de> Deserialize<'de> for RoamingPokemonDefinition {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoamingPokemonInitWrite {
+    pub slot: u8,
+    pub species: String,
+    pub level: u8,
+    pub map_group: u8,
+    pub map_number: u8,
+    pub hp: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoamingPokemonRoute {
+    pub map_group: u8,
+    pub map_number: u8,
+    pub connections: Vec<RoamingMapLocation>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoamingPokemonCatalog {
+    pub slot_count: u8,
+    pub inactive_map: RoamingMapLocation,
+    pub init_writes: Vec<RoamingPokemonInitWrite>,
+    pub routes: Vec<RoamingPokemonRoute>,
+    pub jump_mask: u8,
+}
+
+impl<'de> Deserialize<'de> for RoamingPokemonCatalog {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct RawDefinition {
-            level: u8,
-            map_group: u16,
-            map_number: u16,
+        struct RawCatalog {
+            slot_count: u8,
+            inactive_map: RoamingMapLocation,
+            init_writes: Vec<RoamingPokemonInitWrite>,
+            routes: Vec<RoamingPokemonRoute>,
+            jump_mask: u8,
         }
 
-        let raw = RawDefinition::deserialize(deserializer)?;
-        if raw.level == 0 || raw.level > 100 {
-            return Err(serde::de::Error::custom(format!(
-                "roaming Pokemon level must be 1..100, found {}",
-                raw.level
-            )));
+        let raw = RawCatalog::deserialize(deserializer)?;
+        let catalog = Self {
+            slot_count: raw.slot_count,
+            inactive_map: raw.inactive_map,
+            init_writes: raw.init_writes,
+            routes: raw.routes,
+            jump_mask: raw.jump_mask,
+        };
+        if let Some(issue) = roaming_pokemon_catalog_shape_issues(&catalog).into_iter().next() {
+            return Err(serde::de::Error::custom(issue.to_string()));
         }
-        if raw.map_group == 0 || raw.map_number == 0 {
-            return Err(serde::de::Error::custom(
-                "roaming Pokemon map group and number must be nonzero",
-            ));
-        }
-        Ok(Self {
-            level: raw.level,
-            map_group: raw.map_group,
-            map_number: raw.map_number,
-        })
+        Ok(catalog)
     }
 }
-pub type RoamingPokemonDefinitions = BTreeMap<String, RoamingPokemonDefinition>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RoamingPokemonDefinitionIssue {
-    EmptySpecies { species: String },
-    InvalidSpecies { species: String },
-    UnknownSpecies { species: String },
-    InvalidLevel { species: String },
+impl RoamingPokemonCatalog {
+    pub fn is_empty(&self) -> bool {
+        self.init_writes.is_empty() && self.routes.is_empty()
+    }
+
+    pub fn init_write(&self, slot: usize) -> Option<&RoamingPokemonInitWrite> {
+        self.init_writes
+            .iter()
+            .find(|write| usize::from(write.slot) == slot)
+    }
 }
 
-pub fn roaming_pokemon_definition_issues(
-    definitions: &RoamingPokemonDefinitions,
-    species_ids: &BTreeSet<String>,
-) -> Vec<RoamingPokemonDefinitionIssue> {
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RoamingPokemonCatalogIssue {
+    #[error("roaming Pokemon slotCount must be 3, found {slot_count}")]
+    InvalidSlotCount { slot_count: u8 },
+    #[error("roaming Pokemon inactiveMap must not be the pre-init 0/0 location")]
+    InvalidInactiveMap,
+    #[error("roaming Pokemon inactiveMap collides with a live init, route, or connection map")]
+    InactiveMapCollision,
+    #[error("roaming Pokemon initWrites must contain ordered source slots 0 then 1")]
+    InvalidInitWriteOrder,
+    #[error("roaming Pokemon init slot {slot} species is invalid: {species}")]
+    InvalidInitSpecies { slot: u8, species: String },
+    #[error("roaming Pokemon init slot {slot} species {species} is missing from Pokemon data")]
+    UnknownInitSpecies { slot: u8, species: String },
+    #[error("roaming Pokemon init slot {slot} level {level} is outside 1..=100")]
+    InvalidInitLevel { slot: u8, level: u8 },
+    #[error("roaming Pokemon init slot {slot} uses invalid map {map_group}/{map_number}")]
+    InvalidInitMap {
+        slot: u8,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon init slot {slot} map {map_group}/{map_number} is not a route origin")]
+    UnknownInitRoute {
+        slot: u8,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon init slot {slot} hp must be source value 0, found {hp}")]
+    InvalidInitHp { slot: u8, hp: u8 },
+    #[error("roaming Pokemon catalog must contain exactly 16 ordered route rows, found {count}")]
+    InvalidRouteCount { count: usize },
+    #[error("roaming Pokemon route {index} uses duplicate or invalid map {map_group}/{map_number}")]
+    InvalidRouteMap {
+        index: usize,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon route {index} must contain 1..=4 connections, found {count}")]
+    InvalidConnectionCount { index: usize, count: usize },
+    #[error("roaming Pokemon route {index} connection {connection} uses invalid map {map_group}/{map_number}")]
+    InvalidConnectionMap {
+        index: usize,
+        connection: usize,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon route {index} repeats connection {map_group}/{map_number}")]
+    DuplicateConnection {
+        index: usize,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon route {index} connection {map_group}/{map_number} is not a route origin")]
+    UnknownConnectionTarget {
+        index: usize,
+        map_group: u8,
+        map_number: u8,
+    },
+    #[error("roaming Pokemon jumpMask must be 15, found {jump_mask}")]
+    InvalidJumpMask { jump_mask: u8 },
+}
+
+pub fn roaming_pokemon_catalog_shape_issues(
+    catalog: &RoamingPokemonCatalog,
+) -> Vec<RoamingPokemonCatalogIssue> {
     let mut issues = Vec::new();
-    for (species, definition) in definitions {
-        if species.trim().is_empty() {
-            issues.push(RoamingPokemonDefinitionIssue::EmptySpecies {
-                species: species.clone(),
-            });
-        } else if !is_exact_nonempty_special_token(species) {
-            issues.push(RoamingPokemonDefinitionIssue::InvalidSpecies {
-                species: species.clone(),
-            });
-        } else if !species_ids.contains(species) {
-            issues.push(RoamingPokemonDefinitionIssue::UnknownSpecies {
-                species: species.clone(),
+    if usize::from(catalog.slot_count) != ROAMING_POKEMON_SLOT_COUNT {
+        issues.push(RoamingPokemonCatalogIssue::InvalidSlotCount {
+            slot_count: catalog.slot_count,
+        });
+    }
+    if catalog.inactive_map.map_group == 0 || catalog.inactive_map.map_number == 0 {
+        issues.push(RoamingPokemonCatalogIssue::InvalidInactiveMap);
+    }
+    let inactive_collision = catalog
+        .init_writes
+        .iter()
+        .any(|write| write.map_group == catalog.inactive_map.map_group)
+        || catalog.routes.iter().any(|route| {
+            route.map_group == catalog.inactive_map.map_group
+                || route
+                    .connections
+                    .iter()
+                    .any(|connection| connection.map_group == catalog.inactive_map.map_group)
+        });
+    if inactive_collision {
+        issues.push(RoamingPokemonCatalogIssue::InactiveMapCollision);
+    }
+    if catalog.init_writes.len() != 2
+        || catalog.init_writes[0].slot != 0
+        || catalog.init_writes[1].slot != 1
+    {
+        issues.push(RoamingPokemonCatalogIssue::InvalidInitWriteOrder);
+    }
+    if catalog.routes.len() != ROAMING_POKEMON_ROUTE_COUNT {
+        issues.push(RoamingPokemonCatalogIssue::InvalidRouteCount {
+            count: catalog.routes.len(),
+        });
+    }
+    if catalog.jump_mask != 15 {
+        issues.push(RoamingPokemonCatalogIssue::InvalidJumpMask {
+            jump_mask: catalog.jump_mask,
+        });
+    }
+    let mut route_maps = BTreeSet::new();
+    for (index, route) in catalog.routes.iter().enumerate() {
+        if route.map_group == 0
+            || route.map_number == 0
+            || !route_maps.insert((route.map_group, route.map_number))
+        {
+            issues.push(RoamingPokemonCatalogIssue::InvalidRouteMap {
+                index,
+                map_group: route.map_group,
+                map_number: route.map_number,
             });
         }
-        if definition.level == 0 {
-            issues.push(RoamingPokemonDefinitionIssue::InvalidLevel {
-                species: species.clone(),
+        if !(1..=4).contains(&route.connections.len()) {
+            issues.push(RoamingPokemonCatalogIssue::InvalidConnectionCount {
+                index,
+                count: route.connections.len(),
+            });
+        }
+        let mut connections = BTreeSet::new();
+        for (connection, target) in route.connections.iter().enumerate() {
+            if target.map_group == 0 || target.map_number == 0 {
+                issues.push(RoamingPokemonCatalogIssue::InvalidConnectionMap {
+                    index,
+                    connection,
+                    map_group: target.map_group,
+                    map_number: target.map_number,
+                });
+            }
+            if !connections.insert((target.map_group, target.map_number)) {
+                issues.push(RoamingPokemonCatalogIssue::DuplicateConnection {
+                    index,
+                    map_group: target.map_group,
+                    map_number: target.map_number,
+                });
+            }
+        }
+    }
+    for write in &catalog.init_writes {
+        if !route_maps.contains(&(write.map_group, write.map_number)) {
+            issues.push(RoamingPokemonCatalogIssue::UnknownInitRoute {
+                slot: write.slot,
+                map_group: write.map_group,
+                map_number: write.map_number,
+            });
+        }
+    }
+    for (index, route) in catalog.routes.iter().enumerate() {
+        for target in &route.connections {
+            if !route_maps.contains(&(target.map_group, target.map_number)) {
+                issues.push(RoamingPokemonCatalogIssue::UnknownConnectionTarget {
+                    index,
+                    map_group: target.map_group,
+                    map_number: target.map_number,
+                });
+            }
+        }
+    }
+    issues
+}
+
+pub fn roaming_pokemon_catalog_issues(
+    catalog: &RoamingPokemonCatalog,
+    species_ids: &BTreeSet<String>,
+) -> Vec<RoamingPokemonCatalogIssue> {
+    let mut issues = roaming_pokemon_catalog_shape_issues(catalog);
+    for write in &catalog.init_writes {
+        if !is_exact_nonempty_special_token(&write.species) {
+            issues.push(RoamingPokemonCatalogIssue::InvalidInitSpecies {
+                slot: write.slot,
+                species: write.species.clone(),
+            });
+        } else if !species_ids.contains(&write.species) {
+            issues.push(RoamingPokemonCatalogIssue::UnknownInitSpecies {
+                slot: write.slot,
+                species: write.species.clone(),
+            });
+        }
+        if !(1..=100).contains(&write.level) {
+            issues.push(RoamingPokemonCatalogIssue::InvalidInitLevel {
+                slot: write.slot,
+                level: write.level,
+            });
+        }
+        if write.map_group == 0 || write.map_number == 0 {
+            issues.push(RoamingPokemonCatalogIssue::InvalidInitMap {
+                slot: write.slot,
+                map_group: write.map_group,
+                map_number: write.map_number,
+            });
+        }
+        if write.hp != 0 {
+            issues.push(RoamingPokemonCatalogIssue::InvalidInitHp {
+                slot: write.slot,
+                hp: write.hp,
             });
         }
     }
@@ -3183,7 +3558,7 @@ pub fn apply_special_routine(
     let empty_items = BTreeMap::new();
     let empty_spawn_points = BTreeMap::new();
     let empty_trainers = TrainerCatalog::default();
-    let empty_roaming_pokemon = BTreeMap::new();
+    let empty_roaming_pokemon = RoamingPokemonCatalog::default();
     let empty_buena_password_categories = BuenaPasswordCategories::default();
     let empty_buena_prizes = BTreeMap::new();
     let empty_kurt_apricorn_recipes = BTreeMap::new();
@@ -3218,6 +3593,154 @@ pub fn apply_special_routine(
         },
         routine,
     )
+}
+
+pub fn apply_random_special_routine<S>(
+    state: &mut GameState,
+    move_catalog: &BTreeMap<String, Move>,
+    routine: &str,
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let empty_cries = BTreeMap::new();
+    let empty_species = BTreeMap::new();
+    let empty_learnsets = SpeciesLearnsets::new();
+    let empty_growth_rates = GrowthRateCatalog::new();
+    let empty_items = BTreeMap::new();
+    let empty_spawn_points = BTreeMap::new();
+    let empty_trainers = TrainerCatalog::default();
+    let empty_roaming_pokemon = RoamingPokemonCatalog::default();
+    let empty_buena_password_categories = BuenaPasswordCategories::default();
+    let empty_buena_prizes = BTreeMap::new();
+    let empty_kurt_apricorn_recipes = BTreeMap::new();
+    let empty_dratini_move_sets = BTreeMap::new();
+    let empty_phone_contacts = PhoneContactCatalog::default();
+    let empty_wild_encounters = BTreeMap::new();
+    apply_random_special_routine_with_context(
+        state,
+        SpecialRoutineContext {
+            move_catalog,
+            cry_by_species: &empty_cries,
+            species_catalog: &empty_species,
+            learnsets: &empty_learnsets,
+            growth_rates: &empty_growth_rates,
+            item_catalog: &empty_items,
+            runtime_spawn_points: &empty_spawn_points,
+            roaming_pokemon: &empty_roaming_pokemon,
+            buena_password_categories: &empty_buena_password_categories,
+            buena_prizes: &empty_buena_prizes,
+            kurt_apricorn_recipes: &empty_kurt_apricorn_recipes,
+            shuckie_gift: None,
+            dratini_move_sets: &empty_dratini_move_sets,
+            bug_contest_config: None,
+            battle_tower_rules: None,
+            magikarp_lengths: &[],
+            happiness_data: None,
+            trainer_catalog: &empty_trainers,
+            phone_contacts: &empty_phone_contacts,
+            wild_encounters: &empty_wild_encounters,
+            odd_egg_definitions: &[],
+            oak_ratings: &[],
+        },
+        routine,
+        divider,
+    )
+}
+
+pub fn apply_random_special_routine_with_context<S>(
+    state: &mut GameState,
+    context: SpecialRoutineContext<'_>,
+    routine: &str,
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let mut next = state.clone();
+    let outcome = match routine {
+        "SampleKenjiBreakCountdown" => {
+            sample_kenji_break_countdown(&mut next, routine, divider)
+        }
+        "ResetLuckyNumberShowFlag" => {
+            reset_lucky_number_show_flag(&mut next, routine, divider)
+        }
+        "RandomUnseenWildMon" => random_unseen_wild_mon(
+            &mut next,
+            context.species_catalog,
+            context.phone_contacts,
+            context.wild_encounters,
+            routine,
+            divider,
+        ),
+        "RandomPhoneWildMon" => random_phone_wild_mon(
+            &mut next,
+            context.species_catalog,
+            context.phone_contacts,
+            context.wild_encounters,
+            routine,
+            divider,
+        ),
+        "RandomPhoneMon" => random_phone_mon(
+            &mut next,
+            context.species_catalog,
+            context.phone_contacts,
+            context.trainer_catalog,
+            routine,
+            divider,
+        ),
+        "UnownPuzzle" => unown_puzzle(&mut next, routine, divider),
+        "CardFlip" => card_flip(
+            &mut next,
+            context.item_catalog,
+            routine,
+            divider,
+        ),
+        "GiveShuckle" => give_shuckle(&mut next, context, routine, divider),
+        "BuenasPassword" => buenas_password(
+            &mut next,
+            context.buena_password_categories,
+            routine,
+            divider,
+        ),
+        "SelectRandomBugContestContestants" => select_random_bug_contest_contestants(
+            &mut next,
+            context.bug_contest_config,
+            routine,
+            divider,
+        ),
+        "BugContestJudging" => bug_contest_judging(
+            &mut next,
+            context.bug_contest_config,
+            routine,
+            divider,
+        ),
+        "LoadOpponentTrainerAndPokemonWithOTSprite" => {
+            load_opponent_trainer_and_pokemon_with_ot_sprite(
+                &mut next,
+                context,
+                routine,
+                divider,
+            )
+        }
+        "GiveOddEgg" => give_odd_egg(
+            &mut next,
+            context.species_catalog,
+            context.learnsets,
+            context.growth_rates,
+            context.move_catalog,
+            context.odd_egg_definitions,
+            routine,
+            divider,
+        ),
+        exact => Err(SpecialRoutineError::UnsupportedRoutine {
+            routine: exact.to_string(),
+        }
+        .into()),
+    }?;
+    *state = next;
+    Ok(outcome)
 }
 
 pub fn apply_special_routine_with_context(
@@ -3259,9 +3782,12 @@ pub fn apply_special_routine_with_context(
         "InitialClearDSTFlag" => initial_clear_dst_flag(state, routine),
         "UpdateTime" => update_time(state, routine),
         "UnusedCheckUnusedTwoDayTimer" => unused_check_unused_two_day_timer(state, routine),
-        "SampleKenjiBreakCountdown" => sample_kenji_break_countdown(state, routine),
+        "SampleKenjiBreakCountdown" | "ResetLuckyNumberShowFlag" => {
+            Err(SpecialRoutineError::MissingDividerSource {
+                routine: routine.to_string(),
+            })
+        }
         "CheckLuckyNumberShowFlag" => check_lucky_number_show_flag(state, routine),
-        "ResetLuckyNumberShowFlag" => reset_lucky_number_show_flag(state, routine),
         "CheckForLuckyNumberWinners" => check_for_lucky_number_winners(state, routine),
         "PlaceMoneyTopRight" => place_money_top_right(state, routine),
         "DisplayMoneyAndCoinBalance" => display_money_and_coin_balance(state, routine),
@@ -3346,16 +3872,14 @@ pub fn apply_special_routine_with_context(
             routine,
             ScriptGraphicsRuntimeKind::LoadUsedSpritesGfx,
         ),
-        "ToggleMaptileDecorations" => visual_command(
-            state,
-            routine,
-            ScriptGraphicsRuntimeKind::ToggleMaptileDecorations,
-        ),
+        "ToggleMaptileDecorations" => toggle_maptile_decorations(state, routine),
         "ToggleDecorationsVisibility" => toggle_decorations_visibility(state, routine),
         "MagnetTrain" => visual_command(state, routine, ScriptGraphicsRuntimeKind::MagnetTrain),
         "Diploma" => visual_command(state, routine, ScriptGraphicsRuntimeKind::Diploma),
         "PrintDiploma" => visual_command(state, routine, ScriptGraphicsRuntimeKind::PrintDiploma),
-        "UnownPuzzle" => unown_puzzle(state, routine),
+        "UnownPuzzle" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "OmanyteChamber" => unown_chamber(state, context.item_catalog, routine, "OMANYTE"),
         "AerodactylChamber" => unown_chamber(state, context.item_catalog, routine, "AERODACTYL"),
         "KabutoChamber" => unown_chamber(state, context.item_catalog, routine, "KABUTO"),
@@ -3376,14 +3900,18 @@ pub fn apply_special_routine_with_context(
         ),
         "BankOfMom" => bank_of_mom(state, routine),
         "SlotMachine" => slot_machine(state, context.item_catalog, routine),
-        "CardFlip" => card_flip(state, context.item_catalog, routine),
+        "CardFlip" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "UnusedMemoryGame" | "MemoryGame" => {
             unused_memory_game(state, context.item_catalog, routine)
         }
         "DisplayLinkRecord" => display_link_record(state, routine),
         "TrainerHouse" => trainer_house(state, routine),
         "PhotoStudio" => photo_studio(state, routine),
-        "GiveShuckle" => give_shuckle(state, context, routine),
+        "GiveShuckle" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "ReturnShuckie" => return_shuckie(state, context.shuckie_gift, routine),
         "GiveDratini" => give_dratini(
             state,
@@ -3407,7 +3935,9 @@ pub fn apply_special_routine_with_context(
         "CheckMysteryGift" => check_mystery_gift(state, routine),
         "GetMysteryGiftItem" => get_mystery_gift_item(state, context.item_catalog, routine),
         "UnlockMysteryGift" => unlock_mystery_gift(state, routine),
-        "BuenasPassword" => buenas_password(state, context.buena_password_categories, routine),
+        "BuenasPassword" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "BuenaPrize" => buena_prize(state, context.item_catalog, context.buena_prizes, routine),
         "CelebiShrineEvent" => celebi_shrine_event(state, routine),
         "CheckMagikarpLength" => check_magikarp_length(state, context.magikarp_lengths, routine),
@@ -3420,15 +3950,15 @@ pub fn apply_special_routine_with_context(
         "GiveParkBalls" => give_park_balls(state, context.bug_contest_config, routine),
         "StartBugContestTimer" => start_bug_contest_timer(state, routine),
         "CheckBugContestTimer" => check_bug_contest_timer(state, routine),
-        "SelectRandomBugContestContestants" => {
-            select_random_bug_contest_contestants(state, context.bug_contest_config, routine)
-        }
+        "SelectRandomBugContestContestants" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "ContestDropOffMons" => contest_drop_off_mons(state, routine),
         "ContestReturnMons" => contest_return_mons(state, routine),
         "CheckPartyFullAfterContest" => check_party_full_after_contest(state, routine),
-        "BugContestJudging" => {
-            bug_contest_judging(state, context.bug_contest_config, routine)
-        }
+        "BugContestJudging" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "SetBitsForLinkTradeRequest" => set_bits_for_link_request(state, routine, 1),
         "SetBitsForBattleRequest" => set_bits_for_link_request(state, routine, 2),
         "SetBitsForTimeCapsuleRequest" => set_bits_for_link_request(state, routine, 0),
@@ -3456,7 +3986,9 @@ pub fn apply_special_routine_with_context(
         "BattleTowerBattle" => battle_tower_battle(state, context.battle_tower_rules, routine),
         "BattleTowerMobileError" => battle_tower_mobile_error(state, routine),
         "LoadOpponentTrainerAndPokemonWithOTSprite" => {
-            load_opponent_trainer_and_pokemon_with_ot_sprite(state, context, routine)
+            Err(SpecialRoutineError::MissingDividerSource {
+                routine: routine.to_string(),
+            })
         }
         "AskRememberPassword" => ask_remember_password(state, routine),
         "Function1700ba" => battle_tower_leaderboard(state, routine),
@@ -3490,15 +4022,9 @@ pub fn apply_special_routine_with_context(
         "Function10383c" => battle_tower_mobile_flag(state, routine, "function10383c"),
         "Function10387b" => battle_tower_mobile_flag(state, routine, "function10387b"),
         "Mobile_SelectThreeMons" => mobile_select_three_mons(state, routine),
-        "GiveOddEgg" => give_odd_egg(
-            state,
-            context.species_catalog,
-            context.learnsets,
-            context.growth_rates,
-            context.move_catalog,
-            context.odd_egg_definitions,
-            routine,
-        ),
+        "GiveOddEgg" => Err(SpecialRoutineError::MissingDividerSource {
+            routine: routine.to_string(),
+        }),
         "Menu_ChallengeExplanationCancel" => {
             battle_tower_challenge_explanation_cancel(state, routine)
         }
@@ -3508,27 +4034,11 @@ pub fn apply_special_routine_with_context(
         "UnusedFindItemInPCOrBag" => {
             unused_find_item_in_pc_or_bag(state, context.item_catalog, routine)
         }
-        "RandomUnseenWildMon" => random_unseen_wild_mon(
-            state,
-            context.species_catalog,
-            context.phone_contacts,
-            context.wild_encounters,
-            routine,
-        ),
-        "RandomPhoneWildMon" => random_phone_wild_mon(
-            state,
-            context.species_catalog,
-            context.phone_contacts,
-            context.wild_encounters,
-            routine,
-        ),
-        "RandomPhoneMon" => random_phone_mon(
-            state,
-            context.species_catalog,
-            context.phone_contacts,
-            context.trainer_catalog,
-            routine,
-        ),
+        "RandomUnseenWildMon" | "RandomPhoneWildMon" | "RandomPhoneMon" => {
+            Err(SpecialRoutineError::MissingDividerSource {
+                routine: routine.to_string(),
+            })
+        }
         "Function11ba38" => function11ba38(state, routine),
         "Function11ac3e" | "TradeCornerHoldMon" | "Function11b5e8" | "Function11b7e5"
         | "Function11b879" | "Function11b920" | "Function11b93b" | "Function11c1ab"
@@ -4172,13 +4682,17 @@ fn unused_set_seen_mon(
     })
 }
 
-fn random_unseen_wild_mon(
+fn random_unseen_wild_mon<S>(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
     phone_contacts: &PhoneContactCatalog,
     wild_encounters: &BTreeMap<String, WildEncounterData>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let (contact_id, map_name, encounters) =
         caller_grass_encounters(state, phone_contacts, wild_encounters, routine)?;
     let grass = encounters.grass.as_ref().ok_or_else(|| {
@@ -4194,17 +4708,25 @@ fn random_unseen_wild_mon(
             map_name,
             expected: 7,
             found: morning.len(),
-        });
+        }
+        .into());
     }
 
-    let mut rng = Random::new_crystal(state.rng_seed);
+    let mut rng = CrystalRandom::new(state.random_state, divider);
     let rare_index = loop {
-        let masked = rng.randrange(256) & 0b11;
+        // AddNTimes cannot overflow the bank-local encounter table address,
+        // so the first call enters with carry clear. Every retry follows AND
+        // %11, which also clears carry.
+        let masked = rng
+            .random(false)
+            .map_err(RandomSpecialRoutineError::Divider)?
+            .value
+            & 0b11;
         if masked != 0 {
             break 4 + (masked as usize - 1);
         }
     };
-    state.rng_seed = rng.seed();
+    state.random_state = rng.state();
 
     let selected = &morning[rare_index];
     let common = &morning[..4];
@@ -4226,18 +4748,22 @@ fn random_unseen_wild_mon(
             species: (script_value == 0).then(|| selected.species.clone()),
             already_seen,
             script_value,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
 
-fn random_phone_wild_mon(
+fn random_phone_wild_mon<S>(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
     phone_contacts: &PhoneContactCatalog,
     wild_encounters: &BTreeMap<String, WildEncounterData>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let (contact_id, map_name, encounters) =
         caller_grass_encounters(state, phone_contacts, wild_encounters, routine)?;
     let time_of_day = state.time.time_of_day;
@@ -4254,11 +4780,17 @@ fn random_phone_wild_mon(
             map_name,
             expected: 4,
             found: slots.len(),
-        });
+        }
+        .into());
     }
-    let mut rng = Random::new_crystal(state.rng_seed);
-    let selected = &slots[(rng.randrange(256) & 0b11) as usize];
-    state.rng_seed = rng.seed();
+    let mut rng = CrystalRandom::new(state.random_state, divider);
+    // The preceding bank-local AddNTimes and DEC loop leave carry clear.
+    let sample = rng
+        .random(false)
+        .map_err(RandomSpecialRoutineError::Divider)?
+        .value;
+    let selected = &slots[(sample & 0b11) as usize];
+    state.random_state = rng.state();
     write_phone_species_buffers(state, species_catalog, routine, selected)?;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -4268,18 +4800,22 @@ fn random_phone_wild_mon(
             map_name: encounters.map_name.clone(),
             time_of_day,
             species: selected.species.clone(),
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
 
-fn random_phone_mon(
+fn random_phone_mon<S>(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
     phone_contacts: &PhoneContactCatalog,
     trainer_catalog: &TrainerCatalog,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let (contact_id, contact) = caller_phone_contact(state, phone_contacts, routine)?;
     let trainer_id = contact.trainer_label.clone().ok_or_else(|| {
         SpecialRoutineError::MissingPhoneContactTrainer {
@@ -4298,17 +4834,25 @@ fn random_phone_mon(
         return Err(SpecialRoutineError::EmptyTrainerParty {
             routine: routine.to_string(),
             trainer_id,
-        });
+        }
+        .into());
     }
 
-    let mut rng = Random::new_crystal(state.rng_seed);
+    let mut rng = CrystalRandom::new(state.random_state, divider);
     let party_index = loop {
-        let masked = (rng.randrange(256) & 0b111) as usize;
+        // The party-count loop exits after `cp -1`, which clears carry on
+        // equality. Rejected candidates reach the retry after `cp e` with
+        // carry clear because the candidate was greater than or equal to E.
+        let masked = (rng
+            .random(false)
+            .map_err(RandomSpecialRoutineError::Divider)?
+            .value
+            & 0b111) as usize;
         if masked < trainer.party.len() {
             break masked;
         }
     };
-    state.rng_seed = rng.seed();
+    state.random_state = rng.state();
 
     let selected = &trainer.party[party_index];
     write_phone_species_id_buffers(state, species_catalog, routine, &selected.species)?;
@@ -4320,7 +4864,7 @@ fn random_phone_mon(
             trainer_id: trainer.trainer_id.clone(),
             species: selected.species.clone(),
             party_index,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -4588,9 +5132,9 @@ fn update_time(
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::UpdateTime {
-            hour: state.time.game_time_hours,
-            minute: state.time.game_time_minutes,
-            second: state.time.game_time_seconds,
+            hour: state.time.registers.hours,
+            minute: state.time.registers.minutes,
+            second: state.time.registers.seconds,
             day_of_week: state.time.day_of_week,
             time_of_day: state.time.time_of_day,
         },
@@ -4624,25 +5168,31 @@ fn unused_check_unused_two_day_timer(
     })
 }
 
-fn sample_kenji_break_countdown(
+fn sample_kenji_break_countdown<S>(
     state: &mut GameState,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let mut rng = Random::new_crystal(state.rng_seed);
-    let value = 3 + rng.randrange(4) as u8;
-    state.rng_seed = rng.seed();
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let mut rng = CrystalRandom::new(state.random_state, divider);
+    // Script_special reaches Special through bank-local pointer additions;
+    // the pointer table cannot overflow, so SampleKenji enters with carry
+    // clear just like the CheckDailyResetTimer call site.
+    let sample = rng
+        .random(false)
+        .map_err(RandomSpecialRoutineError::Divider)?
+        .value;
+    let value = 3 + (sample & 0x03);
+    state.random_state = rng.state();
     state.kenji_break_timer = value;
-    state.script_runtime.script_value = Some(value.to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_value".to_string(), value.to_string());
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::SampleKenjiBreakCountdown {
             value,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -4660,20 +5210,23 @@ fn check_lucky_number_show_flag(
     })
 }
 
-fn reset_lucky_number_show_flag(
+fn reset_lucky_number_show_flag<S>(
     state: &mut GameState,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     state.lucky_number_show_flag = false;
-    let lucky_number = ensure_lucky_number(state);
-    set_script_bool_value(state, true);
+    let lucky_number = load_or_regenerate_lucky_number(state, divider)?;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::ResetLuckyNumberShowFlag {
             lucky_number,
             lucky_number_day: state.time.current_day,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -4697,7 +5250,7 @@ fn check_for_lucky_number_winners(
         });
     }
 
-    let lucky_number = ensure_lucky_number(state);
+    let lucky_number = state.lucky_id_number;
     let mut best_tier = 0;
     let mut best_source = None;
     let mut best_species = None;
@@ -4763,17 +5316,37 @@ fn check_for_lucky_number_winners(
     })
 }
 
-fn ensure_lucky_number(state: &mut GameState) -> u16 {
+fn load_or_regenerate_lucky_number<S>(
+    state: &mut GameState,
+    divider: &mut S,
+) -> Result<u16, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let current_day = state.time.current_day;
-    if state.lucky_number_day != Some(current_day) {
-        let mut rng = Random::new_crystal(state.rng_seed);
-        let high = rng.randrange(256) as u16;
-        let low = rng.randrange(256) as u16;
-        state.rng_seed = rng.seed();
+    let current_marker = current_day.wrapping_add(1);
+    let stored_marker = state
+        .lucky_number_day
+        .map(|day| day.wrapping_add(1))
+        .unwrap_or(0);
+    if stored_marker != current_marker {
+        let mut rng = CrystalRandom::new(state.random_state, divider);
+        // LoadOrRegenerateLuckyIDNumber compares the saved day marker against
+        // current_day + 1. The CP carry feeds the first Random call, and the
+        // first call's SBC carry is preserved by `ld c, a` into the second.
+        let first = rng
+            .random(stored_marker < current_marker)
+            .map_err(RandomSpecialRoutineError::Divider)?;
+        let second = rng
+            .random(first.carry_out)
+            .map_err(RandomSpecialRoutineError::Divider)?;
+        let high = u16::from(first.value);
+        let low = u16::from(second.value);
+        state.random_state = rng.state();
         state.lucky_id_number = (high << 8) | low;
         state.lucky_number_day = Some(current_day);
     }
-    state.lucky_id_number
+    Ok(state.lucky_id_number)
 }
 
 fn lucky_number_pc_box_order(
@@ -4949,7 +5522,7 @@ fn print_todays_lucky_number(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let lucky_number = ensure_lucky_number(state);
+    let lucky_number = state.lucky_id_number;
     let formatted = format!("{lucky_number:05}");
     state
         .script_runtime
@@ -5552,11 +6125,17 @@ fn validate_unown_puzzle_state(
     Ok(())
 }
 
-fn shuffled_unown_puzzle(rng: &mut Random) -> UnownPuzzleState {
+fn shuffled_unown_puzzle<S>(rng: &mut CrystalRandom<S>) -> Result<UnownPuzzleState, S::Error>
+where
+    S: DividerSource,
+{
     let mut layout = [[0_u8; 6]; 6];
     for piece_id in 1..=16 {
         loop {
-            let slot_index = rng.randrange(256) as usize & 0x0f;
+            // InitUnownPuzzlePiecePositions enters every Random call with
+            // carry clear: its table arithmetic cannot overflow and both the
+            // accepted and occupied-slot paths execute AND before retrying.
+            let slot_index = usize::from(rng.random(false)?.value & 0x0f);
             let (x, y) = UNOWN_START_POSITIONS[slot_index];
             if layout[y][x] == 0 {
                 layout[y][x] = piece_id;
@@ -5564,11 +6143,11 @@ fn shuffled_unown_puzzle(rng: &mut Random) -> UnownPuzzleState {
             }
         }
     }
-    UnownPuzzleState {
+    Ok(UnownPuzzleState {
         layout,
         holding_piece: None,
         moves: 0,
-    }
+    })
 }
 
 fn load_unown_puzzle_state(
@@ -5577,10 +6156,10 @@ fn load_unown_puzzle_state(
     puzzle_id: &str,
 ) -> Result<UnownPuzzleState, SpecialRoutineError> {
     let Some(raw_layout) = migrate_unown_puzzle_variable(state, "unown_layout", puzzle_id) else {
-        let mut rng = Random::new_crystal(state.rng_seed);
-        let puzzle = shuffled_unown_puzzle(&mut rng);
-        state.rng_seed = rng.seed();
-        return Ok(puzzle);
+        return Err(SpecialRoutineError::InvalidUnownPuzzleState {
+            routine: routine.to_string(),
+            message: format!("puzzle {puzzle_id} has no active layout"),
+        });
     };
     let layout = parse_unown_layout(routine, &raw_layout)?;
     let holding_piece = migrate_unown_puzzle_variable(state, "unown_holding_piece", puzzle_id)
@@ -5646,10 +6225,14 @@ fn store_unown_puzzle_state(state: &mut GameState, puzzle_id: &str, puzzle: &Uno
     }
 }
 
-fn unown_puzzle(
+fn unown_puzzle<S>(
     state: &mut GameState,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let puzzle_id = normalize_unown_puzzle_id(state, routine)?;
     state
         .script_runtime
@@ -5662,35 +6245,34 @@ fn unown_puzzle(
         .cloned()
         .map(|value| value.to_ascii_lowercase());
 
-    let mut puzzle = if action.is_some() {
-        load_unown_puzzle_state(state, routine, &puzzle_id)?
-    } else {
-        let mut rng = Random::new_crystal(state.rng_seed);
-        let puzzle = shuffled_unown_puzzle(&mut rng);
-        state.rng_seed = rng.seed();
+    let mut puzzle = if matches!(action.as_deref(), None | Some("shuffle")) {
+        let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+        let puzzle = shuffled_unown_puzzle(&mut rng)
+            .map_err(RandomSpecialRoutineError::Divider)?;
+        state.random_state = rng.state();
         puzzle
+    } else {
+        load_unown_puzzle_state(state, routine, &puzzle_id)?
     };
 
     match action.as_deref() {
-        Some("shuffle") => {
-            let mut rng = Random::new_crystal(state.rng_seed);
-            puzzle = shuffled_unown_puzzle(&mut rng);
-            state.rng_seed = rng.seed();
-        }
+        Some("shuffle") => {}
         Some("pickup") => {
             let (x, y) = unown_coords(state, routine)?;
             if puzzle.holding_piece.is_some() {
                 return Err(SpecialRoutineError::InvalidUnownPuzzleState {
                     routine: routine.to_string(),
                     message: "cannot pick up a piece while already holding one".to_string(),
-                });
+                }
+                .into());
             }
             let piece = puzzle.layout[y][x];
             if piece == 0 {
                 return Err(SpecialRoutineError::InvalidUnownPuzzleState {
                     routine: routine.to_string(),
                     message: "no piece present at that coordinate".to_string(),
-                });
+                }
+                .into());
             }
             puzzle.layout[y][x] = 0;
             puzzle.holding_piece = Some(piece);
@@ -5701,13 +6283,15 @@ fn unown_puzzle(
                 return Err(SpecialRoutineError::InvalidUnownPuzzleState {
                     routine: routine.to_string(),
                     message: "no piece is currently held".to_string(),
-                });
+                }
+                .into());
             };
             if puzzle.layout[y][x] != 0 {
                 return Err(SpecialRoutineError::InvalidUnownPuzzleState {
                     routine: routine.to_string(),
                     message: "target coordinate is already occupied".to_string(),
-                });
+                }
+                .into());
             }
             puzzle.layout[y][x] = piece;
             puzzle.holding_piece = None;
@@ -5718,7 +6302,8 @@ fn unown_puzzle(
             return Err(SpecialRoutineError::InvalidUnownPuzzleState {
                 routine: routine.to_string(),
                 message: format!("unknown Unown puzzle action '{unknown}'"),
-            });
+            }
+            .into());
         }
     }
 
@@ -5739,7 +6324,7 @@ fn unown_puzzle(
             moves: puzzle.moves,
             layout: unown_puzzle_layout_vec(&puzzle.layout),
             holding_piece: puzzle.holding_piece,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -5772,6 +6357,34 @@ fn visual_command(
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::RuntimeVisualCommand { kind },
     })
+}
+
+fn toggle_maptile_decorations(
+    state: &mut GameState,
+    routine: &str,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    let outcome = visual_command(
+        state,
+        routine,
+        ScriptGraphicsRuntimeKind::ToggleMaptileDecorations,
+    )?;
+    let crate::state::OverworldMemory::Active { map_name, .. } = &state.overworld else {
+        return Ok(outcome);
+    };
+
+    // InitDecorations gives a new Crystal save the Feathery Bed and Town Map.
+    // ToggleMaptileDecorations then writes their decoration tile values at the
+    // exact changeblock-style coordinates authored in decorations.asm:
+    // (0, 4) -> metatile (0, 2), and (6, 0) -> metatile (3, 0).
+    let overrides = state
+        .map_block_overrides
+        .entry(map_name.clone())
+        .or_default();
+    // A saved override is a later decoration choice; initialization must not
+    // replace it with the defaults when the room callback runs again.
+    overrides.entry((0, 2)).or_insert(0x1b);
+    overrides.entry((3, 0)).or_insert(0x1f);
+    Ok(outcome)
 }
 
 fn toggle_decorations_visibility(
@@ -6069,7 +6682,6 @@ fn bank_of_mom(
 #[derive(Debug, Clone, Copy)]
 enum GameCornerGame {
     SlotMachine,
-    CardFlip,
     UnusedMemoryGame,
 }
 
@@ -6185,12 +6797,81 @@ fn slot_machine(
     coin_game_service(state, item_catalog, routine, GameCornerGame::SlotMachine)
 }
 
-fn card_flip(
+fn card_flip<S>(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    coin_game_service(state, item_catalog, routine, GameCornerGame::CardFlip)
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    const COIN_CASE: &str = "COIN_CASE";
+    let coin_case = item_catalog.get(COIN_CASE).ok_or_else(|| {
+        SpecialRoutineError::UnknownItem {
+            routine: routine.to_string(),
+            item_id: COIN_CASE.to_string(),
+        }
+    })?;
+    if state.coins == 0 {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            },
+        });
+    }
+    if !state.bag.has_item(coin_case) {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::MissingCoinCase,
+            },
+        });
+    }
+    if state.coins < 3 {
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            },
+        });
+    }
+
+    state
+        .script_runtime
+        .variables
+        .insert("_coin_case_balance".to_string(), state.coins.to_string());
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    state.script_runtime.active_menu = None;
+    let coins_before = state.coins;
+    let flip = flip_card(state, routine, divider)?;
+    state.coins = state.coins.saturating_sub(3);
+    let coins = state
+        .coins
+        .saturating_add(flip.payout)
+        .min(GAME_CORNER_MAX_COINS);
+    state.coins = coins;
+    set_script_u32_value(state, u32::from(coins));
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::CardFlip {
+            coins_before,
+            card_index: flip.card_index,
+            card_name: flip.card_name,
+            card_level: flip.card_level,
+            payout: flip.payout,
+            deck: parse_required_comma_tokens(state, routine, "card_flip_deck")?,
+            revealed: parse_required_bool_tokens(state, routine, "card_flip_revealed", 24)?,
+            coins,
+            random_state_after: state.random_state,
+        },
+    })
 }
 
 fn unused_memory_game(
@@ -6650,7 +7331,14 @@ fn card_flip_payout(face: u8, cursor_x: usize, cursor_y: usize) -> u16 {
     }
 }
 
-fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, SpecialRoutineError> {
+fn flip_card<S>(
+    state: &mut GameState,
+    routine: &str,
+    divider: &mut S,
+) -> Result<CardFlipOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let initialize = match state
         .script_runtime
         .variables
@@ -6662,23 +7350,32 @@ fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, Sp
             return Err(SpecialRoutineError::InvalidState {
                 routine: routine.to_string(),
                 message: format!("card_flip_initialize must be exactly 1, found {value}"),
-            });
+            }
+            .into());
         }
         None => false,
     };
     let deck = if initialize {
-        let mut rng = Random::new_crystal(state.rng_seed);
+        let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
         let mut deck = vec![0_u8; 24];
         for face in (1_u8..24).rev() {
             loop {
-                let index = usize::from(rng.battle_random_byte() & 0x1f);
+                // ByteFill enters the first call with carry clear. Every
+                // retry follows either AND $1f or an occupancy AND, which
+                // also clears carry.
+                let index = usize::from(
+                    rng.random(false)
+                        .map_err(RandomSpecialRoutineError::Divider)?
+                        .value
+                        & 0x1f,
+                );
                 if index < deck.len() && deck[index] == 0 {
                     deck[index] = face;
                     break;
                 }
             }
         }
-        state.rng_seed = rng.seed();
+        state.random_state = rng.state();
         deck.into_iter().map(|face| face.to_string()).collect()
     } else {
         parse_required_comma_tokens(state, routine, "card_flip_deck")?
@@ -6690,7 +7387,8 @@ fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, Sp
                 "card_flip_deck must contain exactly 24 cards, found {}",
                 deck.len()
             ),
-        });
+        }
+        .into());
     }
     let encoded_deck = deck
         .iter()
@@ -6706,7 +7404,8 @@ fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, Sp
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
             message: "card_flip_deck must contain each encoded card identity exactly once".to_string(),
-        });
+        }
+        .into());
     }
     let mut revealed = if initialize {
         vec![false; deck.len()]
@@ -6718,7 +7417,8 @@ fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, Sp
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
             message: format!("card_flip_index {card_index} has already been revealed"),
-        });
+        }
+        .into());
     }
     revealed[card_index] = true;
     let face = encoded_deck[card_index];
@@ -6835,25 +7535,14 @@ fn play_memory_game(
     } else {
         vec![false; board.len()]
     };
-    let requested_first = state
-        .script_runtime
-        .variables
-        .get("memory_first")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let requested_second = state
-        .script_runtime
-        .variables
-        .get("memory_second")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1);
+    let requested_first = required_game_index(state, routine, "memory_first", board.len())?;
+    let requested_second = required_game_index(state, routine, "memory_second", board.len())?;
     let outcome = memory_reveal(
         &board,
         &mut revealed,
         requested_first,
         requested_second,
     )
-    .or_else(|_| memory_reveal(&board, &mut revealed, 0, 1))
     .map_err(|_| SpecialRoutineError::InvalidState {
         routine: routine.to_string(),
         message: "memory selections must be distinct unrevealed cards".to_string(),
@@ -6986,37 +7675,6 @@ fn coin_game_service_inner(
                     .map(str::to_string),
                 winning_lines: spin.winning_lines,
                 windows: spin.windows.map(|window| window.map(|symbol| slot_symbol_name(symbol).to_string())),
-                coins,
-                rng_seed_after: state.rng_seed,
-            }
-        }
-        GameCornerGame::CardFlip => {
-            if state.coins < 3 {
-                return Ok(SpecialRoutineOutcome {
-                    routine: routine.to_string(),
-                    effect: SpecialRoutineEffect::GameCornerGameUnavailable {
-                        game: routine.to_string(),
-                        reason: GameCornerUnavailableReason::NoCoins,
-                    },
-                });
-            }
-            let coins_before = state.coins;
-            let flip = flip_card(state, routine)?;
-            state.coins = state.coins.saturating_sub(3);
-            let coins = state
-                .coins
-                .saturating_add(flip.payout)
-                .min(GAME_CORNER_MAX_COINS);
-            state.coins = coins;
-            set_script_u32_value(state, u32::from(coins));
-            SpecialRoutineEffect::CardFlip {
-                coins_before,
-                card_index: flip.card_index,
-                card_name: flip.card_name,
-                card_level: flip.card_level,
-                payout: flip.payout,
-                deck: parse_required_comma_tokens(state, routine, "card_flip_deck")?,
-                revealed: parse_required_bool_tokens(state, routine, "card_flip_revealed", 24)?,
                 coins,
                 rng_seed_after: state.rng_seed,
             }
@@ -7198,11 +7856,15 @@ fn battle_tower_challenge_explanation_cancel(
     })
 }
 
-fn give_shuckle(
+fn give_shuckle<S>(
     state: &mut GameState,
     context: SpecialRoutineContext<'_>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let gift = context
         .shuckie_gift
         .ok_or_else(|| SpecialRoutineError::MissingShuckieGift {
@@ -7213,9 +7875,23 @@ fn give_shuckle(
         return Err(SpecialRoutineError::UnknownItem {
             routine: routine.to_string(),
             item_id: gift.held_item.clone(),
+        }
+        .into());
+    }
+    // TryAddMonToParty returns before GeneratePartyMonStats when the party is
+    // full, so the capacity failure consumes no DIV samples.
+    if state.storage.party.next_open_slot().is_none() {
+        set_script_bool_value(state, false);
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GiveShuckle {
+                stored: false,
+                random_state_after: state.random_state,
+            },
         });
     }
-    let dvs = sample_dvs(state);
+    let dvs = sample_shuckie_dvs(state, divider)?;
     let mut pokemon = create_pokemon_from_known_dvs(
         species,
         gift.level,
@@ -7240,7 +7916,7 @@ fn give_shuckle(
             routine: routine.to_string(),
             effect: SpecialRoutineEffect::GiveShuckle {
                 stored: false,
-                rng_seed_after: state.rng_seed,
+                random_state_after: state.random_state,
             },
         });
     }
@@ -7263,7 +7939,7 @@ fn give_shuckle(
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::GiveShuckle {
             stored: true,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -7564,27 +8240,24 @@ fn select_apricorn_for_kurt(
 fn init_roam_mons(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
-    definitions: &RoamingPokemonDefinitions,
+    catalog: &RoamingPokemonCatalog,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    if definitions.is_empty() {
+    if catalog.is_empty() {
         return Err(SpecialRoutineError::MissingRoamingPokemonDefinitions {
             routine: routine.to_string(),
         });
     }
-    let mut roamers = Vec::with_capacity(definitions.len());
-    for (species, definition) in definitions {
-        required_species_metadata(species_catalog, routine, species)?;
-        roamers.push(RoamingPokemonState {
-            species: species.clone(),
-            level: definition.level,
-            map_group: definition.map_group,
-            map_number: definition.map_number,
-            hp: 0,
-            dvs: 0,
-        });
+    for write in &catalog.init_writes {
+        required_species_metadata(species_catalog, routine, &write.species)?;
+        let slot = &mut state.roaming_pokemon[usize::from(write.slot)];
+        slot.species = Some(write.species.clone());
+        slot.level = write.level;
+        slot.map_group = write.map_group;
+        slot.map_number = write.map_number;
+        slot.hp = write.hp;
     }
-    state.roaming_pokemon = roamers.clone();
+    let roamers = state.roaming_pokemon.clone();
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -7694,12 +8367,17 @@ fn unlock_mystery_gift(
     })
 }
 
-fn buenas_password(
+fn buenas_password<S>(
     state: &mut GameState,
     categories: &BuenaPasswordCategories,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let (category_id, category, correct) = ensure_buenas_password(state, categories, routine)?;
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let (category_id, category, correct) =
+        ensure_buenas_password(state, categories, routine, divider)?;
     let guess = state
         .script_runtime
         .variables
@@ -7715,7 +8393,8 @@ fn buenas_password(
             return Err(SpecialRoutineError::InvalidBuenaPasswordGuess {
                 routine: routine.to_string(),
                 guess: guess.to_string(),
-            });
+            }
+            .into());
         }
     }
     let matched = guess.as_deref() == Some(correct.as_str());
@@ -7741,7 +8420,7 @@ fn buenas_password(
             correct,
             guess,
             matched,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -8259,20 +8938,42 @@ fn check_bug_contest_timer(
     })
 }
 
-fn select_random_bug_contest_contestants(
+fn select_random_bug_contest_contestants<S>(
     state: &mut GameState,
     bug_contest_config: Option<&BugContestConfig>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let config = require_bug_contest_config(bug_contest_config, routine)?;
-    let mut rng = Random::new_crystal(state.rng_seed);
+    let contestant_count = u8::try_from(config.contestant_flags.len()).map_err(|_| {
+        SpecialRoutineError::InvalidBugContestConfig {
+            routine: routine.to_string(),
+            message: "contestant_flags must contain at most 255 entries".to_string(),
+        }
+    })?;
+    let quotient_width = u8::MAX / contestant_count;
+    let acceptance_limit = quotient_width * contestant_count;
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
     let mut chosen = Vec::new();
     while chosen.len() < config.selected_contestant_count {
-        let candidate = rng.randrange(config.contestant_flags.len() as u32) as usize;
+        let sample = rng
+            .random(false)
+            .map_err(RandomSpecialRoutineError::Divider)?
+            .value;
+        // SelectRandomBugContestContestants rejects $fa..=$ff, then
+        // SimpleDivide returns the quotient for a divisor of 25.
+        if sample >= acceptance_limit {
+            continue;
+        }
+        let candidate = usize::from(sample / quotient_width);
         if !chosen.contains(&candidate) {
             chosen.push(candidate);
         }
     }
+    state.random_state = rng.state();
     chosen.sort_unstable();
     let mut flags = Vec::with_capacity(chosen.len());
     for flag in &config.contestant_flags {
@@ -8294,7 +8995,6 @@ fn select_random_bug_contest_contestants(
             })?;
         flags.push(flag.to_string());
     }
-    state.rng_seed = rng.seed();
     state.bug_contest.selected_contestant_flags = flags.clone();
     state
         .script_runtime
@@ -8306,7 +9006,7 @@ fn select_random_bug_contest_contestants(
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::SelectRandomBugContestContestants {
             flags,
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -8470,21 +9170,54 @@ fn check_party_full_after_contest(
         });
     };
     let species = contest_mon.species.id.clone();
-    let had_party_space = state.storage.party.has_space();
-    state.storage.register_capture(contest_mon).map_err(|_| {
-        SpecialRoutineError::GiftStorageFull {
-            routine: routine.to_string(),
-            species: species.clone(),
+    let result = if state.storage.party.has_space() {
+        let mut contest_mon = contest_mon;
+        set_bug_contest_caught_data(&mut contest_mon, 0xb1);
+        if !state.storage.party.add_pokemon(contest_mon) {
+            return Err(SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: "party reported space but rejected the contest Pokemon".to_string(),
+            });
         }
-    })?;
+        CAUGHT_MON
+    } else {
+        let current_pc_box = state.current_pc_box;
+        if current_pc_box >= MAX_PC_BOXES {
+            return Err(SpecialRoutineError::InvalidCurrentPcBox {
+                routine: routine.to_string(),
+                current_pc_box,
+                box_count: MAX_PC_BOXES,
+            });
+        }
+        let current_box_full = state
+            .storage
+            .pc_boxes
+            .get(current_pc_box)
+            .is_some_and(|pc_box| !pc_box.has_space());
+        if current_box_full {
+            // caught_data.asm falls through to .BoxFull, discarding the caught
+            // Pokemon while overwriting sBoxMon1's caught provenance.
+            if let Some(first_boxed_mon) =
+                state.storage.pc_boxes[current_pc_box].pokemon[0].as_mut()
+            {
+                set_bug_contest_caught_data(first_boxed_mon, 0);
+            }
+        } else {
+            let mut contest_mon = contest_mon;
+            set_bug_contest_caught_data(&mut contest_mon, 0xb1);
+            state
+                .storage
+                .register_capture_in_box(current_pc_box, contest_mon)
+                .map_err(|error| SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!("current contest box rejected Pokemon despite space: {error}"),
+                })?;
+        }
+        BOXED_MON
+    };
     state.bug_contest.caught_species = None;
     state.bug_contest.caught_level = None;
     state.sync_party_from_storage();
-    let result = if had_party_space {
-        CAUGHT_MON
-    } else {
-        BOXED_MON
-    };
     set_script_numeric_value(state, result);
     state.bug_contest.last_result = Some(result);
     state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -8495,6 +9228,22 @@ fn check_party_full_after_contest(
             species: Some(species),
         },
     })
+}
+
+fn set_bug_contest_caught_data(pokemon: &mut Pokemon, default_ball: u8) {
+    match pokemon.caught_data.as_mut() {
+        Some(caught_data) => {
+            caught_data.level = pokemon.level;
+            caught_data.location = 0x13; // LANDMARK_NATIONAL_PARK
+        }
+        None => {
+            pokemon.caught_data = Some(CaughtData {
+                level: pokemon.level,
+                ball: default_ball,
+                location: 0x13,
+            });
+        }
+    }
 }
 
 pub fn resolve_bug_contest_caught_mon(
@@ -8526,13 +9275,17 @@ pub fn resolve_bug_contest_caught_mon(
     })
 }
 
-fn bug_contest_judging(
+fn bug_contest_judging<S>(
     state: &mut GameState,
     bug_contest_config: Option<&BugContestConfig>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let config = require_bug_contest_config(bug_contest_config, routine)?;
-    let mut rng = Random::new_crystal(state.rng_seed);
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
     let mut winners = std::array::from_fn(|_| BugContestCandidate::default());
     for (index, contestant) in BUG_CONTESTANTS.iter().enumerate() {
         let Some(flag) = config.contestant_flags.get(index) else {
@@ -8541,9 +9294,28 @@ fn bug_contest_judging(
         if state.bug_contest.selected_contestant_flags.contains(flag) {
             continue;
         }
-        let placement = rng.randrange(3) as usize;
+        let placement = loop {
+            // CheckBugContestContestantFlag ends in AND, so every active
+            // contestant's first call enters with carry clear. Rejected 3s
+            // loop after AND 3 / CP 3, which also leaves carry clear.
+            let masked = rng
+                .random(false)
+                .map_err(RandomSpecialRoutineError::Divider)?
+                .value
+                & 0x03;
+            if masked != 3 {
+                break usize::from(masked);
+            }
+        };
         let (species, base_score) = contestant.placements[placement];
-        let score = base_score.saturating_add(rng.randrange(8) as u16);
+        // The placement-table AddHL operations cannot cross a bank boundary,
+        // so the score perturbation call also enters with carry clear.
+        let perturbation = rng
+            .random(false)
+            .map_err(RandomSpecialRoutineError::Divider)?
+            .value
+            & 0x07;
+        let score = base_score.saturating_add(u16::from(perturbation));
         insert_bug_contest_winner(
             &mut winners,
             BugContestCandidate {
@@ -8573,7 +9345,7 @@ fn bug_contest_judging(
             score: player_score,
         },
     );
-    state.rng_seed = rng.seed();
+    state.random_state = rng.state();
     let rank = winners
         .iter()
         .position(|winner| winner.winner_id == 1)
@@ -8600,7 +9372,11 @@ fn bug_contest_judging(
         .collect();
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::BugContestJudging { rank, placements },
+        effect: SpecialRoutineEffect::BugContestJudging {
+            rank,
+            placements,
+            random_state_after: state.random_state,
+        },
     })
 }
 
@@ -8709,10 +9485,23 @@ fn wait_for_linked_friend(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let ready = required_bool_script_variable(state, routine, "_link_friend_ready")?;
+    let serial_established = state
+        .link_session
+        .serial_connection_status
+        .is_established();
+    if ready != serial_established {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: format!(
+                "ready={ready} requires matching serial connection status, found {:?}",
+                state.link_session.serial_connection_status
+            ),
+        });
+    }
     if ready {
         state.link_session.friend_ready = true;
-        state.link_session.serial_connection_status =
-            LinkSerialConnectionStatus::UsingExternalClock;
+    } else {
+        state.link_session.friend_ready = false;
     }
     state.link_session.last_result = ready;
     set_script_bool_value(state, ready);
@@ -8732,6 +9521,19 @@ fn check_link_timeout_receptionist(
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let timeout = required_bool_script_variable(state, routine, "_link_timeout")?;
     if timeout {
+        if state
+            .link_session
+            .serial_connection_status
+            .is_established()
+        {
+            return Err(SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: format!(
+                    "timeout requires connection_not_established, found {:?}",
+                    state.link_session.serial_connection_status
+                ),
+            });
+        }
         reset_link_state(state);
         set_script_bool_value(state, false);
         state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -8744,9 +9546,18 @@ fn check_link_timeout_receptionist(
         });
     }
     let other_mode = required_u8_script_variable(state, routine, "_other_player_link_mode")?;
+    if !state
+        .link_session
+        .serial_connection_status
+        .is_established()
+    {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "connected result requires an established serial clock owner".to_string(),
+        });
+    }
     state.link_session.player_link_action = state.link_session.chosen_cable_club_room;
     state.link_session.other_player_link_mode = other_mode;
-    state.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingExternalClock;
     state.link_session.last_result = true;
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -9372,12 +10183,21 @@ fn battle_tower_mobile_error(
     })
 }
 
-fn canonical_battle_tower_opponent(
+fn canonical_battle_tower_opponent<S>(
     state: &mut GameState,
     rules: &BattleTowerRules,
     context: SpecialRoutineContext<'_>,
     routine: &str,
-) -> Result<(String, String, String, String, Vec<Pokemon>), SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<
+    (String, String, String, String, Vec<Pokemon>),
+    RandomSpecialRoutineError<S::Error>,
+>
+where
+    S: DividerSource + ?Sized,
+{
+    const UNIQUE_TRAINERS: usize = 70;
+    const UNIQUE_MONS: usize = 21;
     let group_index = state
         .battle_tower
         .level_group
@@ -9389,32 +10209,65 @@ fn canonical_battle_tower_opponent(
             error: "compiled Battle Tower level group is missing".to_string(),
         }
     })?;
-    if group.len() < rules.required_party_count {
+    if rules.trainers.len() != UNIQUE_TRAINERS {
+        return Err(SpecialRoutineError::InvalidBattleTowerRules {
+            routine: routine.to_string(),
+            message: format!(
+                "compiled Battle Tower trainer roster must contain exactly {UNIQUE_TRAINERS} entries, found {}",
+                rules.trainers.len()
+            ),
+        }
+        .into());
+    }
+    if group.len() != UNIQUE_MONS {
         return Err(SpecialRoutineError::BattleTowerTrainerBuild {
             routine: routine.to_string(),
             trainer_id: format!("group_{group_index}"),
-            error: "compiled Battle Tower group cannot form the required party".to_string(),
-        });
+            error: format!(
+                "compiled Battle Tower group must contain exactly {UNIQUE_MONS} Pokemon, found {}",
+                group.len()
+            ),
+        }
+        .into());
     }
 
-    let recent_trainers = state
-        .battle_tower
-        .trainer_history
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let available = rules
-        .trainers
-        .iter()
-        .filter(|trainer| !recent_trainers.contains(&(trainer.index as u8)))
-        .collect::<Vec<_>>();
-    let trainer_pool = if available.is_empty() {
-        rules.trainers.iter().collect::<Vec<_>>()
-    } else {
-        available
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+    let mut accumulator = rng.state().add;
+    let trainer_index = loop {
+        // Crystal 1.1 samples a trainer by adding the updated hRandomAdd to
+        // the saved B accumulator. Range retries retain the unmasked sum;
+        // history retries retain the accepted, masked index in B.
+        rng.random(false)
+            .map_err(RandomSpecialRoutineError::Divider)?;
+        accumulator = rng.state().add.wrapping_add(accumulator);
+        let candidate = accumulator & 0x7f;
+        if candidate >= UNIQUE_TRAINERS as u8 {
+            continue;
+        }
+        accumulator = candidate;
+        if state.battle_tower.trainer_history.contains(&candidate) {
+            continue;
+        }
+        break usize::from(candidate);
     };
-    let mut rng = Random::new_crystal(state.rng_seed);
-    let trainer = trainer_pool[rng.randrange(trainer_pool.len() as u32) as usize];
+    let trainer = rules.trainers.get(trainer_index).ok_or_else(|| {
+        SpecialRoutineError::BattleTowerTrainerBuild {
+            routine: routine.to_string(),
+            trainer_id: format!("trainer_{trainer_index}"),
+            error: "canonical trainer index is missing from compiled roster".to_string(),
+        }
+    })?;
+    if trainer.index != trainer_index {
+        return Err(SpecialRoutineError::BattleTowerTrainerBuild {
+            routine: routine.to_string(),
+            trainer_id: trainer.name.clone(),
+            error: format!(
+                "compiled trainer table entry {trainer_index} declares index {}",
+                trainer.index
+            ),
+        }
+        .into());
+    }
     let history_slot = usize::from(state.battle_tower.beaten_trainers)
         .min(state.battle_tower.trainer_history.len().saturating_sub(1));
     if let Some(slot) = state.battle_tower.trainer_history.get_mut(history_slot) {
@@ -9441,35 +10294,32 @@ fn canonical_battle_tower_opponent(
         .filter_map(|(_, index)| group.get(*index))
         .map(|mon| mon.species.as_str())
         .collect::<BTreeSet<_>>();
-    let mut selected = Vec::new();
+    let mut selected: Vec<(usize, &BattleTowerMonDefinition)> = Vec::new();
     while selected.len() < rules.required_party_count {
-        let candidates = group
-            .iter()
-            .enumerate()
-            .filter(|(index, mon)| {
-                !selected
-                    .iter()
-                    .any(|(chosen_index, _)| chosen_index == index)
-                    && !recent_species.contains(mon.species.as_str())
-                    && !selected
-                        .iter()
-                        .any(|(_, chosen): &(usize, &BattleTowerMonDefinition)| {
-                            chosen.species == mon.species
-                                || (chosen.item.is_some() && chosen.item == mon.item)
-                        })
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            break;
-        }
-        selected.push(candidates[rng.randrange(candidates.len() as u32) as usize]);
-    }
-    if selected.len() < rules.required_party_count {
-        return Err(SpecialRoutineError::BattleTowerTrainerBuild {
-            routine: routine.to_string(),
-            trainer_id: trainer.name.clone(),
-            error: "recent Battle Tower history leaves no legal party".to_string(),
-        });
+        // .FindARandomBattleTowerMon reloads B from the current hRandomAdd.
+        // Only an out-of-range retry keeps the unmasked sum. Species/item or
+        // previous-team rejection restarts here and reloads B.
+        let mut mon_accumulator = rng.state().add;
+        let candidate_index = loop {
+            rng.random(false)
+                .map_err(RandomSpecialRoutineError::Divider)?;
+            mon_accumulator = rng.state().add.wrapping_add(mon_accumulator);
+            let candidate = mon_accumulator & 0x1f;
+            if candidate >= UNIQUE_MONS as u8 {
+                continue;
+            }
+            let candidate_index = usize::from(candidate);
+            let mon = &group[candidate_index];
+            let rejected_current = selected.iter().any(|(_, chosen)| {
+                chosen.species == mon.species || chosen.item == mon.item
+            });
+            if rejected_current || recent_species.contains(mon.species.as_str()) {
+                mon_accumulator = rng.state().add;
+                continue;
+            }
+            break candidate_index;
+        };
+        selected.push((candidate_index, &group[candidate_index]));
     }
     let mut enemy_party = Vec::with_capacity(selected.len());
     for (index, mon) in selected {
@@ -9537,7 +10387,7 @@ fn canonical_battle_tower_opponent(
         let keep_from = mon_history.len() - 6;
         mon_history.drain(..keep_from);
     }
-    state.rng_seed = rng.seed();
+    state.random_state = rng.state();
     state.script_runtime.variables.insert(
         "battle_tower_mon_history".to_string(),
         mon_history
@@ -9555,11 +10405,30 @@ fn canonical_battle_tower_opponent(
     ))
 }
 
-fn load_opponent_trainer_and_pokemon_with_ot_sprite(
+fn load_opponent_trainer_and_pokemon_with_ot_sprite<S>(
     state: &mut GameState,
     context: SpecialRoutineContext<'_>,
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    if state.pending_static_wild_terminal.is_some() {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "pending static-wild terminal must resume before a Battle Tower battle starts"
+                .to_string(),
+        }
+        .into());
+    }
+    if !matches!(state.battle, BattleMemory::Inactive) {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "Battle Tower opponent load requires inactive battle memory".to_string(),
+        }
+        .into());
+    }
     let target_object =
         required_string_script_variable(state, routine, "_battle_tower_target_object")?;
     let rules =
@@ -9573,10 +10442,11 @@ fn load_opponent_trainer_and_pokemon_with_ot_sprite(
         return Err(SpecialRoutineError::InvalidBattleTowerRules {
             routine: routine.to_string(),
             message: "compiled trainer roster and Pokemon groups are required".to_string(),
-        });
+        }
+        .into());
     }
     let (trainer_id, trainer_class, trainer_name, sprite_constant, enemy_party) =
-        canonical_battle_tower_opponent(state, rules, context, routine)?;
+        canonical_battle_tower_opponent(state, rules, context, routine, divider)?;
     let win_text = String::new();
     let loss_text = String::new();
     let reward = 0;
@@ -9660,6 +10530,7 @@ fn load_opponent_trainer_and_pokemon_with_ot_sprite(
             party_size: enemy_party.len(),
             sprite_constant,
             target_object,
+            random_state_after: state.random_state,
         },
     })
 }
@@ -9902,7 +10773,7 @@ fn parse_u8_token(routine: &str, raw: &str) -> Result<u8, SpecialRoutineError> {
     parse_exact_u8_token(routine, raw, raw)
 }
 
-fn give_odd_egg(
+fn give_odd_egg<S>(
     state: &mut GameState,
     species_catalog: &BTreeMap<String, PokemonSpecies>,
     learnsets: &SpeciesLearnsets,
@@ -9910,8 +10781,23 @@ fn give_odd_egg(
     move_catalog: &BTreeMap<String, Move>,
     odd_egg_definitions: &[OddEggDefinition],
     routine: &str,
-) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let table_index = draw_odd_egg_index(state, odd_egg_definitions, routine)?;
+    divider: &mut S,
+) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    validate_odd_egg_table(odd_egg_definitions, routine)?;
+    let Some(party_slot) = state.storage.party.next_open_slot() else {
+        // The map script checks PartyCount before calling GiveOddEgg. Keep the
+        // core boundary equally strict so a full party consumes zero DIV
+        // reads even when invoked directly.
+        return Err(SpecialRoutineError::GiftStorageFull {
+            routine: routine.to_string(),
+            species: odd_egg_definitions[0].species.clone(),
+        }
+        .into());
+    };
+    let table_index = draw_odd_egg_index(state, odd_egg_definitions, routine, divider)?;
     let definition = &odd_egg_definitions[table_index];
     let species = required_species_metadata(species_catalog, routine, definition.species.as_str())?;
     let dvs = Dv::from_non_hp(
@@ -9946,7 +10832,7 @@ fn give_odd_egg(
                         party_slot: 0,
                         move_id: move_id.clone(),
                     })?;
-            Ok(LearnedMove {
+            Ok::<LearnedMove, SpecialRoutineError>(LearnedMove {
                 name: move_id.clone(),
                 current_pp: move_data.pp,
                 pp_ups: 0,
@@ -9961,18 +10847,13 @@ fn give_odd_egg(
     egg.original_trainer_id = definition.original_trainer_id;
     egg.experience = definition.experience;
     egg.happiness = definition.hatch_cycles;
-    let location = state.storage.register_capture(egg.clone()).map_err(|_| {
-        SpecialRoutineError::GiftStorageFull {
+    if !state.storage.party.add_pokemon(egg.clone()) {
+        return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
-            species: definition.species.clone(),
+            message: "party reported an open Odd Egg slot but rejected the egg".to_string(),
         }
-    })?;
-    let CaptureStorageLocation::Party { slot: party_slot } = location else {
-        return Err(SpecialRoutineError::GiftStorageFull {
-            routine: routine.to_string(),
-            species: definition.species.clone(),
-        });
-    };
+        .into());
+    }
     state.sync_party_from_storage();
     state.script_runtime.variables.insert(
         "wCurPartySpecies".to_string(),
@@ -9991,16 +10872,15 @@ fn give_odd_egg(
             species: definition.species.clone(),
             party_slot,
             shiny: definition.dvs == [2, 10, 10, 10],
-            rng_seed_after: state.rng_seed,
+            random_state_after: state.random_state,
         },
     })
 }
 
-fn draw_odd_egg_index(
-    state: &mut GameState,
+fn validate_odd_egg_table(
     odd_egg_definitions: &[OddEggDefinition],
     routine: &str,
-) -> Result<usize, SpecialRoutineError> {
+) -> Result<(), SpecialRoutineError> {
     if odd_egg_definitions.is_empty() {
         return Err(SpecialRoutineError::MissingOddEggDefinitions {
             routine: routine.to_string(),
@@ -10015,9 +10895,28 @@ fn draw_odd_egg_index(
             routine: routine.to_string(),
         });
     }
-    let mut rng = Random::new_crystal(state.rng_seed);
-    let random_word = rng.randrange(0x1_0000) as u16;
-    state.rng_seed = rng.seed();
+    Ok(())
+}
+
+fn draw_odd_egg_index<S>(
+    state: &mut GameState,
+    odd_egg_definitions: &[OddEggDefinition],
+    routine: &str,
+    divider: &mut S,
+) -> Result<usize, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+    // The special pointer-table lookup reaches Random after carry-clearing
+    // bank-local ADD instructions. The returned A byte is hRandomSub; the
+    // low byte is the newly updated hRandomAdd.
+    let high = rng
+        .random(false)
+        .map_err(RandomSpecialRoutineError::Divider)?
+        .value;
+    let random_word = u16::from_be_bytes([high, rng.state().add]);
+    state.random_state = rng.state();
     let mut cumulative = 0u32;
     for (index, definition) in odd_egg_definitions.iter().enumerate() {
         cumulative += u32::from(definition.probability);
@@ -10028,7 +10927,8 @@ fn draw_odd_egg_index(
     }
     Err(SpecialRoutineError::InvalidOddEggTable {
         routine: routine.to_string(),
-    })
+    }
+    .into())
 }
 
 fn validate_battle_tower_rules(
@@ -10237,50 +11137,109 @@ fn remove_party_member(state: &mut GameState, party_slot: usize) {
     state.sync_party_from_storage();
 }
 
-fn sample_dvs(state: &mut GameState) -> Dv {
-    let mut rng = Random::new_crystal(state.rng_seed);
-    let attack = rng.randrange(16) as u8;
-    let defense = rng.randrange(16) as u8;
-    let speed = rng.randrange(16) as u8;
-    let special = rng.randrange(16) as u8;
-    state.rng_seed = rng.seed();
-    Dv::from_non_hp(attack, defense, speed, special)
+fn sample_shuckie_dvs<S>(
+    state: &mut GameState,
+    divider: &mut S,
+) -> Result<Dv, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+    // The battle-mode `and a` before GeneratePartyMonStats clears carry.
+    let attack_defense = rng
+        .random(false)
+        .map_err(RandomSpecialRoutineError::Divider)?;
+    // No instruction changes carry between the two Random calls: the second
+    // call receives the borrow from the first call's final SBC.
+    let speed_special = rng
+        .random(attack_defense.carry_out)
+        .map_err(RandomSpecialRoutineError::Divider)?;
+    state.random_state = rng.state();
+    Ok(Dv::from_non_hp(
+        attack_defense.value >> 4,
+        attack_defense.value & 0x0f,
+        speed_special.value >> 4,
+        speed_special.value & 0x0f,
+    ))
 }
 
-fn ensure_buenas_password<'a>(
+fn ensure_buenas_password<'a, S>(
     state: &mut GameState,
     categories: &'a BuenaPasswordCategories,
     routine: &str,
-) -> Result<(&'a str, &'a BuenaPasswordCategoryDefinition, String), SpecialRoutineError> {
+    divider: &mut S,
+) -> Result<
+    (&'a str, &'a BuenaPasswordCategoryDefinition, String),
+    RandomSpecialRoutineError<S::Error>,
+>
+where
+    S: DividerSource + ?Sized,
+{
     if categories.order.is_empty() || categories.categories.is_empty() {
         return Err(SpecialRoutineError::MissingBuenaPasswordCategories {
             routine: routine.to_string(),
-        });
+        }
+        .into());
     }
     let current_day = state.time.current_day;
     if !state.buenas_password.generated || state.buenas_password.generation_day != current_day {
-        let mut rng = Random::new_crystal(state.rng_seed);
-        let category_index = rng.randrange(categories.order.len() as u32) as usize;
+        if categories.order.len() != 11 {
+            return Err(SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: format!(
+                    "Buena password table must contain exactly 11 categories, found {}",
+                    categories.order.len()
+                ),
+            }
+            .into());
+        }
+        let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+        let category_index = loop {
+            // BuenasPassword4 masks hRandomSub with $f and rejects 11..15.
+            // Both the initial path and each retry enter with carry clear.
+            let candidate = rng
+                .random(false)
+                .map_err(RandomSpecialRoutineError::Divider)?
+                .value
+                & 0x0f;
+            if candidate < 11 {
+                break usize::from(candidate);
+            }
+        };
         let Some(category_id) = categories.order.get(category_index) else {
             return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
                 routine: routine.to_string(),
                 index: category_index,
-            });
+            }
+            .into());
         };
         let Some(category) = categories.categories.get(category_id) else {
             return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
                 routine: routine.to_string(),
                 index: category_index,
-            });
+            }
+            .into());
         };
-        if category.options.is_empty() {
+        if category.options.len() != 3 {
             return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
                 routine: routine.to_string(),
                 index: category_index,
-            });
+            }
+            .into());
         }
-        let option_index = rng.randrange(category.options.len() as u32) as usize;
-        state.rng_seed = rng.seed();
+        let option_index = loop {
+            // The option loop masks with 3 and rejects 3; SWAP/AND/CP leave
+            // carry clear for every attempt.
+            let candidate = rng
+                .random(false)
+                .map_err(RandomSpecialRoutineError::Divider)?
+                .value
+                & 0x03;
+            if candidate < 3 {
+                break usize::from(candidate);
+            }
+        };
+        state.random_state = rng.state();
         state.buenas_password.category_index = category_index;
         state.buenas_password.option_index = option_index;
         state.buenas_password.generation_day = current_day;
@@ -10290,19 +11249,22 @@ fn ensure_buenas_password<'a>(
         return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
             routine: routine.to_string(),
             index: state.buenas_password.category_index,
-        });
+        }
+        .into());
     };
     let Some(category) = categories.categories.get(category_id) else {
         return Err(SpecialRoutineError::InvalidBuenaPasswordCategoryIndex {
             routine: routine.to_string(),
             index: state.buenas_password.category_index,
-        });
+        }
+        .into());
     };
     let Some(correct) = category.options.get(state.buenas_password.option_index) else {
         return Err(SpecialRoutineError::InvalidBuenaPasswordOptionIndex {
             routine: routine.to_string(),
             index: state.buenas_password.option_index,
-        });
+        }
+        .into());
     };
     Ok((category_id.as_str(), category, correct.clone()))
 }
@@ -10384,9 +11346,25 @@ fn calculate_magikarp_length(
     magikarp_lengths: &[MagikarpLengthEntry],
     routine: &str,
 ) -> Result<(u8, u8), SpecialRoutineError> {
-    let table = require_magikarp_lengths(magikarp_lengths, routine)?;
     let dv0 = ((pokemon.dvs.attack & 0x0f) << 4) | (pokemon.dvs.defense & 0x0f);
     let dv1 = ((pokemon.dvs.speed & 0x0f) << 4) | (pokemon.dvs.special & 0x0f);
+    calculate_magikarp_length_from_dv_bytes(
+        dv0,
+        dv1,
+        trainer_id,
+        magikarp_lengths,
+        routine,
+    )
+}
+
+pub fn calculate_magikarp_length_from_dv_bytes(
+    dv0: u8,
+    dv1: u8,
+    trainer_id: u16,
+    magikarp_lengths: &[MagikarpLengthEntry],
+    routine: &str,
+) -> Result<(u8, u8), SpecialRoutineError> {
+    let table = require_magikarp_lengths(magikarp_lengths, routine)?;
     let id_high = rotate_right_u8((trainer_id >> 8) as u8, 1);
     let id_low = rotate_right_u8((trainer_id & 0xff) as u8, 1);
     let b = rotate_right_u8(dv0, 2) ^ id_high;
@@ -10401,15 +11379,15 @@ fn calculate_magikarp_length(
             let threshold = entry.threshold;
             if b < ((threshold >> 8) & 0xff) as u8 {
                 let delta = bc.wrapping_sub(threshold);
-                let quotient = (delta / entry.divisor) & 0xff;
-                resolved = Some(quotient + 100 * (2 + multiplier));
+                let quotient = (delta / u16::from(entry.divisor)) & 0xff;
+                resolved = Some(quotient + 100 * multiplier);
                 break;
             }
             multiplier += 1;
         }
         resolved.unwrap_or_else(|| {
             let threshold = table[table.len() - 1].threshold;
-            1600 + bc.wrapping_sub(threshold)
+            1600u16.wrapping_add(bc.wrapping_sub(threshold))
         })
     };
     let total_inches = (u32::from(length_mm) * 10) / 254;
@@ -10423,6 +11401,15 @@ fn require_magikarp_lengths<'a>(
     if magikarp_lengths.is_empty() {
         return Err(SpecialRoutineError::MissingMagikarpLengthTable {
             routine: routine.to_string(),
+        });
+    }
+    if magikarp_lengths.len() != 14 {
+        return Err(SpecialRoutineError::InvalidMagikarpLengthTable {
+            routine: routine.to_string(),
+            message: format!(
+                "expected exactly 14 source rows, found {}",
+                magikarp_lengths.len()
+            ),
         });
     }
     let mut previous = None;

@@ -7,8 +7,11 @@ use crate::map::{BackgroundEvent, CoordEvent, MapConnection, MapEvents, ObjectEv
 use crate::multiplayer::{
     MultiplayerMessageError, OverworldPresence, PlayerInputFrame, PresenceEntityType, fnv1a32,
 };
-use crate::random::Random;
-use crate::state::{EventFlagMemory, GameState, GameStateFrameError};
+use crate::random::{CrystalRandom, DividerSource, Random};
+#[cfg(test)]
+use crate::random::CrystalRandomState;
+use crate::state::{EventFlagMemory, GameState, RoamingPokemonState};
+use crate::systems::special_routines::BugContestEncounterEntry;
 
 use super::collision::{
     Terrain, TilesetCollision, can_jump_ledge, describe_collision, directional_warp_facing,
@@ -17,8 +20,8 @@ use super::collision::{
 };
 use super::encounters::{
     EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
-    ResolvedWildEncounter, SpecialWildEncounterEntry, TimeOfDay, WildEncounter, WildEncounterData,
-    apply_cleanse_tag_effect, apply_encounter_music_effect, encounter_threshold,
+    ResolvedWildEncounter, TimeOfDay, WildEncounter, WildEncounterData,
+    apply_cleanse_tag_effect, apply_encounter_music_effect,
     passes_encounter_roll, percent_to_byte, select_wild_encounter,
 };
 use super::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
@@ -165,14 +168,6 @@ pub struct OverworldInputResult {
     pub snapshot: OverworldSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OverworldInputEncounterResult {
-    pub input: OverworldInputResult,
-    pub wild_encounter: Option<WildEncounterRoll>,
-    pub expired_repel_item: Option<String>,
-}
-
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum OverworldInputError {
     #[error("overworld input frame {input_frame} does not match session frame {session_frame}")]
@@ -190,18 +185,30 @@ pub enum OverworldInputError {
     Coordinate(#[from] OverworldCoordinateError),
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum OverworldInputTickError {
-    #[error(transparent)]
-    Input(#[from] OverworldInputError),
-    #[error(transparent)]
-    Encounter(#[from] EncounterError),
-}
-
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverworldObjectCoordinateError {
     #[error("object '{object_id}' has out-of-range runtime coordinates ({x}, {y})")]
     OutOfRange { object_id: String, x: u16, y: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousObjectAdvanceError<E> {
+    Coordinate(OverworldObjectCoordinateError),
+    Divider(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for AutonomousObjectAdvanceError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Coordinate(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "autonomous movement divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error
+    for AutonomousObjectAdvanceError<E>
+{
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,22 +252,6 @@ pub enum OverworldCoordinateError {
     FollowObjectMissing { object_id: String },
     #[error("follow object '{object_id}' cannot be moved to unsaveable runtime tile ({x}, {y})")]
     FollowPositionUnsavable { object_id: String, x: i16, y: i16 },
-}
-
-fn game_state_frame_error_to_overworld_input(
-    error: GameStateFrameError,
-) -> OverworldInputTickError {
-    match error {
-        GameStateFrameError::ConflictingJoypadDirections { mask } => {
-            OverworldInputTickError::Input(OverworldInputError::ConflictingDirections { mask })
-        }
-        GameStateFrameError::FrameCursorOverflow { frame } => {
-            OverworldInputTickError::Input(OverworldInputError::FrameMismatch {
-                session_frame: frame,
-                input_frame: frame,
-            })
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,13 +305,6 @@ pub struct EncounterCheckOptions {
     pub has_cleanse_tag: bool,
     pub active_repel_item: Option<String>,
     pub lead_party_level: Option<u8>,
-    /// Ordered Roamer slots (Raikou, Entei, Suicune). A matching slot is
-    /// selected with Crystal's post-threshold roaming roll before the normal
-    /// encounter slot roll.
-    #[serde(default)]
-    pub roaming_candidates: Vec<Option<(String, u8)>>,
-    #[serde(default)]
-    pub special_wild_encounters: Vec<SpecialWildEncounterEntry>,
     /// CAVE and DUNGEON environments permit encounters on ordinary land,
     /// except ice, without requiring a grass collision byte.
     #[serde(default)]
@@ -335,11 +319,23 @@ impl Default for EncounterCheckOptions {
             has_cleanse_tag: false,
             active_repel_item: None,
             lead_party_level: None,
-            roaming_candidates: Vec::new(),
-            special_wild_encounters: Vec::new(),
             land_encounters_on_any_land: false,
         }
     }
+}
+
+/// Source-owned encounter tables and WRAM inputs for the exact chooser.
+///
+/// Unlike the legacy `EncounterCheckOptions` candidate vectors, this keeps
+/// all three raw roaming slots and the current numeric map together so the
+/// chooser itself proves the selected slot is on the active map.  Bug Contest
+/// rows are borrowed directly from the required exported configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct ExactEncounterContext<'a> {
+    pub roaming_pokemon: &'a [RoamingPokemonState; 3],
+    pub current_map: (u8, u8),
+    pub bug_contest_encounters: Option<&'a [BugContestEncounterEntry]>,
+    pub unlocked_unown_sets: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,10 +349,34 @@ pub struct WildEncounterRoll {
     pub encounter_roll: u8,
     pub slot_percent_roll: Option<u8>,
     pub level_roll: Option<u8>,
+    /// Exact wRoamMon slot selected by CheckEncounterRoamMon, if any.
+    pub roaming_slot: Option<u8>,
     pub resolved: Option<ResolvedWildEncounter>,
     pub repelled_by: Option<String>,
-    pub rng_seed_after: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactEncounterError<E> {
+    Encounter(EncounterError),
+    Divider(E),
+}
+
+impl<E> From<EncounterError> for ExactEncounterError<E> {
+    fn from(error: EncounterError) -> Self {
+        Self::Encounter(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ExactEncounterError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encounter(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "wild encounter divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for ExactEncounterError<E> {}
 
 pub fn leading_usable_party_level(state: &GameState) -> Option<u8> {
     state
@@ -1025,6 +1045,39 @@ impl OverworldSession {
         &mut self,
         mut rng: Option<&mut Random>,
     ) -> Result<(), OverworldObjectCoordinateError> {
+        self.advance_autonomous_objects_with_random_add(
+            rng.as_mut().map(|rng| {
+                move |_carry: bool| -> Result<u8, std::convert::Infallible> {
+                    Ok(rng.crystal_random_add_sub().0)
+                }
+            }),
+        )
+        .map_err(|error| match error {
+            AutonomousObjectAdvanceError::Coordinate(error) => error,
+            AutonomousObjectAdvanceError::Divider(never) => match never {},
+        })
+    }
+
+    pub fn advance_autonomous_objects_exact<S>(
+        &mut self,
+        rng: &mut CrystalRandom<&mut S>,
+    ) -> Result<(), AutonomousObjectAdvanceError<S::Error>>
+    where
+        S: DividerSource + ?Sized,
+    {
+        self.advance_autonomous_objects_with_random_add(Some(|carry| {
+            rng.random(carry)?;
+            Ok(rng.state().add)
+        }))
+    }
+
+    fn advance_autonomous_objects_with_random_add<E, F>(
+        &mut self,
+        mut random_add: Option<F>,
+    ) -> Result<(), AutonomousObjectAdvanceError<E>>
+    where
+        F: FnMut(bool) -> Result<u8, E>,
+    {
         let visible_indices: Vec<usize> = self
             .objects
             .iter()
@@ -1063,14 +1116,15 @@ impl OverworldSession {
                 }
                 self.object_step_durations.remove(object_id);
                 if self.object_pending_random_wait.remove(object_id) {
-                    let Some(rng) = rng.as_deref_mut() else {
+                    let Some(random_add) = random_add.as_mut() else {
                         self.object_pending_random_wait
                             .insert(object_id.to_string());
                         self.object_step_durations
                             .insert(object_id.to_string(), 1);
                         continue;
                     };
-                    let (duration_roll, _) = rng.crystal_random_add_sub();
+                    let duration_roll = random_add(false)
+                        .map_err(AutonomousObjectAdvanceError::Divider)?;
                     self.object_step_durations
                         .insert(object_id.to_string(), duration_roll & 0x7f);
                 }
@@ -1078,7 +1132,9 @@ impl OverworldSession {
                 // movement function on the following object-update frame.
                 continue;
             }
-            let current = self.object_runtime_tile_checked(index, object)?;
+            let current = self
+                .object_runtime_tile_checked(index, object)
+                .map_err(AutonomousObjectAdvanceError::Coordinate)?;
             // Object movement uses the same one-runtime-tile stride as the
             // player.  METATILE_WIDTH is the map-art block size, not the
             // gameplay movement stride.
@@ -1123,10 +1179,12 @@ impl OverworldSession {
             } else if movement == "SPRITEMOVEDATA_SPINRANDOM_SLOW"
                 || movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
             {
-                let Some(rng) = rng.as_deref_mut() else {
+                let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let (direction_roll, _) = rng.crystal_random_add_sub();
+                let direction_roll = random_add(false)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let previous_direction = direction;
                 direction = match (direction_roll >> 2) & 3 {
                     0 => Direction::Down,
                     1 => Direction::Up,
@@ -1148,7 +1206,18 @@ impl OverworldSession {
                     };
                 }
                 self.object_facings.insert(object_id.to_string(), direction);
-                let (duration_roll, _) = rng.crystal_random_add_sub();
+                let sampled_direction_byte = direction_roll & 0x0c;
+                let previous_direction_byte = match previous_direction {
+                    Direction::Down => 0,
+                    Direction::Up => 4,
+                    Direction::Left => 8,
+                    Direction::Right => 12,
+                };
+                let duration_carry = movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                    && sampled_direction_byte != previous_direction_byte
+                    && sampled_direction_byte < previous_direction_byte;
+                let duration_roll = random_add(duration_carry)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
                 let mask = if movement == "SPRITEMOVEDATA_SPINRANDOM_FAST" {
                     0x1f
                 } else {
@@ -1158,30 +1227,33 @@ impl OverworldSession {
                     .insert(object_id.to_string(), duration_roll & mask);
                 continue;
             } else if movement == "SPRITEMOVEDATA_WALK_LEFT_RIGHT" {
-                let Some(rng) = rng.as_deref_mut() else {
+                let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let (roll, _) = rng.crystal_random_add_sub();
+                let roll = random_add(false)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = if roll & 1 == 0 {
                     Direction::Left
                 } else {
                     Direction::Right
                 };
             } else if movement == "SPRITEMOVEDATA_WALK_UP_DOWN" {
-                let Some(rng) = rng.as_deref_mut() else {
+                let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let (roll, _) = rng.crystal_random_add_sub();
+                let roll = random_add(false)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = if roll & 1 == 0 {
                     Direction::Down
                 } else {
                     Direction::Up
                 };
             } else {
-                let Some(rng) = rng.as_deref_mut() else {
+                let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let (roll, _) = rng.crystal_random_add_sub();
+                let roll = random_add(false)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = match roll & 3 {
                     0 => Direction::Down,
                     1 => Direction::Up,
@@ -1255,8 +1327,9 @@ impl OverworldSession {
                     .insert(object_id.to_string(), 8);
                 self.object_pending_random_wait
                     .insert(object_id.to_string());
-            } else if let Some(rng) = rng.as_deref_mut() {
-                let (duration_roll, _) = rng.crystal_random_add_sub();
+            } else if let Some(random_add) = random_add.as_mut() {
+                let duration_roll = random_add(false)
+                    .map_err(AutonomousObjectAdvanceError::Divider)?;
                 self.object_step_durations.insert(
                     object_id.to_string(),
                     duration_roll & 0x7f,
@@ -1313,7 +1386,10 @@ impl OverworldSession {
             }
         }
 
-        if let Some(event) = self.background_event_at_checked(adjusted_tile)? {
+        if let Some(event) = self
+            .background_event_at_checked(adjusted_tile)?
+            .filter(|event| background_event_accepts_facing(&event.event_type, self.player.facing))
+        {
             return Ok(Some(OverworldInteraction {
                 map_name: self.map.name.clone(),
                 player_tile: self.player.tile,
@@ -1642,78 +1718,6 @@ impl OverworldSession {
         self.apply_joypad_mask(input.joypad_mask(), options, current_scene)
     }
 
-    pub fn apply_input_frame_with_encounter(
-        &mut self,
-        input: &PlayerInputFrame,
-        step_options: StepOptions,
-        current_scene: Option<&str>,
-        encounters: &WildEncounterData,
-        slot_tables: &EncounterSlotTables,
-        music_modifiers: &EncounterMusicModifiers,
-        rng: &mut Random,
-        encounter_options: EncounterCheckOptions,
-    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
-        if input.frame() != self.frame {
-            return Err(OverworldInputTickError::Input(
-                OverworldInputError::FrameMismatch {
-                    session_frame: self.frame,
-                    input_frame: input.frame(),
-                },
-            ));
-        }
-        self.apply_joypad_mask_with_encounter(
-            input.joypad_mask(),
-            step_options,
-            current_scene,
-            encounters,
-            slot_tables,
-            music_modifiers,
-            rng,
-            encounter_options,
-        )
-    }
-
-    pub fn apply_input_frame_with_state_encounter(
-        &mut self,
-        state: &mut GameState,
-        input: &PlayerInputFrame,
-        step_options: StepOptions,
-        current_scene: Option<&str>,
-        encounters: &WildEncounterData,
-        slot_tables: &EncounterSlotTables,
-        music_modifiers: &EncounterMusicModifiers,
-        rng: &mut Random,
-        lead_party_level: Option<u8>,
-        mut encounter_options: EncounterCheckOptions,
-    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
-        let mut staged_state = state.clone();
-        staged_state
-            .apply_joypad_mask(input.joypad_mask())
-            .map_err(game_state_frame_error_to_overworld_input)?;
-        encounter_options.active_repel_item = if staged_state.repel_steps_remaining > 0 {
-            staged_state.active_repel_item.clone()
-        } else {
-            None
-        };
-        encounter_options.lead_party_level =
-            lead_party_level.or_else(|| leading_usable_party_level(&staged_state));
-        let mut result = self.apply_input_frame_with_encounter(
-            input,
-            step_options,
-            current_scene,
-            encounters,
-            slot_tables,
-            music_modifiers,
-            rng,
-            encounter_options,
-        )?;
-        if result.input.action.moves_player() {
-            result.expired_repel_item = staged_state.tick_repel_step_after_movement();
-        }
-        *state = staged_state;
-        Ok(result)
-    }
-
     pub fn apply_joypad_mask(
         &mut self,
         joypad_mask: u8,
@@ -1756,54 +1760,6 @@ impl OverworldSession {
             trainer_sight,
             connection,
             snapshot,
-        })
-    }
-
-    pub fn apply_joypad_mask_with_encounter(
-        &mut self,
-        joypad_mask: u8,
-        step_options: StepOptions,
-        current_scene: Option<&str>,
-        encounters: &WildEncounterData,
-        slot_tables: &EncounterSlotTables,
-        music_modifiers: &EncounterMusicModifiers,
-        rng: &mut Random,
-        encounter_options: EncounterCheckOptions,
-    ) -> Result<OverworldInputEncounterResult, OverworldInputTickError> {
-        let mut staged = self.clone();
-        let mut staged_rng = *rng;
-        let input = staged
-            .apply_joypad_mask(joypad_mask, step_options, current_scene)
-            .map_err(OverworldInputTickError::Input)?;
-        let movement_warp = match &input.action {
-            OverworldInputAction::Step(result) => result.warp.is_some(),
-            OverworldInputAction::LedgeJump(result) => result.warp.is_some(),
-            _ => false,
-        };
-        let wild_encounter = if input.action.moves_player()
-            && !movement_warp
-            && input.coord_event.is_none()
-            && input.trainer_sight.is_none()
-            && input.connection.is_none()
-        {
-            staged
-                .check_wild_encounter(
-                    encounters,
-                    slot_tables,
-                    music_modifiers,
-                    &mut staged_rng,
-                    encounter_options,
-                )
-                .map_err(OverworldInputTickError::Encounter)?
-        } else {
-            None
-        };
-        *self = staged;
-        *rng = staged_rng;
-        Ok(OverworldInputEncounterResult {
-            input,
-            wild_encounter,
-            expired_repel_item: None,
         })
     }
 
@@ -1855,22 +1811,40 @@ impl OverworldSession {
         Ok(OverworldLedgeJumpResult { outcome, warp })
     }
 
-    pub fn check_wild_encounter(
+    /// Exact `TryWildEncounter` / `_TryWildEncounter_BugContest` chooser over
+    /// the caller-owned persistent `hRandomAdd`/`hRandomSub` stream.
+    ///
+    /// This stops before `LoadEnemyMon`; the caller must continue with the
+    /// same [`CrystalRandom`] so held-item and DV reads remain in-order.
+    pub fn check_wild_encounter_exact<S>(
         &self,
-        encounters: &WildEncounterData,
+        encounters: Option<&WildEncounterData>,
         slot_tables: &EncounterSlotTables,
         music_modifiers: &EncounterMusicModifiers,
-        rng: &mut Random,
+        rng: &mut CrystalRandom<&mut S>,
         options: EncounterCheckOptions,
-    ) -> Result<Option<WildEncounterRoll>, EncounterError> {
+        context: ExactEncounterContext<'_>,
+    ) -> Result<Option<WildEncounterRoll>, ExactEncounterError<S::Error>>
+    where
+        S: DividerSource + ?Sized,
+    {
         let Some(surface) = encounter_surface_for_player_tile_checked(
             self,
             options.land_encounters_on_any_land,
         )? else {
             return Ok(None);
         };
-        let contest_encounter = !options.special_wild_encounters.is_empty();
-        let threshold = if contest_encounter {
+        let contest_encounter = context.bug_contest_encounters.is_some();
+        let normal_encounters = if contest_encounter {
+            None
+        } else {
+            Some(encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
+                map_name: self.map.name.clone(),
+                surface,
+                time: options.time,
+            })?)
+        };
+        let uncleaned_threshold = if contest_encounter {
             let permission = sample_collision(&self.map, &self.tileset, self.player.tile)
                 .ok_or_else(|| EncounterError::MissingRuntimeCollision {
                     map_name: self.map.name.clone(),
@@ -1883,30 +1857,39 @@ impl OverworldSession {
             } else {
                 20.0
             });
-            let adjusted = apply_encounter_music_effect(
+            apply_encounter_music_effect(
                 base,
                 options.music_token.as_deref(),
                 music_modifiers,
-            )?;
-            apply_cleanse_tag_effect(adjusted, options.has_cleanse_tag)
+            )?
         } else {
-            encounter_threshold(
-                encounters,
+            let base = crate::world::encounters::base_encounter_rate(
+                normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
                 surface,
                 options.time,
+            )?;
+            let base = percent_to_byte(f64::from(base));
+            apply_encounter_music_effect(
+                base,
                 options.music_token.as_deref(),
                 music_modifiers,
-                options.has_cleanse_tag,
             )?
         };
-        let (encounter_roll, passes_rate) = if contest_encounter {
-            let (add, _) = rng.crystal_random_add_sub();
-            (add, passes_encounter_roll(threshold, add))
+        let threshold = apply_cleanse_tag_effect(
+            uncleaned_threshold,
+            options.has_cleanse_tag,
+        );
+        // With no Cleanse Tag, the final failed party scan executes
+        // `add hl,de`, whose canonical WRAM range cannot overflow. With a
+        // Cleanse Tag, `srl b` supplies bit 0 of the pre-halved rate.
+        let rate_carry = options.has_cleanse_tag && uncleaned_threshold & 1 != 0;
+        let rate_output = rng.random(rate_carry).map_err(ExactEncounterError::Divider)?;
+        let encounter_roll = if contest_encounter {
+            rng.state().add
         } else {
-            let roll = rng.battle_random_byte();
-            (roll, passes_encounter_roll(threshold, roll))
+            rate_output.value
         };
-        if !passes_rate {
+        if !passes_encounter_roll(threshold, encounter_roll) {
             return Ok(Some(WildEncounterRoll {
                 map_name: self.map.name.clone(),
                 tile: self.player.tile,
@@ -1916,67 +1899,35 @@ impl OverworldSession {
                 encounter_roll,
                 slot_percent_roll: None,
                 level_roll: None,
+                roaming_slot: None,
                 resolved: None,
                 repelled_by: None,
-                rng_seed_after: rng.seed(),
             }));
         }
 
-        // Crystal checks roaming monsters after the encounter-rate roll but
-        // before selecting a normal wild slot. The roll is deliberately kept
-        // byte-wide: values >= 100 miss, then bits 0..1 select one of the
-        // three roaming slots. Water encounters never use roamers.
-        if !contest_encounter && surface != EncounterSurface::Water {
-            let roaming_roll = rng.battle_random_byte();
-            if roaming_roll < 100 {
-                let slot = usize::from(roaming_roll & 0x03);
-                if slot != 0 {
-                    if let Some((species, level)) = options
-                        .roaming_candidates
-                        .get(slot - 1)
-                        .and_then(Clone::clone)
-                    {
-                        let resolved = ResolvedWildEncounter {
-                            level,
-                            encounter: crate::world::encounters::WildEncounter {
-                                species,
-                                level,
-                            },
-                            slot: slot - 1,
-                        };
-                        let (resolved, repelled_by) =
-                            apply_repel_to_wild_encounter(Some(resolved), &options)?;
-                        return Ok(Some(WildEncounterRoll {
-                            map_name: self.map.name.clone(),
-                            tile: self.player.tile,
-                            surface,
-                            time: options.time,
-                            threshold,
-                            encounter_roll,
-                            slot_percent_roll: None,
-                            level_roll: Some(level),
-                            resolved,
-                            repelled_by,
-                            rng_seed_after: rng.seed(),
-                        }));
-                    }
-                }
-            }
-        }
-
-        if !options.special_wild_encounters.is_empty() {
-            let mut roll = loop {
-                let (_, sub) = rng.crystal_random_add_sub();
-                if sub < 200 {
-                    break i16::from(sub >> 1);
+        if contest_encounter {
+            // `TryWildEncounter_BugContest` returns with carry set on success.
+            let mut first = true;
+            let mut weighted_roll = loop {
+                let output = rng
+                    .random(first)
+                    .map_err(ExactEncounterError::Divider)?;
+                first = false;
+                if output.value < 200 {
+                    break i16::from(output.value >> 1);
                 }
             };
-            for entry in &options.special_wild_encounters {
-                roll -= i16::from(entry.percent);
-                if roll < 0 {
+            for entry in context.bug_contest_encounters.unwrap_or_default() {
+                weighted_roll -= i16::from(entry.weight);
+                if weighted_roll < 0 {
                     let range = entry.max_level.saturating_sub(entry.min_level) + 1;
-                    let (add, _) = rng.crystal_random_add_sub();
-                    let level = entry.min_level + add % range;
+                    let level = if range == 1 {
+                        entry.min_level
+                    } else {
+                        rng.random(false)
+                            .map_err(ExactEncounterError::Divider)?;
+                        entry.min_level + rng.state().add % range
+                    };
                     let resolved = ResolvedWildEncounter {
                         level,
                         encounter: WildEncounter {
@@ -1996,9 +1947,9 @@ impl OverworldSession {
                         encounter_roll,
                         slot_percent_roll: None,
                         level_roll: Some(level),
+                        roaming_slot: None,
                         resolved,
                         repelled_by,
-                        rng_seed_after: rng.seed(),
                     }));
                 }
             }
@@ -2006,21 +1957,91 @@ impl OverworldSession {
                 map_name: self.map.name.clone(),
                 surface,
                 time: options.time,
-            });
+            }
+            .into());
         }
 
-        let slot_percent_roll = next_percent_roll(rng);
-        let level_roll = (surface == EncounterSurface::Water)
-            .then(|| rng.battle_random_byte());
+        // CheckEncounterRoamMon is land-only and enters Random with carry
+        // clear after CheckOnWater's final `and a`.
+        if surface != EncounterSurface::Water {
+            let roaming_roll = rng
+                .random(false)
+                .map_err(ExactEncounterError::Divider)?
+                .value;
+            if roaming_roll < 100 {
+                let raw_slot = usize::from(roaming_roll & 0x03);
+                if raw_slot != 0 {
+                    let roaming = &context.roaming_pokemon[raw_slot - 1];
+                    if roaming.map_group == context.current_map.0
+                        && roaming.map_number == context.current_map.1
+                        && let Some(species) = roaming.species.clone()
+                    {
+                        let level = roaming.level;
+                        let resolved = ResolvedWildEncounter {
+                            level,
+                            encounter: WildEncounter {
+                                species,
+                                level,
+                            },
+                            slot: raw_slot - 1,
+                        };
+                        let (resolved, repelled_by) =
+                            apply_repel_to_wild_encounter(Some(resolved), &options)?;
+                        return Ok(Some(WildEncounterRoll {
+                            map_name: self.map.name.clone(),
+                            tile: self.player.tile,
+                            surface,
+                            time: options.time,
+                            threshold,
+                            encounter_roll,
+                            slot_percent_roll: None,
+                            level_roll: Some(level),
+                            roaming_slot: Some((raw_slot - 1) as u8),
+                            resolved,
+                            repelled_by,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let slot_percent_roll = loop {
+            let value = rng
+                .random(false)
+                .map_err(ExactEncounterError::Divider)?
+                .value;
+            if value < 100 {
+                break value + 1;
+            }
+        };
+        let level_roll = if surface == EncounterSurface::Water {
+            Some(
+                rng.random(false)
+                    .map_err(ExactEncounterError::Divider)?
+                    .value,
+            )
+        } else {
+            None
+        };
         let resolved = select_wild_encounter(
-            encounters,
+            normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
             slot_tables,
             surface,
             options.time,
             slot_percent_roll,
             level_roll.unwrap_or(0),
         )?;
-        let (resolved, repelled_by) = apply_repel_to_wild_encounter(resolved, &options)?;
+        // When no Unown letters are unlocked, ChooseWildEncounter returns
+        // normally after its chooser draws but before Repel or LoadEnemyMon.
+        let (resolved, repelled_by) = if resolved
+            .as_ref()
+            .is_some_and(|resolved| resolved.encounter.species == "UNOWN")
+            && context.unlocked_unown_sets == 0
+        {
+            (None, None)
+        } else {
+            apply_repel_to_wild_encounter(resolved, &options)?
+        };
         Ok(Some(WildEncounterRoll {
             map_name: self.map.name.clone(),
             tile: self.player.tile,
@@ -2030,9 +2051,198 @@ impl OverworldSession {
             encounter_roll,
             slot_percent_roll: Some(slot_percent_roll),
             level_roll,
+            roaming_slot: None,
             resolved,
             repelled_by,
-            rng_seed_after: rng.seed(),
+        }))
+    }
+
+    /// Exact `SweetScentEncounter` chooser. Unlike a walking encounter this
+    /// performs no encounter-rate Random call and never applies Repel. The
+    /// live collision decides land/water; callers cannot inject a surface.
+    pub fn check_sweet_scent_encounter_exact<S>(
+        &self,
+        encounters: Option<&WildEncounterData>,
+        slot_tables: &EncounterSlotTables,
+        rng: &mut CrystalRandom<&mut S>,
+        mut options: EncounterCheckOptions,
+        context: ExactEncounterContext<'_>,
+    ) -> Result<Option<WildEncounterRoll>, ExactEncounterError<S::Error>>
+    where
+        S: DividerSource + ?Sized,
+    {
+        let Some(surface) = encounter_surface_for_player_tile_checked(
+            self,
+            options.land_encounters_on_any_land,
+        )? else {
+            return Ok(None);
+        };
+        let contest_encounter = context.bug_contest_encounters.is_some();
+        let normal_encounters = if contest_encounter {
+            None
+        } else {
+            Some(encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
+                map_name: self.map.name.clone(),
+                surface,
+                time: options.time,
+            })?)
+        };
+        let threshold = if contest_encounter {
+            u8::MAX
+        } else {
+            let rate = crate::world::encounters::base_encounter_rate(
+                normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
+                surface,
+                options.time,
+            )?;
+            if rate == 0 {
+                return Ok(None);
+            }
+            rate
+        };
+        // Sweet Scent never calls CheckRepelEffect.
+        options.active_repel_item = None;
+
+        if contest_encounter {
+            // CanEncounterWildMon returned SCF and the intervening BIT keeps C.
+            let mut first = true;
+            let mut weighted_roll = loop {
+                let output = rng
+                    .random(first)
+                    .map_err(ExactEncounterError::Divider)?;
+                first = false;
+                if output.value < 200 {
+                    break i16::from(output.value >> 1);
+                }
+            };
+            for entry in context.bug_contest_encounters.unwrap_or_default() {
+                weighted_roll -= i16::from(entry.weight);
+                if weighted_roll < 0 {
+                    let range = entry.max_level.saturating_sub(entry.min_level) + 1;
+                    let level = if range == 1 {
+                        entry.min_level
+                    } else {
+                        rng.random(false)
+                            .map_err(ExactEncounterError::Divider)?;
+                        entry.min_level + rng.state().add % range
+                    };
+                    let resolved = Some(ResolvedWildEncounter {
+                        level,
+                        encounter: WildEncounter {
+                            level,
+                            species: entry.species.clone(),
+                        },
+                        slot: 0,
+                    });
+                    return Ok(Some(WildEncounterRoll {
+                        map_name: self.map.name.clone(),
+                        tile: self.player.tile,
+                        surface,
+                        time: options.time,
+                        threshold,
+                        encounter_roll: 0,
+                        slot_percent_roll: None,
+                        level_roll: Some(level),
+                        roaming_slot: None,
+                        resolved,
+                        repelled_by: None,
+                    }));
+                }
+            }
+            return Err(EncounterError::EmptyEncounterSlots {
+                map_name: self.map.name.clone(),
+                surface,
+                time: options.time,
+            }
+            .into());
+        }
+
+        if surface != EncounterSurface::Water {
+            let roaming_roll = rng
+                .random(false)
+                .map_err(ExactEncounterError::Divider)?
+                .value;
+            if roaming_roll < 100 {
+                let raw_slot = usize::from(roaming_roll & 0x03);
+                if raw_slot != 0 {
+                    let roaming = &context.roaming_pokemon[raw_slot - 1];
+                    if roaming.map_group == context.current_map.0
+                        && roaming.map_number == context.current_map.1
+                        && let Some(species) = roaming.species.clone()
+                    {
+                        let level = roaming.level;
+                        return Ok(Some(WildEncounterRoll {
+                            map_name: self.map.name.clone(),
+                            tile: self.player.tile,
+                            surface,
+                            time: options.time,
+                            threshold,
+                            encounter_roll: 0,
+                            slot_percent_roll: None,
+                            level_roll: Some(level),
+                            roaming_slot: Some((raw_slot - 1) as u8),
+                            resolved: Some(ResolvedWildEncounter {
+                                level,
+                                encounter: WildEncounter {
+                                    species,
+                                    level,
+                                },
+                                slot: raw_slot - 1,
+                            }),
+                            repelled_by: None,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let slot_percent_roll = loop {
+            let value = rng
+                .random(false)
+                .map_err(ExactEncounterError::Divider)?
+                .value;
+            if value < 100 {
+                break value + 1;
+            }
+        };
+        let level_roll = if surface == EncounterSurface::Water {
+            Some(
+                rng.random(false)
+                    .map_err(ExactEncounterError::Divider)?
+                    .value,
+            )
+        } else {
+            None
+        };
+        let resolved = select_wild_encounter(
+            normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
+            slot_tables,
+            surface,
+            options.time,
+            slot_percent_roll,
+            level_roll.unwrap_or(0),
+        )?;
+        let resolved = if resolved
+            .as_ref()
+            .is_some_and(|resolved| resolved.encounter.species == "UNOWN")
+            && context.unlocked_unown_sets == 0
+        {
+            None
+        } else {
+            resolved
+        };
+        Ok(Some(WildEncounterRoll {
+            map_name: self.map.name.clone(),
+            tile: self.player.tile,
+            surface,
+            time: options.time,
+            threshold,
+            encounter_roll: 0,
+            slot_percent_roll: Some(slot_percent_roll),
+            level_roll,
+            roaming_slot: None,
+            resolved,
+            repelled_by: None,
         }))
     }
 
@@ -2056,6 +2266,19 @@ impl OverworldSession {
             });
         }
         Ok(())
+    }
+}
+
+fn background_event_accepts_facing(event_type: &str, facing: Direction) -> bool {
+    match event_type {
+        "BGEVENT_UP" => facing == Direction::Up,
+        "BGEVENT_DOWN" => facing == Direction::Down,
+        "BGEVENT_RIGHT" => facing == Direction::Right,
+        "BGEVENT_LEFT" => facing == Direction::Left,
+        // BGEVENT_COPY only copies hidden-item metadata for Itemfinder and
+        // never starts a script or acknowledges an A-button interaction.
+        "BGEVENT_COPY" => false,
+        _ => true,
     }
 }
 
@@ -2186,15 +2409,6 @@ fn encounter_surface_for_player_tile_checked(
         return Ok(Some(EncounterSurface::Grass));
     }
     Ok(None)
-}
-
-fn next_percent_roll(rng: &mut Random) -> u8 {
-    loop {
-        let value = rng.battle_random_byte();
-        if value < 100 {
-            return value + 1;
-        }
-    }
 }
 
 fn direction_from_joypad_mask(mask: u8) -> Result<Option<Direction>, OverworldInputError> {
@@ -2530,6 +2744,36 @@ mod tests {
             TilePosition::new(2, 2)
         );
         assert_ne!(rng.seed(), 0x1234_5678);
+    }
+
+    #[test]
+    fn exact_fast_random_spin_duration_inherits_direction_compare_carry() {
+        let mut spinner = object("SPINNER", 1, 1, "-1");
+        spinner.spritemovedata = "SPRITEMOVEDATA_SPINRANDOM_FAST".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![spinner],
+            tileset(),
+            TilePosition::new(6, 6),
+        );
+        session
+            .object_facings
+            .insert("SPINNER".to_string(), Direction::Right);
+        let mut divider = crate::random::ReplayDivider::new([0, 0, 247, 0]);
+        let mut rng = CrystalRandom::new(
+            CrystalRandomState { add: 8, sub: 0 },
+            &mut divider,
+        );
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("exact autonomous random spin");
+
+        assert_eq!(session.object_facings.get("SPINNER"), Some(&Direction::Left));
+        assert_eq!(session.object_step_durations.get("SPINNER"), Some(&0));
+        assert_eq!(rng.state(), CrystalRandomState { add: 0, sub: 0xff });
+        assert_eq!(divider.remaining(), 0);
     }
 
     #[test]
@@ -3009,116 +3253,6 @@ mod tests {
             })
         );
         assert_eq!(result.snapshot.tile, TilePosition::new(1, 0));
-    }
-
-    #[test]
-    fn input_frame_with_encounter_rolls_after_player_moves() {
-        let mut session = OverworldSession::new(
-            map_with_blocks(2, 1, vec![0, 0]),
-            grass_tileset(),
-            TilePosition::new(0, 0),
-        );
-        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
-        let mut rng = Random::new(1);
-
-        let result = session
-            .apply_input_frame_with_encounter(
-                &input,
-                StepOptions {
-                    force_step_after_turn: true,
-                    ..StepOptions::default()
-                },
-                None,
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect("field input encounter");
-
-        assert_eq!(result.input.snapshot.tile, TilePosition::new(1, 0));
-        let roll = result.wild_encounter.expect("wild encounter roll");
-        assert_eq!(roll.tile, TilePosition::new(1, 0));
-        assert_eq!(roll.encounter_roll, 64);
-        assert_eq!(roll.slot_percent_roll, Some(88));
-        assert_eq!(roll.rng_seed_after, rng.seed());
-    }
-
-    #[test]
-    fn input_frame_with_state_encounter_ticks_repel_after_movement() {
-        let mut session = OverworldSession::new(
-            map_with_blocks(2, 1, vec![0, 0]),
-            grass_tileset(),
-            TilePosition::new(0, 0),
-        );
-        let mut state = GameState {
-            repel_steps_remaining: 1,
-            active_repel_item: Some("REPEL".to_string()),
-            ..GameState::default()
-        };
-        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
-        let mut rng = Random::new(1);
-
-        let result = session
-            .apply_input_frame_with_state_encounter(
-                &mut state,
-                &input,
-                StepOptions {
-                    force_step_after_turn: true,
-                    ..StepOptions::default()
-                },
-                None,
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                Some(3),
-                EncounterCheckOptions::default(),
-            )
-            .expect("field input encounter");
-
-        assert_eq!(result.expired_repel_item, Some("REPEL".to_string()));
-        assert_eq!(state.joypad.h_joypad_pressed, B_PAD_RIGHT);
-        assert_eq!(state.joypad.h_joypad_down, B_PAD_RIGHT);
-        assert_eq!(state.repel_steps_remaining, 0);
-        assert_eq!(state.active_repel_item, None);
-        assert_eq!(
-            result.wild_encounter.expect("encounter roll").repelled_by,
-            None
-        );
-    }
-
-    #[test]
-    fn input_frame_with_encounter_does_not_consume_rng_when_only_turning() {
-        let mut session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let input = PlayerInputFrame::new(1, Frame(0), B_PAD_RIGHT).expect("input frame");
-        let mut rng = Random::new(1);
-
-        let result = session
-            .apply_input_frame_with_encounter(
-                &input,
-                StepOptions::default(),
-                None,
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect("field input encounter");
-
-        assert_eq!(result.wild_encounter, None);
-        assert_eq!(rng.seed(), 1);
-        assert_eq!(
-            result.input.action,
-            OverworldInputAction::Step(OverworldStepResult {
-                outcome: StepOutcome::Turned {
-                    facing: Direction::Right,
-                },
-                warp: None,
-            })
-        );
     }
 
     #[test]
@@ -3776,6 +3910,40 @@ mod tests {
     }
 
     #[test]
+    fn directional_background_events_require_the_canonical_player_facing() {
+        let events = MapEvents {
+            bg_events: vec![
+                background_event(3, 2, "BGEVENT_UP", "WrongSideComputerScript"),
+                background_event(2, 1, "BGEVENT_UP", "ComputerScript"),
+            ],
+            ..MapEvents::default()
+        };
+        let mut session = OverworldSession::with_events(
+            map_with_blocks(4, 3, vec![0; 12]),
+            events,
+            tileset(),
+            TilePosition::new(2, 2),
+        );
+
+        session.player.facing = Direction::Right;
+        assert_eq!(
+            session
+                .check_interaction_checked(StepOptions::default().stride_tiles)
+                .expect("wrong-facing background check"),
+            None
+        );
+
+        session.player.facing = Direction::Up;
+        assert_eq!(
+            session
+                .check_interaction_checked(StepOptions::default().stride_tiles)
+                .expect("correct-facing background check")
+                .map(|interaction| interaction.script),
+            Some("ComputerScript".to_string())
+        );
+    }
+
+    #[test]
     fn interaction_dispatches_standard_scripts_for_interactive_collision_tiles() {
         for (permission, script) in [
             (permissions::BOOKSHELF, "MagazineBookshelfScript"),
@@ -4092,80 +4260,101 @@ mod tests {
     }
 
     #[test]
-    fn session_rolls_deterministic_grass_encounter_on_grass_tile() {
+    fn exact_walking_rate_random_uses_cleanse_shift_carry_and_no_tag_clear_carry() {
         let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut rng = Random::new(1);
 
-        let roll = session
-            .check_wild_encounter(
-                &encounter_data(),
+        let mut cleanse_divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut cleanse_rng = CrystalRandom::new(
+            CrystalRandomState { add: 0xff, sub: 0 },
+            &mut cleanse_divider,
+        );
+        let roaming = std::array::from_fn(|_| RoamingPokemonState::default());
+        let exact_context = ExactEncounterContext {
+            roaming_pokemon: &roaming,
+            current_map: (1, 1),
+            bug_contest_encounters: None,
+            unlocked_unown_sets: u8::MAX,
+        };
+        let cleanse = session
+            .check_wild_encounter_exact(
+                Some(&encounter_data()),
                 &encounter_slot_tables(),
                 &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
+                &mut cleanse_rng,
+                EncounterCheckOptions {
+                    has_cleanse_tag: true,
+                    ..EncounterCheckOptions::default()
+                },
+                exact_context,
             )
-            .expect("encounter roll")
-            .expect("grass encounter check");
+            .expect("exact Cleanse Tag rate roll")
+            .expect("grass permits an encounter check");
+        assert_eq!(cleanse.threshold, 127);
+        assert_eq!(cleanse.encounter_roll, 0xff);
+        assert_eq!(cleanse.resolved, None);
+        assert_eq!(cleanse_divider.remaining(), 0);
 
-        assert_eq!(roll.map_name, "test");
-        assert_eq!(roll.surface, EncounterSurface::Grass);
-        assert_eq!(roll.threshold, 255);
-        assert_eq!(roll.encounter_roll, 64);
-        assert_eq!(roll.slot_percent_roll, Some(88));
-        assert_eq!(
-            roll.resolved.expect("resolved encounter").encounter.species,
-            "PIDGEY"
+        let mut zero_rate = encounter_data();
+        for rate in zero_rate
+            .grass_rates
+            .as_mut()
+            .expect("grass rates")
+            .values_mut()
+        {
+            *rate = 0;
+        }
+        let mut clear_divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut clear_rng = CrystalRandom::new(
+            CrystalRandomState { add: 0xff, sub: 0 },
+            &mut clear_divider,
         );
-        assert_eq!(roll.rng_seed_after, rng.seed());
+        let clear = session
+            .check_wild_encounter_exact(
+                Some(&zero_rate),
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut clear_rng,
+                EncounterCheckOptions::default(),
+                exact_context,
+            )
+            .expect("exact no-Cleanse rate roll")
+            .expect("grass permits an encounter check");
+        assert_eq!(clear.threshold, 0);
+        assert_eq!(clear.encounter_roll, 0);
+        assert_eq!(clear.resolved, None);
+        assert_eq!(clear_divider.remaining(), 0);
     }
 
     #[test]
-    fn session_wild_encounter_accepts_odd_runtime_player_tile() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(1, 0));
-        let mut rng = Random::new(1);
-
+    fn exact_sweet_scent_skips_rate_and_repel_and_uses_live_collision_surface() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        // selector roll 0 misses roaming; slot roll 0 selects percent 1.
+        let mut divider = crate::random::ReplayDivider::new([0, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        let roaming = std::array::from_fn(|_| RoamingPokemonState::default());
         let roll = session
-            .check_wild_encounter(
-                &encounter_data(),
+            .check_sweet_scent_encounter_exact(
+                Some(&encounter_data()),
                 &encounter_slot_tables(),
-                &encounter_music_modifiers(),
                 &mut rng,
-                EncounterCheckOptions::default(),
+                EncounterCheckOptions {
+                    active_repel_item: Some("REPEL".to_string()),
+                    lead_party_level: Some(u8::MAX),
+                    ..EncounterCheckOptions::default()
+                },
+                ExactEncounterContext {
+                    roaming_pokemon: &roaming,
+                    current_map: (1, 1),
+                    bug_contest_encounters: None,
+                    unlocked_unown_sets: u8::MAX,
+                },
             )
-            .expect("encounter roll")
-            .expect("grass encounter check");
-
-        assert_eq!(roll.map_name, "test");
+            .expect("exact Sweet Scent chooser")
+            .expect("Sweet Scent finds a grass encounter");
         assert_eq!(roll.surface, EncounterSurface::Grass);
-        assert_eq!(roll.rng_seed_after, rng.seed());
-    }
-
-    #[test]
-    fn session_wild_encounter_rejects_out_of_bounds_player_tile_before_rng() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(4, 0));
-        let mut rng = Random::new(1);
-
-        let error = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect_err("encounter checks must reject runtime tiles outside the map");
-
-        assert_eq!(
-            error,
-            EncounterError::RuntimeTileOutOfBounds {
-                map_name: "test".to_string(),
-                x: 4,
-                y: 0,
-                width: 4,
-                height: 2,
-            }
-        );
-        assert_eq!(rng.seed(), 1);
+        assert!(roll.resolved.is_some(), "Sweet Scent never applies Repel");
+        assert_eq!(roll.repelled_by, None);
+        assert_eq!(divider.remaining(), 0, "there is no rate Random call");
     }
 
     #[test]
@@ -4243,249 +4432,6 @@ mod tests {
                 .expect("cave ice surface"),
             None
         );
-    }
-
-    #[test]
-    fn session_wild_encounter_rejects_missing_collision_before_rng() {
-        let session = OverworldSession::new(
-            map(),
-            TilesetCollision {
-                metatiles: Vec::new(),
-            },
-            TilePosition::new(0, 0),
-        );
-        let mut rng = Random::new(1);
-
-        let error = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect_err("encounter checks must reject missing collision data");
-
-        assert_eq!(
-            error,
-            EncounterError::MissingRuntimeCollision {
-                map_name: "test".to_string(),
-                x: 0,
-                y: 0,
-            }
-        );
-        assert_eq!(rng.seed(), 1);
-    }
-
-    #[test]
-    fn session_repel_suppresses_resolved_weaker_wild_encounter() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut rng = Random::new(1);
-
-        let roll = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions {
-                    active_repel_item: Some("REPEL".to_string()),
-                    lead_party_level: Some(8),
-                    ..EncounterCheckOptions::default()
-                },
-            )
-            .expect("encounter roll")
-            .expect("grass encounter check");
-
-        assert_eq!(roll.resolved, None);
-        assert_eq!(roll.repelled_by, Some("REPEL".to_string()));
-        assert_eq!(roll.encounter_roll, 64);
-        assert_eq!(roll.slot_percent_roll, Some(88));
-        assert_eq!(roll.rng_seed_after, rng.seed());
-    }
-
-    #[test]
-    fn session_repel_allows_resolved_same_level_wild_encounter_like_asm() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut rng = Random::new(1);
-
-        let roll = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions {
-                    active_repel_item: Some("REPEL".to_string()),
-                    lead_party_level: Some(7),
-                    ..EncounterCheckOptions::default()
-                },
-            )
-            .expect("encounter roll")
-            .expect("grass encounter check");
-
-        let resolved = roll.resolved.expect("same-level encounter resolves");
-        assert_eq!(resolved.level, 7);
-        assert_eq!(roll.repelled_by, None);
-    }
-
-    #[test]
-    fn encounter_roll_checks_roamers_before_normal_slot_selection() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut selected = None;
-        for seed in 1..10_000 {
-            let mut rng = Random::new(seed);
-            let roll = session
-                .check_wild_encounter(
-                    &encounter_data(),
-                    &encounter_slot_tables(),
-                    &encounter_music_modifiers(),
-                    &mut rng,
-                    EncounterCheckOptions {
-                        roaming_candidates: vec![Some(("RAIKOU".to_string(), 40)), None, None],
-                        ..EncounterCheckOptions::default()
-                    },
-                )
-                .expect("encounter roll");
-            if let Some(roll) =
-                roll.filter(|roll| roll.slot_percent_roll.is_none() && roll.resolved.is_some())
-            {
-                selected = Some(roll);
-                break;
-            }
-        }
-        let roll = selected.expect("a deterministic seed should select the roamer");
-        assert_eq!(
-            roll.resolved
-                .as_ref()
-                .map(|resolved| resolved.encounter.species.as_str()),
-            Some("RAIKOU")
-        );
-        assert_eq!(
-            roll.resolved.as_ref().map(|resolved| resolved.level),
-            Some(40)
-        );
-    }
-
-    #[test]
-    fn encounter_roll_uses_special_bug_contest_table_before_normal_slots() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut selected = None;
-        for seed in 1..10_000 {
-            let mut rng = Random::new(seed);
-            let roll = session
-                .check_wild_encounter(
-                    &encounter_data(),
-                    &encounter_slot_tables(),
-                    &encounter_music_modifiers(),
-                    &mut rng,
-                    EncounterCheckOptions {
-                        special_wild_encounters: vec![SpecialWildEncounterEntry {
-                            percent: 255,
-                            species: "SCYTHER".to_string(),
-                            min_level: 13,
-                            max_level: 14,
-                        }],
-                        ..EncounterCheckOptions::default()
-                    },
-                )
-                .expect("encounter roll");
-            if let Some(roll) = roll.filter(|roll| roll.resolved.is_some()) {
-                selected = Some(roll);
-                break;
-            }
-        }
-        let roll = selected.expect("a deterministic seed should resolve the special encounter");
-        let resolved = roll.resolved.expect("special encounter result");
-        assert_eq!(resolved.encounter.species, "SCYTHER");
-        assert!((13..=14).contains(&resolved.level));
-        assert_eq!(roll.slot_percent_roll, None);
-    }
-
-    #[test]
-    fn input_with_encounter_error_does_not_commit_session_or_rng() {
-        let mut session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        session.player.facing = Direction::Right;
-        let mut rng = Random::new(1);
-        let encounters = WildEncounterData {
-            map_name: "test".to_string(),
-            grass_rates: None,
-            water_rate: None,
-            grass: None,
-            water: None,
-        };
-
-        let error = session
-            .apply_joypad_mask_with_encounter(
-                B_PAD_RIGHT,
-                StepOptions {
-                    force_step_after_turn: true,
-                    ..StepOptions::default()
-                },
-                None,
-                &encounters,
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect_err("missing encounter rate must reject input frame");
-
-        assert!(matches!(
-            error,
-            OverworldInputTickError::Encounter(EncounterError::MissingEncounterRate {
-                map_name,
-                surface: EncounterSurface::Grass,
-            }) if map_name == "test"
-        ));
-        assert_eq!(session.player.tile, TilePosition::new(0, 0));
-        assert_eq!(session.frame, 0);
-        assert_eq!(rng.seed(), 1);
-    }
-
-    #[test]
-    fn session_active_repel_requires_explicit_lead_party_level() {
-        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
-        let mut rng = Random::new(1);
-
-        let error = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions {
-                    active_repel_item: Some("REPEL".to_string()),
-                    ..EncounterCheckOptions::default()
-                },
-            )
-            .expect_err("active repel must not infer lead level");
-
-        assert_eq!(
-            error,
-            EncounterError::ActiveRepelMissingLeadLevel {
-                item_id: "REPEL".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn session_skips_wild_encounter_check_on_floor_tile() {
-        let session = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
-        let mut rng = Random::new(1);
-
-        let roll = session
-            .check_wild_encounter(
-                &encounter_data(),
-                &encounter_slot_tables(),
-                &encounter_music_modifiers(),
-                &mut rng,
-                EncounterCheckOptions::default(),
-            )
-            .expect("encounter roll");
-
-        assert_eq!(roll, None);
-        assert_eq!(rng.seed(), 1);
     }
 
     #[test]

@@ -5,10 +5,11 @@ use thiserror::Error;
 
 use crate::battle::start::{
     ActiveBattleEnemyError, ActiveBattlePartyError, claim_active_trainer_battle_reward_index,
-    deactivate_battle, require_active_battle_party_index, update_active_battle_enemy,
+    deactivate_battle_after_win, require_active_battle_party_index, update_active_battle_enemy,
 };
 use crate::models::pokemon::StatExperience;
 use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
+use crate::random::DividerSource;
 use crate::state::{BattleMemory, GameState, PendingMoveLearn};
 use crate::systems::evolution::{
     EvolutionError, EvolutionReport, EvolutionTable, check_and_evolve,
@@ -230,6 +231,8 @@ pub enum BattleRewardError {
     },
     #[error("pending move learn level {level} does not match party index {party_index}")]
     PendingMoveLearnLevelMismatch { party_index: usize, level: u8 },
+    #[error("post-battle Pokerus divider failed: {error}")]
+    PokerusDivider { error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -518,7 +521,7 @@ pub fn claim_active_trainer_battle_rewards(
     Ok(outcome)
 }
 
-pub fn claim_active_wild_battle_rewards(
+pub fn claim_active_wild_battle_rewards<S>(
     state: &mut GameState,
     rules: &BattleRewardRules,
     species: &BTreeMap<String, PokemonSpecies>,
@@ -527,7 +530,12 @@ pub fn claim_active_wild_battle_rewards(
     growth_rates: &GrowthRateCatalog,
     evolutions: &EvolutionTable,
     time_of_day: TimeOfDay,
-) -> Result<BattleRewardOutcome, ActiveWildBattleRewardError> {
+    divider: &mut S,
+) -> Result<BattleRewardOutcome, ActiveWildBattleRewardError>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
     let enemy = match &state.battle {
         BattleMemory::Wild { enemy_pokemon, .. }
         | BattleMemory::StaticWild { enemy_pokemon, .. } => enemy_pokemon.clone(),
@@ -692,8 +700,12 @@ pub fn claim_active_wild_battle_rewards(
             &share_outcome,
         ));
     }
-    deactivate_battle(state);
-    state.spread_pokerus_after_battle();
+    deactivate_battle_after_win(state);
+    state
+        .spread_pokerus_after_battle(divider)
+        .map_err(|error| BattleRewardError::PokerusDivider {
+            error: error.to_string(),
+        })?;
     state.sync_party_from_storage();
     Ok(outcome)
 }
@@ -1253,6 +1265,7 @@ fn learn_moves_for_current_level(
 mod tests {
     use super::*;
     use crate::models::{BaseStats, Dv, GrowthRate, growth_rate, pokemon_type};
+    use crate::random::ReplayDivider;
     use crate::systems::evolution::EvolutionEntry;
     use crate::systems::experience::crystal_growth_rate_catalog_for_tests;
     use crate::systems::learnsets::LearnsetEntry;
@@ -1647,10 +1660,12 @@ mod tests {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
             enemy_pokemon: defeated.clone(),
             enemy_party: vec![defeated.clone()],
         };
 
+        let mut divider = ReplayDivider::new([]);
         let outcome = claim_active_wild_battle_rewards(
             &mut state,
             &reward_rules(),
@@ -1660,6 +1675,7 @@ mod tests {
             &growth_rates,
             &evolutions,
             TimeOfDay::Day,
+            &mut divider,
         )
         .expect("claim wild rewards");
 

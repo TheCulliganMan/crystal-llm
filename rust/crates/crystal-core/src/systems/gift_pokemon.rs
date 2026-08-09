@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::models::{
-    CaptureStorageLocation, Dv, Item, Move, Pokemon, PokemonBuildError, PokemonSpecies,
-    PokemonStorage, create_pokemon_from_known_dvs,
+    CaptureStorageLocation, Dv, Item, MAX_PC_BOXES, Move, Pokemon, PokemonBuildError,
+    PokemonSpecies, PokemonStorage, create_pokemon_from_known_dvs,
 };
 use crate::state::GameState;
 use crate::systems::experience::GrowthRateCatalog;
@@ -147,7 +147,9 @@ impl<'de> Deserialize<'de> for GiftPokemonRequest {
 pub struct GiftPokemonOutcome {
     pub species_id: String,
     pub level: u8,
-    pub location: CaptureStorageLocation,
+    pub location: Option<CaptureStorageLocation>,
+    /// The exact value left in wScriptVar by Script_givepoke or Script_giveegg.
+    pub script_value: u8,
     pub pokemon: Pokemon,
     pub source_script: String,
     pub command_index: usize,
@@ -162,7 +164,7 @@ pub enum GiftPokemonError {
     UnknownHeldItem { item_id: String },
     InvalidSourceScript { source_script: String },
     InvalidLevel { level: u8 },
-    StorageFull { species_id: String },
+    InvalidCurrentPcBox { current_pc_box: usize },
     PokemonBuild { error: PokemonBuildError },
 }
 
@@ -343,6 +345,7 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
 
 pub fn give_gift_pokemon(
     storage: &mut PokemonStorage,
+    current_pc_box: usize,
     species: &BTreeMap<String, PokemonSpecies>,
     learnsets: &SpeciesLearnsets,
     moves: &BTreeMap<String, Move>,
@@ -416,16 +419,37 @@ pub fn give_gift_pokemon(
         pokemon.rampage_turns = 0;
     }
 
-    let location =
-        storage
-            .register_capture(pokemon.clone())
-            .map_err(|_| GiftPokemonError::StorageFull {
-                species_id: request.species_id.clone(),
-            })?;
+    let (location, script_value) = if request.egg {
+        let location = storage.party.next_open_slot().and_then(|slot| {
+            storage
+                .party
+                .add_pokemon(pokemon.clone())
+                .then_some(CaptureStorageLocation::Party { slot })
+        });
+        let script_value = if location.is_some() { 2 } else { 0 };
+        (location, script_value)
+    } else {
+        if current_pc_box >= MAX_PC_BOXES {
+            return Err(GiftPokemonError::InvalidCurrentPcBox { current_pc_box });
+        }
+        match storage.register_capture_in_box(current_pc_box, pokemon.clone()) {
+            Ok(location) => {
+                let script_value = match location {
+                    CaptureStorageLocation::Party { .. } => 0,
+                    CaptureStorageLocation::Pc { .. } => 1,
+                };
+                (Some(location), script_value)
+            }
+            // GivePoke treats a full selected box as an ordinary B=2 result.
+            // register_capture_in_box has no other failure for a validated index.
+            Err(_) => (None, 2),
+        }
+    };
     Ok(GiftPokemonOutcome {
         species_id: request.species_id,
         level: request.level,
         location,
+        script_value,
         pokemon,
         source_script: request.source_script,
         command_index: request.command_index,
@@ -442,8 +466,10 @@ pub fn grant_gift_pokemon_to_state(
     request: GiftPokemonRequest,
 ) -> Result<GiftPokemonOutcome, GiftPokemonError> {
     let egg = request.egg;
+    let current_pc_box = state.current_pc_box;
     let outcome = give_gift_pokemon(
         &mut state.storage,
+        current_pc_box,
         species,
         learnsets,
         moves,
@@ -451,9 +477,19 @@ pub fn grant_gift_pokemon_to_state(
         items,
         request,
     )?;
-    if !egg {
+    if !egg && outcome.location.is_some() {
         state.pokedex.record_caught_pokemon(&outcome.pokemon);
     }
+    let script_value = outcome.script_value.to_string();
+    state.script_runtime.script_value = Some(script_value.clone());
+    state
+        .script_runtime
+        .variables
+        .insert("_value".to_string(), script_value.clone());
+    state
+        .script_runtime
+        .memory
+        .insert("wScriptVar".to_string(), script_value);
     state.sync_party_from_storage();
     Ok(outcome)
 }
@@ -461,7 +497,7 @@ pub fn grant_gift_pokemon_to_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, growth_rate, item_pocket, pokemon_type};
+    use crate::models::{BaseStats, MAX_BOX_MONS, PcBox, growth_rate, item_pocket, pokemon_type};
     use crate::systems::experience::{GrowthRateCatalog, crystal_growth_rate_catalog_for_tests};
 
     fn growth_rates() -> GrowthRateCatalog {
@@ -553,6 +589,28 @@ mod tests {
 
     fn learnsets(species_id: &str) -> SpeciesLearnsets {
         [(species_id.to_string(), Vec::new())].into_iter().collect()
+    }
+
+    fn pokemon(id: &str) -> Pokemon {
+        Pokemon::new_for_tests(species(id), 5, Dv::from_non_hp(10, 10, 10, 10))
+    }
+
+    fn fill_party(storage: &mut PokemonStorage) {
+        for index in 0..6 {
+            assert!(
+                storage
+                    .party
+                    .add_pokemon(pokemon(&format!("PARTY_{index}")))
+            );
+        }
+    }
+
+    fn full_box(index: usize) -> PcBox {
+        let mut pc_box = PcBox::new(index);
+        for slot in 0..MAX_BOX_MONS {
+            assert!(pc_box.add_pokemon(pokemon(&format!("BOX_{index}_{slot}"))));
+        }
+        pc_box
     }
 
     #[test]
@@ -718,6 +776,7 @@ mod tests {
 
         let outcome = give_gift_pokemon(
             &mut storage,
+            0,
             &species_map,
             &learnsets("CYNDAQUIL"),
             &BTreeMap::new(),
@@ -727,7 +786,10 @@ mod tests {
         )
         .expect("gift pokemon");
 
-        assert_eq!(outcome.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(
+            outcome.location,
+            Some(CaptureStorageLocation::Party { slot: 0 })
+        );
         assert_eq!(outcome.pokemon.species.id, "CYNDAQUIL");
         assert_eq!(outcome.pokemon.item.as_deref(), Some("BERRY"));
         assert_eq!(storage.party.filled_slots(), 1);
@@ -745,6 +807,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -759,6 +822,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -781,6 +845,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -798,6 +863,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -813,6 +879,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -830,6 +897,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -847,6 +915,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets("CYNDAQUIL"),
                 &BTreeMap::new(),
@@ -870,6 +939,7 @@ mod tests {
 
         let outcome = give_gift_pokemon(
             &mut storage,
+            0,
             &species_map,
             &learnsets("TOGEPI"),
             &BTreeMap::new(),
@@ -904,7 +974,10 @@ mod tests {
         )
         .expect("gift pokemon");
 
-        assert_eq!(outcome.location, CaptureStorageLocation::Party { slot: 0 });
+        assert_eq!(
+            outcome.location,
+            Some(CaptureStorageLocation::Party { slot: 0 })
+        );
         assert_eq!(
             state.storage.party.pokemon[0].as_ref().unwrap().species.id,
             "CYNDAQUIL"
@@ -939,6 +1012,139 @@ mod tests {
     }
 
     #[test]
+    fn givepoke_uses_only_selected_box_and_reports_full_without_fatal_error() {
+        let mut state = GameState::default();
+        fill_party(&mut state.storage);
+        state.storage.pc_boxes = vec![full_box(0), PcBox::new(1)];
+        state.current_pc_box = 0;
+        state.sync_party_from_storage();
+        let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
+
+        let outcome = grant_gift_pokemon_to_state(
+            &mut state,
+            &species_map,
+            &learnsets("CYNDAQUIL"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            request("CYNDAQUIL", 5),
+        )
+        .expect("full selected box is a normal GivePoke result");
+
+        assert_eq!(outcome.location, None);
+        assert_eq!(outcome.script_value, 2);
+        assert_eq!(state.storage.pc_boxes[0].filled_slots(), MAX_BOX_MONS);
+        assert_eq!(state.storage.pc_boxes[1].filled_slots(), 0);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("2"));
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wScriptVar")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert!(!state.pokedex.has_caught("CYNDAQUIL"));
+    }
+
+    #[test]
+    fn giveegg_is_party_only_and_reports_full_without_pc_fallback() {
+        let mut state = GameState::default();
+        fill_party(&mut state.storage);
+        state.storage.pc_boxes = vec![PcBox::new(0), PcBox::new(1)];
+        state.current_pc_box = 0;
+        state.sync_party_from_storage();
+        let species_map = BTreeMap::from([("TOGEPI".to_string(), species("TOGEPI"))]);
+        let mut egg_request = request("TOGEPI", 5);
+        egg_request.egg = true;
+
+        let outcome = grant_gift_pokemon_to_state(
+            &mut state,
+            &species_map,
+            &learnsets("TOGEPI"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            egg_request,
+        )
+        .expect("full party is a normal GiveEgg result");
+
+        assert_eq!(outcome.location, None);
+        assert_eq!(outcome.script_value, 0);
+        assert_eq!(state.storage.pc_boxes[0].filled_slots(), 0);
+        assert_eq!(state.storage.pc_boxes[1].filled_slots(), 0);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wScriptVar")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert!(!state.pokedex.has_seen("TOGEPI"));
+        assert!(!state.pokedex.has_caught("TOGEPI"));
+    }
+
+    #[test]
+    fn gift_script_accumulators_match_party_box_and_egg_success() {
+        let species_map = BTreeMap::from([
+            ("CYNDAQUIL".to_string(), species("CYNDAQUIL")),
+            ("TOGEPI".to_string(), species("TOGEPI")),
+        ]);
+
+        let mut party_state = GameState::default();
+        let party_outcome = grant_gift_pokemon_to_state(
+            &mut party_state,
+            &species_map,
+            &learnsets("CYNDAQUIL"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            request("CYNDAQUIL", 5),
+        )
+        .expect("party gift");
+        assert_eq!(party_outcome.script_value, 0);
+        assert_eq!(
+            party_state.script_runtime.script_value.as_deref(),
+            Some("0")
+        );
+
+        let mut box_state = GameState::default();
+        fill_party(&mut box_state.storage);
+        box_state.current_pc_box = 3;
+        let box_outcome = grant_gift_pokemon_to_state(
+            &mut box_state,
+            &species_map,
+            &learnsets("CYNDAQUIL"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            request("CYNDAQUIL", 5),
+        )
+        .expect("box gift");
+        assert_eq!(box_outcome.script_value, 1);
+        assert_eq!(box_state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(box_state.storage.pc_boxes[3].filled_slots(), 1);
+
+        let mut egg_state = GameState::default();
+        let mut egg_request = request("TOGEPI", 5);
+        egg_request.egg = true;
+        let egg_outcome = grant_gift_pokemon_to_state(
+            &mut egg_state,
+            &species_map,
+            &learnsets("TOGEPI"),
+            &BTreeMap::new(),
+            &growth_rates(),
+            &BTreeMap::new(),
+            egg_request,
+        )
+        .expect("egg gift");
+        assert_eq!(egg_outcome.script_value, 2);
+        assert_eq!(egg_state.script_runtime.script_value.as_deref(), Some("2"));
+    }
+
+    #[test]
     fn rejects_missing_learnset_moves_without_creating_zero_pp_gift() {
         let mut storage = PokemonStorage::default();
         let species_map = BTreeMap::from([("CYNDAQUIL".to_string(), species("CYNDAQUIL"))]);
@@ -955,6 +1161,7 @@ mod tests {
         assert_eq!(
             give_gift_pokemon(
                 &mut storage,
+                0,
                 &species_map,
                 &learnsets,
                 &BTreeMap::new(),

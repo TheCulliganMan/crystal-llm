@@ -34,7 +34,9 @@ impl<'de> Deserialize<'de> for PhoneContactCatalog {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PermanentPhoneNumberRule {}
+pub struct PermanentPhoneNumberRule {
+    pub list_index: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -439,6 +441,7 @@ pub fn apply_script_phone_command(
             } else {
                 match register_phone_number(
                     &mut state.script_runtime.phone_numbers,
+                    &mut state.script_runtime.phone_number_order,
                     command.contact_id.as_str(),
                     catalog,
                     permanent_phone_numbers,
@@ -484,13 +487,20 @@ pub fn initialize_permanent_phone_numbers(
         });
     }
     let mut inserted = Vec::new();
-    for contact_id in permanent_phone_numbers.keys() {
+    let mut ordered_permanent_numbers = permanent_phone_numbers.iter().collect::<Vec<_>>();
+    ordered_permanent_numbers.sort_by_key(|(_, rule)| rule.list_index);
+    for (contact_id, _) in ordered_permanent_numbers {
         if state
             .script_runtime
             .phone_numbers
             .insert(contact_id.clone())
         {
             inserted.push(contact_id.clone());
+            let inserted_slot = insert_phone_number_in_first_open_slot(
+                &mut state.script_runtime.phone_number_order,
+                contact_id,
+            );
+            debug_assert!(inserted_slot, "validated permanent contacts fit phone list");
         }
     }
     Ok(inserted)
@@ -498,6 +508,7 @@ pub fn initialize_permanent_phone_numbers(
 
 pub fn register_phone_number(
     phone_numbers: &mut BTreeSet<String>,
+    phone_number_order: &mut Vec<Option<String>>,
     contact_id: &str,
     catalog: &PhoneContactCatalog,
     permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
@@ -524,8 +535,26 @@ pub fn register_phone_number(
         return Ok(PhoneRegistrationResult::ContactsFull);
     }
 
+    if !insert_phone_number_in_first_open_slot(phone_number_order, contact_id) {
+        return Ok(PhoneRegistrationResult::ContactsFull);
+    }
     phone_numbers.insert(contact_id.to_string());
     Ok(PhoneRegistrationResult::Registered)
+}
+
+pub(crate) fn insert_phone_number_in_first_open_slot(
+    phone_number_order: &mut Vec<Option<String>>,
+    contact_id: &str,
+) -> bool {
+    if let Some(open_slot) = phone_number_order.iter_mut().find(|slot| slot.is_none()) {
+        *open_slot = Some(contact_id.to_string());
+        return true;
+    }
+    if phone_number_order.len() >= MAX_PHONE_CONTACTS {
+        return false;
+    }
+    phone_number_order.push(Some(contact_id.to_string()));
+    true
 }
 
 pub fn validate_script_phone_command(
@@ -1264,6 +1293,38 @@ mod tests {
         assert_eq!(inserted, vec!["PHONE_ELM", "PHONE_MOM"]);
         assert!(state.script_runtime.phone_numbers.contains("PHONE_MOM"));
         assert!(state.script_runtime.phone_numbers.contains("PHONE_ELM"));
+    }
+
+    #[test]
+    fn registration_fills_the_first_deleted_phone_list_slot() {
+        let mut phone_numbers = BTreeSet::from([
+            "PHONE_MOM".to_string(),
+            "PHONE_JOEY".to_string(),
+        ]);
+        let mut slots = vec![
+            Some("PHONE_MOM".to_string()),
+            None,
+            Some("PHONE_JOEY".to_string()),
+        ];
+
+        let result = register_phone_number(
+            &mut phone_numbers,
+            &mut slots,
+            "PHONE_ELM",
+            &catalog(),
+            &BTreeMap::new(),
+        )
+        .expect("register into deleted slot");
+
+        assert_eq!(result, PhoneRegistrationResult::Registered);
+        assert_eq!(
+            slots,
+            vec![
+                Some("PHONE_MOM".to_string()),
+                Some("PHONE_ELM".to_string()),
+                Some("PHONE_JOEY".to_string()),
+            ]
+        );
     }
 
     #[test]

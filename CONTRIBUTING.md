@@ -46,7 +46,7 @@ npm run build --workspace @pokecrystal/web
 ## Verification
 - If you change TypeScript behavior, make sure `npm run build` passes.
 - If you change shared runtime code, run the relevant workspace tests as well as the root build.
-- If you touch generated assets, regenerate them through the TypeScript exporter path instead of editing JSON by hand.
+- If you touch generated assets, regenerate the canonical pack with the Rust `./export` path instead of editing the compiled artifact by hand.
 
 ## Generated Data Policy
 - `pokecrystal_disassembly/` is the source of truth.

@@ -14,10 +14,10 @@ TypeScript exporters for turning `vendor/pokecrystal/` inputs into checked runti
 ## Core Export
 
 ```bash
-npm run export:core --workspace @pokecrystal/exporters
+./export
 ```
 
-This is the canonical exporter path for regenerating core runtime data.
+Run this from the repository root. The canonical core pack is now exported exclusively by the Rust `crystal-assets` crate; this command does not invoke this legacy TypeScript exporter package, Node, or npm.
 
 ## Development Commands
 

@@ -356,6 +356,7 @@ class BrowserPcmAudioBackend implements PcmAudioPlaybackBackend {
   private initPromise: Promise<AudioWorkletNode | null> | null = null;
   private workletUrl: string | null = null;
   private readonly endedCallbacks = new Map<number, () => void>();
+  private readonly pendingVoiceIds = new Set<number>();
 
   static isSupported(): boolean {
     if (typeof window === "undefined" || typeof Blob === "undefined" || typeof URL === "undefined") {
@@ -374,8 +375,9 @@ class BrowserPcmAudioBackend implements PcmAudioPlaybackBackend {
     if (onEnded) {
       this.endedCallbacks.set(voice.id, onEnded);
     }
+    this.pendingVoiceIds.add(voice.id);
     void this.ensureNode().then((node) => {
-      if (!node) {
+      if (!node || !this.pendingVoiceIds.delete(voice.id)) {
         return;
       }
       const pcm = new Int16Array(voice.pcm);
@@ -393,6 +395,7 @@ class BrowserPcmAudioBackend implements PcmAudioPlaybackBackend {
   }
 
   stopVoice(id: number): void {
+    this.pendingVoiceIds.delete(id);
     this.endedCallbacks.delete(id);
     this.node?.port.postMessage({ type: "stop", id });
   }
@@ -417,6 +420,7 @@ class BrowserPcmAudioBackend implements PcmAudioPlaybackBackend {
     this.node = null;
     this.initPromise = null;
     this.endedCallbacks.clear();
+    this.pendingVoiceIds.clear();
     if (this.workletUrl) {
       URL.revokeObjectURL(this.workletUrl);
       this.workletUrl = null;
@@ -1055,6 +1059,10 @@ export class AudioEngine {
     if (role === "map") {
       this.mapMusicName = token;
     }
+    // A music request supersedes every earlier request, including tracks still
+    // loading their PCM stems asynchronously.
+    const requestId = ++this.pendingMusicRequestId;
+    this._stopMusicElement();
     const source = this._resolveSource(token, this.music);
     if (!source) {
       return;
@@ -1068,9 +1076,7 @@ export class AudioEngine {
     });
     this.fadeState = null;
     this.pendingMusicAfterFade = null;
-    this._stopMusicElement();
     if (this._isManifestSource(source)) {
-      const requestId = ++this.pendingMusicRequestId;
       void this._playMusicManifest(token, source, role, requestId);
       return;
     }
@@ -1100,6 +1106,8 @@ export class AudioEngine {
   }
 
   stopMusic(): void {
+    // Invalidate manifest/PCM loads so a stopped track cannot start later.
+    this.pendingMusicRequestId += 1;
     this.fadeState = null;
     this.pendingMusicAfterFade = null;
     this._stopMusicElement();
@@ -1818,6 +1826,7 @@ export class AudioEngine {
     source: string,
     role: string,
     manifest: PcmMusicTrackManifest,
+    requestId: number,
   ): Promise<void> {
     if (!this.pcmBackend) {
       return;
@@ -1826,6 +1835,9 @@ export class AudioEngine {
     for (const stem of manifest.stems) {
       const path = this._resolveManifestPath(source, stem.path);
       const pcm = await this._loadPcmBytes(path);
+      if (requestId !== this.pendingMusicRequestId || this.currentMusicName !== token) {
+        return;
+      }
       if (!pcm) {
         continue;
       }
@@ -1848,6 +1860,9 @@ export class AudioEngine {
       }
     }
     if (stems.size === 0) {
+      return;
+    }
+    if (requestId !== this.pendingMusicRequestId || this.currentMusicName !== token) {
       return;
     }
     if (this.currentMusicState) {
@@ -1890,7 +1905,7 @@ export class AudioEngine {
       return;
     }
     if (this._isPcmMusicManifest(manifest)) {
-      await this._playPcmMusicManifest(token, source, role, manifest);
+      await this._playPcmMusicManifest(token, source, role, manifest, requestId);
       return;
     }
     if (this.currentMusicState) {

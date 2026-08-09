@@ -188,9 +188,11 @@ pub struct TimeState {
     pub time_of_day: TimeOfDay,
     pub dst: bool,
     pub rtc_status_flags: u8,
-    pub game_time_seconds: u8,
+    pub game_time_capped: bool,
+    pub game_time_hours: u16,
     pub game_time_minutes: u8,
-    pub game_time_hours: u8,
+    pub game_time_seconds: u8,
+    pub game_time_frames: u8,
     last_rtc_day_count: u16,
 }
 
@@ -211,9 +213,11 @@ impl<'de> Deserialize<'de> for TimeState {
             time_of_day: TimeOfDay,
             dst: bool,
             rtc_status_flags: u8,
-            game_time_seconds: u8,
+            game_time_capped: bool,
+            game_time_hours: u16,
             game_time_minutes: u8,
-            game_time_hours: u8,
+            game_time_seconds: u8,
+            game_time_frames: u8,
             last_rtc_day_count: u16,
         }
 
@@ -228,9 +232,11 @@ impl<'de> Deserialize<'de> for TimeState {
             time_of_day: raw.time_of_day,
             dst: raw.dst,
             rtc_status_flags: raw.rtc_status_flags,
-            game_time_seconds: raw.game_time_seconds,
-            game_time_minutes: raw.game_time_minutes,
+            game_time_capped: raw.game_time_capped,
             game_time_hours: raw.game_time_hours,
+            game_time_minutes: raw.game_time_minutes,
+            game_time_seconds: raw.game_time_seconds,
+            game_time_frames: raw.game_time_frames,
             last_rtc_day_count: raw.last_rtc_day_count,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
@@ -250,9 +256,11 @@ impl TimeState {
             time_of_day: TimeOfDay::Night,
             dst: false,
             rtc_status_flags: 0,
-            game_time_seconds: 0,
-            game_time_minutes: 0,
+            game_time_capped: false,
             game_time_hours: 0,
+            game_time_minutes: 0,
+            game_time_seconds: 0,
+            game_time_frames: 0,
             last_rtc_day_count: 0,
         }
     }
@@ -291,7 +299,7 @@ impl TimeState {
 
         let base_day = (self.last_rtc_day_count % 7) as i16;
         let day_raw = i16::from(target.day) - (base_day + carry_days);
-        let start_day = mod_i16(day_raw, 256) as u8;
+        let start_day = mod_i16(day_raw, 7) as u8;
 
         self.start_time = ClockTime {
             day: start_day,
@@ -304,7 +312,7 @@ impl TimeState {
     pub fn update_time_registers(&mut self) {
         self.fix_days();
         self.fix_time();
-        self.sync_game_time_fields();
+        self.day_of_week = self.current_day % 7;
         self.time_of_day = time_of_day_for_hour(self.registers.hours);
     }
 
@@ -316,26 +324,49 @@ impl TimeState {
         self.registers.rtc_minutes = minute % 60;
         self.registers.rtc_hours = hour % 24;
         self.registers.rtc_day_lo = (day_count & 0xff) as u8;
-        self.registers.rtc_day_hi = (((day_count >> 8) & 1) as u8) << B_RAMB_RTC_DH_HIGH;
+        let control = self.registers.rtc_day_hi
+            & ((1 << B_RAMB_RTC_DH_HALT) | (1 << B_RAMB_RTC_DH_CARRY));
+        self.registers.rtc_day_hi =
+            control | (((day_count >> 8) & 1) as u8) << B_RAMB_RTC_DH_HIGH;
+        if day_count > 0x1ff {
+            self.registers.rtc_day_hi |= 1 << B_RAMB_RTC_DH_CARRY;
+            self.rtc_status_flags |= RTC_RESET;
+        }
     }
 
     fn fix_days(&mut self) {
         let mut status = 0;
         let mut day_lo = self.registers.rtc_day_lo;
         let mut day_hi = self.registers.rtc_day_hi;
+        let mut set_clock = false;
 
         if day_hi & (1 << B_RAMB_RTC_DH_HIGH) != 0 {
             day_hi &= !(1 << B_RAMB_RTC_DH_HIGH);
-            day_lo %= 140;
+            day_lo = ((u16::from(day_lo) + 256) % 140) as u8;
             status |= RTC_DAYS_EXCEED_255;
+            set_clock = true;
         } else if day_lo >= 140 {
             day_lo %= 140;
             status |= RTC_DAYS_EXCEED_139;
+            set_clock = true;
         }
 
         self.registers.rtc_day_lo = day_lo;
         self.registers.rtc_day_hi = day_hi;
-        self.rtc_status_flags = status;
+        self.last_rtc_day_count = u16::from(day_lo);
+        self.rtc_status_flags |= status;
+        if set_clock {
+            // FixDays writes the reduced day count back to the MBC3. Rebase the
+            // host-date anchor at that same boundary so the next host sample
+            // observes the written counter instead of recreating the overflow.
+            self.rtc_anchor = game_date_from_days(
+                days_from_civil(
+                    self.current_date.year,
+                    self.current_date.month,
+                    self.current_date.day,
+                ) - i64::from(day_lo),
+            );
+        }
     }
 
     fn fix_time(&mut self) {
@@ -360,11 +391,65 @@ impl TimeState {
         self.current_day = mod_i16(total_days, 256) as u8;
     }
 
-    fn sync_game_time_fields(&mut self) {
-        self.game_time_seconds = self.registers.seconds;
-        self.game_time_minutes = self.registers.minutes;
-        self.game_time_hours = self.registers.hours;
-        self.day_of_week = self.current_day % 7;
+    pub fn advance_game_timer_frame(&mut self) {
+        self.advance_game_timer_frames(1);
+    }
+
+    pub fn advance_game_timer_frames(&mut self, frames: u64) {
+        if self.game_time_capped || frames == 0 {
+            return;
+        }
+        const FRAMES_PER_SECOND: u64 = 60;
+        const FRAMES_PER_MINUTE: u64 = 60 * FRAMES_PER_SECOND;
+        const FRAMES_PER_HOUR: u64 = 60 * FRAMES_PER_MINUTE;
+        const GAME_TIME_CAP_FRAMES: u64 = 1000 * FRAMES_PER_HOUR;
+
+        let current = u64::from(self.game_time_hours) * FRAMES_PER_HOUR
+            + u64::from(self.game_time_minutes) * FRAMES_PER_MINUTE
+            + u64::from(self.game_time_seconds) * FRAMES_PER_SECOND
+            + u64::from(self.game_time_frames);
+        let Some(next) = current.checked_add(frames) else {
+            self.cap_game_timer();
+            return;
+        };
+        if next >= GAME_TIME_CAP_FRAMES {
+            self.cap_game_timer();
+            return;
+        }
+
+        self.game_time_hours = (next / FRAMES_PER_HOUR) as u16;
+        let within_hour = next % FRAMES_PER_HOUR;
+        self.game_time_minutes = (within_hour / FRAMES_PER_MINUTE) as u8;
+        let within_minute = within_hour % FRAMES_PER_MINUTE;
+        self.game_time_seconds = (within_minute / FRAMES_PER_SECOND) as u8;
+        self.game_time_frames = (within_minute % FRAMES_PER_SECOND) as u8;
+    }
+
+    fn cap_game_timer(&mut self) {
+        self.game_time_capped = true;
+        self.game_time_hours = 999;
+        self.game_time_minutes = 59;
+        self.game_time_seconds = 59;
+        self.game_time_frames = 0;
+    }
+
+    /// SaveRTC clears the persisted RTC status byte and the MBC3 carry bit.
+    /// Rebase the host-date anchor to the retained nine-bit counter so a later
+    /// sample does not reconstruct the carry that the save boundary cleared.
+    pub fn normalize_rtc_for_save(&mut self) {
+        let day_count = u16::from(self.registers.rtc_day_lo)
+            | (u16::from(
+                (self.registers.rtc_day_hi >> B_RAMB_RTC_DH_HIGH) & 1,
+            ) << 8);
+        self.rtc_anchor = game_date_from_days(
+            days_from_civil(
+                self.current_date.year,
+                self.current_date.month,
+                self.current_date.day,
+            ) - i64::from(day_count),
+        );
+        self.registers.rtc_day_hi &= !(1 << B_RAMB_RTC_DH_CARRY);
+        self.rtc_status_flags = 0;
     }
 
     pub fn validate_saved_state(&self) -> Result<(), String> {
@@ -377,22 +462,27 @@ impl TimeState {
         validate_clock_field("time.registers.seconds", self.registers.seconds, 60)?;
         validate_clock_field("time.registers.minutes", self.registers.minutes, 60)?;
         validate_clock_field("time.registers.hours", self.registers.hours, 24)?;
-        if self.game_time_seconds != self.registers.seconds {
+        if self.game_time_hours > 999 {
             return Err(format!(
-                "time.game_time_seconds {} does not match registers.seconds {}",
-                self.game_time_seconds, self.registers.seconds
+                "time.game_time_hours {} exceeds Crystal's 999-hour cap",
+                self.game_time_hours
             ));
         }
-        if self.game_time_minutes != self.registers.minutes {
+        validate_clock_field("time.game_time_minutes", self.game_time_minutes, 60)?;
+        validate_clock_field("time.game_time_seconds", self.game_time_seconds, 60)?;
+        validate_clock_field("time.game_time_frames", self.game_time_frames, 60)?;
+        if self.game_time_capped
+            && (self.game_time_hours != 999
+                || self.game_time_minutes != 59
+                || self.game_time_seconds != 59
+                || self.game_time_frames != 0)
+        {
             return Err(format!(
-                "time.game_time_minutes {} does not match registers.minutes {}",
-                self.game_time_minutes, self.registers.minutes
-            ));
-        }
-        if self.game_time_hours != self.registers.hours {
-            return Err(format!(
-                "time.game_time_hours {} does not match registers.hours {}",
-                self.game_time_hours, self.registers.hours
+                "capped game timer must be exactly 999:59:59.00, got {}:{:02}:{:02}.{:02}",
+                self.game_time_hours,
+                self.game_time_minutes,
+                self.game_time_seconds,
+                self.game_time_frames
             ));
         }
         let expected_day_of_week = self.current_day % 7;
@@ -460,6 +550,21 @@ fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     i64::from(era * 146097 + doe)
 }
 
+fn game_date_from_days(days: i64) -> GameDate {
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
+            / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    GameDate::new(year as i32, month as u8, day as u8)
+}
+
 fn mod_i16(value: i16, modulus: i16) -> i16 {
     value.rem_euclid(modulus)
 }
@@ -481,8 +586,87 @@ mod tests {
         assert_eq!(state.registers.rtc_minutes, 0);
         assert_eq!(state.registers.rtc_seconds, 0);
         assert_eq!(state.time_of_day, TimeOfDay::Day);
-        assert_eq!(state.game_time_hours, 12);
+        assert_eq!(state.game_time_hours, 0);
         assert!(!state.dst);
+    }
+
+    #[test]
+    fn rtc_updates_do_not_rewrite_the_independent_play_timer() {
+        let mut state = TimeState::new(GameDate::new(2024, 1, 1));
+        state.game_time_hours = 7;
+        state.game_time_minutes = 8;
+        state.game_time_seconds = 9;
+
+        state.update_from_datetime(GameDate::new(2024, 1, 2), 12, 34, 56);
+
+        assert_eq!(state.registers.hours, 12);
+        assert_eq!(state.registers.minutes, 34);
+        assert_eq!(state.registers.seconds, 56);
+        assert_eq!(state.game_time_hours, 7);
+        assert_eq!(state.game_time_minutes, 8);
+        assert_eq!(state.game_time_seconds, 9);
+    }
+
+    #[test]
+    fn saved_play_timer_accepts_the_canonical_999_hour_range() {
+        let mut saved = serde_json::to_value(TimeState::default()).expect("serialize time state");
+        saved["game_time_hours"] = serde_json::json!(999);
+
+        let state: TimeState = serde_json::from_value(saved)
+            .expect("wGameTimeHours is a two-byte counter capped at 999 hours");
+
+        assert_eq!(state.game_time_hours, 999);
+    }
+
+    #[test]
+    fn game_timer_advances_at_sixty_frames_per_second_with_exact_carries() {
+        let mut state = TimeState::default();
+
+        for _ in 0..59 {
+            state.advance_game_timer_frame();
+        }
+        assert_eq!(state.game_time_frames, 59);
+        assert_eq!(state.game_time_seconds, 0);
+
+        state.advance_game_timer_frame();
+        assert_eq!(state.game_time_frames, 0);
+        assert_eq!(state.game_time_seconds, 1);
+
+        state.game_time_frames = 59;
+        state.game_time_seconds = 59;
+        state.game_time_minutes = 59;
+        state.game_time_hours = 12;
+        state.advance_game_timer_frame();
+        assert_eq!(state.game_time_frames, 0);
+        assert_eq!(state.game_time_seconds, 0);
+        assert_eq!(state.game_time_minutes, 0);
+        assert_eq!(state.game_time_hours, 13);
+        assert!(!state.game_time_capped);
+    }
+
+    #[test]
+    fn game_timer_caps_at_999_59_59_and_stops_advancing() {
+        let mut state = TimeState::default();
+        state.game_time_hours = 999;
+        state.game_time_minutes = 59;
+        state.game_time_seconds = 59;
+        state.game_time_frames = 59;
+
+        state.advance_game_timer_frame();
+
+        assert!(state.game_time_capped);
+        assert_eq!(state.game_time_hours, 999);
+        assert_eq!(state.game_time_minutes, 59);
+        assert_eq!(state.game_time_seconds, 59);
+        assert_eq!(state.game_time_frames, 0);
+
+        for _ in 0..120 {
+            state.advance_game_timer_frame();
+        }
+        assert_eq!(state.game_time_hours, 999);
+        assert_eq!(state.game_time_minutes, 59);
+        assert_eq!(state.game_time_seconds, 59);
+        assert_eq!(state.game_time_frames, 0);
     }
 
     #[test]
@@ -514,6 +698,23 @@ mod tests {
     }
 
     #[test]
+    fn manual_weekday_offset_uses_init_time_modulo_seven_and_preserves_wcurday() {
+        let mut state = TimeState::new(GameDate::new(2024, 1, 1));
+
+        state.set_manual_time(
+            GameDate::new(2024, 1, 3),
+            12,
+            0,
+            0,
+            ClockTime::new(0, 12, 0, 0),
+        );
+
+        assert_eq!(state.start_time.day, 5);
+        assert_eq!(state.current_day, 7);
+        assert_eq!(state.day_of_week, 0);
+    }
+
+    #[test]
     fn byte_start_offset_carries_minutes_forward() {
         let mut state = TimeState::new(GameDate::new(2024, 1, 1));
         state.update_from_datetime(GameDate::new(2024, 1, 1), 12, 0, 0);
@@ -531,14 +732,75 @@ mod tests {
     }
 
     #[test]
+    fn rtc_host_date_anchor_conversion_round_trips_civil_dates() {
+        for date in [
+            GameDate::new(2000, 1, 1),
+            GameDate::new(2024, 2, 29),
+            GameDate::new(2025, 12, 31),
+        ] {
+            assert_eq!(
+                game_date_from_days(days_from_civil(date.year, date.month, date.day)),
+                date
+            );
+        }
+    }
+
+    #[test]
     fn day_count_and_rtc_status_flags_match_day_thresholds() {
         let mut state = TimeState::new(GameDate::new(2024, 1, 1));
         state.update_from_datetime(GameDate::new(2024, 5, 20), 12, 0, 0);
         assert_eq!(state.registers.rtc_day_lo, 0);
         assert_eq!(state.rtc_status_flags, RTC_DAYS_EXCEED_139);
 
+        let mut state = TimeState::new(GameDate::new(2024, 1, 1));
         state.update_from_datetime(GameDate::new(2024, 9, 14), 12, 0, 0);
         assert_eq!(state.rtc_status_flags, RTC_DAYS_EXCEED_255);
+    }
+
+    #[test]
+    fn fix_days_reduces_the_complete_nine_bit_rtc_day_counter() {
+        let mut state = TimeState::default();
+        for (day_count, expected_day, expected_status) in [
+            (139_u16, 139_u8, 0_u8),
+            (140, 0, RTC_DAYS_EXCEED_139),
+            (255, 115, RTC_DAYS_EXCEED_139),
+            (256, 116, RTC_DAYS_EXCEED_255),
+            (257, 117, RTC_DAYS_EXCEED_255),
+            (279, 139, RTC_DAYS_EXCEED_255),
+            (280, 0, RTC_DAYS_EXCEED_255),
+        ] {
+            state.registers.rtc_day_lo = day_count as u8;
+            state.registers.rtc_day_hi =
+                ((day_count >> 8) as u8) << B_RAMB_RTC_DH_HIGH;
+            state.rtc_status_flags = 0;
+
+            state.fix_days();
+
+            assert_eq!(state.registers.rtc_day_lo, expected_day, "day {day_count}");
+            assert_eq!(
+                state.registers.rtc_day_hi & (1 << B_RAMB_RTC_DH_HIGH),
+                0,
+                "day {day_count}"
+            );
+            assert_eq!(state.rtc_status_flags, expected_status, "day {day_count}");
+        }
+    }
+
+    #[test]
+    fn rtc_status_flags_remain_sticky_across_clean_and_later_overflow_samples() {
+        let mut state = TimeState::new(GameDate::new(2024, 1, 1));
+
+        state.update_from_datetime(GameDate::new(2024, 5, 20), 12, 0, 0);
+        assert_eq!(state.rtc_status_flags, RTC_DAYS_EXCEED_139);
+
+        state.update_from_datetime(GameDate::new(2024, 1, 2), 12, 0, 0);
+        assert_eq!(state.rtc_status_flags, RTC_DAYS_EXCEED_139);
+
+        state.update_from_datetime(GameDate::new(2025, 1, 31), 12, 0, 0);
+        assert_eq!(
+            state.rtc_status_flags,
+            RTC_DAYS_EXCEED_139 | RTC_DAYS_EXCEED_255
+        );
     }
 
     #[test]

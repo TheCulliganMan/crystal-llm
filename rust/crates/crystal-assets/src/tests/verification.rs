@@ -292,6 +292,29 @@
     }
 
     #[test]
+    fn every_source_move_effect_is_accepted_by_the_runtime_verifier() {
+        let asset_root = AssetRoot::new(repository_root_for_tests());
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load source-backed base game data");
+        let report = verify_game_data(&asset_root, &data, &PlayabilityRules::default());
+        let unsupported = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unsupported_battle_move_effect")
+            .map(|diagnostic| {
+                format!(
+                    "{}: {}",
+                    diagnostic.subject,
+                    diagnostic.message
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(unsupported, Vec::<String>::new());
+    }
+
+    #[test]
     fn verifier_rejects_invalid_asm_text_without_coercion() {
         let data = GameDataSet {
             asm_text: [("GreetingText".to_string(), String::new())]
@@ -4290,7 +4313,7 @@
     }
 
     #[test]
-    fn raw_script_movement_extraction_binds_global_labels_to_exact_source_scripts() {
+    fn raw_script_movement_extraction_deduplicates_global_labels_in_parent_scope() {
         let movement_command = |source_script: &str, command_index: usize| ScriptObjectCommand {
             command: "applymovement".to_string(),
             object_id: Some("PLAYER".to_string()),
@@ -4321,9 +4344,9 @@
                 movement_command(".GotPass_Female_1@Copycat", 1),
             ],
         )
-        .expect("shared movement parses for each exact source script");
+        .expect("shared movement parses once in its parent script scope");
 
-        assert_eq!(movements.len(), 2);
+        assert_eq!(movements.len(), 1);
         assert_eq!(
             movements
                 .iter()
@@ -4335,10 +4358,7 @@
                     )
                 })
                 .collect::<Vec<_>>(),
-            vec![
-                ("SharedSpinMovement", Some(".Default_Female_1@Copycat"), 3),
-                ("SharedSpinMovement", Some(".GotPass_Female_1@Copycat"), 3),
-            ]
+            vec![("SharedSpinMovement", Some("Copycat"), 3)]
         );
     }
 

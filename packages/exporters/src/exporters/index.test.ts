@@ -1,5 +1,19 @@
 const mockCalls: string[] = [];
 
+const testBugContestEncounters = [
+  { weight: 20, species: "CATERPIE", minLevel: 7, maxLevel: 18 },
+  { weight: 20, species: "WEEDLE", minLevel: 7, maxLevel: 18 },
+  { weight: 10, species: "METAPOD", minLevel: 9, maxLevel: 18 },
+  { weight: 10, species: "KAKUNA", minLevel: 9, maxLevel: 18 },
+  { weight: 5, species: "BUTTERFREE", minLevel: 12, maxLevel: 15 },
+  { weight: 5, species: "BEEDRILL", minLevel: 12, maxLevel: 15 },
+  { weight: 10, species: "VENONAT", minLevel: 10, maxLevel: 16 },
+  { weight: 10, species: "PARAS", minLevel: 10, maxLevel: 17 },
+  { weight: 5, species: "SCYTHER", minLevel: 13, maxLevel: 14 },
+  { weight: 5, species: "PINSIR", minLevel: 13, maxLevel: 14 },
+  { weight: 255, species: "VENOMOTH", minLevel: 30, maxLevel: 40 },
+];
+
 const mockExportData = jest.fn(() => {
   mockCalls.push("exportData");
   return {
@@ -220,6 +234,7 @@ const mockExportBugContestConfig = jest.fn(() => {
     timerSeconds: 0,
     selectedContestantCount: 5,
     contestantFlags: ["EVENT_BUG_CATCHING_CONTESTANT_1A"],
+    encounters: testBugContestEncounters,
   };
 });
 const mockExportBattleTowerRules = jest.fn(() => {
@@ -657,6 +672,7 @@ describe("exportCoreData", () => {
         timerSeconds: 0,
         selectedContestantCount: 5,
         contestantFlags: ["EVENT_BUG_CATCHING_CONTESTANT_1A"],
+        encounters: testBugContestEncounters,
       },
       battleTowerRules: {
         bannedSpecies: { MEWTWO: {}, MEW: {}, LUGIA: {}, HO_OH: {}, CELEBI: {} },

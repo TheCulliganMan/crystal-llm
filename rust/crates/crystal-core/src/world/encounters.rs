@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-use crate::random::Random;
+use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, Random};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EncounterSurface {
@@ -22,7 +22,7 @@ impl EncounterSurface {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TimeOfDay {
     Morning,
@@ -140,18 +140,6 @@ pub enum EncounterError {
 pub struct WildEncounter {
     pub level: u8,
     pub species: String,
-}
-
-/// A temporary encounter table supplied by a special event such as the
-/// Bug-Catching Contest. It is kept separate from map encounter data because
-/// Crystal replaces the normal slot table while the event is active.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpecialWildEncounterEntry {
-    pub percent: u8,
-    pub species: String,
-    pub min_level: u8,
-    pub max_level: u8,
 }
 
 impl<'de> Deserialize<'de> for WildEncounter {
@@ -709,6 +697,7 @@ pub struct FieldEncounterEntry {
     pub weight: u8,
     pub species: String,
     pub level: u8,
+    pub sleep_turns_by_time: BTreeMap<TimeOfDay, u8>,
 }
 
 impl<'de> Deserialize<'de> for FieldEncounterEntry {
@@ -723,6 +712,7 @@ impl<'de> Deserialize<'de> for FieldEncounterEntry {
             #[serde(deserialize_with = "required_encounter_token")]
             species: String,
             level: u8,
+            sleep_turns_by_time: BTreeMap<TimeOfDay, u8>,
         }
 
         let raw = RawFieldEncounterEntry::deserialize(deserializer)?;
@@ -738,10 +728,21 @@ impl<'de> Deserialize<'de> for FieldEncounterEntry {
                 raw.species
             )));
         }
+        if let Some((time, turns)) = raw
+            .sleep_turns_by_time
+            .iter()
+            .find(|(_, turns)| **turns == 0 || **turns > 7)
+        {
+            return Err(D::Error::custom(format!(
+                "field encounter species {} has invalid {:?} sleep counter {} (expected 1..=7)",
+                raw.species, time, turns
+            )));
+        }
         Ok(Self {
             weight: raw.weight,
             species: raw.species,
             level: raw.level,
+            sleep_turns_by_time: raw.sleep_turns_by_time,
         })
     }
 }
@@ -873,6 +874,44 @@ pub struct FieldEncounterRoll {
     pub resolved: Option<ResolvedWildEncounter>,
 }
 
+/// The memory-independent result of Crystal's `RockMonEncounter` routine.
+///
+/// `chance_roll == None` means the current map had no valid rock encounter
+/// table. That path consumes no divider samples. A present chance roll with no
+/// entry roll is the ordinary 60% miss; the entry roll exists only after the
+/// chance roll succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RockMonEncounterOutcome {
+    pub chance_roll: Option<u8>,
+    pub entry_roll: Option<u8>,
+    pub resolved: Option<ResolvedWildEncounter>,
+    pub random_state_after: CrystalRandomState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RockMonEncounterError<E> {
+    Encounter(EncounterError),
+    Divider(E),
+}
+
+impl<E> From<EncounterError> for RockMonEncounterError<E> {
+    fn from(error: EncounterError) -> Self {
+        Self::Encounter(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for RockMonEncounterError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encounter(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "RockMonEncounter divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for RockMonEncounterError<E> {}
+
 pub fn resolve_encounter_time_key(value: impl AsRef<str>) -> Result<TimeOfDay, EncounterError> {
     match value.as_ref() {
         "morning" => Ok(TimeOfDay::Morning),
@@ -970,6 +1009,23 @@ pub enum FieldEncounterCatalogIssue {
         bucket: &'static str,
         entry_index: usize,
         species_id: String,
+    },
+    InvalidSleepTurns {
+        map_name: String,
+        kind: String,
+        bucket: &'static str,
+        entry_index: usize,
+        species_id: String,
+        time: TimeOfDay,
+        sleep_turns: u8,
+    },
+    UnexpectedSleepRule {
+        map_name: String,
+        kind: String,
+        bucket: &'static str,
+        entry_index: usize,
+        species_id: String,
+        time: TimeOfDay,
     },
     InvalidWeightTotal {
         map_name: String,
@@ -1237,6 +1293,29 @@ fn push_field_encounter_bucket_issues(
                 species_id: entry.species.clone(),
             });
         }
+        for (&time, &sleep_turns) in &entry.sleep_turns_by_time {
+            if !(1..=7).contains(&sleep_turns) {
+                issues.push(FieldEncounterCatalogIssue::InvalidSleepTurns {
+                    map_name: map_name.to_string(),
+                    kind: kind.to_string(),
+                    bucket,
+                    entry_index,
+                    species_id: entry.species.clone(),
+                    time,
+                    sleep_turns,
+                });
+            }
+            if kind != FieldEncounterKind::Headbutt.as_key() {
+                issues.push(FieldEncounterCatalogIssue::UnexpectedSleepRule {
+                    map_name: map_name.to_string(),
+                    kind: kind.to_string(),
+                    bucket,
+                    entry_index,
+                    species_id: entry.species.clone(),
+                    time,
+                });
+            }
+        }
     }
 
     let total_weight: u16 = entries.iter().map(|entry| u16::from(entry.weight)).sum();
@@ -1470,41 +1549,10 @@ pub fn select_sweet_scent_encounter(
         encounter_roll: 0,
         slot_percent_roll: Some(slot_percent_roll),
         level_roll: Some(level_roll_byte),
+        roaming_slot: None,
         resolved,
         repelled_by: None,
-        rng_seed_after: 0,
     })
-}
-
-pub fn roll_sweet_scent_encounter(
-    data: &WildEncounterData,
-    slot_tables: &EncounterSlotTables,
-    surface: EncounterSurface,
-    time: TimeOfDay,
-    tile: crate::world::map::TilePosition,
-    rng: &mut Random,
-) -> Result<crate::world::session::WildEncounterRoll, EncounterError> {
-    require_encounter_table_for_surface(data, surface, time)?;
-    let slot_percent_roll = loop {
-        let value = rng.battle_random_byte();
-        if value < 100 {
-            break value + 1;
-        }
-    };
-    let level_roll = (surface == EncounterSurface::Water)
-        .then(|| rng.battle_random_byte());
-    let mut roll = select_sweet_scent_encounter(
-        data,
-        slot_tables,
-        surface,
-        time,
-        tile,
-        slot_percent_roll,
-        level_roll.unwrap_or(0),
-    )?;
-    roll.level_roll = level_roll;
-    roll.rng_seed_after = rng.seed();
-    Ok(roll)
 }
 
 pub fn tree_score(tile_x: i16, tile_y: i16, player_id: u16) -> u8 {
@@ -1612,15 +1660,67 @@ pub fn select_rock_smash_encounter(
     })
 }
 
-pub fn roll_rock_smash_encounter(
-    data: &FieldEncounterData,
-    target_tile_x: i16,
-    target_tile_y: i16,
-    rng: &mut Random,
-) -> Result<FieldEncounterRoll, EncounterError> {
-    let chance_roll = rng.randrange(10) as u8;
-    let entry_roll = rng.randrange(100) as u8;
-    select_rock_smash_encounter(data, target_tile_x, target_tile_y, chance_roll, entry_roll)
+/// Resolve the RNG-owned portion of `RockMonEncounter` from
+/// `engine/events/treemons.asm`.
+///
+/// A missing map or a map without a rock table is the cartridge's
+/// `GetTreeMonSet`/`GetTreeMons` failure path: it succeeds as a no-encounter
+/// result without reading DIV. On eligible maps the range-100 selection is
+/// conditional on the range-10 result being in `0..4`.
+pub fn resolve_rock_mon_encounter<S>(
+    data: Option<&FieldEncounterData>,
+    random_state: CrystalRandomState,
+    divider: &mut S,
+) -> Result<RockMonEncounterOutcome, RockMonEncounterError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let Some(data) = data else {
+        return Ok(RockMonEncounterOutcome {
+            chance_roll: None,
+            entry_roll: None,
+            resolved: None,
+            random_state_after: random_state,
+        });
+    };
+    let Some(table) = data.table(FieldEncounterKind::RockSmash) else {
+        return Ok(RockMonEncounterOutcome {
+            chance_roll: None,
+            entry_roll: None,
+            resolved: None,
+            random_state_after: random_state,
+        });
+    };
+
+    let mut rng = CrystalRandom::new(random_state, divider);
+    let chance_roll = rng
+        .random_range(10)
+        .map_err(RockMonEncounterError::Divider)?;
+    if chance_roll >= 4 {
+        return Ok(RockMonEncounterOutcome {
+            chance_roll: Some(chance_roll),
+            entry_roll: None,
+            resolved: None,
+            random_state_after: rng.state(),
+        });
+    }
+
+    let entry_roll = rng
+        .random_range(100)
+        .map_err(RockMonEncounterError::Divider)?;
+    let resolved = choose_weighted_field_entry(
+        data,
+        FieldEncounterKind::RockSmash,
+        "common",
+        table.common.as_slice(),
+        entry_roll,
+    )?;
+    Ok(RockMonEncounterOutcome {
+        chance_roll: Some(chance_roll),
+        entry_roll: Some(entry_roll),
+        resolved: Some(resolved),
+        random_state_after: rng.state(),
+    })
 }
 
 fn choose_weighted_field_entry(
@@ -1721,11 +1821,13 @@ mod tests {
                     weight: 100,
                     species: "HOOTHOOT".to_string(),
                     level: 10,
+                    sleep_turns_by_time: Default::default(),
                 }],
                 rare: vec![FieldEncounterEntry {
                     weight: 100,
                     species: "PINECO".to_string(),
                     level: 10,
+                    sleep_turns_by_time: Default::default(),
                 }],
             }),
             Some(FieldEncounterTable {
@@ -1734,16 +1836,81 @@ mod tests {
                         weight: 90,
                         species: "KRABBY".to_string(),
                         level: 15,
+                        sleep_turns_by_time: Default::default(),
                     },
                     FieldEncounterEntry {
                         weight: 10,
                         species: "SHUCKLE".to_string(),
                         level: 15,
+                        sleep_turns_by_time: Default::default(),
                     },
                 ],
                 rare: Vec::new(),
             }),
         )
+    }
+
+    #[test]
+    fn field_encounter_sleep_rules_are_required_and_byte_validated() {
+        let missing = serde_json::from_value::<FieldEncounterEntry>(serde_json::json!({
+            "weight": 100,
+            "species": "CATERPIE",
+            "level": 5
+        }))
+        .expect_err("field encounter sleep rules must be explicit")
+        .to_string();
+        assert!(missing.contains("sleep_turns_by_time"), "{missing}");
+
+        let invalid = serde_json::from_value::<FieldEncounterEntry>(serde_json::json!({
+            "weight": 100,
+            "species": "CATERPIE",
+            "level": 5,
+            "sleep_turns_by_time": { "night": 0 }
+        }))
+        .expect_err("zero cannot represent an asleep tree monster")
+        .to_string();
+        assert!(invalid.contains("expected 1..=7"), "{invalid}");
+
+        let valid = serde_json::from_value::<FieldEncounterEntry>(serde_json::json!({
+            "weight": 100,
+            "species": "CATERPIE",
+            "level": 5,
+            "sleep_turns_by_time": { "night": 7 }
+        }))
+        .expect("canonical tree sleep rule");
+        assert_eq!(valid.sleep_turns_by_time.get(&TimeOfDay::Night), Some(&7));
+    }
+
+    #[test]
+    fn field_encounter_catalog_rejects_sleep_rules_on_rock_smash_entries() {
+        let mut data = field_data();
+        data.table_mut(FieldEncounterKind::RockSmash)
+            .expect("rock smash")
+            .common[0]
+            .sleep_turns_by_time
+            .insert(TimeOfDay::Night, 7);
+        let encounters = [("Route29".to_string(), data)].into_iter().collect();
+        let map_ids = ["Route29".to_string()].into_iter().collect();
+        let species_ids = [
+            "HOOTHOOT".to_string(),
+            "PINECO".to_string(),
+            "KRABBY".to_string(),
+            "SHUCKLE".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            field_encounter_catalog_issues(&encounters, &map_ids, &species_ids),
+            vec![FieldEncounterCatalogIssue::UnexpectedSleepRule {
+                map_name: "Route29".to_string(),
+                kind: "rock_smash".to_string(),
+                bucket: "common",
+                entry_index: 0,
+                species_id: "KRABBY".to_string(),
+                time: TimeOfDay::Night,
+            }]
+        );
     }
 
     fn slot_tables() -> EncounterSlotTables {
@@ -2472,64 +2639,7 @@ mod tests {
         let resolved = roll.resolved.expect("resolved");
         assert_eq!(resolved.slot, 1);
         assert_eq!(resolved.encounter.species, "RATTATA");
-        assert_eq!(resolved.level, 7);
-    }
-
-    #[test]
-    fn sweet_scent_roll_helper_consumes_runtime_rng_in_core() {
-        let data = sample_data();
-        let tile = crate::world::map::TilePosition::new(4, 6);
-        let mut helper_rng = Random::new(1);
-        let mut explicit_rng = Random::new(1);
-        let slot_percent_roll = explicit_rng.randrange(100) as u8 + 1;
-        let level_roll = explicit_rng.randrange(256) as u8;
-
-        let helper = roll_sweet_scent_encounter(
-            &data,
-            &slot_tables(),
-            EncounterSurface::Grass,
-            TimeOfDay::Morning,
-            tile,
-            &mut helper_rng,
-        )
-        .expect("helper sweet scent");
-        let mut explicit = select_sweet_scent_encounter(
-            &data,
-            &slot_tables(),
-            EncounterSurface::Grass,
-            TimeOfDay::Morning,
-            tile,
-            slot_percent_roll,
-            level_roll,
-        )
-        .expect("explicit sweet scent");
-        explicit.rng_seed_after = explicit_rng.seed();
-
-        assert_eq!(helper, explicit);
-        assert_eq!(helper_rng.seed(), explicit_rng.seed());
-    }
-
-    #[test]
-    fn sweet_scent_roll_helper_rejects_missing_surface_before_rng() {
-        let mut data = sample_data();
-        data.water = None;
-        let mut rng = Random::new(1);
-
-        assert!(matches!(
-            roll_sweet_scent_encounter(
-                &data,
-                &slot_tables(),
-                EncounterSurface::Water,
-                TimeOfDay::Morning,
-                crate::world::map::TilePosition::new(4, 6),
-                &mut rng,
-            ),
-            Err(EncounterError::MissingEncounterTable {
-                map_name,
-                surface: EncounterSurface::Water,
-            }) if map_name == "ROUTE_29"
-        ));
-        assert_eq!(rng.seed(), 1);
+        assert_eq!(resolved.level, 3);
     }
 
     #[test]
@@ -2613,7 +2723,163 @@ mod tests {
     }
 
     #[test]
-    fn field_encounter_roll_helpers_consume_runtime_rng_in_core() {
+    fn rock_mon_encounter_uses_zero_divider_reads_without_a_rock_table() {
+        let random_state = crate::random::CrystalRandomState {
+            add: 0x12,
+            sub: 0x34,
+        };
+        let mut missing_map_divider = crate::random::ReplayDivider::new([]);
+        let missing_map = resolve_rock_mon_encounter(None, random_state, &mut missing_map_divider)
+            .expect("a map absent from RockMonMaps is a zero-read miss");
+
+        assert_eq!(missing_map.chance_roll, None);
+        assert_eq!(missing_map.entry_roll, None);
+        assert_eq!(missing_map.resolved, None);
+        assert_eq!(missing_map.random_state_after, random_state);
+        assert_eq!(missing_map_divider.consumed(), 0);
+
+        let ineligible = FieldEncounterData::for_crystal("IcePathB3F", None, None);
+        let mut ineligible_divider = crate::random::ReplayDivider::new([]);
+        let no_rock_table =
+            resolve_rock_mon_encounter(Some(&ineligible), random_state, &mut ineligible_divider)
+                .expect("a map without a rock set is a zero-read miss");
+
+        assert_eq!(no_rock_table, missing_map);
+        assert_eq!(ineligible_divider.consumed(), 0);
+    }
+
+    #[test]
+    fn rock_mon_encounter_miss_consumes_only_the_chance_random_range() {
+        let data = field_data();
+        let mut divider = crate::random::ReplayDivider::new([3, 0]);
+
+        let outcome = resolve_rock_mon_encounter(
+            Some(&data),
+            crate::random::CrystalRandomState::default(),
+            &mut divider,
+        )
+        .expect("chance roll 4 is a Rock Smash miss");
+
+        // RandomRange enters Random with carry set, so hRandomAdd becomes
+        // 0 + 3 + 1 = 4. No entry roll is permitted after that miss.
+        assert_eq!(outcome.chance_roll, Some(4));
+        assert_eq!(outcome.entry_roll, None);
+        assert_eq!(outcome.resolved, None);
+        assert_eq!(
+            outcome.random_state_after,
+            crate::random::CrystalRandomState { add: 4, sub: 0 }
+        );
+        assert_eq!(divider.consumed(), 2);
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn rock_mon_encounter_selects_the_exact_ninety_ten_boundary() {
+        let data = field_data();
+
+        let mut krabby_divider = crate::random::ReplayDivider::new([255, 0, 88, 0]);
+        let krabby = resolve_rock_mon_encounter(
+            Some(&data),
+            crate::random::CrystalRandomState::default(),
+            &mut krabby_divider,
+        )
+        .expect("entry roll 89 selects Krabby");
+        assert_eq!(krabby.chance_roll, Some(0));
+        assert_eq!(krabby.entry_roll, Some(89));
+        assert_eq!(
+            krabby
+                .resolved
+                .as_ref()
+                .expect("Krabby encounter")
+                .encounter,
+            WildEncounter {
+                level: 15,
+                species: "KRABBY".to_string(),
+            }
+        );
+        assert_eq!(
+            krabby.random_state_after,
+            crate::random::CrystalRandomState { add: 89, sub: 255 }
+        );
+        assert_eq!(krabby_divider.consumed(), 4);
+
+        let mut shuckle_divider = crate::random::ReplayDivider::new([255, 0, 89, 0]);
+        let shuckle = resolve_rock_mon_encounter(
+            Some(&data),
+            crate::random::CrystalRandomState::default(),
+            &mut shuckle_divider,
+        )
+        .expect("entry roll 90 selects Shuckle");
+        assert_eq!(shuckle.chance_roll, Some(0));
+        assert_eq!(shuckle.entry_roll, Some(90));
+        assert_eq!(
+            shuckle
+                .resolved
+                .as_ref()
+                .expect("Shuckle encounter")
+                .encounter,
+            WildEncounter {
+                level: 15,
+                species: "SHUCKLE".to_string(),
+            }
+        );
+        assert_eq!(
+            shuckle.random_state_after,
+            crate::random::CrystalRandomState { add: 90, sub: 255 }
+        );
+        assert_eq!(shuckle_divider.consumed(), 4);
+    }
+
+    #[test]
+    fn rock_mon_encounter_retries_random_ranges_with_carry_set() {
+        let data = field_data();
+
+        // For RandomRange(10), hRandomAdd 250 is rejected. The retry also
+        // enters Random with carry set and produces chance roll 4.
+        let mut chance_divider = crate::random::ReplayDivider::new([249, 0, 9, 0]);
+        let chance_retry = resolve_rock_mon_encounter(
+            Some(&data),
+            crate::random::CrystalRandomState::default(),
+            &mut chance_divider,
+        )
+        .expect("range-10 rejection retries");
+        assert_eq!(chance_retry.chance_roll, Some(4));
+        assert_eq!(chance_retry.entry_roll, None);
+        assert_eq!(
+            chance_retry.random_state_after,
+            crate::random::CrystalRandomState { add: 4, sub: 255 }
+        );
+        assert_eq!(chance_divider.consumed(), 4);
+
+        // The first range-100 hRandomAdd is 200 and must be rejected. The
+        // second iteration's carry produces the exact Shuckle boundary 90.
+        let mut entry_divider = crate::random::ReplayDivider::new([255, 0, 199, 0, 145, 0]);
+        let entry_retry = resolve_rock_mon_encounter(
+            Some(&data),
+            crate::random::CrystalRandomState::default(),
+            &mut entry_divider,
+        )
+        .expect("range-100 rejection retries");
+        assert_eq!(entry_retry.chance_roll, Some(0));
+        assert_eq!(entry_retry.entry_roll, Some(90));
+        assert_eq!(
+            entry_retry
+                .resolved
+                .as_ref()
+                .expect("Shuckle after range rejection")
+                .encounter
+                .species,
+            "SHUCKLE"
+        );
+        assert_eq!(
+            entry_retry.random_state_after,
+            crate::random::CrystalRandomState { add: 90, sub: 254 }
+        );
+        assert_eq!(entry_divider.consumed(), 6);
+    }
+
+    #[test]
+    fn headbutt_field_encounter_roll_helper_consumes_runtime_rng_in_core() {
         let data = field_data();
         let mut helper_rng = Random::new(1);
         let mut explicit_rng = Random::new(1);
@@ -2627,18 +2893,6 @@ mod tests {
         assert_eq!(helper, explicit);
         assert_eq!(helper_rng.seed(), explicit_rng.seed());
 
-        let mut helper_rng = Random::new(7);
-        let mut explicit_rng = Random::new(7);
-        let chance_roll = explicit_rng.randrange(10) as u8;
-        let entry_roll = explicit_rng.randrange(100) as u8;
-
-        let helper =
-            roll_rock_smash_encounter(&data, 4, 6, &mut helper_rng).expect("helper rock smash");
-        let explicit = select_rock_smash_encounter(&data, 4, 6, chance_roll, entry_roll)
-            .expect("explicit rock smash");
-
-        assert_eq!(helper, explicit);
-        assert_eq!(helper_rng.seed(), explicit_rng.seed());
     }
 
     #[test]
@@ -2661,11 +2915,6 @@ mod tests {
         assert_eq!(headbutt_roll.target_tile_x, 1);
         assert_ne!(rng.seed(), 0x1234_5678);
 
-        let mut rng = Random::new(0x1234_5678);
-        let rock_smash_roll =
-            roll_rock_smash_encounter(&data, 0, 1, &mut rng).expect("odd rock smash roll");
-        assert_eq!(rock_smash_roll.target_tile_y, 1);
-        assert_ne!(rng.seed(), 0x1234_5678);
     }
 
     #[test]
@@ -2932,7 +3181,7 @@ mod tests {
                 serde_json::json!({
                     "map_name": "Route29",
                     "headbutt": {
-                        "common": [{"weight": 100, "species": "AIPOM", "level": 10}],
+                        "common": [{"weight": 100, "species": "AIPOM", "level": 10, "sleep_turns_by_time": {}}],
                         "rare": []
                     }
                 }),
@@ -2942,7 +3191,7 @@ mod tests {
                 serde_json::json!({
                     "map_name": "Route29",
                     "rock_smash": {
-                        "common": [{"weight": 100, "species": "KRABBY", "level": 10}],
+                        "common": [{"weight": 100, "species": "KRABBY", "level": 10, "sleep_turns_by_time": {}}],
                         "rare": []
                     }
                 }),
@@ -2953,7 +3202,7 @@ mod tests {
                     "map_name": "Route29",
                     "tables": {
                         "head butt": {
-                            "common": [{"weight": 100, "species": "AIPOM", "level": 10}],
+                            "common": [{"weight": 100, "species": "AIPOM", "level": 10, "sleep_turns_by_time": {}}],
                             "rare": []
                         }
                     }
@@ -2965,7 +3214,7 @@ mod tests {
                     "map_name": "Route29",
                     "tables": {
                         "headbutt": {
-                            "common": [{"weight": 100, "species": "AIP OM", "level": 10}],
+                            "common": [{"weight": 100, "species": "AIP OM", "level": 10, "sleep_turns_by_time": {}}],
                             "rare": []
                         }
                     }

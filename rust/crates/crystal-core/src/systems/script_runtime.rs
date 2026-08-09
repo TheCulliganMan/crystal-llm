@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::Dv;
+use crate::systems::economy::{EconomyError, MoneyAccount};
+use crate::systems::phone::insert_phone_number_in_first_open_slot;
 use crate::state::{
     GameState, HALL_OF_FAME_ENTRY_LIMIT, HALL_OF_FAME_MASTER_COUNT, HALL_OF_FAME_TEAM_SIZE,
     HallOfFameEntry, HallOfFamePokemon, ScriptRuntimeAsmDirective,
@@ -20,6 +22,41 @@ pub struct ScriptRuntimeCommand {
     pub args: Vec<String>,
     pub source_script: String,
     pub command_index: usize,
+}
+
+/// Game Boy CPU condition tokens accepted by RGBDS control-flow opcodes.
+///
+/// CPU routines embedded beside script bytecode use these exact tokens for
+/// conditional returns. Keeping them typed prevents an unknown condition from
+/// being treated as either an unconditional return or a false branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptRuntimeCpuCondition {
+    Z,
+    Nz,
+    C,
+    Nc,
+}
+
+impl ScriptRuntimeCpuCondition {
+    pub fn from_asm_token(token: &str) -> Option<Self> {
+        match token {
+            "z" => Some(Self::Z),
+            "nz" => Some(Self::Nz),
+            "c" => Some(Self::C),
+            "nc" => Some(Self::Nc),
+            _ => None,
+        }
+    }
+
+    pub fn is_met(self, zero: bool, carry: bool) -> bool {
+        match self {
+            Self::Z => zero,
+            Self::Nz => !zero,
+            Self::C => carry,
+            Self::Nc => !carry,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +275,8 @@ pub enum ScriptRuntimeCommandError {
     PaddedCommand { command: String },
     #[error("unknown script runtime command '{command}'")]
     UnknownCommand { command: String },
+    #[error("script runtime data declaration '{command}' is not an executable opcode")]
+    NonExecutableDataCommand { command: String },
     #[error("script runtime command '{command}' expects {expected} args but found {actual}")]
     WrongArgCount {
         command: String,
@@ -248,6 +287,14 @@ pub enum ScriptRuntimeCommandError {
     EmptyArg { command: String },
     #[error("script runtime command '{command}' has a whitespace-padded argument '{arg}'")]
     PaddedArg { command: String, arg: String },
+    #[error("script runtime command '{command}' has invalid string buffer '{buffer}'")]
+    InvalidStringBuffer { command: String, buffer: String },
+    #[error("script runtime getmoney account is invalid '{account}'")]
+    InvalidMoneyAccount { account: String },
+    #[error("script runtime getmoney account is unknown '{account}'")]
+    UnknownMoneyAccount { account: String },
+    #[error("script runtime CPU return has unknown condition '{condition}'")]
+    InvalidCpuCondition { condition: String },
     #[error("script runtime source script '{source_script}' is not exact pack syntax")]
     InvalidSourceScript { source_script: String },
     #[error("script runtime command '{command}' has invalid numeric token syntax '{token}'")]
@@ -321,11 +368,13 @@ pub fn commit_interaction_script_dispatch(
 pub struct ScriptRuntimeReferenceCatalog {
     pub special_routines: BTreeSet<String>,
     pub trainer_classes: BTreeMap<String, String>,
+    pub trainer_class_names: BTreeSet<String>,
     pub items: BTreeSet<String>,
     pub pokemon: BTreeSet<String>,
     pub phone_contacts: BTreeSet<String>,
     pub special_phone_calls: BTreeSet<String>,
     pub npc_trades: BTreeSet<String>,
+    pub landmarks: BTreeSet<String>,
     pub script_labels: BTreeSet<String>,
 }
 
@@ -339,11 +388,13 @@ impl<'de> Deserialize<'de> for ScriptRuntimeReferenceCatalog {
         struct RawCatalog {
             special_routines: BTreeSet<String>,
             trainer_classes: BTreeMap<String, String>,
+            trainer_class_names: BTreeSet<String>,
             items: BTreeSet<String>,
             pokemon: BTreeSet<String>,
             phone_contacts: BTreeSet<String>,
             special_phone_calls: BTreeSet<String>,
             npc_trades: BTreeSet<String>,
+            landmarks: BTreeSet<String>,
             script_labels: BTreeSet<String>,
         }
 
@@ -352,6 +403,11 @@ impl<'de> Deserialize<'de> for ScriptRuntimeReferenceCatalog {
             .map_err(serde::de::Error::custom)?;
         validate_runtime_pack_id_map("script_runtime.trainer_classes", &raw.trainer_classes)
             .map_err(serde::de::Error::custom)?;
+        validate_runtime_pack_id_set(
+            "script_runtime.trainer_class_names",
+            &raw.trainer_class_names,
+        )
+        .map_err(serde::de::Error::custom)?;
         validate_runtime_pack_id_set("script_runtime.items", &raw.items)
             .map_err(serde::de::Error::custom)?;
         validate_runtime_pack_id_set("script_runtime.pokemon", &raw.pokemon)
@@ -365,6 +421,8 @@ impl<'de> Deserialize<'de> for ScriptRuntimeReferenceCatalog {
         .map_err(serde::de::Error::custom)?;
         validate_runtime_pack_id_set("script_runtime.npc_trades", &raw.npc_trades)
             .map_err(serde::de::Error::custom)?;
+        validate_runtime_landmark_id_set("script_runtime.landmarks", &raw.landmarks)
+            .map_err(serde::de::Error::custom)?;
         for label in &raw.script_labels {
             require_runtime_label("script_runtime.script_labels", label)
                 .map_err(serde::de::Error::custom)?;
@@ -372,11 +430,13 @@ impl<'de> Deserialize<'de> for ScriptRuntimeReferenceCatalog {
         Ok(Self {
             special_routines: raw.special_routines,
             trainer_classes: raw.trainer_classes,
+            trainer_class_names: raw.trainer_class_names,
             items: raw.items,
             pokemon: raw.pokemon,
             phone_contacts: raw.phone_contacts,
             special_phone_calls: raw.special_phone_calls,
             npc_trades: raw.npc_trades,
+            landmarks: raw.landmarks,
             script_labels: raw.script_labels,
         })
     }
@@ -401,6 +461,9 @@ pub enum ScriptRuntimeCommandIssue {
         trainer_id: String,
     },
     InvalidTrainerClass {
+        trainer_class: String,
+    },
+    UnknownTrainerClassName {
         trainer_class: String,
     },
     TrainerClassMismatch {
@@ -437,6 +500,12 @@ pub enum ScriptRuntimeCommandIssue {
     },
     InvalidNpcTrade {
         trade_id: String,
+    },
+    UnknownLandmark {
+        landmark_id: String,
+    },
+    InvalidLandmark {
+        landmark_id: String,
     },
     UnknownTarget {
         target_label: String,
@@ -537,6 +606,21 @@ fn validate_runtime_pack_id_set(field: &str, values: &BTreeSet<String>) -> Resul
     Ok(())
 }
 
+fn validate_runtime_landmark_id_set(
+    field: &str,
+    values: &BTreeSet<String>,
+) -> Result<(), String> {
+    validate_runtime_pack_id_set(field, values)?;
+    for value in values {
+        if !value.starts_with("LANDMARK_") {
+            return Err(format!(
+                "{field} values must use exact LANDMARK_* ids, found {value:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_runtime_pack_id_map(
     field: &str,
     values: &BTreeMap<String, String>,
@@ -575,9 +659,12 @@ pub fn script_runtime_command_issues(
                 });
             }
         }
-        "gettrainername" => {
-            let trainer_class = &command.args[1];
-            let trainer_id = &command.args[2];
+        "gettrainername" | "loadtrainer" => {
+            let (trainer_class, trainer_id) = if command.command == "gettrainername" {
+                (&command.args[1], &command.args[2])
+            } else {
+                (&command.args[0], &command.args[1])
+            };
             let valid_trainer_class = is_exact_nonempty_runtime_pack_id(trainer_class);
             let valid_trainer_id = is_exact_nonempty_runtime_pack_id(trainer_id);
             if !valid_trainer_class {
@@ -605,6 +692,30 @@ pub fn script_runtime_command_issues(
                 None => issues.push(ScriptRuntimeCommandIssue::UnknownTrainer {
                     trainer_id: trainer_id.clone(),
                 }),
+            }
+        }
+        "gettrainerclassname" => {
+            let trainer_class = &command.args[1];
+            if !is_exact_nonempty_runtime_pack_id(trainer_class) {
+                issues.push(ScriptRuntimeCommandIssue::InvalidTrainerClass {
+                    trainer_class: trainer_class.clone(),
+                });
+            } else if !catalog.trainer_class_names.contains(trainer_class) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownTrainerClassName {
+                    trainer_class: trainer_class.clone(),
+                });
+            }
+        }
+        "winlosstext" => {
+            for target_label in &command.args {
+                if target_label != "0" && target_label != "-1" {
+                    push_unknown_runtime_target_issue(
+                        command,
+                        target_label,
+                        catalog,
+                        &mut issues,
+                    );
+                }
             }
         }
         "getitemname" => {
@@ -635,6 +746,20 @@ pub fn script_runtime_command_issues(
                         species_id: species_id.clone(),
                     });
                 }
+            }
+        }
+        "getlandmarkname" => {
+            let landmark_id = &command.args[1];
+            if !is_exact_nonempty_runtime_pack_id(landmark_id)
+                || !landmark_id.starts_with("LANDMARK_")
+            {
+                issues.push(ScriptRuntimeCommandIssue::InvalidLandmark {
+                    landmark_id: landmark_id.clone(),
+                });
+            } else if !catalog.landmarks.contains(landmark_id) {
+                issues.push(ScriptRuntimeCommandIssue::UnknownLandmark {
+                    landmark_id: landmark_id.clone(),
+                });
             }
         }
         "addcellnum" => {
@@ -765,6 +890,11 @@ pub fn apply_script_runtime_command_in_map(
     inputs: ScriptRuntimeInputs,
 ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
     validate_script_runtime_command(&command)?;
+    if command.command == "conditional_event" {
+        return Err(ScriptRuntimeCommandError::NonExecutableDataCommand {
+            command: command.command,
+        });
+    }
     if command.command != "random"
         && (inputs.random_value.is_some() || inputs.rng_seed_after.is_some())
     {
@@ -820,6 +950,11 @@ pub fn apply_script_runtime_command_in_map(
                 .ok_or(ScriptRuntimeCommandError::MissingGameVersion)?;
             set_script_value(state, &command, value)
         }
+        "checkphonecall" => set_script_value(
+            state,
+            &command,
+            u8::from(!state.script_runtime.special_phone_calls.is_empty()).to_string(),
+        ),
         _ => {
             apply_runtime_effect(state, origin_map_name, &command)?;
             ScriptRuntimeOutcome::EffectRecorded {
@@ -861,7 +996,12 @@ pub fn validate_script_runtime_command(
         .ok_or_else(|| ScriptRuntimeCommandError::UnknownCommand {
             command: command.command.clone(),
         })?;
-    if command.args.len() != expected {
+    let arity_is_valid = if command.command == "ret" {
+        command.args.len() <= 1
+    } else {
+        command.args.len() == expected
+    };
+    if !arity_is_valid {
         return Err(ScriptRuntimeCommandError::WrongArgCount {
             command: command.command.clone(),
             expected,
@@ -881,6 +1021,23 @@ pub fn validate_script_runtime_command(
             });
         }
     }
+    if matches!(
+        command.command.as_str(),
+        "getlandmarkname" | "getmoney" | "gettrainerclassname"
+    ) {
+        require_script_string_buffer(&command.command, &command.args[0])?;
+    }
+    if command.command == "getmoney" {
+        parse_script_money_account(&command.args[1])?;
+    }
+    if command.command == "ret"
+        && let Some(condition) = command.args.first()
+        && ScriptRuntimeCpuCondition::from_asm_token(condition).is_none()
+    {
+        return Err(ScriptRuntimeCommandError::InvalidCpuCondition {
+            condition: condition.clone(),
+        });
+    }
     if command.command == "special" && !is_exact_nonempty_runtime_pack_id(&command.args[0]) {
         return Err(ScriptRuntimeCommandError::PaddedArg {
             command: command.command.clone(),
@@ -888,6 +1045,39 @@ pub fn validate_script_runtime_command(
         });
     }
     Ok(())
+}
+
+fn require_script_string_buffer(
+    command: &str,
+    buffer: &str,
+) -> Result<(), ScriptRuntimeCommandError> {
+    if matches!(
+        buffer,
+        "STRING_BUFFER_3" | "STRING_BUFFER_4" | "STRING_BUFFER_5"
+    ) {
+        Ok(())
+    } else {
+        Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+            command: command.to_string(),
+            buffer: buffer.to_string(),
+        })
+    }
+}
+
+fn parse_script_money_account(
+    account: &str,
+) -> Result<MoneyAccount, ScriptRuntimeCommandError> {
+    MoneyAccount::from_script_id(account).map_err(|error| match error {
+        EconomyError::InvalidMoneyAccount { account } => {
+            ScriptRuntimeCommandError::InvalidMoneyAccount { account }
+        }
+        EconomyError::UnknownMoneyAccount { account } => {
+            ScriptRuntimeCommandError::UnknownMoneyAccount { account }
+        }
+        _ => ScriptRuntimeCommandError::UnknownMoneyAccount {
+            account: account.to_string(),
+        },
+    })
 }
 
 fn apply_runtime_effect(
@@ -926,11 +1116,33 @@ fn apply_runtime_effect(
                 .variable_sprites
                 .insert(command.args[0].clone(), command.args[1].clone());
         }
-        "gettrainername" | "getitemname" | "getmonname" | "getstring" => {
+        "gettrainername"
+        | "gettrainerclassname"
+        | "getitemname"
+        | "getmonname"
+        | "getstring"
+        | "getlandmarkname" => {
             state
                 .script_runtime
                 .named_buffers
                 .insert(command.args[0].clone(), command.args[1..].join(" "));
+        }
+        "getmoney" => {
+            let account = parse_script_money_account(&command.args[1])?;
+            let value = match account {
+                MoneyAccount::YourMoney => state.money,
+                MoneyAccount::MomsMoney => state.moms_money,
+            };
+            state
+                .script_runtime
+                .named_buffers
+                .insert(command.args[0].clone(), value.to_string());
+        }
+        "getcurlandmarkname" => {
+            state
+                .script_runtime
+                .named_buffers
+                .insert(command.args[0].clone(), String::new());
         }
         "loadmenu" => {
             state.script_runtime.active_menu = Some(command.args[0].clone());
@@ -980,10 +1192,18 @@ fn apply_runtime_effect(
                 .insert(command.args[0].clone(), command.args[1].clone());
         }
         "addcellnum" => {
-            let added = state
-                .script_runtime
-                .phone_numbers
-                .insert(command.args[0].clone());
+            let contact_id = &command.args[0];
+            let added = !state.script_runtime.phone_numbers.contains(contact_id)
+                && insert_phone_number_in_first_open_slot(
+                    &mut state.script_runtime.phone_number_order,
+                    contact_id,
+                );
+            if added {
+                state
+                    .script_runtime
+                    .phone_numbers
+                    .insert(contact_id.clone());
+            }
             state.script_runtime.script_value = Some(if added {
                 "0".to_string()
             } else {
@@ -994,15 +1214,50 @@ fn apply_runtime_effect(
             if command.args[0] == SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE {
                 state.script_runtime.special_phone_calls.clear();
             } else {
+                state.script_runtime.special_phone_calls.clear();
                 state
                     .script_runtime
                     .special_phone_calls
                     .push(command.args[0].clone());
             }
+            state.script_runtime.variables.insert(
+                "VAR_SPECIALPHONECALL".to_string(),
+                command.args[0].clone(),
+            );
         }
         "pokepic" => state.script_runtime.active_pokemon_picture = Some(command.args[0].clone()),
         "closepokepic" => state.script_runtime.active_pokemon_picture = None,
         "trade" => {}
+        "winlosstext" => {
+            state.script_runtime.memory.insert(
+                "wWinTextPointer".to_string(),
+                command.args[0].clone(),
+            );
+            state.script_runtime.memory.insert(
+                "wLossTextPointer".to_string(),
+                command.args[1].clone(),
+            );
+        }
+        "loadtrainer" => {
+            state
+                .script_runtime
+                .memory
+                .insert("wBattleScriptFlags".to_string(), "129".to_string());
+            state.script_runtime.memory.insert(
+                "wOtherTrainerClass".to_string(),
+                command.args[0].clone(),
+            );
+            state.script_runtime.memory.insert(
+                "wOtherTrainerID".to_string(),
+                command.args[1].clone(),
+            );
+        }
+        "randomwildmon" => {
+            state
+                .script_runtime
+                .memory
+                .insert("wBattleScriptFlags".to_string(), "0".to_string());
+        }
         "catchtutorial" => {
             state
                 .script_runtime
@@ -1147,19 +1402,6 @@ fn apply_runtime_effect(
                     command_index: command.command_index,
                 });
         }
-        "conditional_event" => {
-            state
-                .script_runtime
-                .command_queue
-                .push(ScriptRuntimeQueuedCommand {
-                    origin_map_name: origin_map_name.to_string(),
-                    command: command.command.clone(),
-                    bank: Some(command.args[0].clone()),
-                    target: command.args[1].clone(),
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                })
-        }
         "push" => state.script_runtime.stack.push(command.args[0].clone()),
         "pop" => {
             let value = state
@@ -1189,6 +1431,11 @@ fn apply_runtime_effect(
 /// Hall of Fame animation, saturates the win counter at 200, and records the
 /// newest team at the front of a bounded history.
 fn record_hall_of_fame(state: &mut GameState) {
+    // Script_halloffame clears GAME_TIMER_COUNTING_F before entering the
+    // HallOfFame farcall. HallOfFame itself raises wGameLogicPaused only for
+    // its save/recording work and clears it before the animation/credits.
+    state.set_game_timer_counting(false);
+    state.set_game_logic_paused(true);
     let count = state.hall_of_fame.count;
     let next_count = if count < HALL_OF_FAME_MASTER_COUNT {
         count.saturating_add(1)
@@ -1236,6 +1483,7 @@ fn record_hall_of_fame(state: &mut GameState) {
         .flags
         .engine_flags
         .insert("STATUSFLAGS_HALL_OF_FAME_F".to_string(), true);
+    state.set_game_logic_paused(false);
     state.script_runtime.hall_of_fame_requested = true;
 }
 
@@ -1446,6 +1694,7 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("setlasttalked", 1),
         ("variablesprite", 2),
         ("gettrainername", 3),
+        ("gettrainerclassname", 2),
         ("getitemname", 2),
         ("getmonname", 2),
         ("loadmenu", 1),
@@ -1465,12 +1714,19 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("addval", 1),
         ("verbosegiveitemvar", 2),
         ("getstring", 2),
+        ("getcurlandmarkname", 1),
+        ("getlandmarkname", 2),
+        ("getmoney", 2),
+        ("checkphonecall", 0),
         ("addcellnum", 1),
         ("specialphonecall", 1),
         ("checkpoke", 1),
         ("pokepic", 1),
         ("closepokepic", 0),
         ("trade", 1),
+        ("winlosstext", 2),
+        ("loadtrainer", 2),
+        ("randomwildmon", 0),
         ("catchtutorial", 1),
         ("warpsound", 0),
         ("blackoutmod", 1),
@@ -1646,6 +1902,370 @@ mod tests {
     }
 
     #[test]
+    fn trainer_battle_setup_commands_validate_and_write_exact_wram_symbols() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            trainer_classes: BTreeMap::from([(
+                "VANCE3".to_string(),
+                "BIRD_KEEPER".to_string(),
+            )]),
+            script_labels: BTreeSet::from(["BirdKeeperVance1BeatenText".to_string()]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+        let win_loss = command(
+            "winlosstext",
+            &["BirdKeeperVance1BeatenText", "0"],
+        );
+        let load_trainer = command("loadtrainer", &["BIRD_KEEPER", "VANCE3"]);
+
+        assert_eq!(script_runtime_command_issues(&win_loss, &catalog), []);
+        assert_eq!(script_runtime_command_issues(&load_trainer, &catalog), []);
+
+        let mut state = GameState::default();
+        apply_script_runtime_command(&mut state, win_loss, default_inputs())
+            .expect("winlosstext writes the canonical pointers");
+        apply_script_runtime_command(&mut state, load_trainer, default_inputs())
+            .expect("loadtrainer writes the canonical battle setup");
+
+        assert_eq!(
+            state.script_runtime.memory.get("wWinTextPointer").map(String::as_str),
+            Some("BirdKeeperVance1BeatenText")
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wLossTextPointer").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wBattleScriptFlags").map(String::as_str),
+            Some("129")
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wOtherTrainerClass").map(String::as_str),
+            Some("BIRD_KEEPER")
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wOtherTrainerID").map(String::as_str),
+            Some("VANCE3")
+        );
+    }
+
+    #[test]
+    fn randomwildmon_clears_only_the_canonical_battle_script_flags_byte() {
+        let runtime_command = command("randomwildmon", &[]);
+        assert_eq!(validate_script_runtime_command(&runtime_command), Ok(()));
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        state
+            .script_runtime
+            .memory
+            .insert("wTempWildMonSpecies".to_string(), "GEODUDE".to_string());
+
+        apply_script_runtime_command(&mut state, runtime_command, default_inputs())
+            .expect("randomwildmon applies exact script setup");
+
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wBattleScriptFlags")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wTempWildMonSpecies")
+                .map(String::as_str),
+            Some("GEODUDE")
+        );
+    }
+
+    #[test]
+    fn landmark_and_money_buffer_commands_validate_typed_operands_and_write_exact_values() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            landmarks: BTreeSet::from(["LANDMARK_ROUTE_32".to_string()]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+        let landmark = command(
+            "getlandmarkname",
+            &["STRING_BUFFER_5", "LANDMARK_ROUTE_32"],
+        );
+        let money = command("getmoney", &["STRING_BUFFER_3", "MOMS_MONEY"]);
+
+        assert_eq!(script_runtime_command_issues(&landmark, &catalog), []);
+        assert_eq!(script_runtime_command_issues(&money, &catalog), []);
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "getlandmarkname",
+                    &["STRING_BUFFER_5", "LANDMARK_ROUTE_99"],
+                ),
+                &catalog,
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownLandmark {
+                landmark_id: "LANDMARK_ROUTE_99".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("getlandmarkname", &["STRING_BUFFER_5", "ROUTE_32"]),
+                &catalog,
+            ),
+            vec![ScriptRuntimeCommandIssue::InvalidLandmark {
+                landmark_id: "ROUTE_32".to_string(),
+            }]
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command(
+                "getlandmarkname",
+                &["STRING_BUFFER_2", "LANDMARK_ROUTE_32"],
+            )),
+            Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+                command: "getlandmarkname".to_string(),
+                buffer: "STRING_BUFFER_2".to_string(),
+            })
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command(
+                "getmoney",
+                &["STRING_BUFFER_3", "moms_money"],
+            )),
+            Err(ScriptRuntimeCommandError::UnknownMoneyAccount {
+                account: "moms_money".to_string(),
+            })
+        );
+
+        let mut state = GameState {
+            moms_money: 654_321,
+            ..GameState::default()
+        };
+        apply_script_runtime_command(&mut state, money, default_inputs())
+            .expect("getmoney formats the exact selected account");
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_3")
+                .map(String::as_str),
+            Some("654321")
+        );
+    }
+
+    #[test]
+    fn trainer_class_name_command_uses_exact_class_catalog_and_named_buffer() {
+        let catalog = ScriptRuntimeReferenceCatalog {
+            trainer_class_names: BTreeSet::from([
+                "BEAUTY".to_string(),
+                "COOLTRAINERM".to_string(),
+            ]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+        let runtime_command = command(
+            "gettrainerclassname",
+            &["STRING_BUFFER_4", "COOLTRAINERM"],
+        );
+
+        assert_eq!(script_runtime_command_issues(&runtime_command, &catalog), []);
+        assert_eq!(
+            script_runtime_command_issues(
+                &command("gettrainerclassname", &["STRING_BUFFER_4", "FISHER"]),
+                &catalog,
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownTrainerClassName {
+                trainer_class: "FISHER".to_string(),
+            }]
+        );
+        assert_eq!(
+            script_runtime_command_issues(
+                &command(
+                    "gettrainerclassname",
+                    &["STRING_BUFFER_4", "cooltrainerm"],
+                ),
+                &catalog,
+            ),
+            vec![ScriptRuntimeCommandIssue::UnknownTrainerClassName {
+                trainer_class: "cooltrainerm".to_string(),
+            }]
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command(
+                "gettrainerclassname",
+                &["STRING_BUFFER_2", "COOLTRAINERM"],
+            )),
+            Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+                command: "gettrainerclassname".to_string(),
+                buffer: "STRING_BUFFER_2".to_string(),
+            })
+        );
+
+        let mut state = GameState::default();
+        apply_script_runtime_command(&mut state, runtime_command, default_inputs())
+            .expect("gettrainerclassname records the validated pack-owned class id");
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_4")
+                .map(String::as_str),
+            Some("COOLTRAINERM")
+        );
+    }
+
+    #[test]
+    fn runtime_reference_catalog_requires_exact_landmark_and_trainer_class_name_sets() {
+        let exact = ScriptRuntimeReferenceCatalog {
+            landmarks: BTreeSet::from(["LANDMARK_ROUTE_32".to_string()]),
+            trainer_class_names: BTreeSet::from(["COOLTRAINERM".to_string()]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+        let value = serde_json::to_value(&exact).expect("serialize exact runtime catalog");
+        let decoded = serde_json::from_value::<ScriptRuntimeReferenceCatalog>(value.clone())
+            .expect("deserialize exact runtime catalog");
+        assert_eq!(decoded, exact);
+
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .expect("runtime catalog object")
+            .remove("landmarks");
+        assert!(
+            serde_json::from_value::<ScriptRuntimeReferenceCatalog>(missing)
+                .expect_err("landmark catalog field is required")
+                .to_string()
+                .contains("missing field `landmarks`")
+        );
+
+        let mut invalid = value;
+        invalid["landmarks"] = serde_json::json!(["ROUTE_32"]);
+        assert!(
+            serde_json::from_value::<ScriptRuntimeReferenceCatalog>(invalid)
+                .expect_err("landmark ids require canonical prefix")
+                .to_string()
+                .contains("exact LANDMARK_* ids")
+        );
+
+        let mut missing = serde_json::to_value(&exact).expect("serialize exact runtime catalog");
+        missing
+            .as_object_mut()
+            .expect("runtime catalog object")
+            .remove("trainer_class_names");
+        assert!(
+            serde_json::from_value::<ScriptRuntimeReferenceCatalog>(missing)
+                .expect_err("trainer class name catalog field is required")
+                .to_string()
+                .contains("missing field `trainer_class_names`")
+        );
+
+        let mut invalid = serde_json::to_value(&exact).expect("serialize exact runtime catalog");
+        invalid["trainer_class_names"] = serde_json::json!(["COOL TRAINER"]);
+        assert!(
+            serde_json::from_value::<ScriptRuntimeReferenceCatalog>(invalid)
+                .expect_err("trainer class name ids require exact pack syntax")
+                .to_string()
+                .contains("nonempty exact pack id")
+        );
+    }
+
+    #[test]
+    fn cpu_returns_accept_only_exact_rgbds_conditions() {
+        for (token, condition) in [
+            ("z", ScriptRuntimeCpuCondition::Z),
+            ("nz", ScriptRuntimeCpuCondition::Nz),
+            ("c", ScriptRuntimeCpuCondition::C),
+            ("nc", ScriptRuntimeCpuCondition::Nc),
+        ] {
+            assert_eq!(
+                ScriptRuntimeCpuCondition::from_asm_token(token),
+                Some(condition)
+            );
+            assert_eq!(
+                validate_script_runtime_command(&command("ret", &[token])),
+                Ok(())
+            );
+        }
+        assert_eq!(validate_script_runtime_command(&command("ret", &[])), Ok(()));
+        assert_eq!(
+            validate_script_runtime_command(&command("ret", &["NZ"])),
+            Err(ScriptRuntimeCommandError::InvalidCpuCondition {
+                condition: "NZ".to_string(),
+            })
+        );
+        assert!(matches!(
+            validate_script_runtime_command(&command("ret", &["z", "nc"])),
+            Err(ScriptRuntimeCommandError::WrongArgCount {
+                command,
+                expected: 0,
+                actual: 2,
+            }) if command == "ret"
+        ));
+    }
+
+    #[test]
+    fn conditional_event_is_background_event_data_not_an_executable_opcode() {
+        let mut state = GameState::default();
+
+        let error = apply_script_runtime_command(
+            &mut state,
+            command(
+                "conditional_event",
+                &["EVENT_OPENED_LOCKED_DOOR", ".Script"],
+            ),
+            default_inputs(),
+        )
+        .expect_err("conditional_event data cannot execute through the script interpreter");
+
+        assert_eq!(
+            error,
+            ScriptRuntimeCommandError::NonExecutableDataCommand {
+                command: "conditional_event".to_string(),
+            }
+        );
+        assert!(state.script_runtime.command_queue.is_empty());
+        assert!(state.script_runtime.effects.is_empty());
+    }
+
+    #[test]
+    fn checkphonecall_reports_the_canonical_pending_special_call_byte() {
+        let mut state = GameState::default();
+
+        let none = apply_script_runtime_command(
+            &mut state,
+            command("checkphonecall", &[]),
+            default_inputs(),
+        )
+        .expect("check empty special-call slot");
+        assert_eq!(
+            none,
+            ScriptRuntimeOutcome::ScriptValueSet {
+                command: "checkphonecall".to_string(),
+                value: "0".to_string(),
+                source_script: "RuntimeScript".to_string(),
+                command_index: 4,
+            }
+        );
+
+        state
+            .script_runtime
+            .special_phone_calls
+            .push("SPECIALCALL_POKERUS".to_string());
+        let pending = apply_script_runtime_command(
+            &mut state,
+            command("checkphonecall", &[]),
+            default_inputs(),
+        )
+        .expect("check pending special-call slot");
+        assert!(matches!(
+            pending,
+            ScriptRuntimeOutcome::ScriptValueSet { value, .. } if value == "1"
+        ));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+    }
+
+    #[test]
     fn command_issues_reject_reserved_runtime_tokens() {
         let catalog = ScriptRuntimeReferenceCatalog {
             items: BTreeSet::from(["POTION".to_string()]),
@@ -1687,11 +2307,13 @@ mod tests {
         let catalog = ScriptRuntimeReferenceCatalog {
             special_routines: BTreeSet::from(["FadeOutMusic".to_string()]),
             trainer_classes: BTreeMap::from([("FALKNER1".to_string(), "FALKNER".to_string())]),
+            trainer_class_names: BTreeSet::from(["FALKNER".to_string()]),
             items: BTreeSet::from(["POTION".to_string()]),
             pokemon: BTreeSet::from(["PIKACHU".to_string()]),
             phone_contacts: BTreeSet::from(["PHONE_ELM".to_string()]),
             special_phone_calls: BTreeSet::from(["SPECIALCALL_MASTERBALL".to_string()]),
             npc_trades: BTreeSet::from(["NPC_TRADE_MIKE".to_string()]),
+            landmarks: BTreeSet::from(["LANDMARK_ROUTE_32".to_string()]),
             script_labels: BTreeSet::from([
                 "MainScript".to_string(),
                 ".Done@MainScript".to_string(),
@@ -2929,6 +3551,7 @@ mod tests {
         state.storage.party.pokemon[0] = Some(champion);
         state.storage.party.pokemon[1] = Some(egg);
         state.hall_of_fame.count = HALL_OF_FAME_MASTER_COUNT;
+        state.set_game_timer_counting(true);
 
         let outcome =
             apply_script_runtime_command(&mut state, command("halloffame", &[]), default_inputs())
@@ -2953,6 +3576,14 @@ mod tests {
             Some(&true)
         );
         assert!(state.script_runtime.hall_of_fame_requested);
+        assert!(
+            !state.game_timer_counting,
+            "Script_halloffame clears GAME_TIMER_COUNTING_F until credits return"
+        );
+        assert!(
+            !state.game_logic_paused,
+            "HallOfFame restores wGameLogicPaused before animation and credits"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::battle::damage::{
     truncate_damage_stats,
 };
 use crate::battle::start::{
-    ActiveBattleEnemyError, ActiveBattlePartyError, deactivate_battle,
+    ActiveBattleEnemyError, ActiveBattlePartyError, deactivate_battle_after_draw,
     require_active_battle_enemy_party_index, require_active_battle_party_index,
     update_active_battle_enemy,
 };
@@ -17,7 +17,9 @@ use crate::battle::stats::{BattleStatMultiplierTables, accuracy_stage_multiplier
 use crate::models::pokemon::default_stat_boosts;
 use crate::models::{Dv, Item, LearnedMove, Move, Pokemon, PokemonSpecies, PokemonType, Stat};
 use crate::random::Random;
-use crate::state::{BattleMemory, GameState};
+use crate::state::{
+    BattleMemory, GameState, LINK_MODE_COLOSSEUM, LinkSerialConnectionStatus,
+};
 use crate::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
 };
@@ -36,6 +38,23 @@ impl BattleSide {
         match self {
             Self::Player => Self::Enemy,
             Self::Enemy => Self::Player,
+        }
+    }
+}
+
+/// Crystal processes paired between-turn effects enemy-first only on the
+/// Game Boy using the external serial clock. Internal-clock and non-link
+/// execution both retain the ordinary player-first order.
+pub const fn between_turn_side_order(
+    serial_connection_status: LinkSerialConnectionStatus,
+) -> [BattleSide; 2] {
+    match serial_connection_status {
+        LinkSerialConnectionStatus::UsingExternalClock => {
+            [BattleSide::Enemy, BattleSide::Player]
+        }
+        LinkSerialConnectionStatus::NotEstablished
+        | LinkSerialConnectionStatus::UsingInternalClock => {
+            [BattleSide::Player, BattleSide::Enemy]
         }
     }
 }
@@ -143,6 +162,10 @@ pub struct BattleCombatState {
     pub time_of_day: TimeOfDay,
     #[serde(default)]
     pub link_battle: bool,
+    #[serde(default)]
+    pub link_colosseum: bool,
+    #[serde(default)]
+    pub serial_connection_status: LinkSerialConnectionStatus,
     pub player_mist_active: bool,
     pub enemy_mist_active: bool,
     pub player_safeguard_turns: u8,
@@ -251,6 +274,8 @@ pub struct BattleCombatState {
     #[serde(default)]
     pub obedience_badges: [bool; 8],
     #[serde(default)]
+    pub kanto_badges: [bool; 8],
+    #[serde(default)]
     pub badge_boosts_enabled: bool,
 }
 
@@ -268,6 +293,8 @@ impl BattleCombatState {
             weather: Weather::None,
             time_of_day: default_battle_time_of_day(),
             link_battle: false,
+            link_colosseum: false,
+            serial_connection_status: LinkSerialConnectionStatus::NotEstablished,
             player_mist_active: false,
             enemy_mist_active: false,
             player_safeguard_turns: 0,
@@ -356,6 +383,7 @@ impl BattleCombatState {
             trainer_items_used: BTreeSet::new(),
             obedience_trainer_id: None,
             obedience_badges: [false; 8],
+            kanto_badges: [false; 8],
             badge_boosts_enabled: false,
         }
     }
@@ -396,14 +424,26 @@ impl BattleCombatState {
         self
     }
 
+    pub fn with_kanto_badges(mut self, kanto_badges: [bool; 8]) -> Self {
+        self.kanto_badges = kanto_badges;
+        self
+    }
+
     pub fn with_badge_boosts_enabled(mut self, enabled: bool) -> Self {
         self.badge_boosts_enabled = enabled;
         self
     }
 
-    pub fn with_time_context(mut self, time_of_day: TimeOfDay, link_battle: bool) -> Self {
+    pub fn with_link_context(
+        mut self,
+        time_of_day: TimeOfDay,
+        link_mode: u8,
+        serial_connection_status: LinkSerialConnectionStatus,
+    ) -> Self {
         self.time_of_day = time_of_day;
-        self.link_battle = link_battle;
+        self.link_battle = link_mode != 0;
+        self.link_colosseum = link_mode == LINK_MODE_COLOSSEUM;
+        self.serial_connection_status = serial_connection_status;
         self
     }
 }
@@ -779,12 +819,6 @@ pub enum BattleTurnError {
     MissingMovePriorityTable,
     MissingMoveEffectPriority {
         move_effect: String,
-    },
-    UnsupportedMoveEffect {
-        side: BattleSide,
-        move_name: String,
-        effect: String,
-        reason: String,
     },
     MissingMoveSwitchTarget {
         side: BattleSide,
@@ -1996,7 +2030,21 @@ pub enum BattleTurnCommitError {
 pub fn active_battle_combat_state(
     state: &GameState,
 ) -> Result<BattleCombatState, BattleTurnCommitError> {
-    if let Some(combat) = state.script_runtime.active_battle_combat.clone() {
+    let link_battle = state.link_session.link_mode != 0;
+    let badge_boosts_enabled = !link_battle
+        && !matches!(
+            &state.battle,
+            BattleMemory::Trainer { battle_type, .. }
+                if battle_type == "BATTLETYPE_BATTLE_TOWER"
+        );
+    if let Some(mut combat) = state.script_runtime.active_battle_combat.clone() {
+        combat.link_battle = link_battle;
+        combat.link_colosseum = state.link_session.link_mode == LINK_MODE_COLOSSEUM;
+        combat.serial_connection_status = state.link_session.serial_connection_status;
+        combat.obedience_trainer_id = Some(state.player_id);
+        combat.obedience_badges = state.badges.johto;
+        combat.kanto_badges = state.badges.kanto;
+        combat.badge_boosts_enabled = badge_boosts_enabled;
         return Ok(combat);
     }
     let active_party_index = require_active_battle_party_index(state)?;
@@ -2059,10 +2107,14 @@ pub fn active_battle_combat_state(
     let mut combat = BattleCombatState::new(player, enemy, state.rng_seed)
         .with_parties(player_party, enemy_party)
         .with_party_indices(active_party_index, active_enemy_index)
-        .with_time_context(
+        .with_obedience(state.player_id, state.badges.johto)
+        .with_kanto_badges(state.badges.kanto)
+        .with_link_context(
             state.time.time_of_day,
-            state.link_session.link_mode != 0,
-        );
+            state.link_session.link_mode,
+            state.link_session.serial_connection_status,
+        )
+        .with_badge_boosts_enabled(badge_boosts_enabled);
     combat.force_switch_blocked = force_switch_blocked;
     combat.sleep_turn_mask = sleep_turn_mask;
     combat.enemy_effect_ai_random_fail = state.link_session.link_mode == 0
@@ -2106,6 +2158,10 @@ pub fn commit_battle_turn_outcome(
         let fainted = slot
             .as_mut()
             .expect("validated active battle party slot became empty");
+        // PlayerFaint explicitly clears wBattleMonStatus before
+        // UpdateBattleMonInParty copies HP/status back to the persistent slot.
+        fainted.status = None;
+        fainted.sleep_turns = 0;
         apply_battle_faint_happiness(fainted, outcome.state.enemy.level);
     }
     if commit_party_index != active_party_index {
@@ -2136,7 +2192,7 @@ pub fn commit_battle_turn_outcome(
         .iter()
         .any(|event| matches!(event, BattleEvent::Fled { .. }))
     {
-        deactivate_battle(state);
+        deactivate_battle_after_draw(state);
     }
     Ok(())
 }
@@ -2267,7 +2323,7 @@ pub fn commit_wild_battle_escape_attempt(state: &mut GameState, outcome: &Battle
     state.rng_seed = outcome.rng_seed_after;
     state.battle_escape_attempts = outcome.attempts_after;
     if outcome.escaped {
-        deactivate_battle(state);
+        deactivate_battle_after_draw(state);
     }
 }
 
@@ -2297,7 +2353,7 @@ pub fn resolve_battle_turn(
 }
 
 pub fn resolve_battle_turn_with_items(
-    mut state: BattleCombatState,
+    state: BattleCombatState,
     input: BattleTurnInput,
     moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
@@ -2340,10 +2396,9 @@ fn resolve_battle_turn_with_items_for_context(
     let mut acted_before = Vec::new();
     validate_active_battle_turn_input(&state, &input, false, false)?;
     clear_turn_last_damage(&mut state);
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         apply_berserk_gene_start_of_turn(&mut state, side, items, &mut events)?;
     }
-    apply_held_status_healing(&mut state, items, &mut events)?;
     let order = determine_turn_order(
         &state,
         &input,
@@ -2410,7 +2465,6 @@ fn resolve_battle_turn_with_items_for_context(
             &mut events,
         )?;
         end_opponent_action_volatiles(&mut state, side);
-        apply_held_status_healing(&mut state, items, &mut events)?;
         acted_before.push(side);
         if battle_continues_after_actions(&state, &events)
             && state.pokemon(side).hp > 0
@@ -2507,7 +2561,6 @@ pub fn resolve_wild_battle_turn_with_items(
     reset_fury_cutter_chain(&mut state, BattleSide::Player);
     reset_protect_counter(&mut state, BattleSide::Player);
     set_rage_active(&mut state, BattleSide::Player, false);
-    apply_held_status_healing(&mut state, items, &mut events)?;
     let escape = if state.force_switch_blocked {
         events.push(BattleEvent::RunPrevented {
             side: BattleSide::Player,
@@ -2585,7 +2638,6 @@ pub fn resolve_wild_battle_turn_with_items(
                 &mut events,
             )?;
             end_opponent_action_volatiles(&mut state, BattleSide::Enemy);
-            apply_held_status_healing(&mut state, items, &mut events)?;
             if battle_continues_after_actions(&state, &events)
                 && state.player.hp > 0
                 && state.enemy.hp > 0
@@ -2703,7 +2755,6 @@ pub fn resolve_battle_enemy_action_with_items(
     clear_turn_last_damage(&mut state);
     set_destiny_bond_active(&mut state, BattleSide::Player, false);
     end_opponent_action_volatiles(&mut state, BattleSide::Player);
-    apply_held_status_healing(&mut state, items, &mut events)?;
     if state.player.hp > 0 && state.enemy.hp > 0 {
         apply_post_action_residual_damage(&mut state, BattleSide::Player, &mut events);
     }
@@ -2728,7 +2779,6 @@ pub fn resolve_battle_enemy_action_with_items(
             &mut events,
         )?;
         end_opponent_action_volatiles(&mut state, BattleSide::Enemy);
-        apply_held_status_healing(&mut state, items, &mut events)?;
         if battle_continues_after_actions(&state, &events)
             && state.player.hp > 0
             && state.enemy.hp > 0
@@ -3272,6 +3322,7 @@ fn execute_item(
             pending_move_learns: Vec::new(),
             deferred_level_evolution: false,
             evolution_target: None,
+            evolution_cancel_snapshot: None,
             consumed: false,
         };
         match side {
@@ -4059,6 +4110,13 @@ fn execute_move_effect(
             if applied && status == "BAD_POISON" {
                 set_toxic_turns(state, target, 1);
             }
+            if applied {
+                // Sleep/Poison/Burn/Freeze/Paralyze target commands call
+                // UseHeldStatusHealingItem immediately after installing the
+                // status.  This is distinct from the blanket between-turn
+                // HandleHealingItems pass for a status that was already set.
+                apply_held_status_healing(state, target, items, events)?;
+            }
         } else {
             events.push(BattleEvent::StatusFailed {
                 side,
@@ -4070,11 +4128,19 @@ fn execute_move_effect(
         return Ok(());
     }
     if direct_confusion_effect(move_data) {
+        let event_start = events.len();
         apply_confusion_to_target(state, side, &move_name, rng, events);
+        if confusion_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, events)?;
+        }
         return Ok(());
     }
     if direct_swagger_effect(move_data) {
+        let event_start = events.len();
         apply_swagger_effect(state, side, &move_name, rng, events)?;
+        if confusion_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, events)?;
+        }
         return Ok(());
     }
     if direct_heal_effect(move_data) {
@@ -4236,7 +4302,6 @@ fn execute_move_effect(
             side,
             &move_name,
             force_switch_ends_battle,
-            items,
             rng,
             acted_before,
             events,
@@ -4376,17 +4441,19 @@ fn execute_move_effect(
             }
         }
         if move_data.effect == "POISON_MULTI_HIT" {
-            let chance_percent = move_data.effect_chance.min(100);
-            let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-            poison_multi_effect_succeeds = succeeds;
-            if !succeeds {
-                if let Some(roll) = roll {
+            // Twineedle's effectchance command is inside its hit loop and
+            // precedes critical/damage calculation, unlike the other
+            // damaging effect scripts sampled by apply_damage_hit.
+            let effect_chance = sample_effect_chance_against_target(state, side, move_data, rng);
+            poison_multi_effect_succeeds = effect_chance.succeeds;
+            if !effect_chance.succeeds {
+                if let Some(roll) = effect_chance.roll {
                     events.push(BattleEvent::SecondaryStatusMissed {
                         side,
                         move_name: move_name.to_string(),
                         target: side.other(),
                         status: "POISON".to_string(),
-                        chance_percent,
+                        chance_percent: effect_chance.chance_percent,
                         roll,
                     });
                 }
@@ -4456,6 +4523,7 @@ fn execute_move_effect(
     if completed_loop && completed_hits > 0 {
         apply_kings_rock_flinch(state, side, &move_name, move_data, 1, items, rng, events)?;
         if move_data.effect == "POISON_MULTI_HIT" && poison_multi_effect_succeeds {
+            let event_start = events.len();
             apply_secondary_status_after_success(
                 state,
                 side,
@@ -4465,6 +4533,9 @@ fn execute_move_effect(
                 rng,
                 events,
             );
+            if status_applied_since(events, event_start, side.other()) {
+                apply_held_status_healing(state, side.other(), items, events)?;
+            }
         }
     }
     Ok(())
@@ -4664,6 +4735,8 @@ fn apply_damage_hit(
                             Stat::SpecialDefense
                         },
                     ),
+                    attacker_type_badge_boost: prepared_move_data.name != "STRUGGLE"
+                        && badge_type_boost_active(state, side, &prepared_move_data.move_type),
                     defender_metal_powder: ditto_holds_metal_powder(state, side.other()),
                     defender_screen: active_damage_screen(
                         state,
@@ -4672,6 +4745,7 @@ fn apply_damage_hit(
                         &prepared_move_data,
                     )?
                     .is_some(),
+                    link_colosseum: state.link_colosseum,
                     held_type_boost_percent,
                     pre_stab_multiplier: if prepared_move_data.effect == "TRIPLE_KICK" {
                         hit_number.max(1)
@@ -4703,6 +4777,14 @@ fn apply_damage_hit(
         return Ok(DamageHitResult::NoEffect);
     }
 
+    // In the compiled effect streams this command is after checkhit but
+    // before move animation/applydamage. It therefore samples even when the
+    // impending damage will faint the target, and it must precede the Focus
+    // Band roll inside applydamage. A pre-existing Substitute makes the
+    // command fail without calling BattleRandom.
+    let pre_damage_effect_chance =
+        sample_pre_damage_effect_chance(state, side, move_data, rng);
+
     let defender_hp_before = state.pokemon(side.other()).hp;
     let raw_damage = if move_data.effect == "STOMP" && minimized_state(state, side.other()) {
         result.damage.saturating_mul(2)
@@ -4713,6 +4795,21 @@ fn apply_damage_hit(
         apply_substitute_damage(state, side, move_name, raw_damage, events)
     {
         apply_rage_counter_increment(state, side.other(), events)?;
+        if move_data.effect == "DEFENSE_DOWN_HIT" {
+            // This script deliberately has another effectchance after
+            // applydamage. If the hit just broke the Substitute, that second
+            // command now samples and can lower the real target's Defense.
+            let effect_chance = sample_effect_chance_against_target(state, side, move_data, rng);
+            apply_secondary_stat_stage_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                effect_chance,
+                rng,
+                events,
+            )?;
+        }
         if move_data.effect == "HYPER_BEAM" {
             set_recharge_move_state(state, side, Some(move_name.to_string()));
             events.push(BattleEvent::RechargeStarted {
@@ -4775,7 +4872,6 @@ fn apply_damage_hit(
         roll: damage_roll,
         result: applied_result,
     });
-    apply_held_hp_healing(state, side.other(), items, events)?;
     if damage > 0 {
         record_last_damage(
             state,
@@ -4792,21 +4888,39 @@ fn apply_damage_hit(
     }
     let target_fainted_from_hit = state.pokemon(side.other()).hp == 0;
     let secondary_stat_handled = if move_data.effect == "RAPID_SPIN" {
-        apply_post_damage_stat_effect(state, side, move_name, move_data, damage, rng, events)?
+        apply_post_damage_stat_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            damage,
+            pre_damage_effect_chance,
+            rng,
+            events,
+        )?
     } else if target_fainted_from_hit {
-        // The effectchance command precedes applydamage/checkfaint, so retain
-        // its RNG consumption even though checkfaint skips the later stat
-        // command.
-        if move_data.effect == "ALL_UP_HIT" || secondary_stat_hit_effect(move_data) {
-            let _ = secondary_effect_roll(move_data.effect_chance.min(100), rng);
-            true
-        } else {
-            false
-        }
+        move_data.effect == "ALL_UP_HIT" || secondary_stat_hit_effect(move_data)
     } else {
-        apply_post_damage_stat_effect(state, side, move_name, move_data, damage, rng, events)?
+        apply_post_damage_stat_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            damage,
+            pre_damage_effect_chance,
+            rng,
+            events,
+        )?
     };
-    apply_post_damage_hp_effect(state, side, move_name, move_data, damage, events);
+    apply_post_damage_hp_effect(
+        state,
+        side,
+        move_name,
+        move_data,
+        damage,
+        pre_damage_effect_chance,
+        events,
+    );
     apply_direct_damage_faint_events(state, side, side.other(), move_name, events);
     if move_data.effect == "HYPER_BEAM" && damage > 0 {
         set_recharge_move_state(state, side, Some(move_name.to_string()));
@@ -4836,23 +4950,62 @@ fn apply_damage_hit(
     } else if move_data.effect == "TRAP_TARGET" {
         apply_trap_target_effect(state, side, move_name, rng, events);
     } else if move_data.effect == "TRI_ATTACK" {
+        let event_start = events.len();
         apply_tri_attack_effect(state, side, move_name, move_data, rng, events);
-    } else if let Some((status, chance_percent)) = secondary_status_effect(move_data) {
-        apply_secondary_status_effect(state, side, move_name, status, chance_percent, rng, events);
-    } else if let Some(chance_percent) = secondary_confusion_effect(move_data) {
-        apply_secondary_confusion_effect(state, side, move_name, chance_percent, rng, events);
-    } else if let Some(chance_percent) = secondary_flinch_effect(move_data) {
+        if status_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, events)?;
+        }
+    } else if let Some((status, _chance_percent)) = secondary_status_effect(move_data) {
+        let event_start = events.len();
+        apply_secondary_status_effect(
+            state,
+            side,
+            move_name,
+            status,
+            pre_damage_effect_chance
+                .expect("damaging status effect script must sample before damage"),
+            rng,
+            events,
+        );
+        if status_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, events)?;
+        }
+    } else if secondary_confusion_effect(move_data).is_some() {
+        let event_start = events.len();
+        apply_secondary_confusion_effect(
+            state,
+            side,
+            move_name,
+            pre_damage_effect_chance
+                .expect("damaging confusion effect script must sample before damage"),
+            rng,
+            events,
+        );
+        if confusion_applied_since(events, event_start, side.other()) {
+            apply_held_status_healing(state, side.other(), items, events)?;
+        }
+    } else if secondary_flinch_effect(move_data).is_some() {
         apply_secondary_flinch_effect(
             state,
             side,
             move_name,
-            chance_percent,
+            pre_damage_effect_chance
+                .expect("damaging flinch effect script must sample before damage"),
             target_already_acted,
-            rng,
             events,
         );
     } else if !secondary_stat_handled {
-        apply_secondary_stat_stage_effect(state, side, move_name, move_data, rng, events)?;
+        if let Some(effect_chance) = pre_damage_effect_chance {
+            apply_secondary_stat_stage_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                effect_chance,
+                rng,
+                events,
+            )?;
+        }
     }
     apply_kings_rock_flinch(
         state, side, move_name, move_data, damage, items, rng, events,
@@ -5102,7 +5255,6 @@ fn apply_beat_up_effect(
             },
         });
         hit_any = true;
-        apply_held_hp_healing(state, side.other(), items, events)?;
         if damage > 0 {
             record_last_damage(
                 state,
@@ -5213,7 +5365,8 @@ fn calculate_wild_enemy_beat_up_damage(
     if !ignore_stages && screen_turns(state, defender_side, BattleScreen::LightScreen) != 0 {
         defense = defense.wrapping_mul(2);
     }
-    let (mut attack, mut defense) = truncate_damage_stats(attack, defense);
+    let (mut attack, mut defense) =
+        truncate_damage_stats(attack, defense, state.link_colosseum);
     if defender.species.id == "DITTO" && defender.item.as_deref() == Some("METAL_POWDER") {
         (attack, defense) = apply_metal_powder_damage_stats(attack, defense);
     }
@@ -5257,6 +5410,13 @@ enum DamageHitResult {
     NoEffect,
     Continue,
     Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectChanceResult {
+    chance_percent: u8,
+    succeeds: bool,
+    roll: Option<u8>,
 }
 
 enum PresentEffectOutcome {
@@ -5520,7 +5680,6 @@ fn apply_ohko_effect(
             type_multiplier,
         },
     });
-    apply_held_hp_healing(state, target, items, events)?;
     record_last_damage(
         state,
         target,
@@ -5917,8 +6076,10 @@ fn apply_confusion_self_damage(
             random_roll: damage_roll,
             attacker_badge_boost: badge_boost_active(state, side, Stat::Attack),
             defender_badge_boost: badge_boost_active(state, side, Stat::Defense),
+            attacker_type_badge_boost: false,
             defender_metal_powder: ditto_holds_metal_powder(state, side),
             defender_screen: screen_turns(state, side, BattleScreen::Reflect) != 0,
+            link_colosseum: state.link_colosseum,
             held_type_boost_percent,
             pre_stab_multiplier: 1,
             rage_counter: 0,
@@ -5951,56 +6112,55 @@ fn ditto_holds_metal_powder(state: &BattleCombatState, side: BattleSide) -> bool
 
 fn apply_held_status_healing(
     state: &mut BattleCombatState,
+    side: BattleSide,
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
-        if state.pokemon(side).hp == 0 {
-            continue;
-        }
-        let Some(item_id) = state.pokemon(side).item.clone() else {
-            continue;
-        };
-        let item = items
-            .get(&item_id)
-            .ok_or_else(|| BattleTurnError::UnknownHeldItem {
-                side,
-                item_id: item_id.clone(),
-            })?;
-        let held_effect = item.held_effect.clone();
-        let status_before = state.pokemon(side).status.clone();
-        let confusion_turns_before = state.pokemon(side).confusion_turns;
-        let heals_status = held_item_heals_status(&held_effect, status_before.as_deref());
-        let heals_confusion = matches!(
-            held_effect.as_str(),
-            "HELD_HEAL_CONFUSION" | "HELD_HEAL_STATUS"
-        ) && confusion_turns_before != 0;
-        if !heals_status && !heals_confusion {
-            continue;
-        }
-        if heals_status {
-            {
-                let pokemon = state.pokemon_mut(side);
-                pokemon.status = None;
-                pokemon.sleep_turns = 0;
-            }
-            set_toxic_turns(state, side, 0);
-            if status_before.as_deref() == Some("SLEEP") {
-                set_nightmare_source(state, side, None);
-            }
-        }
-        if heals_confusion {
-            state.pokemon_mut(side).confusion_turns = 0;
-        }
-        state.pokemon_mut(side).item = None;
-        events.push(BattleEvent::HeldItemStatusHealed {
-            side,
-            item_id,
-            held_effect,
-            status_before,
-            confusion_turns_before,
-        });
+    if state.pokemon(side).hp == 0 {
+        return Ok(());
     }
+    let Some(item_id) = state.pokemon(side).item.clone() else {
+        return Ok(());
+    };
+    let item = items
+        .get(&item_id)
+        .ok_or_else(|| BattleTurnError::UnknownHeldItem {
+            side,
+            item_id: item_id.clone(),
+        })?;
+    let held_effect = item.held_effect.clone();
+    let status_before = state.pokemon(side).status.clone();
+    let confusion_turns_before = state.pokemon(side).confusion_turns;
+    let heals_status = held_item_heals_status(&held_effect, status_before.as_deref());
+    let heals_confusion = matches!(
+        held_effect.as_str(),
+        "HELD_HEAL_CONFUSION" | "HELD_HEAL_STATUS"
+    ) && confusion_turns_before != 0;
+    if !heals_status && !heals_confusion {
+        return Ok(());
+    }
+    if heals_status {
+        {
+            let pokemon = state.pokemon_mut(side);
+            pokemon.status = None;
+            pokemon.sleep_turns = 0;
+        }
+        set_toxic_turns(state, side, 0);
+        if status_before.as_deref() == Some("SLEEP") {
+            set_nightmare_source(state, side, None);
+        }
+    }
+    if heals_confusion {
+        state.pokemon_mut(side).confusion_turns = 0;
+    }
+    state.pokemon_mut(side).item = None;
+    events.push(BattleEvent::HeldItemStatusHealed {
+        side,
+        item_id,
+        held_effect,
+        status_before,
+        confusion_turns_before,
+    });
     Ok(())
 }
 
@@ -6011,7 +6171,7 @@ fn apply_held_hp_healing(
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let pokemon = state.pokemon(side);
-    if pokemon.hp == 0 || pokemon.hp > pokemon.max_hp / 2 {
+    if pokemon.hp == 0 || pokemon.hp.saturating_mul(2) >= pokemon.max_hp {
         return Ok(());
     }
     let Some(item_id) = pokemon.item.clone() else {
@@ -6055,7 +6215,7 @@ fn apply_end_turn_leftovers(
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let pokemon = state.pokemon(side);
         if pokemon.hp == 0 || pokemon.hp >= pokemon.max_hp {
             continue;
@@ -6094,7 +6254,7 @@ fn apply_end_turn_mystery_berry(
     items: &BTreeMap<String, Item>,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         if state.pokemon(side).hp == 0 {
             continue;
         }
@@ -6149,7 +6309,7 @@ fn apply_end_turn_defrost(
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         if state.pokemon(side).status.as_deref() != Some("FREEZE") {
             continue;
         }
@@ -6177,7 +6337,7 @@ fn apply_end_turn_defrost(
 }
 
 fn apply_end_turn_encore(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let Some(encore) = encore_state(state, side).cloned() else {
             continue;
         };
@@ -6368,7 +6528,6 @@ fn apply_end_turn_effects(
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    apply_held_status_healing(state, items, events)?;
     apply_end_turn_future_sight(state, items, rng, events)?;
     if either_active_pokemon_fainted(state) {
         return Ok(());
@@ -6391,8 +6550,9 @@ fn apply_end_turn_effects(
     apply_end_turn_defrost(state, rng, events);
     apply_end_turn_safeguard(state, events);
     apply_end_turn_screens(state, events);
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         apply_held_hp_healing(state, side, items, events)?;
+        apply_held_status_healing(state, side, items, events)?;
     }
     apply_end_turn_encore(state, events);
     Ok(())
@@ -6508,7 +6668,7 @@ fn apply_end_turn_curse(
 }
 
 fn apply_end_turn_trap(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let Some(trap) = trap_state(state, side).cloned() else {
             continue;
         };
@@ -6567,7 +6727,7 @@ fn apply_end_turn_trap(state: &mut BattleCombatState, events: &mut Vec<BattleEve
 }
 
 fn clear_inactive_escape_traps(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let Some(trap) = escape_trap_state(state, side).cloned() else {
             continue;
         };
@@ -6584,7 +6744,7 @@ fn clear_inactive_escape_traps(state: &mut BattleCombatState, events: &mut Vec<B
 }
 
 fn apply_end_turn_perish_song(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let pokemon = state.pokemon_mut(side);
         if pokemon.hp == 0 || pokemon.perish_song_turns == 0 {
             continue;
@@ -6607,7 +6767,7 @@ fn apply_end_turn_future_sight(
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let Some(queued) = future_sight_state(state, side).cloned() else {
             continue;
         };
@@ -6678,7 +6838,6 @@ fn apply_end_turn_future_sight(
             hp_before,
             hp_after: hp_after_damage,
         });
-        apply_held_hp_healing(state, side, items, events)?;
         if damage > 0 {
             record_last_damage(
                 state,
@@ -6701,7 +6860,7 @@ fn apply_end_turn_future_sight(
 }
 
 fn apply_end_turn_safeguard(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         let turns = safeguard_turns(state, side);
         if turns == 0 {
             continue;
@@ -6716,7 +6875,7 @@ fn apply_end_turn_safeguard(state: &mut BattleCombatState, events: &mut Vec<Batt
 }
 
 fn apply_end_turn_screens(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         for screen in [BattleScreen::Reflect, BattleScreen::LightScreen] {
             let turns = screen_turns(state, side, screen);
             if turns == 0 {
@@ -6760,7 +6919,7 @@ fn apply_end_turn_weather(state: &mut BattleCombatState, events: &mut Vec<Battle
 }
 
 fn apply_end_turn_sandstorm_damage(state: &mut BattleCombatState, events: &mut Vec<BattleEvent>) {
-    for side in [BattleSide::Player, BattleSide::Enemy] {
+    for side in between_turn_side_order(state.serial_connection_status) {
         if state.pokemon(side).hp == 0 || pokemon_is_sandstorm_immune(state, side) {
             continue;
         }
@@ -7209,10 +7368,41 @@ fn secondary_status_effect(move_data: &Move) -> Option<(&'static str, u8)> {
         "BURN_HIT" | "FLAME_WHEEL" | "SACRED_FIRE" => "BURN",
         "FREEZE_HIT" => "FREEZE",
         "POISON_HIT" | "POISON_MULTI_HIT" => "POISON",
-        "PARALYZE_HIT" => "PARALYSIS",
+        "PARALYZE_HIT" | "THUNDER" => "PARALYSIS",
         _ => return None,
     };
     Some((status, move_data.effect_chance.min(100)))
+}
+
+fn damaging_effect_script_has_pre_damage_effect_chance(move_data: &Move) -> bool {
+    matches!(
+        move_data.effect.as_str(),
+        "POISON_HIT"
+            | "BURN_HIT"
+            | "FREEZE_HIT"
+            | "PARALYZE_HIT"
+            | "ATTACK_DOWN_HIT"
+            | "DEFENSE_DOWN_HIT"
+            | "SPEED_DOWN_HIT"
+            | "SPECIAL_ATTACK_DOWN_HIT"
+            | "SPECIAL_DEFENSE_DOWN_HIT"
+            | "ACCURACY_DOWN_HIT"
+            | "EVASION_DOWN_HIT"
+            | "DEFENSE_UP_HIT"
+            | "ATTACK_UP_HIT"
+            | "ALL_UP_HIT"
+            | "FLINCH_HIT"
+            | "CONFUSE_HIT"
+            | "SKY_ATTACK"
+            | "SNORE"
+            | "THIEF"
+            | "FLAME_WHEEL"
+            | "SACRED_FIRE"
+            | "TWISTER"
+            | "EARTHQUAKE"
+            | "STOMP"
+            | "THUNDER"
+    )
 }
 
 fn secondary_confusion_effect(move_data: &Move) -> Option<u8> {
@@ -7242,6 +7432,7 @@ fn secondary_stat_hit_effect(move_data: &Move) -> bool {
             | "DEFENSE_UP_HIT"
             | "DEFENSE_DOWN_HIT"
             | "SPEED_DOWN_HIT"
+            | "SPECIAL_ATTACK_DOWN_HIT"
             | "SPECIAL_DEFENSE_DOWN_HIT"
             | "ACCURACY_DOWN_HIT"
             | "EVASION_DOWN_HIT"
@@ -7643,7 +7834,6 @@ fn apply_counter_effect(
         defender_hp_before,
         defender_hp_after,
     });
-    apply_held_hp_healing(state, target, items, events)?;
     if damage != 0 {
         record_last_damage(
             state,
@@ -7760,6 +7950,7 @@ fn apply_post_damage_hp_effect(
     move_name: &str,
     move_data: &Move,
     damage: u16,
+    pre_damage_effect_chance: Option<EffectChanceResult>,
     events: &mut Vec<BattleEvent>,
 ) {
     if damage == 0 {
@@ -7769,7 +7960,13 @@ fn apply_post_damage_hp_effect(
         "DREAM_EATER" | "LEECH_HIT" => apply_drain_effect(state, side, move_name, damage, events),
         "RECOIL_HIT" => apply_recoil_effect(state, side, move_name, damage, events),
         "PAY_DAY" => apply_pay_day_effect(state, side, move_name, events),
-        "THIEF" => apply_thief_effect(state, side, move_name, events),
+        "THIEF"
+            if pre_damage_effect_chance
+                .expect("Thief effect script must sample before damage")
+                .succeeds =>
+        {
+            apply_thief_effect(state, side, move_name, events)
+        }
         _ => {}
     }
 }
@@ -7780,6 +7977,7 @@ fn apply_post_damage_stat_effect(
     move_name: &str,
     move_data: &Move,
     damage: u16,
+    pre_damage_effect_chance: Option<EffectChanceResult>,
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
@@ -7788,7 +7986,9 @@ fn apply_post_damage_stat_effect(
     }
     match move_data.effect.as_str() {
         "ALL_UP_HIT" => {
-            if !roll_secondary_effect_chance(move_data, rng) {
+            let effect_chance = pre_damage_effect_chance
+                .expect("AllUpHit effect script must sample before damage");
+            if !effect_chance.succeeds {
                 return Ok(true);
             }
             for stat in [
@@ -7809,7 +8009,23 @@ fn apply_post_damage_stat_effect(
             Ok(true)
         }
         _ if secondary_stat_hit_effect(move_data) => {
-            apply_secondary_stat_stage_effect(state, side, move_name, move_data, rng, events)?;
+            // DefenseDownHit uniquely executes a second effectchance after
+            // applydamage; the latter result overwrites the first one.
+            let effect_chance = if move_data.effect == "DEFENSE_DOWN_HIT" {
+                sample_effect_chance_against_target(state, side, move_data, rng)
+            } else {
+                pre_damage_effect_chance
+                    .expect("damaging stat effect script must sample before damage")
+            };
+            apply_secondary_stat_stage_effect(
+                state,
+                side,
+                move_name,
+                move_data,
+                effect_chance,
+                rng,
+                events,
+            )?;
             Ok(true)
         }
         "RAPID_SPIN" => {
@@ -7820,18 +8036,42 @@ fn apply_post_damage_stat_effect(
     }
 }
 
-fn roll_secondary_effect_chance(move_data: &Move, rng: &mut Random) -> bool {
-    let chance_percent = move_data.effect_chance.min(100);
-    secondary_effect_roll(chance_percent, rng).0
-}
-
 fn secondary_effect_roll(chance_percent: u8, rng: &mut Random) -> (bool, Option<u8>) {
-    if chance_percent == 0 {
-        return (true, None);
-    }
     let threshold = (u16::from(chance_percent.min(100)) * 255 / 100) as u8;
     let roll = rng.battle_random_byte();
     (roll < threshold, Some(roll))
+}
+
+fn sample_effect_chance_against_target(
+    state: &BattleCombatState,
+    side: BattleSide,
+    move_data: &Move,
+    rng: &mut Random,
+) -> EffectChanceResult {
+    let chance_percent = move_data.effect_chance.min(100);
+    if substitute_hp(state, side.other()) != 0 {
+        return EffectChanceResult {
+            chance_percent,
+            succeeds: false,
+            roll: None,
+        };
+    }
+    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
+    EffectChanceResult {
+        chance_percent,
+        succeeds,
+        roll,
+    }
+}
+
+fn sample_pre_damage_effect_chance(
+    state: &BattleCombatState,
+    side: BattleSide,
+    move_data: &Move,
+    rng: &mut Random,
+) -> Option<EffectChanceResult> {
+    damaging_effect_script_has_pre_damage_effect_chance(move_data)
+        .then(|| sample_effect_chance_against_target(state, side, move_data, rng))
 }
 
 fn crystal_damage_variation_roll(rng: &mut Random) -> u8 {
@@ -8840,6 +9080,9 @@ fn clear_side_volatile_conditions(state: &mut BattleCombatState, side: BattleSid
     set_type_override(state, side, None);
     set_transform_state(state, side, None);
     let pokemon = state.pokemon_mut(side);
+    if pokemon.status.as_deref() == Some("BAD_POISON") {
+        pokemon.status = Some("POISON".to_string());
+    }
     pokemon.flinching = false;
     pokemon.confusion_turns = 0;
     pokemon.perish_song_turns = 0;
@@ -8879,6 +9122,7 @@ fn apply_secondary_stat_stage_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
+    effect_chance: EffectChanceResult,
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
@@ -8888,7 +9132,7 @@ fn apply_secondary_stat_stage_effect(
     if move_data.power == 0 || amount == 0 {
         return Ok(false);
     }
-    if !roll_secondary_stat_stage_effect(side, move_name, move_data, rng, events)? {
+    if !roll_secondary_stat_stage_effect(side, move_name, move_data, effect_chance, events)? {
         return Ok(true);
     }
     let target = stat_effect_target(side, amount);
@@ -8924,7 +9168,7 @@ fn roll_secondary_stat_stage_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
-    rng: &mut Random,
+    effect_chance: EffectChanceResult,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     let (Some(stat), Some(amount)) = (move_data.stat, move_data.amount) else {
@@ -8933,17 +9177,15 @@ fn roll_secondary_stat_stage_effect(
     if amount == 0 {
         return Ok(false);
     }
-    let chance_percent = move_data.effect_chance.min(100);
-    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-    if !succeeds {
-        if let Some(roll) = roll {
+    if !effect_chance.succeeds {
+        if let Some(roll) = effect_chance.roll {
             events.push(BattleEvent::SecondaryStatStageMissed {
                 side,
                 move_name: move_name.to_string(),
                 target: stat_effect_target(side, amount),
                 stat,
                 amount,
-                chance_percent,
+                chance_percent: effect_chance.chance_percent,
                 roll,
             });
         }
@@ -8957,20 +9199,19 @@ fn apply_secondary_status_effect(
     side: BattleSide,
     move_name: &str,
     status: &str,
-    chance_percent: u8,
+    effect_chance: EffectChanceResult,
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-    if !succeeds {
-        if let Some(roll) = roll {
+    if !effect_chance.succeeds {
+        if let Some(roll) = effect_chance.roll {
             events.push(BattleEvent::SecondaryStatusMissed {
                 side,
                 move_name: move_name.to_string(),
                 target,
                 status: status.to_string(),
-                chance_percent,
+                chance_percent: effect_chance.chance_percent,
                 roll,
             });
         }
@@ -8998,7 +9239,7 @@ fn apply_tri_attack_effect(
             target,
             status: "TRI_ATTACK".to_string(),
             chance_percent,
-            roll: chance_roll.expect("nonzero secondary chance consumes a battle byte"),
+            roll: chance_roll.expect("effectchance always consumes a battle byte"),
         });
         return;
     }
@@ -9071,24 +9312,46 @@ fn apply_secondary_status_after_success(
     }
 }
 
+fn status_applied_since(events: &[BattleEvent], start: usize, target: BattleSide) -> bool {
+    events[start..].iter().any(|event| {
+        matches!(
+            event,
+            BattleEvent::StatusApplied {
+                target: applied_target,
+                ..
+            } if *applied_target == target
+        )
+    })
+}
+
+fn confusion_applied_since(events: &[BattleEvent], start: usize, target: BattleSide) -> bool {
+    events[start..].iter().any(|event| {
+        matches!(
+            event,
+            BattleEvent::ConfusionApplied {
+                target: applied_target,
+                ..
+            } if *applied_target == target
+        )
+    })
+}
+
 fn apply_secondary_flinch_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    chance_percent: u8,
+    effect_chance: EffectChanceResult,
     target_already_acted: bool,
-    rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-    if !succeeds {
-        if let Some(roll) = roll {
+    if !effect_chance.succeeds {
+        if let Some(roll) = effect_chance.roll {
             events.push(BattleEvent::SecondaryFlinchMissed {
                 side,
                 move_name: move_name.to_string(),
                 target,
-                chance_percent,
+                chance_percent: effect_chance.chance_percent,
                 roll,
             });
         }
@@ -9208,19 +9471,18 @@ fn apply_secondary_confusion_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    chance_percent: u8,
+    effect_chance: EffectChanceResult,
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
-    let (succeeds, roll) = secondary_effect_roll(chance_percent, rng);
-    if !succeeds {
-        if let Some(roll) = roll {
+    if !effect_chance.succeeds {
+        if let Some(roll) = effect_chance.roll {
             events.push(BattleEvent::SecondaryConfusionMissed {
                 side,
                 move_name: move_name.to_string(),
                 target,
-                chance_percent,
+                chance_percent: effect_chance.chance_percent,
                 roll,
             });
         }
@@ -10447,7 +10709,6 @@ fn apply_force_switch_effect(
     side: BattleSide,
     move_name: &str,
     force_switch_ends_battle: bool,
-    items: &BTreeMap<String, Item>,
     rng: &mut Random,
     acted_before: &[BattleSide],
     events: &mut Vec<BattleEvent>,
@@ -11070,7 +11331,8 @@ fn calculate_future_sight_damage(
     if screen_turns(state, defender_side, BattleScreen::LightScreen) != 0 {
         defense = defense.wrapping_mul(2);
     }
-    let (mut attack, mut defense) = truncate_damage_stats(attack, defense);
+    let (mut attack, mut defense) =
+        truncate_damage_stats(attack, defense, state.link_colosseum);
     if defender.species.id == "DITTO" && defender.item.as_deref() == Some("METAL_POWDER") {
         (attack, defense) = apply_metal_powder_damage_stats(attack, defense);
     }
@@ -11747,17 +12009,51 @@ fn battle_speed(
 }
 
 fn badge_boost_active(state: &BattleCombatState, side: BattleSide, stat: Stat) -> bool {
-    if side != BattleSide::Player || !state.badge_boosts_enabled {
+    if side != BattleSide::Player || state.link_battle || !state.badge_boosts_enabled {
         return false;
     }
     let badge_index = match stat {
         Stat::Attack => 0,
-        Stat::Defense => 5,
+        Stat::Defense => 4,
         Stat::Speed => 2,
         Stat::SpecialAttack | Stat::SpecialDefense => 6,
         _ => return false,
     };
     state.obedience_badges[badge_index]
+}
+
+fn badge_type_boost_active(
+    state: &BattleCombatState,
+    side: BattleSide,
+    move_type: &str,
+) -> bool {
+    const JOHTO_BADGE_TYPES: [&str; 8] = [
+        "FLYING", "BUG", "NORMAL", "GHOST", "STEEL", "FIGHTING", "ICE", "DRAGON",
+    ];
+    const KANTO_BADGE_TYPES: [&str; 8] = [
+        "ROCK",
+        "WATER",
+        "ELECTRIC",
+        "GRASS",
+        "POISON",
+        "PSYCHIC_TYPE",
+        "FIRE",
+        "GROUND",
+    ];
+
+    if side != BattleSide::Player || state.link_battle || !state.badge_boosts_enabled {
+        return false;
+    }
+    state
+        .obedience_badges
+        .iter()
+        .zip(JOHTO_BADGE_TYPES)
+        .any(|(owned, badge_type)| *owned && badge_type == move_type)
+        || state
+            .kanto_badges
+            .iter()
+            .zip(KANTO_BADGE_TYPES)
+            .any(|(owned, badge_type)| *owned && badge_type == move_type)
 }
 
 fn apply_paralysis_speed_penalty(pokemon: &Pokemon, speed: u16) -> u16 {

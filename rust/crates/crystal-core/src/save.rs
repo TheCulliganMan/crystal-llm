@@ -13,7 +13,7 @@ use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
 pub const SAVE_EXTENSION: &str = "crystalsave";
-pub const SAVE_FORMAT_VERSION: u16 = 5;
+pub const SAVE_FORMAT_VERSION: u16 = 9;
 const SAVE_VERSION_OFFSET: usize = SAVE_MAGIC.len();
 const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;
@@ -264,10 +264,22 @@ impl<'de> Deserialize<'de> for SaveGame {
 
 impl SaveGame {
     fn new(
-        state: GameState,
+        mut state: GameState,
         modpack: SaveModpackIdentity,
         pack_content_hash: String,
     ) -> Result<Self, SaveError> {
+        // SaveOptions explicitly clears the transient NO_TEXT_SCROLL bit in
+        // the primary SRAM copy without mutating live WRAM.
+        state.options.no_text_scroll = false;
+        // SaveRTC clears the status byte and MBC3 carry bit only in the
+        // persisted generation. The caller's live state remains sticky until
+        // this save boundary, matching SRAM/hardware separation.
+        state.time.normalize_rtc_for_save();
+        // These two controls live in unsaved WRAM. SaveGameData can run while
+        // wGameLogicPaused is raised, but Continue always reconstructs the
+        // playable timer state instead of restoring either transient byte.
+        state.game_logic_paused = false;
+        state.game_timer_counting = false;
         let metadata = SaveMetadata::new(modpack, pack_content_hash, &state)?;
         let save = Self {
             format_version: SAVE_FORMAT_VERSION,
@@ -599,11 +611,35 @@ fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveEr
         }
         return Err(error);
     }
+    // SaveBackupOptions/PlayerData/PokemonData/Checksum copy the same current
+    // generation after the primary save. A successful first save therefore
+    // also has a complete recovery copy, rather than treating the backup as
+    // a previous-generation undo slot.
+    write_primary_save_bytes(&backup, &bytes)?;
     Ok(())
 }
 
-fn save_backup_path(path: &Path) -> PathBuf {
+pub fn save_backup_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", path.display()))
+}
+
+pub fn erase_save_game(path: impl AsRef<Path>) -> Result<bool, SaveError> {
+    let path = path.as_ref();
+    validate_save_path(path)?;
+    let mut removed = false;
+    for artifact in [path.to_path_buf(), save_backup_path(path)] {
+        match std::fs::remove_file(&artifact) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SaveError::Write {
+                    path: artifact.display().to_string(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(removed)
 }
 
 fn write_primary_save_bytes(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
@@ -994,6 +1030,39 @@ mod tests {
         let mut state = GameState::default();
         state.frame_counter = 42;
         state.pokedex.seen_species.insert("CHIKORITA".to_string());
+        let mut sleeping_species = crate::models::PokemonSpecies::new_for_tests(
+            "CHIKORITA",
+            crate::models::BaseStats::new(45, 49, 65, 45, 49, 65),
+        );
+        sleeping_species.int_id = 152;
+        let mut sleeping = crate::models::Pokemon::new_for_tests(
+            sleeping_species,
+            5,
+            crate::models::Dv::default(),
+        );
+        sleeping.status = Some("SLEEP".to_string());
+        sleeping.sleep_turns = 3;
+        state.storage.party.pokemon[0] = Some(sleeping);
+        state.sync_party_from_storage();
+        state.overworld = crate::state::OverworldMemory::Active {
+            map_name: "ROUTE_40".to_string(),
+            tile: crate::world::map::TilePosition::new(4, 7),
+            facing: crate::world::map::Direction::Down,
+            mode: crate::world::movement::MovementMode::Normal,
+        };
+        state.pending_static_wild_terminal =
+            Some(crate::state::PendingStaticWildBattleTerminal {
+                origin_map_name: "ROUTE_40".to_string(),
+                source_script: "RockSmashScript".to_string(),
+                startbattle_command_index: 12,
+                resume_command_index: 13,
+                battle_type: "BATTLETYPE_NORMAL".to_string(),
+                species: "SHUCKLE".to_string(),
+                level: 15,
+                pay_day_payout: 1_234,
+                battle_result: 0,
+                win_cleanup_applied: false,
+            });
         let modpack = SaveModpackIdentity::new(
             "core-modular",
             "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
@@ -1039,7 +1108,118 @@ mod tests {
             u16::from_be_bytes([bytes[SAVE_VERSION_OFFSET], bytes[SAVE_VERSION_OFFSET + 1]]),
             SAVE_FORMAT_VERSION
         );
-        let _ = std::fs::remove_file(path);
+        erase_save_game(&path).expect("erase save artifacts");
+    }
+
+    #[test]
+    fn primary_save_clears_transient_no_text_scroll_option() {
+        let path = temp_save_path("transient-no-text-scroll.crystalsave");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let mut state = GameState::default();
+        state.options.no_text_scroll = true;
+
+        write_save_game_for_modpack(
+            &path,
+            state.clone(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write save");
+        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("read save");
+
+        assert!(state.options.no_text_scroll, "save must not mutate live WRAM");
+        assert!(
+            !loaded.state().options.no_text_scroll,
+            "SaveOptions clears NO_TEXT_SCROLL before writing primary SRAM"
+        );
+        erase_save_game(&path).expect("erase save artifacts");
+    }
+
+    #[test]
+    fn save_does_not_persist_transient_game_timer_control_bytes() {
+        let path = temp_save_path("transient-game-timer-controls.crystalsave");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let mut state = GameState::default();
+        state.set_game_timer_counting(true);
+        state.set_game_logic_paused(true);
+
+        write_save_game_for_modpack(
+            &path,
+            state.clone(),
+            &modpack,
+            pack_content_hash(),
+        )
+        .expect("write save");
+        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("read save");
+
+        assert!(state.game_timer_counting, "save must not mutate live WRAM");
+        assert!(state.game_logic_paused, "save must not mutate live WRAM");
+        assert!(!loaded.state().game_timer_counting);
+        assert!(!loaded.state().game_logic_paused);
+        erase_save_game(&path).expect("erase save artifacts");
+    }
+
+    #[test]
+    fn save_rtc_normalization_clears_only_the_persisted_status_and_carry() {
+        use crate::systems::time::{
+            B_RAMB_RTC_DH_CARRY, GameDate, RTC_DAYS_EXCEED_255, RTC_RESET,
+        };
+
+        let path = temp_save_path("rtc-normalization.crystalsave");
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let mut state = GameState::default();
+        state.time.current_date = GameDate::new(2024, 1, 1);
+        state.time.registers.rtc_day_lo = 88;
+        state.time.registers.rtc_day_hi = 1 << B_RAMB_RTC_DH_CARRY;
+        state.time.rtc_status_flags = RTC_RESET | RTC_DAYS_EXCEED_255;
+        let live_state = state.clone();
+
+        write_save_game_for_modpack(&path, state, &modpack, pack_content_hash())
+            .expect("write save");
+        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("read save");
+
+        assert_eq!(
+            live_state.time.rtc_status_flags,
+            RTC_RESET | RTC_DAYS_EXCEED_255,
+            "SaveRTC must not clear the live in-memory status byte"
+        );
+        assert_ne!(
+            live_state.time.registers.rtc_day_hi & (1 << B_RAMB_RTC_DH_CARRY),
+            0,
+            "SaveRTC must not mutate the live emulated MBC3 register"
+        );
+        assert_eq!(loaded.state().time.rtc_status_flags, 0);
+        assert_eq!(
+            loaded.state().time.registers.rtc_day_hi & (1 << B_RAMB_RTC_DH_CARRY),
+            0
+        );
+
+        let mut resumed = loaded.into_state();
+        resumed
+            .time
+            .update_from_datetime(GameDate::new(2024, 1, 1), 12, 0, 0);
+        assert_eq!(resumed.time.rtc_status_flags, 0);
+        assert_eq!(
+            resumed.time.registers.rtc_day_hi & (1 << B_RAMB_RTC_DH_CARRY),
+            0,
+            "the next host sample must not recreate the carry cleared at SaveRTC"
+        );
+        erase_save_game(&path).expect("erase save artifacts");
     }
 
     #[test]
@@ -1263,8 +1443,6 @@ mod tests {
             )
             .expect("identity"),
         );
-        let bytes = encode_save_game_bytes(&save).expect("encode save");
-
         let current_dir_error = write_save_game("saves/./slot.crystalsave", &save)
             .expect_err("save writes must reject current-directory aliases");
         assert!(matches!(
@@ -1313,7 +1491,7 @@ mod tests {
             read_save_game_bytes(b"{\"sram\":{}}", "legacy.json"),
             Err(SaveError::InvalidMagic(_))
         ));
-        let _ = std::fs::remove_file(path);
+        erase_save_game(&path).expect("erase save artifacts");
     }
 
     #[test]
@@ -1395,6 +1573,102 @@ mod tests {
         assert!(matches!(
             read_save_game_bytes(&legacy, "slot.crystalsave"),
             Err(SaveError::UnsupportedVersion(_))
+        ));
+
+        let mut framed_v8 = encode_save_game_bytes(&save).expect("encode current framed save");
+        framed_v8[SAVE_VERSION_OFFSET..SAVE_VERSION_OFFSET + 2]
+            .copy_from_slice(&8_u16.to_be_bytes());
+        assert!(matches!(
+            read_save_game_bytes(&framed_v8, "slot-v8.crystalsave"),
+            Err(SaveError::UnsupportedVersion(8))
+        ));
+
+        #[derive(serde::Serialize)]
+        struct LegacyRoamingPokemonStateV8 {
+            species: String,
+            level: u8,
+            map_group: u16,
+            map_number: u16,
+            hp: u16,
+            dvs: u16,
+        }
+
+        let mut prior_state = GameState::default();
+        prior_state.roaming_pokemon[0] = crate::state::RoamingPokemonState {
+            species: Some("ROAMING_V9_SCHEMA_SENTINEL".to_string()),
+            level: 40,
+            map_group: 1,
+            map_number: 1,
+            hp: 1,
+            dvs_be: [0x12, 0x34],
+        };
+        let prior_save = test_save(
+            prior_state.clone(),
+            SaveModpackIdentity::new(
+                "core-modular",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("identity"),
+        );
+        let mut prior_payload = bincode::serde::encode_to_vec(&prior_save, save_binary_config())
+            .expect("encode current save payload");
+        let current_roaming = bincode::serde::encode_to_vec(
+            &prior_state.roaming_pokemon,
+            save_binary_config(),
+        )
+        .expect("encode current roaming array");
+        let history = bincode::serde::encode_to_vec(
+            &prior_state.roaming_map_history,
+            save_binary_config(),
+        )
+        .expect("encode current roaming history");
+        let positions = prior_payload
+            .windows(current_roaming.len())
+            .enumerate()
+            .filter_map(|(index, window)| (window == current_roaming).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(positions.len(), 1, "locate exact current roaming payload");
+        let roaming_start = positions[0];
+        let history_start = roaming_start + current_roaming.len();
+        assert_eq!(
+            &prior_payload[history_start..history_start + history.len()],
+            history.as_slice(),
+            "roaming history immediately follows the v9 roaming array"
+        );
+        let legacy_roaming = bincode::serde::encode_to_vec(
+            vec![
+                LegacyRoamingPokemonStateV8 {
+                    species: "ROAMING_V9_SCHEMA_SENTINEL".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 1,
+                    hp: 1,
+                    dvs: 0x1234,
+                },
+                LegacyRoamingPokemonStateV8 {
+                    species: "ENTEI".to_string(),
+                    level: 40,
+                    map_group: 1,
+                    map_number: 2,
+                    hp: 1,
+                    dvs: 0x5678,
+                },
+            ],
+            save_binary_config(),
+        )
+        .expect("encode prior v8 roaming vector shape");
+        prior_payload.splice(
+            roaming_start..history_start + history.len(),
+            legacy_roaming,
+        );
+        let mut prior_under_v9 = SAVE_MAGIC.to_vec();
+        prior_under_v9.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
+        prior_under_v9.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
+        prior_under_v9.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
+        prior_under_v9.extend_from_slice(&prior_payload);
+        assert!(matches!(
+            read_save_game_bytes(&prior_under_v9, "slot-v8-shape-under-v9.crystalsave"),
+            Err(SaveError::Decode(_))
         ));
     }
 
@@ -1563,7 +1837,7 @@ mod tests {
 
         let mut second_state = first_state.clone();
         second_state.frame_counter = 12;
-        write_save_game(&path, &test_save(second_state, modpack.clone()))
+        write_save_game(&path, &test_save(second_state.clone(), modpack.clone()))
             .expect("write second save");
         assert!(backup.exists(), "second write should preserve a backup");
 
@@ -1571,18 +1845,93 @@ mod tests {
         let recovered = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
             .expect("recover valid backup");
 
-        assert_eq!(recovered.state.frame_counter, first_state.frame_counter);
+        assert_eq!(recovered.state.frame_counter, second_state.frame_counter);
         assert_eq!(
             read_save_game(&path).expect("repaired primary").state,
-            first_state
+            second_state
         );
         let backup_save = read_save_game_bytes(
             &std::fs::read(&backup).expect("read preserved backup"),
             backup.display().to_string(),
         )
         .expect("preserved backup");
-        assert_eq!(backup_save.state, first_state);
+        assert_eq!(backup_save.state, second_state);
 
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn every_successful_save_refreshes_backup_with_the_current_state() {
+        let path = temp_save_path("current-backup.crystalsave");
+        let backup = save_backup_path(&path);
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let mut state = GameState::default();
+        state.frame_counter = 11;
+
+        write_save_game(&path, &test_save(state.clone(), modpack.clone()))
+            .expect("write first save");
+        assert!(
+            backup.exists(),
+            "SaveBackupPokemonData writes a recovery copy on the first successful save"
+        );
+        assert_eq!(
+            read_save_game_bytes(
+                &std::fs::read(&backup).expect("read first backup"),
+                backup.display().to_string(),
+            )
+            .expect("decode first backup")
+            .state,
+            state
+        );
+
+        state.frame_counter = 12;
+        write_save_game(&path, &test_save(state.clone(), modpack))
+            .expect("write second save");
+        assert_eq!(
+            std::fs::read(&path).expect("read current primary bytes"),
+            std::fs::read(&backup).expect("read current backup bytes"),
+            "primary and recovery artifacts must commit the same encoded generation"
+        );
+        assert_eq!(
+            read_save_game_bytes(
+                &std::fs::read(&backup).expect("read refreshed backup"),
+                backup.display().to_string(),
+            )
+            .expect("decode refreshed backup")
+            .state,
+            state,
+            "the recovery copy must contain the same state as the newly committed primary"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn first_save_can_recover_from_a_corrupted_primary() {
+        let path = temp_save_path("first-save-backup-recovery.crystalsave");
+        let backup = save_backup_path(&path);
+        let modpack = SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("identity");
+        let mut state = GameState::default();
+        state.frame_counter = 37;
+        write_save_game(&path, &test_save(state.clone(), modpack.clone()))
+            .expect("write first save");
+
+        std::fs::write(&path, b"corrupted first primary").expect("corrupt primary");
+        let recovered = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
+            .expect("recover first save from current-generation backup");
+
+        assert_eq!(recovered.state, state);
+        assert_eq!(read_save_game(&path).expect("repaired primary").state, state);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup);
     }

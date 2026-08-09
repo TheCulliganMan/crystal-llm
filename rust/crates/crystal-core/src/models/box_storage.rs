@@ -242,35 +242,32 @@ impl PokemonStorage {
         Ok(())
     }
 
-    pub fn has_capture_space(&self) -> bool {
-        self.party.has_space()
-            || self.pc_boxes.len() < MAX_PC_BOXES
-            || self.pc_boxes.iter().any(PcBox::has_space)
+    pub fn has_capture_space_in_box(&self, box_index: usize) -> Result<bool, String> {
+        validate_capture_box_index(box_index)?;
+        Ok(self.party.has_space() || self.pc_boxes.get(box_index).is_none_or(PcBox::has_space))
     }
 
-    pub fn register_capture(&mut self, pokemon: Pokemon) -> Result<CaptureStorageLocation, String> {
+    pub fn register_capture_in_box(
+        &mut self,
+        box_index: usize,
+        pokemon: Pokemon,
+    ) -> Result<CaptureStorageLocation, String> {
+        validate_capture_box_index(box_index)?;
         if self.party.add_pokemon(pokemon.clone()) {
             let slot = self.party.filled_slots() - 1;
             return Ok(CaptureStorageLocation::Party { slot });
         }
 
-        for box_index in 0..self.pc_boxes.len() {
-            self.ensure_canonical_box(box_index);
-            if self.pc_boxes[box_index].add_pokemon(pokemon.clone()) {
-                let slot = self.pc_boxes[box_index].filled_slots() - 1;
-                return Ok(CaptureStorageLocation::Pc { box_index, slot });
-            }
+        self.ensure_canonical_box(box_index);
+        if self.pc_boxes[box_index].add_pokemon(pokemon) {
+            let slot = self.pc_boxes[box_index].filled_slots() - 1;
+            return Ok(CaptureStorageLocation::Pc { box_index, slot });
         }
 
-        if self.pc_boxes.len() < MAX_PC_BOXES {
-            let box_index = self.pc_boxes.len();
-            self.ensure_canonical_box(box_index);
-            if self.pc_boxes[box_index].add_pokemon(pokemon) {
-                return Ok(CaptureStorageLocation::Pc { box_index, slot: 0 });
-            }
-        }
-
-        Err("party and PC boxes are full; cannot store captured Pokemon".to_string())
+        Err(format!(
+            "party and current PC box {} are full; cannot store captured Pokemon",
+            box_index + 1
+        ))
     }
 
     fn ensure_canonical_box(&mut self, index: usize) {
@@ -282,6 +279,15 @@ impl PokemonStorage {
             self.pc_boxes[index].name = format_default_box_name(index);
         }
     }
+}
+
+fn validate_capture_box_index(box_index: usize) -> Result<(), String> {
+    if box_index >= MAX_PC_BOXES {
+        return Err(format!(
+            "current PC box {box_index} is outside capture box range 0..{MAX_PC_BOXES}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,18 +364,18 @@ mod tests {
     fn capture_storage_uses_party_before_pc_boxes() {
         let mut storage = PokemonStorage::default();
         let first = storage
-            .register_capture(pokemon("CHIKORITA", 152))
+            .register_capture_in_box(0, pokemon("CHIKORITA", 152))
             .expect("store in party");
         assert_eq!(first, CaptureStorageLocation::Party { slot: 0 });
 
         for index in 0..(PARTY_SIZE - 1) {
             storage
-                .register_capture(pokemon(&format!("PARTY_{index}"), index as u16))
+                .register_capture_in_box(0, pokemon(&format!("PARTY_{index}"), index as u16))
                 .expect("fill party");
         }
 
         let pc = storage
-            .register_capture(pokemon("TOTODILE", 158))
+            .register_capture_in_box(0, pokemon("TOTODILE", 158))
             .expect("store in pc");
         assert_eq!(
             pc,
@@ -402,8 +408,51 @@ mod tests {
             storage.pc_boxes.push(pc_box);
         }
 
-        assert!(!storage.has_capture_space());
-        assert!(storage.register_capture(pokemon("EXTRA", 999)).is_err());
+        assert_eq!(storage.has_capture_space_in_box(0), Ok(false));
+        assert!(storage.register_capture_in_box(0, pokemon("EXTRA", 999)).is_err());
+    }
+
+    #[test]
+    fn captured_pokemon_never_routes_around_a_full_current_box() {
+        let mut storage = PokemonStorage::default();
+        for index in 0..PARTY_SIZE {
+            assert!(
+                storage
+                    .party
+                    .add_pokemon(pokemon(&format!("PARTY_{index}"), index as u16))
+            );
+        }
+        let mut current_box = PcBox::new(0);
+        for slot in 0..MAX_BOX_MONS {
+            assert!(
+                current_box.add_pokemon(pokemon(&format!("CURRENT_{slot}"), (slot + 1) as u16,))
+            );
+        }
+        storage.pc_boxes.push(current_box);
+        storage.pc_boxes.push(PcBox::new(1));
+        let before = storage.clone();
+
+        assert_eq!(storage.has_capture_space_in_box(0), Ok(false));
+        assert!(
+            storage
+                .register_capture_in_box(0, pokemon("EXTRA", 999))
+                .is_err()
+        );
+        assert_eq!(storage, before);
+        assert_eq!(storage.pc_boxes[1].filled_slots(), 0);
+
+        assert_eq!(storage.has_capture_space_in_box(1), Ok(true));
+        assert_eq!(
+            storage
+                .register_capture_in_box(1, pokemon("EXTRA", 999))
+                .expect("selected empty box stores the capture"),
+            CaptureStorageLocation::Pc {
+                box_index: 1,
+                slot: 0,
+            }
+        );
+        assert_eq!(storage.pc_boxes[0].filled_slots(), MAX_BOX_MONS);
+        assert_eq!(storage.pc_boxes[1].filled_slots(), 1);
     }
 
     #[test]

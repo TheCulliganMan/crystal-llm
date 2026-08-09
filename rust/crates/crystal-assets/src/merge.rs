@@ -48,28 +48,13 @@ fn insert_dratini_move_set(
 }
 
 fn merge_roaming_pokemon(
-    target: &mut RoamingPokemonDefinitions,
-    source: RoamingPokemonDefinitions,
+    target: &mut RoamingPokemonCatalog,
+    source: RoamingPokemonCatalog,
 ) -> Result<()> {
-    for (species, definition) in source {
-        insert_roaming_pokemon_definition(target, species, definition)?;
+    if !target.is_empty() {
+        anyhow::bail!("duplicate roaming Pokemon catalog");
     }
-    Ok(())
-}
-
-fn insert_roaming_pokemon_definition(
-    target: &mut RoamingPokemonDefinitions,
-    species: String,
-    definition: RoamingPokemonDefinition,
-) -> Result<()> {
-    validate_modpack_payload_token(&species, "roaming Pokemon species id")?;
-    if definition.level == 0 {
-        anyhow::bail!("roaming Pokemon '{species}' level must be nonzero");
-    }
-    if target.contains_key(&species) {
-        anyhow::bail!("duplicate roaming Pokemon definition for species '{species}'");
-    }
-    target.insert(species, definition);
+    *target = source;
     Ok(())
 }
 
@@ -1896,6 +1881,21 @@ fn insert_keyed_trainer(
     target.insert(trainer).context("insert trainer payload")
 }
 
+fn merge_trainer_class_names(
+    target: &mut BTreeMap<String, String>,
+    source: BTreeMap<String, String>,
+) -> Result<()> {
+    for (trainer_class, display_name) in source {
+        validate_modpack_payload_token(&trainer_class, "trainer class name id")?;
+        validate_exact_modpack_value(&display_name, "trainer class display name")?;
+        if target.contains_key(&trainer_class) {
+            anyhow::bail!("duplicate trainer class display name '{trainer_class}'");
+        }
+        target.insert(trainer_class, display_name);
+    }
+    Ok(())
+}
+
 fn validate_trainer_pack_record(trainer: &Trainer) -> Result<()> {
     validate_battle_table_token(
         &trainer.trainer_class,
@@ -2423,6 +2423,24 @@ fn merge_raw_story_event_payload(
         let mut canonical_scripts = serde_json::Map::new();
         for (script_key, script_payload) in scripts {
             validate_script_label_payload_token(script_key, "story event script")?;
+            // The standard-script catalog contains a metadata entry alongside
+            // executable script bodies. GlobalScriptRoots is a list of labels,
+            // not a list of `{ command, args }` script commands.
+            if map_key == "StandardScripts" && script_key == "GlobalScriptRoots" {
+                let roots = script_payload.as_array().with_context(|| {
+                    format!("{payload_description} '{map_key}' GlobalScriptRoots must be an array")
+                })?;
+                for (index, root) in roots.iter().enumerate() {
+                    let root = root.as_str().with_context(|| {
+                        format!(
+                            "{payload_description} '{map_key}' GlobalScriptRoots entry {index} must be a script label"
+                        )
+                    })?;
+                    validate_script_label_payload_token(root, "global script root")?;
+                }
+                canonical_scripts.insert(script_key.clone(), Value::Array(roots.clone()));
+                continue;
+            }
             let commands =
                 parse_raw_script_command_list(payload_description, script_key, script_payload)?;
             canonical_scripts.insert(
@@ -2438,6 +2456,35 @@ fn merge_raw_story_event_payload(
     }
     target.push(Value::Object(canonical_payload));
     Ok(())
+}
+
+#[cfg(test)]
+mod story_event_payload_tests {
+    use super::*;
+
+    #[test]
+    fn standard_scripts_accept_global_script_root_metadata() {
+        let mut target = Vec::new();
+        let payload = serde_json::json!({
+            "StandardScripts": {
+                "GlobalScriptRoots": ["BugCatchingContestOverScript"],
+                "StdScripts": [{"command": "add_stdscript", "args": ["ExampleScript"]}],
+                "ExampleScript": [{"command": "end", "args": ""}]
+            }
+        });
+
+        merge_raw_story_event_payload(
+            &mut target,
+            payload,
+            "story event payload",
+            "story event payload key",
+        )
+        .expect("standard-script metadata should be accepted");
+        assert_eq!(
+            target[0]["StandardScripts"]["GlobalScriptRoots"],
+            serde_json::json!(["BugCatchingContestOverScript"])
+        );
+    }
 }
 
 fn validate_raw_script_command_list(

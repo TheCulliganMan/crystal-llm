@@ -344,7 +344,7 @@
         session
             .state
             .storage
-            .register_capture(poisoned)
+            .register_capture_in_box(0, poisoned)
             .expect("register poisoned Pokemon");
         session.state.sync_party_from_storage();
         session.state.step_events = StepEventCounters {
@@ -474,15 +474,15 @@
             )
             .expect("set manual time");
         assert_eq!(manual.time_of_day, TimeOfDay::Night);
-        assert_eq!(manual.game_time_hours, 20);
-        assert_eq!(manual.game_time_minutes, 30);
+        assert_eq!(manual.hour, 20);
+        assert_eq!(manual.minute, 30);
 
         let day = session
             .update_clock_from_datetime(&runtime, GameDate::new(2000, 1, 2), 22, 45, 0)
             .expect("update clock");
         assert_eq!(day.time_of_day, TimeOfDay::Day);
-        assert_eq!(day.game_time_hours, 13);
-        assert_eq!(day.game_time_minutes, 15);
+        assert_eq!(day.hour, 13);
+        assert_eq!(day.minute, 15);
 
         let save_path = root.join("clock.crystalsave");
         runtime
@@ -491,6 +491,202 @@
         let loaded = runtime.load_save(&save_path).expect("load clock state");
         assert_eq!(loaded.time, session.state.time);
         assert_eq!(loaded.time.time_of_day, TimeOfDay::Day);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_manual_clock_applies_process_downtime_without_advancing_play_time() {
+        let root = temp_repository_root("runtime-clock-process-downtime");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let save_path = root.join("clock-downtime.crystalsave");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0).expect("game shell");
+        shell
+            .set_manual_clock_time(
+                GameDate::new(2000, 1, 1),
+                6,
+                0,
+                0,
+                ClockTime::new(0, 20, 30, 0),
+            )
+            .expect("set manual time from recorded startup sample");
+        shell.save(&save_path).expect("persist clock state");
+
+        let mut resumed =
+            RuntimeGameShell::resume_from_save(asset_root, runtime, &save_path).expect("resume save");
+        assert_eq!(resumed.session().state().time.game_time_frames, 0);
+
+        resumed
+            .tick_with_rtc(
+                std::iter::empty(),
+                RuntimeRtcSample {
+                    date: GameDate::new(2000, 1, 2),
+                    hour: 8,
+                    minute: 0,
+                    second: 0,
+                },
+            )
+            .expect("apply first post-process host sample");
+        let state = resumed.session().state();
+        assert_eq!(state.time.registers.hours, 22);
+        assert_eq!(state.time.registers.minutes, 30);
+        assert_eq!(state.time.registers.seconds, 0);
+        assert_eq!(state.time.game_time_hours, 0);
+        assert_eq!(state.time.game_time_minutes, 0);
+        assert_eq!(state.time.game_time_seconds, 0);
+        assert_eq!(state.time.game_time_frames, 1);
+
+        resumed
+            .tick_with_rtc(
+                std::iter::empty(),
+                RuntimeRtcSample {
+                    date: GameDate::new(2000, 1, 2),
+                    hour: 8,
+                    minute: 0,
+                    second: 1,
+                },
+            )
+            .expect("apply continued-play host sample");
+        let state = resumed.session().state();
+        assert_eq!(state.time.registers.hours, 22);
+        assert_eq!(state.time.registers.minutes, 30);
+        assert_eq!(state.time.registers.seconds, 1);
+        assert_eq!(state.time.game_time_frames, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ordinary_unblocked_overworld_tick_advances_play_time_exactly_once() {
+        let root = temp_repository_root("runtime-game-timer-single-vblank");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+
+        shell
+            .tick(std::iter::empty())
+            .expect("advance one unblocked overworld VBlank");
+
+        let state = shell.session().state();
+        assert_eq!(state.frame_counter, 1);
+        assert_eq!(state.time.game_time_frames, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manual_offset_crossing_game_midnight_resets_once_without_host_date_change() {
+        let root = temp_repository_root("manual-clock-game-midnight");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+        shell.session_mut().state_mut().fishing.daily_flags1 = 0xff;
+        shell.session_mut().state_mut().kenji_break_timer = 1;
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
+
+        shell
+            .set_manual_clock_time(
+                GameDate::new(2000, 1, 1),
+                23,
+                0,
+                0,
+                ClockTime::new(1, 0, 0, 0),
+            )
+            .expect("offset-adjusted wCurDay crossing must run the daily boundary");
+
+        let state = shell.session().state();
+        assert_eq!(state.time.current_day, 1);
+        assert_eq!(state.fishing.daily_flags1, 0);
+        assert_eq!(state.kenji_break_timer, 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_date_change_without_wcurday_change_does_not_reset_daily_state() {
+        let root = temp_repository_root("rtc-host-date-same-game-day");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+        shell.session_mut().state_mut().fishing.daily_flags1 = 0xff;
+        shell.session_mut().state_mut().kenji_break_timer = 1;
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay(std::iter::empty());
+        let random_before = shell.session().state().random_state;
+
+        shell
+            .update_clock_from_datetime(GameDate::new(2000, 5, 20), 12, 0, 0)
+            .expect("140 elapsed RTC days reduce to the same wCurDay");
+
+        let state = shell.session().state();
+        assert_eq!(state.time.current_day, 0);
+        assert_eq!(state.fishing.daily_flags1, 0xff);
+        assert_eq!(state.kenji_break_timer, 1);
+        assert_eq!(state.random_state, random_before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn multi_day_resume_runs_one_overdue_daily_countdown_and_records_one_rng_sample_pair() {
+        let root = temp_repository_root("rtc-multi-day-single-reset");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime.clone(), 0)
+            .expect("game shell");
+        shell.session_mut().state_mut().fishing.daily_flags1 = 0xff;
+        shell.session_mut().state_mut().kenji_break_timer = 1;
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
+        let before = shell.session().state().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        shell
+            .update_clock_from_datetime(GameDate::new(2000, 1, 8), 12, 0, 0)
+            .expect("overdue daily timer runs once after multi-day downtime");
+
+        let state = shell.session().state();
+        assert_eq!(state.time.current_day, 7);
+        assert_eq!(state.fishing.daily_flags1, 0);
+        assert_eq!(state.kenji_break_timer, 3);
+        let frame = &shell.retained_runtime_commands()[retained_before];
+        let command = crystal_assets::decode_runtime_mutation_command_frame(frame, &before)
+            .expect("decode recorded multi-day clock update");
+        let RuntimeMutationCommand::UpdateClockFromDatetime(command) = command else {
+            panic!("multi-day resume must retain its clock mutation");
+        };
+        assert_eq!(command.divider_trace.samples, vec![0, 200]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -505,12 +701,13 @@
             identity(),
         )
         .expect("runtime");
-        let mut shell = RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root, runtime.clone(), 0).expect("game shell");
         shell
             .session_mut()
             .state_mut()
             .storage
-            .register_capture(wounded_runtime_pokemon("CHIKORITA"))
+            .register_capture_in_box(0, wounded_runtime_pokemon("CHIKORITA"))
             .expect("register party Pokemon");
         shell.session_mut().state_mut().sync_party_from_storage();
         shell.session_mut().state_mut().fishing.daily_flags1 = 0xff;
@@ -526,6 +723,11 @@
             .as_mut()
             .expect("starter slot")
             .pokerus = 0xa2;
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
+        let replay_base = shell.session().clone();
+        let before_clock_update = shell.session().state().clone();
+        let retained_before_clock_update = shell.retained_runtime_commands().len();
 
         shell
             .tick_with_rtc(
@@ -550,6 +752,59 @@
                 & 0x0f,
             1
         );
+        assert_eq!(state.kenji_break_timer, 3);
+        assert_eq!(
+            state.random_state,
+            crystal_core::random::CrystalRandomState { add: 0, sub: 56 }
+        );
+
+        let clock_frame = &shell.retained_runtime_commands()[retained_before_clock_update];
+        let clock_command = crystal_assets::decode_runtime_mutation_command_frame(
+            clock_frame,
+            &before_clock_update,
+        )
+        .expect("decode recorded clock update against pre-mutation state");
+        let RuntimeMutationCommand::UpdateClockFromDatetime(command) = clock_command else {
+            panic!("first RTC mutation must be the recorded clock update");
+        };
+        assert_eq!(command.divider_trace.samples, vec![0, 200]);
+
+        let clock_command_with_trace = |samples: Vec<u8>| {
+            RuntimeMutationCommand::UpdateClockFromDatetime(RuntimeClockUpdateCommand {
+                date: GameDate::new(2000, 1, 2),
+                hour: 12,
+                minute: 0,
+                second: 0,
+                divider_trace: RuntimeDividerTrace::new(samples),
+            })
+        };
+        let mut exhausted_replay = replay_base.clone();
+        let exhausted_request = exhausted_replay
+            .runtime_command_frame(1, 1, clock_command_with_trace(vec![0]))
+            .expect("frame exhausted clock replay command");
+        let exhausted_before = exhausted_replay.clone();
+        let exhausted_error = exhausted_replay
+            .apply_runtime_command_frame(&runtime, &exhausted_request)
+            .expect_err("short clock divider trace must reject atomically");
+        assert!(
+            format!("{exhausted_error:#}").contains("divider replay exhausted after 1 samples"),
+            "{exhausted_error:#}"
+        );
+        assert_eq!(exhausted_replay, exhausted_before);
+
+        let mut tailed_replay = replay_base;
+        let tailed_request = tailed_replay
+            .runtime_command_frame(1, 1, clock_command_with_trace(vec![0, 200, 77]))
+            .expect("frame tailed clock replay command");
+        let tailed_before = tailed_replay.clone();
+        let tailed_error = tailed_replay
+            .apply_runtime_command_frame(&runtime, &tailed_request)
+            .expect_err("unused clock divider sample must reject atomically");
+        assert!(
+            format!("{tailed_error:#}").contains("1 unconsumed samples after 2 reads"),
+            "{tailed_error:#}"
+        );
+        assert_eq!(tailed_replay, tailed_before);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -814,9 +1069,6 @@
             AudioProgramSource::Midi(_) => panic!("compiled PCM cry must not load as MIDI"),
             AudioProgramSource::PcmGzip { .. } => {
                 panic!("test PCM cry unexpectedly used compressed pack source")
-            }
-            AudioProgramSource::PcmFile { .. } => {
-                panic!("embedded compiled PCM cry must not load from an external file")
             }
         }
         let manifest_entry = runtime
@@ -1944,6 +2196,149 @@
     }
 
     #[test]
+    fn jumpstd_enters_the_exported_standard_script_through_the_compiled_interpreter() {
+        let root = temp_repository_root("compiled-standard-script-step");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data();
+        data.story_events = vec![serde_json::json!({
+            "StandardScripts": {
+                "StdScripts": [
+                    {"command": "add_stdscript", "args": ["ElevatorButtonScript"]}
+                ],
+                "ElevatorButtonScript": [
+                    {"command": "playsound", "args": ["SFX_READ_TEXT_2"]},
+                    {"command": "pause", "args": ["15"]},
+                    {"command": "playsound", "args": ["SFX_ELEVATOR_END"]},
+                    {"command": "end", "args": []}
+                ]
+            }
+        })];
+        let map = data.maps.get_mut("RuntimeMap").expect("runtime map");
+        map.scripts.insert(
+            "RuntimeJumpStdScript".to_string(),
+            serde_json::json!([
+                {"command": "jumpstd", "args": ["ElevatorButtonScript"]}
+            ]),
+        );
+        map.script_control_commands.push(ScriptControlCommand {
+            command: "jumpstd".to_string(),
+            compare_value: None,
+            target_label: Some("ElevatorButtonScript".to_string()),
+            resolved_target_script: None,
+            source_script: "RuntimeJumpStdScript".to_string(),
+            command_index: 0,
+        });
+        data.materialize_global_scripts()
+            .expect("materialize the exported standard script");
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
+
+        let jump = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                "RuntimeJumpStdScript",
+                0,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("step jumpstd");
+
+        assert_eq!(
+            jump.next_cursor,
+            Some(RuntimeCompiledScriptCursor {
+                origin_map_name: "RuntimeMap".to_string(),
+                source_script: "ElevatorButtonScript".to_string(),
+                command_index: 0,
+            })
+        );
+        assert!(shell.session.state().script_runtime.audio_events.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn standard_interaction_dialogue_uses_global_text_bodies() {
+        let root = temp_repository_root("standard-interaction-dialogue");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data();
+        data.story_events = vec![serde_json::json!({
+            "StandardScripts": {
+                "StdScripts": [
+                    {"command": "add_stdscript", "args": ["TVScript"]},
+                    {"command": "add_stdscript", "args": ["TownMapScript"]},
+                    {"command": "add_stdscript", "args": ["PictureBookshelfScript"]}
+                ],
+                "TVScript": [
+                    {"command": "farjumptext", "args": ["TVText"]}
+                ],
+                "TownMapScript": [
+                    {"command": "farjumptext", "args": ["LookTownMapText"]}
+                ],
+                "PictureBookshelfScript": [
+                    {"command": "farjumptext", "args": ["PictureBookshelfText"]}
+                ],
+                "TVText": [
+                    {"command": "text", "args": ["It's a TV."]},
+                    {"command": "done", "args": []}
+                ],
+                "LookTownMapText": [
+                    {"command": "text", "args": ["It's a town map."]},
+                    {"command": "done", "args": []}
+                ],
+                "PictureBookshelfText": [
+                    {"command": "text", "args": ["A picture book."]},
+                    {"command": "done", "args": []}
+                ]
+            }
+        })];
+        data.materialize_global_scripts()
+            .expect("materialize standard interaction scripts");
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0).expect("game shell");
+
+        for (script, label) in [
+            ("TVScript", "TVText"),
+            ("TownMapScript", "LookTownMapText"),
+            ("PictureBookshelfScript", "PictureBookshelfText"),
+        ] {
+            shell
+                .step_compiled_script_command(
+                    "RuntimeMap",
+                    script,
+                    0,
+                    ScriptRuntimeInputs::default(),
+                    ScriptPhoneInputs::default(),
+                )
+                .expect("apply standard interaction dialogue");
+            let text = runtime
+                .active_text_snapshot(shell.session.state())
+                .expect("resolve standard interaction dialogue")
+                .expect("standard interaction dialogue");
+            assert_eq!(text.label, label);
+            assert_eq!(
+                text.source,
+                RuntimeTextSource::ScriptBody {
+                    map_name: "GlobalScripts".to_string()
+                }
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
         let root = temp_repository_root("script-object-movement");
         write_floor_tileset(&root, "johto");
@@ -2047,6 +2442,7 @@
                 .expect("dispatch game shell");
         let dispatched = dispatch_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeObjectScript",
                 4,
                 ScriptRuntimeInputs::default(),
@@ -2397,6 +2793,7 @@
 
         let outcome = shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeCommandScript",
                 0,
                 ScriptRuntimeInputs::default(),
@@ -2423,6 +2820,184 @@
                 crystal_core::state::ScriptAudioRuntimeKind::FadeMusic
             ) && event.audio_id.as_deref() == Some("MUSIC_NONE")
         }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
+        let root = temp_repository_root("global-phone-caller");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data();
+        data.phone_contacts = crystal_core::systems::phone::PhoneContactCatalog(BTreeMap::from([(
+            "PHONE_TEST".to_string(),
+            crystal_core::systems::phone::PhoneContactRecord {
+                contact_id: "PHONE_TEST".to_string(),
+                trainer_class: None,
+                trainer_label: None,
+                lines: vec!["Test caller".to_string()],
+                primary_label: "PHONE_TEST".to_string(),
+                map_constant: None,
+                callee_time_mask: 7,
+                callee_script: None,
+                caller_time_mask: 7,
+                caller_script: Some("TestPhoneCallerScript".to_string()),
+            },
+        )]));
+        data.special_phone_calls.insert(
+            "SPECIALCALL_TEST".to_string(),
+            crystal_assets::SpecialPhoneCallRule {
+                condition: "SpecialCallOnlyWhenOutside".to_string(),
+                contact_id: "PHONE_TEST".to_string(),
+                caller_script: "TestPhoneCallerScript".to_string(),
+            },
+        );
+        data.asm_text
+            .insert("_TestGiftText".to_string(), "A test gift call.".to_string());
+        data.phone_scripts = vec![serde_json::json!({
+            "TestPhoneCallerScript": [
+                {"command": "readvar", "args": ["VAR_SPECIALPHONECALL"]},
+                {"command": "ifequal", "args": ["$7", ".Gift"]},
+                {"command": "end", "args": []}
+            ],
+            ".Gift@TestPhoneCallerScript": [
+                {"command": "farwritetext", "args": ["TestGiftText"]},
+                {"command": "specialphonecall", "args": ["SPECIALCALL_NONE"]},
+                {"command": "end", "args": []}
+            ],
+            "TestGiftText": [
+                {"command": "text_far", "args": ["_TestGiftText"]},
+                {"command": "text_end", "args": []}
+            ],
+            "Script_ReceivePhoneCall": [
+                {"command": "reanchormap", "args": []},
+                {"command": "callasm", "args": ["RingTwice_StartCall"]},
+                {"command": "memcall", "args": ["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"]},
+                {"command": "waitbutton", "args": []},
+                {"command": "callasm", "args": ["HangUp"]},
+                {"command": "closetext", "args": []},
+                {"command": "callasm", "args": ["InitCallReceiveDelay"]},
+                {"command": "end", "args": []}
+            ]
+        })];
+        data.materialize_global_scripts()
+            .expect("materialize global phone scripts");
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
+        shell
+            .session_mut()
+            .state
+            .script_runtime
+            .special_phone_calls
+            .push("SPECIALCALL_TEST".to_string());
+        shell
+            .session_mut()
+            .state
+            .script_runtime
+            .variables
+            .insert("VAR_SPECIALPHONECALL".to_string(), "7".to_string());
+
+        shell
+            .tick([GameButton::Right])
+            .expect("turn toward the next tile");
+        let phone_frame = shell
+            .tick([GameButton::Right])
+            .expect("step and receive special call")
+            .clone();
+        let call = phone_frame.phone_call.expect("special call dispatch");
+        assert_eq!(call.contact_id, "PHONE_TEST");
+        assert_eq!(call.caller_script, "TestPhoneCallerScript");
+        assert_eq!(call.receive_script, "Script_ReceivePhoneCall");
+        assert!(shell
+            .session()
+            .state
+            .script_runtime
+            .command_queue
+            .iter()
+            .any(|queued| queued.command == "callasm" && queued.target == "RingTwice_StartCall"));
+
+        shell
+            .drain_script_runtime_queue(RuntimeScriptRuntimeQueue::PendingDelay)
+            .expect("complete special-call delay");
+        shell
+            .drain_script_runtime_queue(RuntimeScriptRuntimeQueue::Command)
+            .expect("complete ringing callasm");
+        let caller = shell
+            .run_pending_next_script_until_boundary(
+                8,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("run exported global caller");
+        assert_eq!(caller.next_script.script, "TestPhoneCallerScript");
+        assert_eq!(
+            caller
+                .run
+                .steps
+                .iter()
+                .map(|step| (step.source_script.as_str(), step.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("TestPhoneCallerScript", "readvar"),
+                ("TestPhoneCallerScript", "ifequal"),
+                (".Gift@TestPhoneCallerScript", "farwritetext"),
+            ]
+        );
+        assert_eq!(
+            caller.run.boundary,
+            Some(RuntimeCompiledScriptBoundary::TextLabel(
+                "TestGiftText".to_string()
+            ))
+        );
+        shell
+            .take_pending_script_request(RuntimePendingScriptRequestKind::TextLabel)
+            .expect("display caller text");
+        let caller_finish = shell
+            .run_compiled_script_until_boundary(
+                caller.run.next_cursor.expect("caller resume cursor"),
+                4,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("finish global caller");
+        assert!(caller_finish.ended);
+        assert!(shell
+            .session()
+            .state
+            .script_runtime
+            .special_phone_calls
+            .is_empty());
+        shell.take_script_end_state().expect("consume caller end");
+
+        let wrapper = shell.pop_script_call_stack().expect("resume receive wrapper");
+        assert_eq!(wrapper.frame.source_script, "Script_ReceivePhoneCall");
+        assert_eq!(wrapper.frame.next_command_index, 3);
+        let wrapper_wait = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: wrapper.frame.origin_map_name,
+                    source_script: wrapper.frame.source_script,
+                    command_index: wrapper.frame.next_command_index,
+                },
+                1,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("resume receive wrapper at waitbutton");
+        assert!(matches!(
+            wrapper_wait.boundary,
+            Some(RuntimeCompiledScriptBoundary::TextWait(ScriptTextWait {
+                ref source_script,
+                command_index: 3,
+                ..
+            })) if source_script == "Script_ReceivePhoneCall"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2517,6 +3092,15 @@
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
         add_runtime_party_pokemon(&runtime, &mut session);
+        session.divider = crystal_core::random::RuntimeDividerSource::replay([
+            0, 1, // encounter rate
+            0, 0, // roaming selector
+            0, 0, // slot
+            0, 0, // level
+            0, 0, // held item
+            0, 0, // attack/defense
+            0, 0, // speed/special
+        ]);
 
         let turn = session
             .apply_buttons(&runtime, &asset_root, [GameButton::Right])
@@ -2554,6 +3138,7 @@
         assert_eq!(
             session.state.battle,
             BattleMemory::Wild {
+                roaming_slot: None,
                 battle_type: battle.battle_type.clone(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE_NIGHT".to_string(),
                 map_name: "RuntimeMap".to_string(),
@@ -2561,8 +3146,10 @@
                 enemy_party: battle.enemy_party.clone(),
             }
         );
-        assert_ne!(session.state.rng_seed, 1);
-        assert_eq!(battle.rng_seed_after, session.state.rng_seed);
+        assert_ne!(
+            session.state.random_state,
+            crystal_core::random::CrystalRandomState::default()
+        );
         let saved_battle = session.state.battle.clone();
         let save_path = root.join("battle.crystalsave");
         runtime
@@ -2622,7 +3209,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -2720,7 +3307,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3035,7 +3622,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         let _ = step_right_until_warp(&mut session, &runtime, &asset_root);
@@ -3096,7 +3683,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         let before_state = session.state.clone();
@@ -3347,6 +3934,30 @@
                 {"command": "setval", "args": ["7"]}
             ]),
         );
+        map.scripts.insert(
+            "AlternateWildScript".to_string(),
+            serde_json::json!([
+                {"command": "loadwildmon", "args": ["CHIKORITA", "6"]},
+                {"command": "startbattle", "args": []},
+                {"command": "setval", "args": ["9"]}
+            ]),
+        );
+        map.script_map_commands
+            .retain(|command| command.source_script != "RuntimeWildScript");
+        map.script_flag_commands
+            .retain(|command| command.source_script != "RuntimeWildScript");
+        map.script_object_commands
+            .retain(|command| command.source_script != "RuntimeWildScript");
+        let mut alternate = map
+            .scripted_wild_battles
+            .first()
+            .expect("base scripted wild battle")
+            .clone();
+        alternate.source_script = "AlternateWildScript".to_string();
+        alternate.loadwildmon_command_index = 0;
+        alternate.startbattle_command_index = 1;
+        alternate.request.source_script = "AlternateWildScript".to_string();
+        map.scripted_wild_battles.push(alternate);
         map.script_variable_commands.push(ScriptVariableCommand {
             command: "setval".to_string(),
             target: None,
@@ -3363,16 +3974,16 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let mut player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 8), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let mut player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 8),
+        )
+        .enemy_pokemon;
         player.original_trainer_name = "PLAYER".to_string();
         session
             .state
             .storage
-            .register_capture(player.clone())
+            .register_capture_in_box(0, player.clone())
             .expect("register player");
         session.state.sync_party_from_storage();
 
@@ -3385,11 +3996,21 @@
             .session_mut()
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register dispatch player");
         dispatch_shell.session_mut().state.sync_party_from_storage();
+        dispatch_shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([
+                0, 64, // held-item gate -> 192
+                0, 173, // rare-item roll -> 19
+                0, 3, // packed Attack/Defense byte -> 0x10
+                0, 101, // packed Speed/Special byte -> 0xab
+            ]);
+        let start_replay_base = dispatch_shell.session().clone();
+        let retained_before_start = dispatch_shell.retained_runtime_commands().len();
         let dispatched = dispatch_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeWildScript",
                 4,
                 ScriptRuntimeInputs::default(),
@@ -3402,6 +4023,75 @@
         };
         assert_eq!(dispatched_start.species, "CHIKORITA");
         assert_eq!(dispatched_start.level, 6);
+        assert_eq!(
+            dispatched_start.enemy_pokemon.dvs,
+            Dv::from_non_hp(1, 0, 10, 11)
+        );
+        let start_frame = &dispatch_shell.retained_runtime_commands()[retained_before_start];
+        let recorded_start = crystal_assets::decode_runtime_mutation_command_frame(
+            start_frame,
+            start_replay_base.state(),
+        )
+        .expect("decode recorded static battle start");
+        let RuntimeMutationCommand::StartScriptedWildBattle(recorded_start) = recorded_start else {
+            panic!("compiled startbattle must journal the exact typed start command");
+        };
+        assert_eq!(
+            recorded_start.divider_trace.samples,
+            vec![0, 64, 0, 173, 0, 3, 0, 101]
+        );
+
+        let start_command_with_trace = |samples: Vec<u8>| {
+            RuntimeMutationCommand::StartScriptedWildBattle(
+                RuntimeScriptedWildBattleStartCommand {
+                    command: recorded_start.command.clone(),
+                    divider_trace: RuntimeDividerTrace::new(samples),
+                },
+            )
+        };
+        let mut short_start = start_replay_base.clone();
+        let short_request = short_start
+            .runtime_command_frame(1, 1, start_command_with_trace(vec![
+                0, 64, 0, 173, 0, 3, 0,
+            ]))
+            .expect("short start frame");
+        let short_before = short_start.clone();
+        let short_error = short_start
+            .apply_runtime_command_frame(&runtime, &short_request)
+            .expect_err("truncated static-start divider trace must reject atomically");
+        assert!(
+            format!("{short_error:#}").contains("divider replay exhausted after 7 samples"),
+            "{short_error:#}"
+        );
+        assert_eq!(short_start, short_before);
+
+        let mut tailed_start = start_replay_base.clone();
+        let tailed_request = tailed_start
+            .runtime_command_frame(
+                1,
+                1,
+                start_command_with_trace(vec![0, 64, 0, 173, 0, 3, 0, 101, 77]),
+            )
+            .expect("tailed start frame");
+        let tailed_before = tailed_start.clone();
+        let tail_error = tailed_start
+            .apply_runtime_command_frame(&runtime, &tailed_request)
+            .expect_err("unused static-start divider tail must reject atomically");
+        assert!(
+            format!("{tail_error:#}").contains("1 unconsumed samples after 8 reads"),
+            "{tail_error:#}"
+        );
+        assert_eq!(tailed_start, tailed_before);
+
+        let mut exact_start = start_replay_base;
+        let exact_outcome = exact_start
+            .apply_runtime_command_frame(&runtime, start_frame)
+            .expect("the recorded start replays exactly once");
+        assert_eq!(exact_start.state(), dispatch_shell.session().state());
+        assert_eq!(
+            exact_outcome.state_checksum,
+            game_state_checksum(dispatch_shell.session().state()).expect("started state checksum")
+        );
 
         assert_eq!(start.species, "CHIKORITA");
         assert_eq!(start.level, 6);
@@ -3410,36 +4100,96 @@
                 .state
                 .flags
                 .is_event_flag_set("EVENT_RUNTIME_WILD_READY"),
-            Ok(true)
+            Ok(false)
         );
-        assert_eq!(session.state.battle, BattleMemory::from(&start));
+        let origin = static_wild_origin_from_state(&session.state);
+        assert_eq!(origin.map_name, "RuntimeMap");
+        assert_eq!(origin.source_script, "RuntimeWildScript");
+        assert_eq!(origin.startbattle_command_index, 4);
+        assert_eq!(origin.resume_command_index, 5);
         assert!(session.state.pokedex.has_seen("CHIKORITA"));
         assert_eq!(session.state.battle_active_party_index, Some(0));
+
+        // Capture/flee deactivate the battle before the script cursor resumes.
+        // The persisted terminal is the sole authority for both origin and
+        // deferred Pay Day cleanup, and it blocks every new battle first.
+        let mut pending_terminal = session.clone();
+        pending_terminal.state.money = 400;
+        pending_terminal.state.battle_pay_day_money = 65;
+        pending_terminal.state.battle_amulet_coin_active = true;
+        crystal_core::battle::start::deactivate_battle_after_win(&mut pending_terminal.state);
+        assert_eq!(
+            pending_terminal
+                .state
+                .pending_static_wild_terminal
+                .as_ref()
+                .expect("capture/flee terminal persists")
+                .pay_day_payout,
+            130
+        );
+        pending_terminal.divider = crystal_core::random::RuntimeDividerSource::replay([]);
+        let blocked_before = pending_terminal.clone();
+        let blocked = pending_terminal
+            .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
+            .expect_err("a pending static-wild terminal must block the next battle before RNG");
+        assert!(
+            format!("{blocked:#}").contains("pending static-wild terminal resumes"),
+            "{blocked:#}"
+        );
+        assert_eq!(pending_terminal, blocked_before);
+
+        let forged_origin = RuntimeStaticWildBattleOrigin {
+            map_name: "RuntimeMap".to_string(),
+            source_script: "AlternateWildScript".to_string(),
+            startbattle_command_index: 1,
+            resume_command_index: 2,
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            species: "CHIKORITA".to_string(),
+            level: 6,
+        };
+        let forged_before = pending_terminal.clone();
+        let forged = pending_terminal
+            .complete_scripted_wild_battle(&runtime, forged_origin)
+            .expect_err("a different pack-valid origin must not consume the pending terminal");
+        assert!(
+            format!("{forged:#}")
+                .contains("persisted scripted wild terminal does not match"),
+            "{forged:#}"
+        );
+        assert_eq!(pending_terminal, forged_before);
+
+        pending_terminal.divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
+        pending_terminal
+            .complete_scripted_wild_battle(&runtime, origin.clone())
+            .expect("capture/flee terminal performs cleanup once");
+        assert_eq!(pending_terminal.state.money, 530);
+        assert!(pending_terminal.state.pending_static_wild_terminal.is_none());
+
         session.state.money = 400;
         session.state.battle_pay_day_money = 65;
+        crystal_core::battle::start::deactivate_battle_after_win(&mut session.state);
         let completion = session
-            .complete_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
+            .complete_scripted_wild_battle(&runtime, origin.clone())
             .expect("scripted wild battle completes");
         assert!(completion.continued_after_battle);
-        let effects = completion.effects.expect("wild battle effects apply");
-        assert_eq!(
-            effects.event_flags_set,
-            vec!["EVENT_RUNTIME_WILD_DONE".to_string()]
-        );
-        assert_eq!(
-            effects.script_flags_set,
-            vec!["ENGINE_RUNTIME_WILD_DONE".to_string()]
-        );
-        assert_eq!(
-            effects.disappeared_objects[0].object_identifier,
-            "RUNTIME_STATIC_MON"
-        );
         assert_eq!(
             session
                 .state
                 .flags
                 .is_event_flag_set("EVENT_RUNTIME_STATIC_MON_HIDDEN"),
-            Ok(true)
+            Ok(false),
+            "completion alone must not execute the source disappear command"
+        );
+        assert_eq!(
+            session.state.flags.is_event_flag_set("EVENT_RUNTIME_WILD_DONE"),
+            Ok(false),
+            "completion alone must not execute the source setevent command"
+        );
+        assert_eq!(
+            session.state.flags.is_engine_flag_set("ENGINE_RUNTIME_WILD_DONE"),
+            Ok(false),
+            "completion alone must not execute the source setflag command"
         );
         assert_eq!(session.state.battle, BattleMemory::Inactive);
         assert_eq!(session.state.money, 465);
@@ -3448,17 +4198,18 @@
 
         let mut battle_shell = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
             .expect("battle runner shell");
-        let mut battle_player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 8), &mut Random::new(8))
-            .expect("battle runner player pokemon")
-            .enemy_pokemon;
+        let mut battle_player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 8),
+        )
+        .enemy_pokemon;
         battle_player.original_trainer_name = "PLAYER".to_string();
+        battle_player.pokerus = 0xa2;
         battle_shell
             .session_mut()
             .state
             .storage
-            .register_capture(battle_player)
+            .register_capture_in_box(0, battle_player)
             .expect("register battle runner player");
         battle_shell.session_mut().state.sync_party_from_storage();
         let start_step = battle_shell
@@ -3484,17 +4235,86 @@
                 command_index: 5,
             })
         );
+        let battle_origin = static_wild_origin_from_state(battle_shell.session().state());
+        crystal_core::battle::start::deactivate_battle_after_win(
+            &mut battle_shell.session_mut().state,
+        );
+        battle_shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 200]);
+        let replay_base = battle_shell.session().clone();
+        let before_completion = battle_shell.session().state().clone();
+        let retained_before_completion = battle_shell.retained_runtime_commands().len();
         let resumed_battle = battle_shell
             .complete_scripted_wild_battle_and_run_compiled_script(
-                "RuntimeMap",
-                "RuntimeWildScript",
-                4,
-                start_step.next_cursor.clone(),
+                battle_origin.clone(),
                 4,
                 ScriptRuntimeInputs::default(),
                 ScriptPhoneInputs::default(),
             )
             .expect("complete wild battle and continue script");
+        assert_eq!(
+            battle_shell.session().state().random_state,
+            crystal_core::random::CrystalRandomState { add: 0, sub: 56 }
+        );
+        let completion_frame = &battle_shell.retained_runtime_commands()
+            [retained_before_completion];
+        let completion_command = crystal_assets::decode_runtime_mutation_command_frame(
+            completion_frame,
+            &before_completion,
+        )
+        .expect("decode recorded completion against its pre-mutation state");
+        let RuntimeMutationCommand::CompleteScriptedWildBattle(command) = completion_command else {
+            panic!("first post-battle command must be the recorded completion");
+        };
+        assert_eq!(command.divider_trace.samples, vec![0, 200]);
+
+        let completion_command_with_trace = |samples: Vec<u8>| {
+            RuntimeMutationCommand::CompleteScriptedWildBattle(
+                RuntimeScriptedWildBattleCompletionCommand {
+                    origin: battle_origin.clone(),
+                    terminal: RuntimeScriptedWildBattleTerminal {
+                        battle_result: 0,
+                        win_cleanup_applied: false,
+                    },
+                    divider_trace: RuntimeDividerTrace::new(samples),
+                },
+            )
+        };
+        let mut exhausted_replay = replay_base.clone();
+        let exhausted_request = exhausted_replay
+            .runtime_command_frame(
+                1,
+                1,
+                completion_command_with_trace(vec![0]),
+            )
+            .expect("frame exhausted replay command");
+        let exhausted_before = exhausted_replay.clone();
+        let exhausted_error = exhausted_replay
+            .apply_runtime_command_frame(&runtime, &exhausted_request)
+            .expect_err("short divider trace must reject atomically");
+        assert!(
+            format!("{exhausted_error:#}").contains("divider replay exhausted after 1 samples"),
+            "{exhausted_error:#}"
+        );
+        assert_eq!(exhausted_replay, exhausted_before);
+
+        let mut tailed_replay = replay_base;
+        let tailed_request = tailed_replay
+            .runtime_command_frame(
+                1,
+                1,
+                completion_command_with_trace(vec![0, 200, 77]),
+            )
+            .expect("frame tailed replay command");
+        let tailed_before = tailed_replay.clone();
+        let tailed_error = tailed_replay
+            .apply_runtime_command_frame(&runtime, &tailed_request)
+            .expect_err("unused divider sample must reject atomically");
+        assert!(
+            format!("{tailed_error:#}").contains("1 unconsumed samples after 2 reads"),
+            "{tailed_error:#}"
+        );
+        assert_eq!(tailed_replay, tailed_before);
         assert!(resumed_battle.completion.continued_after_battle);
         assert_eq!(battle_shell.session.state().battle, BattleMemory::Inactive);
         assert_eq!(resumed_battle.run.steps.len(), 1);
@@ -3518,6 +4338,195 @@
     }
 
     #[test]
+    fn runtime_dynamic_rock_battle_save_load_resumes_exact_commands_thirteen_and_fourteen() {
+        let root = temp_repository_root("dynamic-rock-save-resume");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        add_runtime_field_encounters(&mut data);
+        add_runtime_rock_smash_global_scripts(&mut data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0).expect("game shell");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.original_trainer_name = "PLAYER".to_string();
+        shell
+            .session_mut()
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([
+            255, 0, // Rock RandomRange(10) -> 0
+            0, 0, // Rock RandomRange(100) -> 1
+            0, 64, // held-item gate -> 191, no second item roll
+            0, 175, // packed Attack/Defense -> 0x10
+            0, 101, // packed Speed/Special -> 0xab
+        ]);
+
+        let started = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: "RuntimeMap".to_string(),
+                    source_script: "RockSmashScript".to_string(),
+                    command_index: 8,
+                },
+                8,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("run exact dynamic Rock encounter into startbattle");
+        assert_eq!(
+            started
+                .steps
+                .iter()
+                .map(|step| step.command_index)
+                .collect::<Vec<_>>(),
+            vec![8, 9, 10, 11, 12]
+        );
+        assert_eq!(
+            started.next_cursor,
+            Some(RuntimeCompiledScriptCursor {
+                origin_map_name: "RuntimeMap".to_string(),
+                source_script: "RockSmashScript".to_string(),
+                command_index: 13,
+            })
+        );
+        assert!(matches!(
+            started.boundary,
+            Some(RuntimeCompiledScriptBoundary::ActiveBattle(
+                RuntimeShellPhase::StaticWildBattle
+            ))
+        ));
+        let origin = static_wild_origin_from_state(shell.session().state());
+        assert_eq!(origin.source_script, "RockSmashScript");
+        assert_eq!(origin.startbattle_command_index, 12);
+        assert_eq!(origin.resume_command_index, 13);
+        assert_eq!(origin.species, "CHIKORITA");
+        let BattleMemory::StaticWild { enemy_pokemon, .. } =
+            &shell.session().state().battle
+        else {
+            panic!("Rock start must persist a static-wild battle origin");
+        };
+        assert_eq!(enemy_pokemon.level, 15);
+        assert_eq!(enemy_pokemon.dvs, Dv::from_non_hp(1, 0, 10, 11));
+
+        let save_path = root.join("dynamic-rock.crystalsave");
+        runtime
+            .save_game(&save_path, shell.session().state().clone())
+            .expect("save active dynamic Rock battle");
+        let mut resumed = RuntimeGameShell::resume_from_save(
+            asset_root.clone(),
+            runtime.clone(),
+            &save_path,
+        )
+        .expect("load active dynamic Rock battle without a UI script cursor");
+        assert_eq!(static_wild_origin_from_state(resumed.session().state()), origin);
+
+        // Model an exact manual-RUN terminal after loading. DRAW resumes the
+        // saved cursor but skips Pay Day and Pokerus entirely; no caller-side
+        // fixed-battle lookup or remembered UI cursor participates.
+        resumed.session_mut().state.money = 100;
+        resumed.session_mut().state.battle_pay_day_money = 50;
+        let random_state_before_draw = resumed.session().state().random_state;
+        crystal_core::battle::start::deactivate_battle_after_draw(
+            &mut resumed.session_mut().state,
+        );
+        assert_eq!(resumed.session().state().battle_result, 2);
+        resumed.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([]);
+        let completed = resumed
+            .complete_scripted_wild_battle_and_run_compiled_script(
+                origin.clone(),
+                4,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("complete loaded dynamic Rock battle and resume its source cursor");
+        assert_eq!(
+            completed
+                .run
+                .steps
+                .iter()
+                .map(|step| (step.command_index, step.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(13, "reloadmapafterbattle"), (14, "end")]
+        );
+        assert!(completed.run.ended);
+        assert_eq!(completed.run.next_cursor, None);
+        assert!(resumed.session().state().pending_static_wild_terminal.is_none());
+        assert_eq!(resumed.session().state().battle, BattleMemory::Inactive);
+        assert_eq!(resumed.session().state().money, 100);
+        assert_eq!(resumed.session().state().random_state, random_state_before_draw);
+
+        let mut lost = RuntimeGameShell::resume_from_save(
+            asset_root,
+            runtime.clone(),
+            &save_path,
+        )
+        .expect("reload the same active Rock battle for the loss branch");
+        assert_eq!(static_wild_origin_from_state(lost.session().state()), origin);
+        lost.session_mut().state.money = 100;
+        lost.session_mut().state.battle_pay_day_money = 50;
+        for pokemon in lost
+            .session_mut()
+            .state
+            .storage
+            .party
+            .pokemon
+            .iter_mut()
+            .flatten()
+        {
+            pokemon.hp = 0;
+        }
+        lost.session_mut().state.sync_party_from_storage();
+        let loss_random_state = lost.session().state().random_state;
+        let loss_before = lost.session().state().clone();
+        let retained_before_loss = lost.retained_runtime_commands().len();
+        let recovery = lost
+            .resolve_blackout_to_last_spawn()
+            .expect("static-wild loss resolves through whiteout, not source completion");
+        assert_eq!(lost.session().state().battle_result, 1);
+        assert_eq!(lost.session().state().battle, BattleMemory::Inactive);
+        assert!(lost.session().state().pending_static_wild_terminal.is_none());
+        assert_eq!(lost.session().state().money, 50);
+        assert_eq!(lost.session().state().random_state, loss_random_state);
+        assert_eq!(recovery.spawn_identifier, Some(0));
+        assert_eq!(recovery.map_name, "RuntimeMap");
+        assert!(lost.session().state().script_runtime.next_script.is_none());
+        assert!(lost.session().state().script_runtime.deferred_scripts.is_empty());
+        assert!(lost.session().state().script_runtime.call_stack.is_empty());
+        assert!(lost
+            .session()
+            .state()
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .all(|pokemon| pokemon.hp == pokemon.max_hp));
+        assert_eq!(
+            lost.retained_runtime_commands().len(),
+            retained_before_loss + 1,
+            "whiteout must not run Rock reload/disappear/end tail commands"
+        );
+        assert!(matches!(
+            crystal_assets::decode_runtime_mutation_command_frame(
+                &lost.retained_runtime_commands()[retained_before_loss],
+                &loss_before,
+            )
+            .expect("decode authoritative loss/whiteout mutation"),
+            RuntimeMutationCommand::ResolveBlackoutToLastSpawn
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn runtime_resolves_active_battle_turn_into_authoritative_state() {
         let root = temp_repository_root("battle-turn");
         write_floor_tileset(&root, "johto");
@@ -3534,16 +4543,16 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let mut player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 8), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let mut player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 8),
+        )
+        .enemy_pokemon;
         player.original_trainer_name = "PLAYER".to_string();
         session
             .state
             .storage
-            .register_capture(player.clone())
+            .register_capture_in_box(0, player.clone())
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3708,18 +4717,18 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let mut player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 8), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let mut player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 8),
+        )
+        .enemy_pokemon;
         player.hp = 10;
         refresh_runtime_pokemon_stats(&mut player);
         player.hp = 10;
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3783,19 +4792,16 @@
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
         for level in [8, 9] {
-            let mut player = runtime
-                .data
-                .static_wild_battle_start(
-                    static_wild_request("CHIKORITA", level),
-                    &mut Random::new(level as u32),
-                )
-                .expect("player pokemon")
-                .enemy_pokemon;
+            let mut player = static_wild_battle_start_for_tests(
+                &runtime.data,
+                static_wild_request("CHIKORITA", level),
+            )
+            .enemy_pokemon;
             player.original_trainer_name = "PLAYER".to_string();
             session
                 .state
                 .storage
-                .register_capture(player)
+                .register_capture_in_box(0, player)
                 .expect("register player");
         }
         session.state.sync_party_from_storage();
@@ -3868,7 +4874,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         let enemy = {
@@ -3883,9 +4889,12 @@
         session.state.battle = BattleMemory::StaticWild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            origin_map_name: "RuntimeMap".to_string(),
             species: "CHIKORITA".to_string(),
             level: 6,
             source_script: "RuntimeWildScript".to_string(),
+            startbattle_command_index: 4,
+            resume_command_index: 5,
             enemy_pokemon: enemy.clone(),
             enemy_party: vec![enemy],
         };
@@ -3927,7 +4936,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -3971,7 +4980,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -4019,7 +5028,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session

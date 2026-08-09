@@ -188,10 +188,14 @@ export class StartMenu {
     this.entries = entries;
     const storedIndex = this.gameState.wram.start_menu_cursor;
     if (entries.length > 0) {
-      if (storedIndex >= 0 && storedIndex < entries.length) {
-        this.cursorIndexValue = storedIndex;
-      } else if (activeIdentifier) {
+      // The menu can gain or lose entries between drawing a frame and handling
+      // its input (for example, when a script enables the Pokedex). Keep the
+      // entry the player can see selected; its old numeric index may now refer
+      // to a different action such as the Pokedex instead of PACK.
+      if (activeIdentifier) {
         this.cursorIndexValue = this.findIdentifier(activeIdentifier);
+      } else if (storedIndex >= 0 && storedIndex < entries.length) {
+        this.cursorIndexValue = storedIndex;
       } else {
         this.cursorIndexValue = 0;
       }
@@ -203,6 +207,7 @@ export class StartMenu {
   resetCursorPosition(): void {
     this.cursorIndexValue = 0;
     this.gameState.wram.start_menu_cursor = 0;
+    this.entries = [];
     this.refresh();
     this.playOpenSound();
   }

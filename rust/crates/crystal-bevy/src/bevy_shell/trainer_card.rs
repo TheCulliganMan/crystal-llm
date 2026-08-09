@@ -1085,7 +1085,6 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.pending_field_notice_effect_frames = None;
     runtime_shell.visible_sweet_scent_delay = false;
-    runtime_shell.visible_rock_smash_target = None;
     runtime_shell.visible_cut_animation = None;
     runtime_shell.visible_whirlpool_animation = None;
     runtime_shell.visible_headbutt_animation = None;

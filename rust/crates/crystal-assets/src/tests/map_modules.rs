@@ -1,4 +1,500 @@
     #[test]
+    fn check_can_delete_phone_number_compiles_typed_conditional_returns() {
+        let scripts = BTreeMap::from([(
+            "CheckCanDeletePhoneNumber".to_string(),
+            serde_json::json!([
+                {"command": "ld", "args": ["a", "c"]},
+                {"command": "call", "args": ["GetCallerTrainerClass"]},
+                {"command": "ld", "args": ["a", "c"]},
+                {"command": "ret", "args": ["nz"]},
+                {"command": "ld", "args": ["a", "b"]},
+                {"command": "cp", "args": ["PHONECONTACT_MOM"]},
+                {"command": "ret", "args": ["z"]},
+                {"command": "cp", "args": ["PHONECONTACT_ELM"]},
+                {"command": "ret", "args": ["z"]},
+                {"command": "ld", "args": ["c", "$1"]},
+                {"command": "ret", "args": []}
+            ]),
+        )]);
+
+        let commands = parse_script_runtime_commands("GlobalPhoneScripts", &scripts)
+            .expect("compile canonical conditional CPU returns");
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.command == "ret")
+                .map(|command| command.args.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec!["nz".to_string()],
+                vec!["z".to_string()],
+                vec!["z".to_string()],
+                Vec::new(),
+            ]
+        );
+    }
+
+    #[test]
+    fn trainer_battle_setup_opcodes_materialize_as_runtime_commands() {
+        let scripts = BTreeMap::from([(
+            "Route44VanceBattle".to_string(),
+            serde_json::json!([
+                {"command": "winlosstext", "args": ["BirdKeeperVance1BeatenText", "0"]},
+                {"command": "loadtrainer", "args": ["BIRD_KEEPER", "VANCE3"]},
+                {"command": "startbattle", "args": []}
+            ]),
+        )]);
+
+        let commands = parse_script_runtime_commands("Route44", &scripts)
+            .expect("materialize canonical trainer battle setup opcodes");
+        assert_eq!(
+            commands,
+            vec![
+                ScriptRuntimeCommand {
+                    command: "winlosstext".to_string(),
+                    args: vec![
+                        "BirdKeeperVance1BeatenText".to_string(),
+                        "0".to_string(),
+                    ],
+                    source_script: "Route44VanceBattle".to_string(),
+                    command_index: 0,
+                },
+                ScriptRuntimeCommand {
+                    command: "loadtrainer".to_string(),
+                    args: vec!["BIRD_KEEPER".to_string(), "VANCE3".to_string()],
+                    source_script: "Route44VanceBattle".to_string(),
+                    command_index: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn movement_references_from_local_scripts_materialize_in_parent_scope() {
+        let scripts = BTreeMap::from([
+            (
+                ".AfterBattle@ParentA".to_string(),
+                serde_json::json!([
+                    {"command": "applymovement", "args": ["NPC", "SharedGlobalMovement"]},
+                    {"command": "applymovement", "args": ["NPC", ".SharedMovement"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+            (
+                ".SharedMovement@ParentA".to_string(),
+                serde_json::json!([
+                    {"command": "step", "args": ["LEFT"]},
+                    {"command": "step_end", "args": []}
+                ]),
+            ),
+            (
+                ".AfterBattle@ParentB".to_string(),
+                serde_json::json!([
+                    {"command": "applymovement", "args": ["NPC", "SharedGlobalMovement"]},
+                    {"command": "applymovement", "args": ["NPC", ".SharedMovement"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+            (
+                ".SharedMovement@ParentB".to_string(),
+                serde_json::json!([
+                    {"command": "step", "args": ["RIGHT"]},
+                    {"command": "step_end", "args": []}
+                ]),
+            ),
+            (
+                "SharedGlobalMovement".to_string(),
+                serde_json::json!([
+                    {"command": "step", "args": ["UP"]},
+                    {"command": "step_end", "args": []}
+                ]),
+            ),
+        ]);
+
+        let object_commands =
+            parse_script_object_commands("ScopeTest", &scripts).expect("parse object commands");
+        let movements = parse_script_movements("ScopeTest", &scripts, &object_commands)
+            .expect("materialize local and global movement references");
+        let movement_keys = movements
+            .iter()
+            .map(|movement| (movement.label.as_str(), movement.source_script.as_deref()))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            movement_keys,
+            BTreeSet::from([
+                (".SharedMovement", Some("ParentA")),
+                (".SharedMovement", Some("ParentB")),
+                ("SharedGlobalMovement", Some("ParentA")),
+                ("SharedGlobalMovement", Some("ParentB")),
+            ])
+        );
+    }
+
+    #[test]
+    fn generated_azalea_local_post_battle_movement_materializes_without_scope_drift() {
+        let path = repository_root_for_tests().join("apps/web/assets/data/maps/AzaleaTown.json");
+        let scripts: BTreeMap<String, Value> = serde_json::from_slice(
+            &std::fs::read(&path).expect("read generated AzaleaTown story scripts"),
+        )
+        .expect("parse generated AzaleaTown story scripts");
+        let object_commands = parse_script_object_commands("AzaleaTown", &scripts)
+            .expect("parse AzaleaTown object commands");
+        let movements = parse_script_movements("AzaleaTown", &scripts, &object_commands)
+            .expect("materialize AzaleaTown movement references");
+        let movement_keys = movements
+            .iter()
+            .map(|movement| (movement.label.clone(), movement.source_script.clone()))
+            .collect::<BTreeSet<_>>();
+        let command = object_commands
+            .iter()
+            .find(|command| {
+                command.source_script == ".AfterBattle@AzaleaTownRivalBattleScript"
+                    && command.command_index == 6
+            })
+            .expect("Azalea rival post-battle exit movement command");
+
+        assert_eq!(
+            script_object_command_issues(
+                command,
+                &BTreeMap::from([("AZALEATOWN_RIVAL".to_string(), "-1".to_string())]),
+                &BTreeSet::new(),
+                &movement_keys,
+            ),
+            []
+        );
+        assert!(movement_keys.contains(&(
+            "AzaleaTownRivalBattleExitMovement".to_string(),
+            Some("AzaleaTownRivalBattleScript".to_string()),
+        )));
+    }
+
+    #[test]
+    fn complete_exported_phone_catalog_materializes_without_cpu_parser_leakage() {
+        for relative_root in [
+            "apps/web/assets/data/phone_scripts",
+            "apps/web/assets/data/content-packs/core-modular/phone_scripts",
+        ] {
+            let phone_root = repository_root_for_tests().join(relative_root);
+            let mut paths = std::fs::read_dir(&phone_root)
+                .expect("read exported phone catalog")
+                .map(|entry| entry.expect("phone catalog entry").path())
+                .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+                .collect::<Vec<_>>();
+            paths.sort();
+            assert!(!paths.is_empty(), "exported phone catalog must not be empty");
+
+            let mut data = GameDataSet::default();
+            for path in paths {
+                let bytes = std::fs::read(&path).expect("read exported phone script payload");
+                data.phone_scripts.push(
+                    serde_json::from_slice(&bytes).expect("parse exported phone script payload"),
+                );
+            }
+
+            data.materialize_global_scripts()
+                .expect("materialize the complete exported phone catalog");
+            let module = data.global_scripts.expect("global script module");
+            assert!(module.scripts.contains_key("Script_ReceivePhoneCall"));
+            assert!(module.script_text_bodies.contains_key("PhoneClickText"));
+            assert!(
+                module
+                    .script_text_bodies
+                    .contains_key(".PhoneWrongNumberText@WrongNumber")
+            );
+            assert!(
+                !module.scripts.contains_key("CheckCanDeletePhoneNumber"),
+                "CPU-only routines must not leak into script-bytecode parsing"
+            );
+            for (source_script, expected_command, expected_args) in [
+                (
+                    ".ReportSwarm@RalphPhoneCalleeScript",
+                    "getlandmarkname",
+                    ["STRING_BUFFER_5", "LANDMARK_ROUTE_32"],
+                ),
+                (
+                    "GinaWantsBattle",
+                    "getlandmarkname",
+                    ["STRING_BUFFER_5", "LANDMARK_ROUTE_34"],
+                ),
+                (
+                    "WadeWantsBattle2",
+                    "getlandmarkname",
+                    ["STRING_BUFFER_5", "LANDMARK_ROUTE_31"],
+                ),
+                (
+                    ".AlreadySwarming@AnthonyPhoneCalleeScript",
+                    "getlandmarkname",
+                    ["STRING_BUFFER_5", "LANDMARK_ROUTE_33"],
+                ),
+                (
+                    ".AlreadySwarming@ArniePhoneCalleeScript",
+                    "getlandmarkname",
+                    ["STRING_BUFFER_5", "LANDMARK_ROUTE_35"],
+                ),
+                (
+                    ".HasMoney@MomSavingMoney",
+                    "getmoney",
+                    ["STRING_BUFFER_3", "MOMS_MONEY"],
+                ),
+                (
+                    ".CoolTrainerM@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "COOLTRAINERM"],
+                ),
+                (
+                    ".Beauty@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "BEAUTY"],
+                ),
+                (
+                    ".Grunt@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "GRUNTM"],
+                ),
+                (
+                    ".Teacher@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "TEACHER"],
+                ),
+                (
+                    ".SwimmerF@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "SWIMMERF"],
+                ),
+                (
+                    ".KimonoGirl@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "KIMONO_GIRL"],
+                ),
+                (
+                    ".Skier@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "SKIER"],
+                ),
+                (
+                    ".Medium@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "MEDIUM"],
+                ),
+                (
+                    ".PokefanM@LizGossip",
+                    "gettrainerclassname",
+                    ["STRING_BUFFER_4", "POKEFANM"],
+                ),
+            ] {
+                assert!(
+                    module.script_runtime_commands.iter().any(|command| {
+                        command.source_script == source_script
+                            && command.command_index == 0
+                            && command.command == expected_command
+                            && command.args == expected_args
+                    }),
+                    "{source_script} must materialize exact {expected_command} runtime metadata",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exported_rock_smash_randomwildmon_materializes_as_exact_runtime_command() {
+        let path = repository_root_for_tests()
+            .join("apps/web/assets/data/story_events/StandardScripts.json");
+        let mut payload: Value = serde_json::from_slice(
+            &std::fs::read(&path).expect("read exported StandardScripts catalog"),
+        )
+        .expect("parse exported StandardScripts catalog");
+        let catalog = payload
+            .get_mut("StandardScripts")
+            .and_then(Value::as_object_mut)
+            .expect("exported StandardScripts object");
+        let smash_rock_pointer = catalog
+            .get("StdScripts")
+            .and_then(Value::as_array)
+            .expect("exported standard-script pointer table")
+            .iter()
+            .find(|entry| {
+                entry
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .is_some_and(|args| {
+                        args == &[Value::String("SmashRockScript".to_string())]
+                    })
+            })
+            .cloned()
+            .expect("source-exact SmashRockScript pointer");
+        catalog.insert(
+            "StdScripts".to_string(),
+            Value::Array(vec![smash_rock_pointer]),
+        );
+        let mut data = GameDataSet {
+            story_events: vec![payload],
+            ..GameDataSet::default()
+        };
+
+        data.materialize_global_scripts()
+            .expect("materialize source-exact Rock Smash standard script");
+        let module = data.global_scripts.expect("global standard-script module");
+        let command = module
+            .script_runtime_commands
+            .iter()
+            .find(|command| {
+                command.source_script == "RockSmashScript"
+                    && command.command_index == 11
+            })
+            .expect("RockSmashScript:11 must have typed runtime metadata");
+
+        assert_eq!(command.command, "randomwildmon");
+        assert_eq!(command.args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn global_phone_landmark_and_money_commands_execute_through_pack_owned_data() {
+        let mut module = test_map_module("RuntimePhoneMap", "RUNTIME_PHONE_MAP", None);
+        module.scripts.insert(
+            "RuntimePhoneMapScript".to_string(),
+            serde_json::json!([{"command": "end", "args": []}]),
+        );
+        let mut data = GameDataSet {
+            maps: [("RuntimePhoneMap".to_string(), module.clone())]
+                .into_iter()
+                .collect(),
+            phone_scripts: vec![serde_json::json!({
+                ".ReportSwarm@RalphPhoneCalleeScript": [
+                    {"command": "getlandmarkname", "args": ["STRING_BUFFER_5", "LANDMARK_ROUTE_32"]},
+                    {"command": "end", "args": []}
+                ],
+                ".HasMoney@MomSavingMoney": [
+                    {"command": "getmoney", "args": ["STRING_BUFFER_3", "MOMS_MONEY"]},
+                    {"command": "end", "args": []}
+                ],
+                ".CoolTrainerM@LizGossip": [
+                    {"command": "gettrainerclassname", "args": ["STRING_BUFFER_4", "COOLTRAINERM"]},
+                    {"command": "end", "args": []}
+                ]
+            })],
+            trainer_class_names: BTreeMap::from([(
+                "COOLTRAINERM".to_string(),
+                "COOLTRAINER".to_string(),
+            )]),
+            pokegear_landmarks: crystal_core::models::display_metadata::PokegearLandmarksPayload {
+                landmarks: vec![crystal_core::models::display_metadata::PokegearLandmark {
+                    id: 8,
+                    constant: "LANDMARK_ROUTE_32".to_string(),
+                    label: "ROUTE_32".to_string(),
+                    name: "ROUTE 32".to_string(),
+                    x: 92,
+                    y: 76,
+                    region: "JOHTO".to_string(),
+                }],
+                map_to_landmark: BTreeMap::new(),
+            },
+            ..GameDataSet::default()
+        };
+        data.materialize_global_scripts()
+            .expect("materialize exact global phone commands");
+        let mut state = GameState {
+            moms_money: 54_321,
+            ..GameState::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimePhoneMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            module.events,
+            module.objects,
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        for source_script in [
+            ".ReportSwarm@RalphPhoneCalleeScript",
+            ".HasMoney@MomSavingMoney",
+            ".CoolTrainerM@LizGossip",
+        ] {
+            data.apply_script_runtime_command_in_session(
+                &mut state,
+                &mut session,
+                "RuntimePhoneMap",
+                source_script,
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute exact global phone buffer command");
+        }
+
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_5"),
+            Some(&"ROUTE 32".to_string())
+        );
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_3"),
+            Some(&"54321".to_string())
+        );
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_4"),
+            Some(&"COOLTRAINER".to_string())
+        );
+    }
+
+    #[test]
+    fn global_phone_materialization_keeps_script_prefixes_and_excludes_cpu_bodies() {
+        let mut data = GameDataSet {
+            phone_scripts: vec![serde_json::json!({
+                "PhoneCallerScript": [
+                    {"command": "farwritetext", "args": ["PhoneCallerText"]},
+                    {"command": "end", "args": []}
+                ],
+                "PhoneCallerText": [
+                    {"command": "text_far", "args": ["_PhoneCallerText"]},
+                    {"command": "text_end", "args": []}
+                ],
+                "Script_SpecialBillCall": [
+                    {"command": "callasm", "args": [".LoadBillScript"]},
+                    {"command": "sjump", "args": ["Script_ReceivePhoneCall"]},
+                    {"command": "ld", "args": ["e", "PHONE_BILL"]},
+                    {"command": "jp", "args": ["LoadCallerScript"]}
+                ],
+                ".LoadBillScript@Script_SpecialBillCall": [
+                    {"command": "ld", "args": ["e", "PHONE_BILL"]},
+                    {"command": "ret", "args": ["nz"]}
+                ],
+                "Script_ReceivePhoneCall": [
+                    {"command": "end", "args": []}
+                ]
+            })],
+            ..GameDataSet::default()
+        };
+
+        data.materialize_global_scripts()
+            .expect("materialize script-only global phone module");
+        let module = data.global_scripts.expect("global script module");
+
+        assert_eq!(
+            module.scripts["Script_SpecialBillCall"],
+            serde_json::json!([
+                {"command": "callasm", "args": [".LoadBillScript"]},
+                {"command": "sjump", "args": ["Script_ReceivePhoneCall"]}
+            ])
+        );
+        assert!(!module
+            .scripts
+            .contains_key(".LoadBillScript@Script_SpecialBillCall"));
+        assert_eq!(module.script_runtime_commands.len(), 1);
+        assert_eq!(module.script_runtime_commands[0].command, "callasm");
+        assert!(module.script_text_bodies.contains_key("PhoneCallerText"));
+    }
+
+    #[test]
     fn map_module_payloads_validate_text_control_map_and_runtime_commands() {
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.scripts.insert(
@@ -510,9 +1006,6 @@
             loadtrainer_command_index: 1,
             startbattle_command_index: 2,
             request: trainer_request,
-            reload_map_after_battle: true,
-            post_battle_event_flags: vec!["EVENT_ROUTE_29_TRAINER_DONE".to_string()],
-            post_battle_script_flags: vec!["ENGINE_ROUTE_29_TRAINER_DONE".to_string()],
         }];
         let mut wild_request = StaticWildBattleRequest::new("PIDGEY", 3);
         wild_request.source_script = "Route29WildScript".to_string();
@@ -521,11 +1014,6 @@
             loadwildmon_command_index: 3,
             startbattle_command_index: 4,
             request: wild_request,
-            reload_map_after_battle: false,
-            pre_battle_event_flags: vec!["EVENT_ROUTE_29_PRE_WILD".to_string()],
-            post_battle_event_flags: vec!["EVENT_ROUTE_29_POST_WILD".to_string()],
-            post_battle_script_flags: vec!["ENGINE_ROUTE_29_POST_WILD".to_string()],
-            disappear_object_ids: vec!["ROUTE_29_BIRD".to_string()],
         }];
         module.gift_pokemon_scripts = vec![GiftPokemonScript {
             species_id: "TOGEPI".to_string(),
@@ -710,9 +1198,6 @@
             loadtrainer_command_index: 10,
             startbattle_command_index: 11,
             request: TrainerBattleRequest::new("YOUNG STER", "YOUNGSTER_JOEY", ""),
-            reload_map_after_battle: false,
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
         }];
         let error = GameDataSet::default()
             .apply_content_pack_payload(
@@ -736,9 +1221,6 @@
             loadtrainer_command_index: 11,
             startbattle_command_index: 12,
             request: TrainerBattleRequest::new("YOUNGSTER", "legacyTrainer", ""),
-            reload_map_after_battle: false,
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
         }];
         let error = GameDataSet::default()
             .apply_content_pack_payload(
@@ -764,9 +1246,6 @@
             loadtrainer_command_index: 13,
             startbattle_command_index: 14,
             request,
-            reload_map_after_battle: false,
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
         }];
         let error = GameDataSet::default()
             .apply_content_pack_payload(
@@ -791,11 +1270,6 @@
             loadwildmon_command_index: 14,
             startbattle_command_index: 15,
             request,
-            reload_map_after_battle: false,
-            pre_battle_event_flags: Vec::new(),
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
-            disappear_object_ids: Vec::new(),
         }];
         let error = GameDataSet::default()
             .apply_content_pack_payload(
@@ -821,11 +1295,6 @@
             loadwildmon_command_index: 15,
             startbattle_command_index: 16,
             request,
-            reload_map_after_battle: false,
-            pre_battle_event_flags: Vec::new(),
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
-            disappear_object_ids: Vec::new(),
         }];
         let error = GameDataSet::default()
             .apply_content_pack_payload(
@@ -843,34 +1312,6 @@
             "{error}"
         );
 
-        let mut module = test_map_module("Route29", "ROUTE_29", None);
-        let request = StaticWildBattleRequest::new("PIDGEY", 3);
-        module.scripted_wild_battles = vec![ScriptedWildBattle {
-            source_script: "Route29WildScript".to_string(),
-            loadwildmon_command_index: 17,
-            startbattle_command_index: 18,
-            request,
-            reload_map_after_battle: false,
-            pre_battle_event_flags: vec!["EVENT ROUTE 29".to_string()],
-            post_battle_event_flags: Vec::new(),
-            post_battle_script_flags: Vec::new(),
-            disappear_object_ids: Vec::new(),
-        }];
-        let error = GameDataSet::default()
-            .apply_content_pack_payload(
-                ContentPackCategory::Maps,
-                serde_json::json!({
-                    "Route29": module
-                }),
-            )
-            .expect_err("scripted wild event flags must be exact")
-            .to_string();
-        assert!(
-            error.contains(
-                "map 'Route29' scripted wild battle command 17 pre battle event flag 'EVENT ROUTE 29' must be exact ASCII alphanumeric or underscore"
-            ),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1431,6 +1872,7 @@
                                 weight: 100,
                                 species: "NEW_MON".to_string(),
                                 level: 5,
+                                sleep_turns_by_time: Default::default(),
                             }],
                             rare: Vec::new(),
                         }),
@@ -1517,6 +1959,7 @@
                     weight: 100,
                     species: "NEW_MON\u{0007}".to_string(),
                     level: 5,
+                    sleep_turns_by_time: Default::default(),
                 }],
                 rare: Vec::new(),
             }),
@@ -1544,6 +1987,7 @@
                     weight: 100,
                     species: "NEW_MON".to_string(),
                     level: 5,
+                    sleep_turns_by_time: Default::default(),
                 }],
                 rare: Vec::new(),
             },
@@ -1633,11 +2077,13 @@
                     weight: 90,
                     species: "NEW_MON".to_string(),
                     level: 5,
+                    sleep_turns_by_time: Default::default(),
                 }],
                 rare: vec![FieldEncounterEntry {
                     weight: 100,
                     species: "NEW_MON".to_string(),
                     level: 5,
+                    sleep_turns_by_time: Default::default(),
                 }],
             }),
             None,
@@ -1848,19 +2294,15 @@
     }
 
     #[test]
-    fn modpack_overlay_rejects_duplicate_roaming_pokemon_species() {
-        let definition = RoamingPokemonDefinition {
-            level: 40,
-            map_group: 2,
-            map_number: 5,
-        };
+    fn modpack_overlay_rejects_duplicate_roaming_pokemon_catalog() {
+        let catalog = roaming_catalog_for_tests("RAIKOU", "ENTEI");
         let mut data = GameDataSet {
-            roaming_pokemon: BTreeMap::from([("RAIKOU".to_string(), definition.clone())]),
+            roaming_pokemon: catalog.clone(),
             ..GameDataSet::default()
         };
         let manifest = ModpackManifest {
             payload: ModpackPayload {
-                roaming_pokemon: BTreeMap::from([("RAIKOU".to_string(), definition)]),
+                roaming_pokemon: catalog,
                 ..ModpackPayload::default()
             },
             ..ModpackManifest::default()
@@ -1868,11 +2310,10 @@
 
         let error = data
             .apply_modpack(&manifest)
-            .expect_err("duplicate roaming Pokemon manifest must not overwrite");
+            .expect_err("duplicate roaming Pokemon catalog must not overwrite");
 
         assert!(
-            format!("{error:#}")
-                .contains("duplicate roaming Pokemon definition for species 'RAIKOU'"),
+            format!("{error:#}").contains("duplicate roaming Pokemon catalog"),
             "{error:#}"
         );
     }
@@ -1918,6 +2359,7 @@
             timer_seconds: 0,
             selected_contestant_count: 5,
             contestant_flags: vec!["EVENT_BUG_CATCHING_CONTESTANT_1A".to_string()],
+            encounters: bug_contest_encounters_for_tests(),
         };
         let mut data = GameDataSet {
             bug_contest_config: Some(config.clone()),
@@ -2062,10 +2504,7 @@
 
     #[test]
     fn modpack_overlay_rejects_duplicate_magikarp_length_table() {
-        let lengths = vec![MagikarpLengthEntry {
-            threshold: 110,
-            divisor: 1,
-        }];
+        let lengths = magikarp_lengths_for_tests();
         let mut data = GameDataSet {
             magikarp_lengths: lengths.clone(),
             ..GameDataSet::default()
@@ -4154,6 +4593,54 @@
     }
 
     #[test]
+    fn content_pack_payloads_merge_exact_trainer_class_display_names() {
+        let mut data = GameDataSet::default();
+
+        data.apply_content_pack_payload(
+            ContentPackCategory::TrainerClassNames,
+            serde_json::json!({
+                "COOLTRAINERM": "COOLTRAINER",
+                "POKEMON_PROF": "POKéMON PROF."
+            }),
+        )
+        .expect("apply source-exact trainer class display names");
+
+        assert_eq!(
+            data.trainer_class_names.get("COOLTRAINERM"),
+            Some(&"COOLTRAINER".to_string())
+        );
+        assert_eq!(
+            data.trainer_class_names.get("POKEMON_PROF"),
+            Some(&"POKéMON PROF.".to_string())
+        );
+
+        let duplicate = data
+            .apply_content_pack_payload(
+                ContentPackCategory::TrainerClassNames,
+                serde_json::json!({"COOLTRAINERM": "CHANGED"}),
+            )
+            .expect_err("trainer class display names must not overwrite");
+        assert!(
+            format!("{duplicate:#}")
+                .contains("duplicate trainer class display name 'COOLTRAINERM'"),
+            "{duplicate:#}"
+        );
+
+        let malformed = GameDataSet::default()
+            .apply_content_pack_payload(
+                ContentPackCategory::TrainerClassNames,
+                serde_json::json!({"COOL TRAINER": " COOLTRAINER"}),
+            )
+            .expect_err("trainer class table ids and display names must stay exact");
+        assert!(
+            format!("{malformed:#}").contains(
+                "trainer class name id 'COOL TRAINER' must be exact ASCII alphanumeric or underscore"
+            ),
+            "{malformed:#}"
+        );
+    }
+
+    #[test]
     fn content_pack_payloads_reject_duplicate_pc_strings() {
         let mut data = GameDataSet::default();
 
@@ -4838,4 +5325,3 @@
             "{error:#}"
         );
     }
-

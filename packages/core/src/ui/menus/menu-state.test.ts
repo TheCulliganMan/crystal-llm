@@ -194,6 +194,29 @@ describe("MenuState reset behavior", () => {
   });
 });
 
+describe("MenuState start-menu actions", () => {
+  it("opens the Pack selected on screen when the menu entries change before A is handled", () => {
+    const gameState = createInitialGameState();
+    const audioEngine = {
+      playSound: jest.fn(),
+      play_sound: jest.fn(),
+    } as unknown as ConstructorParameters<typeof MenuState>[2];
+    const menuState = new MenuState(createMenuUi(), gameState, audioEngine, null);
+
+    // PACK is initially at cursor 0. The Pokedex flag can be set by a script
+    // between frames, which inserts an entry before it. A must still activate
+    // the entry that was visibly selected rather than the new numeric slot.
+    gameState.wram.engine_flags.ENGINE_POKEDEX = true;
+
+    const result = menuState.handleInput(
+      new gameEngine.event.Event("keydown", { button: "a", is_press: true }),
+    );
+
+    expect(result).toBe("bag_menu");
+    expect(menuState.currentMenu).toBe("bag_menu");
+  });
+});
+
 describe("MenuState pokemon stats return", () => {
   const createPokemonMenuState = () => {
     const gameState = createInitialGameState();

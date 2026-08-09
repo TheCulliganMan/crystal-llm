@@ -198,4 +198,23 @@ describe("Game start menu locks", () => {
     expect(menuState.menuState.startMenu.cursorIndex).toBe(0);
     expect(menuState.gameState.wram.start_menu_cursor).toBe(0);
   });
+
+  it("opens the Pack that is visibly selected when a newly available entry changes the menu", async () => {
+    const game = await buildGame();
+    const internals = game as unknown as {
+      gameState: { wram: { engine_flags: Record<string, boolean> } };
+    };
+
+    game.postEvent(new gameEngine.event.Event("keydown", { key: gameEngine.K_RETURN }));
+    invokeHandleInput(game);
+    expect(game.getState()).toBe("menu");
+
+    // PACK was rendered at cursor 0. A script can enable the Pokedex before
+    // the next input frame, which inserts it above PACK.
+    internals.gameState.wram.engine_flags.ENGINE_POKEDEX = true;
+    game.postEvent(new gameEngine.event.Event("keydown", { button: "a", is_press: true }));
+    invokeHandleInput(game);
+
+    expect(game.getMenuState().currentMenu).toBe("bag_menu");
+  });
 });

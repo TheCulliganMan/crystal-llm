@@ -11,7 +11,10 @@ MCP, web UI, CLI agent tooling, and TypeScript app surfaces.
   `vendor/pokecrystal` and the existing TypeScript asset pipeline.
 - `crystal-audio`: music, SFX, cries, and audio command playback data.
 - `crystal-net`: transport-neutral multiplayer protocol types.
+- `crystal-render-api`: read-only presentation snapshots shared with optional
+  Bevy render mods.
 - `crystal-bevy`: desktop game shell for rendering, input, and audio.
+- `crystal-voxel-view`: optional clean-room 2.5D overworld renderer.
 
 The port should move file by file from the game runtime surfaces under
 `packages/core/src`, `packages/assets/src`, `packages/exporters/src`, and
@@ -46,6 +49,25 @@ inventory, battle, or other state-mutation command line.
 Keyboard controls are arrows for the D-pad, `Z` for A, `X` for B, `Enter` for
 Start, and Right Shift for Select.
 
+### Optional 2.5D overworld mod
+
+The normal build keeps the original 2D Game Boy presentation. To opt into the
+experimental renderer mod, build the Bevy shell with the non-default
+`voxel-view` feature:
+
+```sh
+cargo run -p crystal-bevy --features voxel-view -- \
+  --pack /path/to/core-modular.crystalpack \
+  --save-path /tmp/pokecrystal.crystalsave
+```
+
+The mod consumes a read-only render snapshot. It does not change movement,
+collision, scripts, random state, battles, saves, or replay checksums. Menus,
+dialog, fades, and battles continue to use the faithful 2D compositor. Its
+clean-room shape profile is keyed by stable tileset/metatile artwork identity,
+never gameplay collision. Unsupported maps, incomplete frames, and renderer
+errors leave the normal 2D world visible.
+
 ## Verification
 
 Verify the pinned ASM checkout and reference ROM before exporting:
@@ -59,7 +81,7 @@ npm run asm:boot
 From the repository root, rebuild the definitive core pack:
 
 ```sh
-npm run export:core
+./export
 ```
 
 Run the Rust compile and test gates from this directory:

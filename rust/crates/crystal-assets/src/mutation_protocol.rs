@@ -77,11 +77,13 @@ pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<
 }
 
 fn validate_compiled_game_pack_identity(pack: &CompiledGamePack) -> Result<()> {
+    validate_compiled_runtime_files(&pack.runtime_files)?;
     let derived = if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_GZIP) {
         derive_compiled_game_pack_identity_from_manifest(
             pack.format_version,
             &pack.data,
             &pack.audio_manifest,
+            &pack.runtime_files,
             &pack.report,
         )?
     } else {
@@ -89,6 +91,7 @@ fn validate_compiled_game_pack_identity(pack: &CompiledGamePack) -> Result<()> {
             pack.format_version,
             &pack.data,
             &pack.compiled_audio,
+            &pack.runtime_files,
             &pack.report,
         )?
     };
@@ -98,6 +101,54 @@ fn validate_compiled_game_pack_identity(pack: &CompiledGamePack) -> Result<()> {
             pack.identity.content_hash,
             derived.content_hash
         );
+    }
+    Ok(())
+}
+
+pub fn validate_compiled_runtime_files(runtime_files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for key in runtime_files.keys() {
+        validate_compiled_runtime_file_key(key)?;
+    }
+    if runtime_files.is_empty() {
+        return Ok(());
+    }
+    for &key in REQUIRED_VENDOR_RUNTIME_FILE_KEYS {
+        let bytes = runtime_files.get(key).with_context(|| {
+            format!("compiled runtime file bundle is missing required vendor asset '{key}'")
+        })?;
+        if bytes.is_empty() {
+            anyhow::bail!("compiled runtime vendor asset '{key}' must not be empty");
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_compiled_runtime_file_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        anyhow::bail!("compiled runtime file key must not be empty");
+    }
+    let path = Path::new(key);
+    let bytes = key.as_bytes();
+    let has_windows_prefix = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if path.is_absolute() || key.starts_with('/') || key.starts_with('\\') || has_windows_prefix {
+        anyhow::bail!("compiled runtime file key '{key}' must be relative");
+    }
+    let components = key
+        .split(|character| character == '/' || character == '\\')
+        .collect::<Vec<_>>();
+    if components.contains(&"..") {
+        anyhow::bail!("compiled runtime file key '{key}' must not traverse parent directories");
+    }
+    if components.contains(&".") {
+        anyhow::bail!(
+            "compiled runtime file key '{key}' must not include current-directory components"
+        );
+    }
+    if components.contains(&"") {
+        anyhow::bail!("compiled runtime file key '{key}' must not contain empty path components");
+    }
+    if key.contains('\\') {
+        anyhow::bail!("compiled runtime file key '{key}' must use forward-slash separators");
     }
     Ok(())
 }
@@ -1644,14 +1695,6 @@ fn validate_trainer_battle_record_shapes(map_id: &str, map: &MapModule) -> Resul
         );
         validate_exact_modpack_value(&battle.source_script, &format!("{context} source script"))?;
         validate_trainer_battle_request_shape(map_id, &context, &battle.request)?;
-        validate_exact_string_list(
-            &battle.post_battle_event_flags,
-            &format!("{context} post battle event flag"),
-        )?;
-        validate_exact_string_list(
-            &battle.post_battle_script_flags,
-            &format!("{context} post battle script flag"),
-        )?;
     }
     for battle in &map.scripted_wild_battles {
         let context = format!(
@@ -1660,22 +1703,6 @@ fn validate_trainer_battle_record_shapes(map_id: &str, map: &MapModule) -> Resul
         );
         validate_exact_modpack_value(&battle.source_script, &format!("{context} source script"))?;
         validate_static_wild_battle_request_shape(&context, &battle.request)?;
-        validate_exact_string_list(
-            &battle.pre_battle_event_flags,
-            &format!("{context} pre battle event flag"),
-        )?;
-        validate_exact_string_list(
-            &battle.post_battle_event_flags,
-            &format!("{context} post battle event flag"),
-        )?;
-        validate_exact_string_list(
-            &battle.post_battle_script_flags,
-            &format!("{context} post battle script flag"),
-        )?;
-        validate_exact_string_list(
-            &battle.disappear_object_ids,
-            &format!("{context} disappear object id"),
-        )?;
     }
     Ok(())
 }
@@ -1768,10 +1795,7 @@ fn active_battle_type(state: &GameState) -> Option<&str> {
 fn battle_type_guarantees_escape(battle_type: &str) -> bool {
     matches!(
         battle_type,
-        "BATTLETYPE_DEBUG"
-            | "BATTLETYPE_CONTEST"
-            | "BATTLETYPE_BUG_CONTEST"
-            | "BATTLETYPE_PARK"
+        "BATTLETYPE_DEBUG" | "BATTLETYPE_CONTEST"
     )
 }
 
@@ -2799,4 +2823,3 @@ fn insert_buena_prize(target: &mut BuenaPrizeDefinitions, item_id: String, cost:
     target.insert(item_id, cost);
     Ok(())
 }
-

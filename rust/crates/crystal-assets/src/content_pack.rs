@@ -1,6 +1,6 @@
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
 pub const COMPILED_GAME_PACK_EXTENSION: &str = "crystalpack";
-pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 3;
+pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 6;
 const COMPILED_GAME_PACK_VERSION_OFFSET: usize = COMPILED_GAME_PACK_MAGIC.len();
 const COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET: usize = COMPILED_GAME_PACK_VERSION_OFFSET + 2;
 const COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET: usize = COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 4;
@@ -281,6 +281,7 @@ pub enum ContentPackCategory {
     Marts,
     CurrencyConstants,
     Trainers,
+    TrainerClassNames,
     Pokedex,
     PokedexEntries,
     PokemonFrontpicAnim,
@@ -365,6 +366,7 @@ pub struct ContentPackFiles {
     pub marts: Vec<String>,
     pub currency_constants: Vec<String>,
     pub trainers: Vec<String>,
+    pub trainer_class_names: Vec<String>,
     pub pokedex: Vec<String>,
     pub pokedex_entries: Vec<String>,
     pub pokemon_frontpic_anim: Vec<String>,
@@ -449,6 +451,7 @@ impl ContentPackFiles {
             ContentPackCategory::Marts => &self.marts,
             ContentPackCategory::CurrencyConstants => &self.currency_constants,
             ContentPackCategory::Trainers => &self.trainers,
+            ContentPackCategory::TrainerClassNames => &self.trainer_class_names,
             ContentPackCategory::Pokedex => &self.pokedex,
             ContentPackCategory::PokedexEntries => &self.pokedex_entries,
             ContentPackCategory::PokemonFrontpicAnim => &self.pokemon_frontpic_anim,
@@ -533,6 +536,7 @@ const CONTENT_PACK_CATEGORIES: &[ContentPackCategory] = &[
     ContentPackCategory::Marts,
     ContentPackCategory::CurrencyConstants,
     ContentPackCategory::Trainers,
+    ContentPackCategory::TrainerClassNames,
     ContentPackCategory::Pokedex,
     ContentPackCategory::PokedexEntries,
     ContentPackCategory::PokemonFrontpicAnim,
@@ -617,6 +621,7 @@ impl ContentPackCategory {
             ContentPackCategory::Marts => "marts",
             ContentPackCategory::CurrencyConstants => "currency_constants",
             ContentPackCategory::Trainers => "trainers",
+            ContentPackCategory::TrainerClassNames => "trainer_class_names",
             ContentPackCategory::Pokedex => "pokedex",
             ContentPackCategory::PokedexEntries => "pokedex_entries",
             ContentPackCategory::PokemonFrontpicAnim => "pokemon_frontpic_anim",
@@ -879,7 +884,11 @@ pub struct ModpackMetadata {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SpecialPhoneCallRule {}
+pub struct SpecialPhoneCallRule {
+    pub condition: String,
+    pub contact_id: String,
+    pub caller_script: String,
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -938,7 +947,7 @@ pub struct ModpackPayload {
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
     pub flee_mons: FleeMonTables,
     pub buena_password_categories: BuenaPasswordCategories,
-    pub roaming_pokemon: RoamingPokemonDefinitions,
+    pub roaming_pokemon: RoamingPokemonCatalog,
     pub buena_prizes: BuenaPrizeDefinitions,
     pub kurt_apricorn_recipes: KurtApricornRecipes,
     #[serde(deserialize_with = "required_nullable_value")]
@@ -980,6 +989,7 @@ pub struct ModpackPayload {
     pub wild_encounters: BTreeMap<String, WildEncounterData>,
     pub field_encounters: BTreeMap<String, FieldEncounterData>,
     pub trainers: TrainerCatalog,
+    pub trainer_class_names: BTreeMap<String, String>,
     pub phone_contacts: PhoneContactCatalog,
     pub permanent_phone_numbers: BTreeMap<String, PermanentPhoneNumberRule>,
     pub special_phone_calls: BTreeMap<String, SpecialPhoneCallRule>,

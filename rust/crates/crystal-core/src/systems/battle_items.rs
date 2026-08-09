@@ -85,6 +85,7 @@ pub struct BattleItemOutcome {
     pub pending_move_learns: Vec<LearnedMove>,
     pub deferred_level_evolution: bool,
     pub evolution_target: Option<String>,
+    pub evolution_cancel_snapshot: Option<Box<Pokemon>>,
     pub consumed: bool,
 }
 
@@ -669,7 +670,9 @@ pub fn require_wild_battle_for_escape_item(state: &GameState) -> Result<(), Batt
 
 pub fn apply_battle_escape_item_use(state: &mut GameState) -> Result<(), BattleItemError> {
     require_wild_battle_for_escape_item(state)?;
-    crate::battle::start::deactivate_battle(state);
+    // PokeDollEffect ORs DRAW into wBattleResult before the forced-switch
+    // battle turn exits.  Like Teleport/manual RUN, it skips WIN cleanup.
+    crate::battle::start::deactivate_battle_after_draw(state);
     Ok(())
 }
 
@@ -1125,6 +1128,7 @@ pub fn apply_rare_candy_item_effect(
         pending_move_learns,
         deferred_level_evolution,
         evolution_target: evolution.target_species,
+        evolution_cancel_snapshot: evolution.cancel_snapshot,
         consumed,
     })
 }
@@ -1239,6 +1243,7 @@ pub fn apply_evolution_stone_item_effect(
         pending_move_learns,
         deferred_level_evolution: false,
         evolution_target: Some(evolution_target),
+        evolution_cancel_snapshot: evolution.cancel_snapshot,
         consumed,
     })
 }
@@ -1278,6 +1283,7 @@ fn apply_restore_hp(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1323,6 +1329,7 @@ fn apply_full_restore(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1376,6 +1383,7 @@ fn apply_status_heal(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1442,6 +1450,7 @@ fn apply_full_heal(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1495,6 +1504,7 @@ fn apply_revive(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1607,6 +1617,7 @@ fn apply_restore_pp(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1700,6 +1711,7 @@ fn apply_pp_up(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1785,6 +1797,7 @@ fn apply_vitamin(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1857,6 +1870,7 @@ fn apply_battle_stat_boost(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1909,6 +1923,7 @@ fn apply_battle_focus_energy(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -1961,6 +1976,7 @@ fn apply_confusion_heal(
         pending_move_learns: Vec::new(),
         deferred_level_evolution: false,
         evolution_target: None,
+        evolution_cancel_snapshot: None,
         consumed,
     })
 }
@@ -2188,6 +2204,7 @@ mod tests {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon.clone()],
         };
@@ -2244,6 +2261,7 @@ mod tests {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon],
         };
@@ -2411,6 +2429,7 @@ mod tests {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "ROUTE_29".to_string(),
+            roaming_slot: None,
             enemy_pokemon: pokemon.clone(),
             enemy_party: vec![pokemon],
         };
@@ -2428,6 +2447,7 @@ mod tests {
         assert!(wild.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(wild.battle_escape_attempts, 0);
         assert_eq!(wild.battle_player_stat_drop_guard_turns, 0);
+        assert_eq!(wild.battle_result, 2, "Poke Doll escape is base DRAW");
     }
 
     #[test]
@@ -3927,6 +3947,12 @@ mod tests {
         assert_eq!(outcome.level_before, 15);
         assert_eq!(outcome.level_after, 16);
         assert_eq!(outcome.evolution_target, Some("BAYLEEF".to_string()));
+        let cancel_snapshot = outcome
+            .evolution_cancel_snapshot
+            .as_deref()
+            .expect("Rare Candy level evolution remains cancellable");
+        assert_eq!(cancel_snapshot.species.id, "CHIKORITA");
+        assert_eq!(cancel_snapshot.level, 16);
         assert_eq!(pokemon.species.id, "BAYLEEF");
         assert_eq!(pokemon.level, 16);
     }
@@ -4093,6 +4119,7 @@ mod tests {
 
         assert_eq!(outcome.item_id, "THUNDERSTONE");
         assert_eq!(outcome.evolution_target, Some("RAICHU".to_string()));
+        assert_eq!(outcome.evolution_cancel_snapshot, None);
         assert_eq!(outcome.learned_moves, vec!["THUNDERBOLT".to_string()]);
         assert_eq!(pokemon.species.id, "RAICHU");
         assert_eq!(pokemon.moves[0].name, "THUNDERBOLT");

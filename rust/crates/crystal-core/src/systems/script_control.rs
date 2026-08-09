@@ -7,6 +7,8 @@ use crate::state::{
     ScriptLocation, ScriptReturnFrame,
 };
 
+const RUNNING_TRAINER_BATTLE_SCRIPT_MEMORY: &str = "wRunningTrainerBattleScript";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptControlCommand {
@@ -167,35 +169,56 @@ pub fn resolve_script_control_command(
 ) -> Result<ScriptControlAction, ScriptControlCommandError> {
     validate_script_control_command(&command)?;
     match command.command.as_str() {
-        "ifequal" => branch(
+        "ifequal" => {
+            let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
+            branch(state, &command, left == right)
+        }
+        "ifnotequal" => {
+            let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
+            branch(state, &command, left != right)
+        }
+        "iftrue" => branch(
             state,
             &command,
-            accumulator(state, &command)? == require_compare_value(&command)?,
+            require_boolean(state, &command, numeric_constants)?,
         ),
-        "ifnotequal" => branch(
+        "iffalse" => branch(
             state,
             &command,
-            accumulator(state, &command)? != require_compare_value(&command)?,
+            !require_boolean(state, &command, numeric_constants)?,
         ),
-        "iftrue" => branch(state, &command, require_boolean(state, &command)?),
-        "iffalse" => branch(state, &command, !require_boolean(state, &command)?),
         "ifgreater" => {
-            let left = parse_numeric_token(accumulator(state, &command)?, numeric_constants)?;
-            let right = parse_numeric_token(require_compare_value(&command)?, numeric_constants)?;
+            let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
             branch(state, &command, left > right)
         }
         "ifless" => {
-            let left = parse_numeric_token(accumulator(state, &command)?, numeric_constants)?;
-            let right = parse_numeric_token(require_compare_value(&command)?, numeric_constants)?;
+            let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
             branch(state, &command, left < right)
         }
-        "sjump" | "jump" | "scall" | "sdefer" | "jumpstd" => Ok(jump_action(command)?),
-        "end" | "endcallback" | "endifjustbattled" => Ok(ScriptControlAction::End {
+        "sjump" | "jump" | "farsjump" | "scall" | "farscall" | "sdefer" | "jumpstd" => {
+            Ok(jump_action(command)?)
+        }
+        "end" | "endcallback" => Ok(ScriptControlAction::End {
             callback: command.command == "endcallback",
-            just_battled_guard: command.command == "endifjustbattled",
+            just_battled_guard: false,
             source_script: command.source_script,
             command_index: command.command_index,
         }),
+        "endifjustbattled" => {
+            if running_trainer_battle_script(state, numeric_constants)? {
+                Ok(ScriptControlAction::End {
+                    callback: false,
+                    just_battled_guard: true,
+                    source_script: command.source_script,
+                    command_index: command.command_index,
+                })
+            } else {
+                Ok(ScriptControlAction::Continue {
+                    source_script: command.source_script,
+                    command_index: command.command_index,
+                })
+            }
+        }
         other => Err(ScriptControlCommandError::UnknownCommand {
             command: other.to_string(),
         }),
@@ -328,7 +351,8 @@ pub fn validate_script_control_command(
             require_target(command)?;
             require_resolved_target(command)?;
         }
-        "iftrue" | "iffalse" | "sjump" | "jump" | "scall" | "sdefer" => {
+        "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall" | "farscall"
+        | "sdefer" => {
             reject_compare_value(command)?;
             require_target(command)?;
             require_resolved_target(command)?;
@@ -392,7 +416,7 @@ fn jump_action(
     };
     Ok(ScriptControlAction::Jump {
         target_script,
-        call: command.command == "scall",
+        call: matches!(command.command.as_str(), "scall" | "farscall"),
         deferred: command.command == "sdefer",
         standard: command.command == "jumpstd",
         source_script: command.source_script,
@@ -411,16 +435,55 @@ fn accumulator<'a>(
     })
 }
 
+fn comparison_bytes(
+    state: &GameState,
+    command: &ScriptControlCommand,
+    numeric_constants: &BTreeMap<String, i32>,
+) -> Result<(u8, u8), ScriptControlCommandError> {
+    let left = parse_script_byte(accumulator(state, command)?, numeric_constants)?;
+    let right = parse_script_byte(require_compare_value(command)?, numeric_constants)?;
+    Ok((left, right))
+}
+
+fn parse_script_byte(
+    token: &str,
+    numeric_constants: &BTreeMap<String, i32>,
+) -> Result<u8, ScriptControlCommandError> {
+    // Every comparison operand is emitted by the pret macros with `db` and
+    // compared against the one-byte wScriptVar register. Preserve that byte
+    // representation for signed literals and constant expressions as well.
+    Ok(parse_numeric_token(token, numeric_constants)?.rem_euclid(256) as u8)
+}
+
+fn running_trainer_battle_script(
+    state: &GameState,
+    numeric_constants: &BTreeMap<String, i32>,
+) -> Result<bool, ScriptControlCommandError> {
+    // TalkToTrainer clears this WRAM byte before a manual interaction, while
+    // StartBattleWithMapTrainerScript writes -1 immediately before dispatching
+    // the trainer's after-battle script. Script_endifjustbattled only ends for
+    // that nonzero post-battle dispatch.
+    state
+        .script_runtime
+        .memory
+        .get(RUNNING_TRAINER_BATTLE_SCRIPT_MEMORY)
+        .map(|value| parse_script_byte(value, numeric_constants).map(|value| value != 0))
+        .unwrap_or(Ok(false))
+}
+
 fn require_boolean(
     state: &GameState,
     command: &ScriptControlCommand,
+    numeric_constants: &BTreeMap<String, i32>,
 ) -> Result<bool, ScriptControlCommandError> {
     match accumulator(state, command)? {
         "TRUE" | "1" => Ok(true),
         "FALSE" | "0" => Ok(false),
-        value => Err(ScriptControlCommandError::UnknownBoolean {
-            value: value.to_string(),
-        }),
+        value => parse_script_byte(value, numeric_constants)
+            .map(|value| value != 0)
+            .map_err(|_| ScriptControlCommandError::UnknownBoolean {
+                value: value.to_string(),
+            }),
     }
 }
 
@@ -752,12 +815,13 @@ mod tests {
     #[test]
     fn resolves_exact_accumulator_branches_and_jumps() {
         let mut state = GameState::default();
-        state.script_runtime.script_value = Some("SATURDAY".to_string());
+        state.script_runtime.script_value = Some("6".to_string());
+        let constants = BTreeMap::from([("SATURDAY".to_string(), 6)]);
         assert_eq!(
             resolve_script_control_command(
                 &state,
                 script_control_command("ifequal", Some("SATURDAY"), Some(".Done")),
-                &BTreeMap::new(),
+                &constants,
             )
             .expect("branch"),
             ScriptControlAction::Jump {
@@ -773,9 +837,52 @@ mod tests {
             resolve_script_control_command(
                 &state,
                 script_control_command("ifnotequal", Some("SATURDAY"), Some(".Done")),
-                &BTreeMap::new(),
+                &constants,
             ),
             Ok(ScriptControlAction::Continue { .. })
+        ));
+    }
+
+    #[test]
+    fn resolves_comparison_operands_to_canonical_script_bytes() {
+        let constants =
+            BTreeMap::from([("PARTY_LENGTH".to_string(), 6), ("TUESDAY".to_string(), 2)]);
+        let mut state = GameState::default();
+
+        for (accumulator, compare) in [
+            ("6", "PARTY_LENGTH"),
+            ("2", "TUESDAY"),
+            ("0", "$0"),
+            ("TUESDAY", "$2"),
+            ("-1", "$ff"),
+        ] {
+            state.script_runtime.script_value = Some(accumulator.to_string());
+            assert!(matches!(
+                resolve_script_control_command(
+                    &state,
+                    script_control_command("ifequal", Some(compare), Some(".Equal")),
+                    &constants,
+                ),
+                Ok(ScriptControlAction::Jump { .. })
+            ));
+            assert!(matches!(
+                resolve_script_control_command(
+                    &state,
+                    script_control_command("ifnotequal", Some(compare), Some(".Equal")),
+                    &constants,
+                ),
+                Ok(ScriptControlAction::Continue { .. })
+            ));
+        }
+
+        state.script_runtime.script_value = Some("-1".to_string());
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("ifgreater", Some("$0"), Some(".Greater")),
+                &constants,
+            ),
+            Ok(ScriptControlAction::Jump { .. })
         ));
     }
 
@@ -1213,12 +1320,13 @@ mod tests {
     #[test]
     fn continue_branch_records_no_target_or_jump_state() {
         let mut state = GameState::default();
-        state.script_runtime.script_value = Some("SATURDAY".to_string());
+        state.script_runtime.script_value = Some("6".to_string());
+        let constants = BTreeMap::from([("SATURDAY".to_string(), 6)]);
         apply_script_control_command(
             &mut state,
             "TestMap",
             script_control_command("ifnotequal", Some("SATURDAY"), Some(".Done")),
-            &BTreeMap::new(),
+            &constants,
         )
         .expect("continue");
 
@@ -1236,20 +1344,63 @@ mod tests {
     }
 
     #[test]
-    fn end_records_exact_end_state_and_clears_next_script() {
+    fn endifjustbattled_continues_during_manual_trainer_talk() {
         let mut state = GameState::default();
         state.script_runtime.next_script = Some(ScriptLocation {
             origin_map_name: "TestMap".to_string(),
             script: "PendingScript".to_string(),
         });
-        apply_script_control_command(
+        state.script_runtime.memory.insert(
+            RUNNING_TRAINER_BATTLE_SCRIPT_MEMORY.to_string(),
+            "0".to_string(),
+        );
+        let action = apply_script_control_command(
             &mut state,
             "TestMap",
             script_control_command("endifjustbattled", None, None),
             &BTreeMap::new(),
         )
-        .expect("end guarded");
+        .expect("manual trainer talk continues");
 
+        assert!(matches!(action, ScriptControlAction::Continue { .. }));
+        assert_eq!(
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: "PendingScript".to_string(),
+            })
+        );
+        assert_eq!(state.script_runtime.script_ended, None);
+        assert_eq!(
+            state
+                .script_runtime
+                .control_events
+                .last()
+                .map(|event| event.kind),
+            Some(ScriptControlRuntimeKind::Continue)
+        );
+    }
+
+    #[test]
+    fn endifjustbattled_ends_post_battle_trainer_dispatch() {
+        let mut state = GameState::default();
+        state.script_runtime.next_script = Some(ScriptLocation {
+            origin_map_name: "TestMap".to_string(),
+            script: "PendingScript".to_string(),
+        });
+        state.script_runtime.memory.insert(
+            RUNNING_TRAINER_BATTLE_SCRIPT_MEMORY.to_string(),
+            "-1".to_string(),
+        );
+        let action = apply_script_control_command(
+            &mut state,
+            "TestMap",
+            script_control_command("endifjustbattled", None, None),
+            &BTreeMap::new(),
+        )
+        .expect("post-battle trainer dispatch ends");
+
+        assert!(matches!(action, ScriptControlAction::End { .. }));
         assert_eq!(state.script_runtime.next_script, None);
         assert_eq!(
             state.script_runtime.script_ended,

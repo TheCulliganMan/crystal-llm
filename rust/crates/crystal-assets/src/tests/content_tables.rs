@@ -1712,6 +1712,7 @@
                                 weight: 90,
                                 species: "NEW_MON".to_string(),
                                 level: 3,
+                                sleep_turns_by_time: Default::default(),
                             }],
                             rare: Vec::new(),
                         }),
@@ -1720,6 +1721,7 @@
                                 weight: 0,
                                 species: " NEW_MON".to_string(),
                                 level: 8,
+                                sleep_turns_by_time: Default::default(),
                             }],
                             rare: Vec::new(),
                         }),
@@ -4545,4 +4547,3 @@
                 .any(|diagnostic| diagnostic.code == "unwalkable_coord_event_tile")
         );
     }
-

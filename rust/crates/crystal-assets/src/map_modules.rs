@@ -39,6 +39,41 @@ pub struct MapModule {
     pub blocks: Vec<u16>,
 }
 
+/// Typed command indexes for ASM scripts shared by every map. Standard and
+/// phone scripts are exported as bank-level objects rather than map modules,
+/// but execute through the same script engine and therefore need the same
+/// definitive command metadata without duplicating them into every compiled
+/// map. `definitions` retains referenced CPU/data bodies while `scripts`
+/// contains the labels addressable by the compiled script cursor.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalScriptModule {
+    pub scripts: BTreeMap<String, Value>,
+    pub definitions: BTreeMap<String, Value>,
+    pub script_item_grants: Vec<ScriptItemGrant>,
+    pub script_item_checks: Vec<ScriptItemAccess>,
+    pub script_item_takes: Vec<ScriptItemAccess>,
+    pub script_economy_commands: Vec<ScriptEconomyCommand>,
+    pub script_flag_commands: Vec<ScriptFlagCommand>,
+    pub script_scene_commands: Vec<ScriptSceneCommand>,
+    pub script_audio_commands: Vec<ScriptAudioCommand>,
+    pub script_block_changes: Vec<ScriptBlockChange>,
+    pub script_object_commands: Vec<ScriptObjectCommand>,
+    pub script_movements: Vec<ScriptMovement>,
+    pub script_map_commands: Vec<ScriptMapCommand>,
+    pub script_text_commands: Vec<ScriptTextCommand>,
+    pub script_text_bodies: BTreeMap<String, ScriptTextBody>,
+    pub script_menu_definitions: BTreeMap<String, ScriptMenuDefinition>,
+    pub script_vertical_menus: BTreeMap<String, ScriptVerticalMenuDefinition>,
+    pub script_elevators: BTreeMap<String, ScriptElevatorDefinition>,
+    pub script_variable_commands: Vec<ScriptVariableCommand>,
+    pub script_control_commands: Vec<ScriptControlCommand>,
+    pub script_shop_commands: Vec<ScriptShopCommand>,
+    pub script_phone_commands: Vec<ScriptPhoneCommand>,
+    pub script_runtime_commands: Vec<ScriptRuntimeCommand>,
+    pub script_swarm_commands: Vec<ScriptSwarmCommand>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptVerticalMenuDefinition {
@@ -74,11 +109,6 @@ pub struct ScriptedWildBattle {
     pub loadwildmon_command_index: usize,
     pub startbattle_command_index: usize,
     pub request: StaticWildBattleRequest,
-    pub reload_map_after_battle: bool,
-    pub pre_battle_event_flags: Vec<String>,
-    pub post_battle_event_flags: Vec<String>,
-    pub post_battle_script_flags: Vec<String>,
-    pub disappear_object_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,9 +118,6 @@ pub struct ScriptedTrainerBattle {
     pub loadtrainer_command_index: usize,
     pub startbattle_command_index: usize,
     pub request: TrainerBattleRequest,
-    pub reload_map_after_battle: bool,
-    pub post_battle_event_flags: Vec<String>,
-    pub post_battle_script_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,21 +375,32 @@ fn derive_compiled_game_pack_identity(
     format_version: u16,
     data: &GameDataSet,
     compiled_audio: &BTreeMap<String, Vec<u8>>,
+    runtime_files: &BTreeMap<String, Vec<u8>>,
     report: &ModpackCompileReport,
 ) -> Result<CompiledGamePackIdentity> {
     let manifest = ModpackAudioManifest::from_assets(&data.audio, compiled_audio)?;
-    derive_compiled_game_pack_identity_from_manifest(format_version, data, &manifest, report)
+    derive_compiled_game_pack_identity_from_manifest(
+        format_version,
+        data,
+        &manifest,
+        runtime_files,
+        report,
+    )
 }
 
 fn derive_compiled_game_pack_identity_from_manifest(
     format_version: u16,
     data: &GameDataSet,
     manifest: &ModpackAudioManifest,
+    runtime_files: &BTreeMap<String, Vec<u8>>,
     report: &ModpackCompileReport,
 ) -> Result<CompiledGamePackIdentity> {
     let mut encoded = Vec::new();
-    ciborium::into_writer(&(format_version, data, manifest, report), &mut encoded)
-        .context("encode compiled game pack identity")?;
+    ciborium::into_writer(
+        &(format_version, data, manifest, runtime_files, report),
+        &mut encoded,
+    )
+    .context("encode compiled game pack identity")?;
     Ok(CompiledGamePackIdentity {
         format_version,
         runtime_modpack_id: compiled_game_pack_runtime_modpack_id(report)?,
@@ -382,10 +420,11 @@ fn unchecked_compiled_game_pack_identity_for_tests(
     format_version: u16,
     data: &GameDataSet,
     compiled_audio: &BTreeMap<String, Vec<u8>>,
+    runtime_files: &BTreeMap<String, Vec<u8>>,
     report: &ModpackCompileReport,
 ) -> CompiledGamePackIdentity {
-    derive_compiled_game_pack_identity(format_version, data, compiled_audio, report).unwrap_or_else(
-        |_| CompiledGamePackIdentity {
+    derive_compiled_game_pack_identity(format_version, data, compiled_audio, runtime_files, report)
+        .unwrap_or_else(|_| CompiledGamePackIdentity {
             format_version,
             runtime_modpack_id: "invalid-test-pack".to_string(),
             content_hash: "0".repeat(64),
@@ -408,8 +447,7 @@ fn unchecked_compiled_game_pack_identity_for_tests(
                 .iter()
                 .filter(|asset| asset.kind == ModpackAudioKind::Cry)
                 .count(),
-        },
-    )
+        })
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -435,11 +473,13 @@ impl CompiledGamePack {
     pub fn new_unchecked_for_tests(mut data: GameDataSet, report: ModpackCompileReport) -> Self {
         normalize_test_pcm_audio_metadata(&mut data);
         let compiled_audio = synthetic_compiled_audio_for_tests(&data);
+        let runtime_files = BTreeMap::new();
         let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
             COMPILED_GAME_PACK_FORMAT_VERSION,
             &data,
             &compiled_audio,
+            &runtime_files,
             &report,
         );
         let audio_manifest =
@@ -450,10 +490,26 @@ impl CompiledGamePack {
             compiled_audio,
             audio_compression: None,
             audio_manifest,
-            runtime_files: BTreeMap::new(),
+            runtime_files,
             report,
             identity,
         }
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn with_runtime_files_for_tests(
+        mut self,
+        runtime_files: BTreeMap<String, Vec<u8>>,
+    ) -> Self {
+        self.runtime_files = runtime_files;
+        self.identity = unchecked_compiled_game_pack_identity_for_tests(
+            self.format_version,
+            &self.data,
+            &self.compiled_audio,
+            &self.runtime_files,
+            &self.report,
+        );
+        self
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -463,11 +519,13 @@ impl CompiledGamePack {
         report: ModpackCompileReport,
     ) -> Self {
         normalize_test_pcm_audio_metadata(&mut data);
+        let runtime_files = BTreeMap::new();
         let report = canonicalize_core_modular_test_report(&data, report);
         let identity = unchecked_compiled_game_pack_identity_for_tests(
             COMPILED_GAME_PACK_FORMAT_VERSION,
             &data,
             &compiled_audio,
+            &runtime_files,
             &report,
         );
         let audio_manifest =
@@ -478,7 +536,7 @@ impl CompiledGamePack {
             compiled_audio,
             audio_compression: None,
             audio_manifest,
-            runtime_files: BTreeMap::new(),
+            runtime_files,
             report,
             identity,
         }

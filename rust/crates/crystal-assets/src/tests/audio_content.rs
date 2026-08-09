@@ -637,113 +637,84 @@
     #[test]
     fn content_pack_payloads_merge_roaming_pokemon_as_exact_pack_data() {
         let mut data = GameDataSet::default();
+        let catalog = roaming_catalog_for_tests("RAIKOU", "ENTEI");
 
         data.apply_content_pack_payload(
             ContentPackCategory::RoamingPokemon,
-            serde_json::json!({
-                "RAIKOU": { "level": 40, "mapGroup": 2, "mapNumber": 5 }
-            }),
+            serde_json::to_value(&catalog).expect("serialize exact roaming catalog"),
         )
         .expect("apply roaming Pokemon payload");
 
-        assert_eq!(
-            data.roaming_pokemon,
-            BTreeMap::from([(
-                "RAIKOU".to_string(),
-                RoamingPokemonDefinition {
-                    level: 40,
-                    map_group: 2,
-                    map_number: 5,
-                }
-            )])
-        );
+        assert_eq!(data.roaming_pokemon, catalog);
     }
 
     #[test]
-    fn content_pack_payloads_reject_duplicate_roaming_pokemon_species() {
-        let mut data = GameDataSet::default();
-        data.roaming_pokemon.insert(
-            "RAIKOU".to_string(),
-            RoamingPokemonDefinition {
-                level: 40,
-                map_group: 2,
-                map_number: 5,
-            },
-        );
+    fn content_pack_payloads_reject_duplicate_roaming_pokemon_catalog() {
+        let catalog = roaming_catalog_for_tests("RAIKOU", "ENTEI");
+        let mut data = GameDataSet {
+            roaming_pokemon: catalog.clone(),
+            ..GameDataSet::default()
+        };
         let error = data
             .apply_content_pack_payload(
                 ContentPackCategory::RoamingPokemon,
-                serde_json::json!({
-                    "RAIKOU": { "level": 40, "mapGroup": 3, "mapNumber": 6 }
-                }),
+                serde_json::to_value(catalog).expect("serialize duplicate roaming catalog"),
             )
-            .expect_err("duplicate roaming Pokemon species must not be accepted");
+            .expect_err("duplicate roaming Pokemon catalog must not be accepted");
 
         assert!(
-            format!("{error:#}")
-                .contains("duplicate roaming Pokemon definition for species 'RAIKOU'"),
+            format!("{error:#}").contains("duplicate roaming Pokemon catalog"),
             "{error:#}"
         );
     }
 
     #[test]
     fn content_pack_payloads_reject_invalid_roaming_pokemon_at_load_time() {
+        let mut half_zero = serde_json::to_value(roaming_catalog_for_tests("RAIKOU", "ENTEI"))
+            .expect("serialize roaming catalog");
+        half_zero["inactiveMap"] = serde_json::json!({ "mapGroup": 0, "mapNumber": 1 });
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::RoamingPokemon,
-                serde_json::json!({
-                    "RAI KOU": { "level": 40, "mapGroup": 2, "mapNumber": 5 }
-                }),
+                half_zero,
             )
-            .expect_err("roaming Pokemon species ids must be exact tokens");
+            .expect_err("half-zero roaming inactiveMap must be rejected");
         assert!(
-            format!("{error:#}").contains(
-                "roaming Pokemon species id 'RAI KOU' must be exact ASCII alphanumeric or underscore"
-            ),
+            format!("{error:#}").contains("inactiveMap must not be the pre-init"),
             "{error:#}"
         );
 
+        let mut unknown = serde_json::to_value(roaming_catalog_for_tests("RAIKOU", "ENTEI"))
+            .expect("serialize roaming catalog");
+        unknown
+            .as_object_mut()
+            .expect("catalog object")
+            .insert("fallbackRoamer".to_string(), serde_json::json!("ENTEI"));
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::RoamingPokemon,
-                serde_json::json!({
-                    "RAIKOU": { "level": 0, "mapGroup": 2, "mapNumber": 5 }
-                }),
+                unknown,
             )
-            .expect_err("roaming Pokemon levels must be nonzero");
+            .expect_err("unknown roaming catalog fields must be rejected");
         assert!(
-            format!("{error:#}").contains("roaming Pokemon level must be 1..100"),
+            format!("{error:#}").contains("unknown field `fallbackRoamer`"),
             "{error:#}"
         );
 
+        let mut missing = serde_json::to_value(roaming_catalog_for_tests("RAIKOU", "ENTEI"))
+            .expect("serialize roaming catalog");
+        missing
+            .as_object_mut()
+            .expect("catalog object")
+            .remove("slotCount");
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::RoamingPokemon,
-                serde_json::json!({
-                    "roaming_pokemon": {
-                        "RAIKOU": { "level": 40, "mapGroup": 2, "mapNumber": 5 }
-                    },
-                    "fallback_roamer": "ENTEI"
-                }),
+                missing,
             )
-            .expect_err("roaming Pokemon payload must be the compiler-emitted species map");
+            .expect_err("roaming catalog cannot infer a slot count");
         assert!(
-            format!("{error:#}").contains("invalid type: string \"ENTEI\""),
-            "{error:#}"
-        );
-
-        let error = GameDataSet::default()
-            .apply_content_pack_payload(
-                ContentPackCategory::RoamingPokemon,
-                serde_json::json!({
-                    "fallback_roamer": { "level": 40, "mapGroup": 2, "mapNumber": 5 }
-                }),
-            )
-            .expect_err("roaming Pokemon fallback keys must be rejected as reserved payload ids");
-        assert!(
-            format!("{error:#}").contains(
-                "roaming Pokemon species id 'fallback_roamer' uses reserved modpack payload prefix"
-            ),
+            format!("{error:#}").contains("missing field `slotCount`"),
             "{error:#}"
         );
     }
@@ -1318,7 +1289,9 @@
                 "contestantFlags": [
                     "EVENT_BUG_CATCHING_CONTESTANT_1A",
                     "EVENT_BUG_CATCHING_CONTESTANT_2A"
-                ]
+                ],
+                "encounters": serde_json::to_value(bug_contest_encounters_for_tests())
+                    .expect("serialize Bug Contest encounters")
             }),
         )
         .expect("apply Bug-Catching Contest config payload");
@@ -1334,6 +1307,7 @@
                     "EVENT_BUG_CATCHING_CONTESTANT_1A".to_string(),
                     "EVENT_BUG_CATCHING_CONTESTANT_2A".to_string()
                 ],
+                encounters: bug_contest_encounters_for_tests(),
             })
         );
     }
@@ -1346,7 +1320,9 @@
             "timerMinutes": 20,
             "timerSeconds": 0,
             "selectedContestantCount": 1,
-            "contestantFlags": ["EVENT_BUG_CATCHING_CONTESTANT_1A"]
+            "contestantFlags": ["EVENT_BUG_CATCHING_CONTESTANT_1A"],
+            "encounters": serde_json::to_value(bug_contest_encounters_for_tests())
+                .expect("serialize Bug Contest encounters")
         });
         data.apply_content_pack_payload(ContentPackCategory::BugContestConfig, payload.clone())
             .expect("initial Bug-Catching Contest config should load");
@@ -1385,7 +1361,9 @@
                 "timerMinutes": 20,
                 "timerSeconds": 0,
                 "selectedContestantCount": 1,
-                "contestantFlags": ["EVENT_BUG_CATCHING_CONTESTANT_1A"]
+                "contestantFlags": ["EVENT_BUG_CATCHING_CONTESTANT_1A"],
+                "encounters": serde_json::to_value(bug_contest_encounters_for_tests())
+                    .expect("serialize Bug Contest encounters")
             });
             payload[field] = value;
 
@@ -1421,7 +1399,9 @@
                         "timerMinutes": 20,
                         "timerSeconds": 0,
                         "selectedContestantCount": 1,
-                        "contestantFlags": contestant_flags
+                        "contestantFlags": contestant_flags,
+                        "encounters": serde_json::to_value(bug_contest_encounters_for_tests())
+                            .expect("serialize Bug Contest encounters")
                     }),
                 )
                 .expect_err("invalid Bug-Catching Contest contestant flags must be rejected");
@@ -1908,38 +1888,22 @@
     #[test]
     fn content_pack_payloads_merge_magikarp_lengths_as_exact_pack_data() {
         let mut data = GameDataSet::default();
+        let lengths = magikarp_lengths_for_tests();
 
         data.apply_content_pack_payload(
             ContentPackCategory::MagikarpLengths,
-            serde_json::json!([
-                { "threshold": 110, "divisor": 1 },
-                { "threshold": 310, "divisor": 2 }
-            ]),
+            serde_json::to_value(&lengths).expect("serialize exact Magikarp table"),
         )
         .expect("apply Magikarp length table payload");
 
-        assert_eq!(
-            data.magikarp_lengths,
-            vec![
-                MagikarpLengthEntry {
-                    threshold: 110,
-                    divisor: 1,
-                },
-                MagikarpLengthEntry {
-                    threshold: 310,
-                    divisor: 2,
-                },
-            ]
-        );
+        assert_eq!(data.magikarp_lengths, lengths);
     }
 
     #[test]
     fn content_pack_payloads_reject_duplicate_magikarp_length_table() {
         let mut data = GameDataSet::default();
-        let payload = serde_json::json!([
-            { "threshold": 110, "divisor": 1 },
-            { "threshold": 310, "divisor": 2 }
-        ]);
+        let payload = serde_json::to_value(magikarp_lengths_for_tests())
+            .expect("serialize exact Magikarp table");
         data.apply_content_pack_payload(ContentPackCategory::MagikarpLengths, payload.clone())
             .expect("initial Magikarp length table should load");
 
@@ -1955,12 +1919,13 @@
 
     #[test]
     fn content_pack_payloads_reject_invalid_magikarp_length_tables() {
+        let mut zero_divisor = serde_json::to_value(magikarp_lengths_for_tests())
+            .expect("serialize exact Magikarp table");
+        zero_divisor[0]["divisor"] = serde_json::json!(0);
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::MagikarpLengths,
-                serde_json::json!([
-                    { "threshold": 110, "divisor": 0 }
-                ]),
+                zero_divisor,
             )
             .expect_err("zero Magikarp length divisors must fail during pack load");
         assert!(
@@ -1968,17 +1933,37 @@
             "{error:#}"
         );
 
+        let mut oversized_divisor = serde_json::to_value(magikarp_lengths_for_tests())
+            .expect("serialize exact Magikarp table");
+        oversized_divisor[0]["divisor"] = serde_json::json!(256);
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(ContentPackCategory::MagikarpLengths, oversized_divisor)
+            .expect_err("Magikarp divisors larger than one byte must fail during pack load");
+        assert!(
+            format!("{error:#}").contains("divisor must fit one source byte"),
+            "{error:#}"
+        );
+
+        let mut unordered = magikarp_lengths_for_tests();
+        unordered.swap(0, 1);
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::MagikarpLengths,
-                serde_json::json!([
-                    { "threshold": 310, "divisor": 2 },
-                    { "threshold": 110, "divisor": 1 }
-                ]),
+                serde_json::to_value(unordered).expect("serialize unordered table"),
             )
             .expect_err("unordered Magikarp length thresholds must fail during pack load");
         assert!(
             format!("{error:#}").contains("threshold must increase"),
+            "{error:#}"
+        );
+
+        let short = serde_json::to_value(&magikarp_lengths_for_tests()[..13])
+            .expect("serialize short Magikarp table");
+        let error = GameDataSet::default()
+            .apply_content_pack_payload(ContentPackCategory::MagikarpLengths, short)
+            .expect_err("Magikarp table must contain exactly fourteen source rows");
+        assert!(
+            format!("{error:#}").contains("exactly 14 entries"),
             "{error:#}"
         );
     }
@@ -4497,4 +4482,3 @@
             },
         }
     }
-

@@ -244,6 +244,128 @@ describe("AudioEngine direct PCM backend", () => {
     ]);
   });
 
+  it("keeps only the most recently requested music when an earlier PCM track finishes loading", async () => {
+    const backend = new FakePcmBackend();
+    let resolveTitlePcm: ((response: Response) => void) | null = null;
+    globalThis.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const token = url.includes("title") ? "MUSIC_TITLE" : "MUSIC_PROF_OAK";
+      if (url.endsWith(".json")) {
+        return Promise.resolve(jsonResponse({
+          kind: "music",
+          token,
+          sampleRate: 44_100,
+          channelCount: 1,
+          durationFrames: 8,
+          loopStartSample: 0,
+          loopEndSample: 2,
+          stems: [{
+            kind: "music",
+            token,
+            channel: 1,
+            path: `/api/audio/pcm/music/${token}/ch1.pcm`,
+            sampleRate: 44_100,
+            bitsPerSample: 16,
+            durationFrames: 8,
+            loopStartSample: 0,
+            loopEndSample: 2,
+            ownedChannels: [1],
+          }],
+        }));
+      }
+      if (url.includes("MUSIC_TITLE")) {
+        return new Promise<Response>((resolve) => {
+          resolveTitlePcm = resolve;
+        });
+      }
+      return Promise.resolve(pcmResponse([100, -100]));
+    }) as unknown as typeof globalThis.fetch;
+
+    const engine = new AudioEngine({ playbackBackend: "direct-pcm", pcmBackend: backend });
+    engine.loadMusic("MUSIC_TITLE", "/api/audio/pcm/music/title.json");
+    engine.loadMusic("MUSIC_PROF_OAK", "/api/audio/pcm/music/oak.json");
+
+    engine.playMusic("MUSIC_TITLE", "title");
+    await flushPromises();
+    expect(resolveTitlePcm).not.toBeNull();
+
+    engine.playMusic("MUSIC_PROF_OAK", "intro");
+    await flushPromises();
+    resolveTitlePcm?.(pcmResponse([100, -100]));
+    await flushPromises();
+
+    expect(backend.voices).toHaveLength(1);
+    expect(backend.voices[0]).toMatchObject({ token: "MUSIC_PROF_OAK" });
+    expect(engine.getPlaybackSnapshot().musicToken).toBe("MUSIC_PROF_OAK");
+  });
+
+  it("cancels a PCM voice queued while the browser audio worklet is initializing", async () => {
+    type TestWindow = { AudioContext: unknown; AudioWorkletNode: unknown };
+    const globalAny = globalThis as unknown as {
+      window?: TestWindow;
+      AudioWorkletNode?: unknown;
+    };
+    const hadWindow = "window" in globalAny;
+    const originalWindow = globalAny.window;
+    const originalAudioWorkletNode = globalAny.AudioWorkletNode;
+    const messages: Array<{ type?: string; voice?: { token?: string } }> = [];
+    let finishWorkletSetup: (() => void) | null = null;
+
+    class FakeAudioContext {
+      public state = "running";
+      public destination = {};
+      public audioWorklet = {
+        addModule: jest.fn(() => new Promise<void>((resolve) => {
+          finishWorkletSetup = resolve;
+        })),
+      };
+      public resume = jest.fn(async () => undefined);
+    }
+
+    class FakeAudioWorkletNode {
+      public port = {
+        onmessage: null as ((event: unknown) => void) | null,
+        postMessage: jest.fn((message: { type?: string; voice?: { token?: string } }) => {
+          messages.push(message);
+        }),
+      };
+      public connect = jest.fn();
+    }
+
+    try {
+      globalAny.window = {
+        AudioContext: FakeAudioContext,
+        AudioWorkletNode: FakeAudioWorkletNode,
+      };
+      globalAny.AudioWorkletNode = FakeAudioWorkletNode;
+      installPcmFetchMock();
+
+      const engine = new AudioEngine();
+      engine.loadMusic("MUSIC_TITLE", "/api/audio/pcm/music/title.json");
+      engine.loadMusic("MUSIC_PROF_OAK", "/api/audio/pcm/music/oak.json");
+      engine.playMusic("MUSIC_TITLE", "title");
+      await flushPromises();
+      expect(finishWorkletSetup).not.toBeNull();
+
+      engine.playMusic("MUSIC_PROF_OAK", "intro");
+      await flushPromises();
+      finishWorkletSetup?.();
+      await flushPromises();
+
+      expect(messages.filter((message) => message.type === "play")).toEqual([
+        expect.objectContaining({ voice: expect.objectContaining({ token: "MUSIC_PROF_OAK" }) }),
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalAny.AudioWorkletNode = originalAudioWorkletNode;
+      if (hadWindow) {
+        globalAny.window = originalWindow;
+      } else {
+        delete globalAny.window;
+      }
+    }
+  });
+
   it("updates active PCM voice volume when the master volume changes", async () => {
     const backend = new FakePcmBackend();
     globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {

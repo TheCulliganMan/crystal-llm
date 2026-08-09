@@ -468,6 +468,9 @@ pub struct EvolutionReport {
     pub target_species: Option<String>,
     pub events: Vec<EvolutionEvent>,
     pub pending_move_learns: Vec<LearnedMove>,
+    /// Exact pre-evolution state retained only while Crystal's animation can
+    /// still be cancelled with B. Forced item/trade evolutions omit it.
+    pub cancel_snapshot: Option<Box<Pokemon>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +518,15 @@ pub enum EvolutionError {
     InvalidMoveId { move_id: String },
     #[error("missing move data for evolution move {move_id}")]
     MissingMoveData { move_id: String },
+    #[error("evolution cannot be cancelled")]
+    NotCancellable,
+    #[error(
+        "cannot cancel evolution into {target_species}: current species is {current_species}"
+    )]
+    CancelTargetMismatch {
+        target_species: String,
+        current_species: String,
+    },
 }
 
 pub fn find_evolution_candidate<'a>(
@@ -716,6 +728,10 @@ pub fn evolve_pokemon(
     })?;
     let move_learns =
         evolution_moves_for(&target_species.id, pokemon.level, &pokemon.moves, context)?;
+    let cancel_snapshot = (include_intro
+        && !context.force_evolution
+        && context.link_mode == LinkMode::None)
+        .then(|| Box::new(pokemon.clone()));
 
     let mut events = Vec::new();
     if include_intro {
@@ -755,7 +771,44 @@ pub fn evolve_pokemon(
         target_species: Some(target_species.id.clone()),
         events,
         pending_move_learns: move_learns.pending,
+        cancel_snapshot,
     })
+}
+
+/// Resolve Crystal's cancellable animation boundary. The cartridge does not
+/// write the new species, stats, held item, nickname, or moves until after the
+/// animation returns without carry, so cancellation restores the exact state
+/// retained immediately before the provisional evolution mutation.
+pub fn cancel_evolution(
+    pokemon: &mut Pokemon,
+    report: &mut EvolutionReport,
+) -> Result<(), EvolutionError> {
+    let target_species = report
+        .target_species
+        .clone()
+        .ok_or(EvolutionError::NotCancellable)?;
+    let source = report
+        .cancel_snapshot
+        .take()
+        .ok_or(EvolutionError::NotCancellable)?;
+    if pokemon.species.id != target_species {
+        report.cancel_snapshot = Some(source);
+        return Err(EvolutionError::CancelTargetMismatch {
+            target_species,
+            current_species: pokemon.species.id.clone(),
+        });
+    }
+
+    *pokemon = *source;
+    report.target_species = None;
+    report.pending_move_learns.clear();
+    report.events.retain(|event| {
+        matches!(event, EvolutionEvent::Text(text) if *text == "EvolvingText")
+    });
+    report
+        .events
+        .push(EvolutionEvent::Text("StoppedEvolvingText"));
+    Ok(())
 }
 
 pub fn check_and_evolve(
@@ -813,7 +866,7 @@ fn evolution_moves_for(
     }
     let mut current = known_moves.to_vec();
     let mut learned = Vec::new();
-    let pending = Vec::new();
+    let mut pending = Vec::new();
     for LearnsetEntry(learn_level, move_name) in
         level_up_moves_for_species(context.learnsets, species_id).map_err(|_| {
             EvolutionError::MissingLearnset {
@@ -842,6 +895,8 @@ fn evolution_moves_for(
         if current.len() < 4 {
             current.push(entry.clone());
             learned.push(entry);
+        } else {
+            pending.push(entry);
         }
     }
     Ok(EvolutionMoveLearnResult { learned, pending })
@@ -1356,6 +1411,140 @@ mod tests {
                 EvolutionEvent::MoveLearned("IRON_TAIL".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn evolved_species_same_level_move_queues_replacement_when_moves_are_full() {
+        let species_map: BTreeMap<_, _> = [(
+            "DRAGONITE".to_string(),
+            species("DRAGONITE", 91, 134, 95),
+        )]
+        .into_iter()
+        .collect();
+        let moves = [
+            ("WRAP".to_string(), move_data("WRAP", 20)),
+            ("LEER".to_string(), move_data("LEER", 30)),
+            ("THUNDER_WAVE".to_string(), move_data("THUNDER_WAVE", 20)),
+            ("TWISTER".to_string(), move_data("TWISTER", 20)),
+            ("WING_ATTACK".to_string(), move_data("WING_ATTACK", 35)),
+        ]
+        .into_iter()
+        .collect();
+        let learnsets = [(
+            "DRAGONITE".to_string(),
+            vec![LearnsetEntry(55, "WING_ATTACK".to_string())],
+        )]
+        .into_iter()
+        .collect();
+        let entry = EvolutionEntry::level("DRAGONITE", 55);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut dragonair = pokemon("DRAGONAIR", 55);
+        dragonair.moves = ["WRAP", "LEER", "THUNDER_WAVE", "TWISTER"]
+            .into_iter()
+            .map(|move_id| LearnedMove {
+                name: move_id.to_string(),
+                current_pp: moves[move_id].pp,
+                pp_ups: 0,
+            })
+            .collect();
+        let moves_before = dragonair.moves.clone();
+
+        let report = evolve_pokemon(&mut dragonair, &entry, &context, true).expect("evolve");
+
+        assert_eq!(dragonair.species.id, "DRAGONITE");
+        assert_eq!(dragonair.moves, moves_before);
+        assert_eq!(
+            report.pending_move_learns,
+            vec![LearnedMove {
+                name: "WING_ATTACK".to_string(),
+                current_pp: 35,
+                pp_ups: 0,
+            }]
+        );
+        assert!(!report.events.iter().any(
+            |event| matches!(event, EvolutionEvent::MoveLearned(move_id) if move_id == "WING_ATTACK")
+        ));
+    }
+
+    #[test]
+    fn cancelling_animation_restores_exact_species_stats_item_and_moves() {
+        let species_map: BTreeMap<_, _> = [(
+            "DRAGONITE".to_string(),
+            species("DRAGONITE", 91, 134, 95),
+        )]
+        .into_iter()
+        .collect();
+        let moves = [("WING_ATTACK".to_string(), move_data("WING_ATTACK", 35))]
+            .into_iter()
+            .collect();
+        let learnsets = [(
+            "DRAGONITE".to_string(),
+            vec![LearnsetEntry(55, "WING_ATTACK".to_string())],
+        )]
+        .into_iter()
+        .collect();
+        let entry = EvolutionEntry::level("DRAGONITE", 55);
+        let context = context(&species_map, &moves, &learnsets);
+        let mut dragonair = pokemon("DRAGONAIR", 55);
+        dragonair.nickname = "DRAGONAIR".to_string();
+        dragonair.item = Some("BERRY".to_string());
+        dragonair.moves = vec![LearnedMove {
+            name: "WRAP".to_string(),
+            current_pp: 17,
+            pp_ups: 2,
+        }];
+        dragonair.hp = 73;
+        dragonair.attack = 88;
+        dragonair.defense = 79;
+        dragonair.speed = 91;
+        dragonair.special_attack = 84;
+        dragonair.special_defense = 86;
+        let before = dragonair.clone();
+
+        let mut report =
+            evolve_pokemon(&mut dragonair, &entry, &context, true).expect("start evolution");
+        assert_ne!(dragonair, before, "evolution is provisionally committed");
+
+        cancel_evolution(&mut dragonair, &mut report).expect("cancel evolution");
+
+        assert_eq!(dragonair, before);
+        assert_eq!(report.target_species, None);
+        assert!(report.pending_move_learns.is_empty());
+        assert_eq!(
+            report.events,
+            vec![
+                EvolutionEvent::Text("EvolvingText"),
+                EvolutionEvent::Text("StoppedEvolvingText"),
+            ]
+        );
+    }
+
+    #[test]
+    fn forced_evolution_cannot_be_cancelled() {
+        let species_map: BTreeMap<_, _> = [(
+            "VAPOREON".to_string(),
+            species("VAPOREON", 130, 65, 60),
+        )]
+        .into_iter()
+        .collect();
+        let moves = BTreeMap::new();
+        let learnsets = [("VAPOREON".to_string(), Vec::new())]
+            .into_iter()
+            .collect();
+        let entry = EvolutionEntry::item("VAPOREON", "WATER_STONE");
+        let mut context = context(&species_map, &moves, &learnsets);
+        context.force_evolution = true;
+        context.current_item = Some("WATER_STONE");
+        let mut eevee = pokemon("EEVEE", 25);
+
+        let mut report =
+            evolve_pokemon(&mut eevee, &entry, &context, true).expect("force evolution");
+
+        assert_eq!(
+            cancel_evolution(&mut eevee, &mut report),
+            Err(EvolutionError::NotCancellable)
+        );
+        assert_eq!(eevee.species.id, "VAPOREON");
     }
 
     #[test]

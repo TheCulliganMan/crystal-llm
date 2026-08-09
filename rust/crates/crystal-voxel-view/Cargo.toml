@@ -1,0 +1,18 @@
+[package]
+name = "crystal-voxel-view"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy = { version = "0.14", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_sprite",
+    "multi_threaded",
+] }
+crystal-render-api = { path = "../crystal-render-api" }

@@ -1863,7 +1863,7 @@
     }
 
     #[test]
-    fn map_module_extracts_scripted_loadtrainer_battles_with_post_flags() {
+    fn map_module_extracts_scripted_loadtrainer_battle_request_and_source_positions() {
         let root = repository_root_for_tests();
         let data = AssetRoot::new(root)
             .load_base_game_data()
@@ -1884,20 +1884,7 @@
         assert_eq!(battle.request.event_flag, "");
         assert_eq!(battle.request.win_text, "LtSurgeWinLossText");
         assert_eq!(battle.request.loss_text, "");
-        assert!(battle.reload_map_after_battle);
-        assert_eq!(
-            battle.post_battle_event_flags,
-            vec![
-                "EVENT_BEAT_LTSURGE".to_string(),
-                "EVENT_BEAT_GENTLEMAN_GREGORY".to_string(),
-                "EVENT_BEAT_GUITARIST_VINCENT".to_string(),
-                "EVENT_BEAT_JUGGLER_HORTON".to_string(),
-            ]
-        );
-        assert_eq!(
-            battle.post_battle_script_flags,
-            vec!["ENGINE_THUNDERBADGE".to_string()]
-        );
+        assert!(battle.loadtrainer_command_index < battle.startbattle_command_index);
 
         let start = data
             .trainer_battle_start(
@@ -1912,61 +1899,6 @@
         assert_eq!(start.trainer_id, "LT_SURGE1");
         assert_eq!(start.win_text, "LtSurgeWinLossText");
         assert_eq!(start.enemy_party.len(), 5);
-    }
-
-    #[test]
-    fn scripted_trainer_battle_effects_apply_post_battle_badge_flags() {
-        let root = repository_root_for_tests();
-        let data = AssetRoot::new(root)
-            .load_base_game_data()
-            .expect("load base game data");
-        let module = data
-            .map_module("VermilionGym")
-            .expect("assemble VermilionGym module");
-        let battle = module
-            .scripted_trainer_battles
-            .iter()
-            .find(|battle| battle.source_script == "VermilionGymSurgeScript")
-            .expect("Surge scripted trainer battle");
-        let mut state = GameState::default();
-        let effects = ScriptedBattleEffects {
-            event_flags: battle.post_battle_event_flags.clone(),
-            script_flags: battle.post_battle_script_flags.clone(),
-            disappear_object_ids: Vec::new(),
-        };
-
-        let outcome = crystal_core::systems::scripted_battles::apply_scripted_battle_effects(
-            &mut state,
-            &module.objects,
-            &effects,
-        )
-        .expect("Surge post battle effects apply");
-
-        assert_eq!(
-            outcome.event_flags_set,
-            vec![
-                "EVENT_BEAT_LTSURGE".to_string(),
-                "EVENT_BEAT_GENTLEMAN_GREGORY".to_string(),
-                "EVENT_BEAT_GUITARIST_VINCENT".to_string(),
-                "EVENT_BEAT_JUGGLER_HORTON".to_string(),
-            ]
-        );
-        assert_eq!(
-            outcome.script_flags_set,
-            vec!["ENGINE_THUNDERBADGE".to_string()]
-        );
-        assert_eq!(
-            state.flags.is_event_flag_set("EVENT_BEAT_LTSURGE"),
-            Ok(true)
-        );
-        assert_eq!(
-            state.flags.is_engine_flag_set("ENGINE_THUNDERBADGE"),
-            Ok(true)
-        );
-        assert_eq!(
-            state.flags.is_event_flag_set("ENGINE_THUNDERBADGE"),
-            Ok(false)
-        );
     }
 
     #[test]
@@ -1989,7 +1921,6 @@
         assert_eq!(battle.request.trainer_id, "RIVAL1_2_TOTODILE");
         assert_eq!(battle.request.win_text, "AzaleaTownRivalWinText");
         assert_eq!(battle.request.loss_text, "AzaleaTownRivalLossText");
-        assert!(battle.reload_map_after_battle);
     }
 
     #[test]
@@ -2011,20 +1942,18 @@
         assert_eq!(battle.request.battle_type, "BATTLETYPE_FORCEITEM");
         assert_eq!(battle.request.species, "LUGIA");
         assert_eq!(battle.request.level, 60);
-        assert_eq!(battle.pre_battle_event_flags, vec!["EVENT_FOUGHT_LUGIA"]);
-        assert_eq!(
-            battle.disappear_object_ids,
-            vec!["WHIRLISLANDLUGIACHAMBER_LUGIA"]
-        );
-        assert!(battle.reload_map_after_battle);
 
         let mut request = battle.request.clone();
         request.battle_music = data
             .wild_battle_music_for_map_time("WhirlIslandLugiaChamber", TimeOfDay::Day)
             .expect("Lugia battle music from pack data");
-        let mut rng = Random::new(1);
+        let mut divider = crystal_core::random::ReplayDivider::new([0, 0, 0, 0]);
         let start = data
-            .static_wild_battle_start(request, &mut rng)
+            .static_wild_battle_start(
+                request,
+                crystal_core::random::CrystalRandomState::default(),
+                &mut divider,
+            )
             .expect("Lugia battle starts from pack data");
         assert_eq!(start.battle_type, "BATTLETYPE_FORCEITEM");
         assert_eq!(start.enemy_pokemon.species.id, "LUGIA");
@@ -2034,6 +1963,23 @@
         assert_eq!(
             start.enemy_pokemon.item,
             lugia.item1.clone().or_else(|| lugia.item2.clone())
+        );
+
+        let mut state = GameState::default();
+        let mut divider = crystal_core::random::ReplayDivider::new([0, 0, 0, 0]);
+        data.start_scripted_wild_battle(
+            &mut state,
+            "WhirlIslandLugiaChamber",
+            "WhirlIslandLugiaChamber",
+            "Lugia",
+            battle.startbattle_command_index,
+            &mut divider,
+        )
+        .expect("direct Lugia start uses only the source battle request");
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_FOUGHT_LUGIA"),
+            Ok(false),
+            "the preceding source setevent must not be fabricated by startbattle"
         );
     }
 
@@ -2056,16 +2002,18 @@
         assert_eq!(battle.request.battle_type, "BATTLETYPE_FORCESHINY");
         assert_eq!(battle.request.species, "GYARADOS");
         assert_eq!(battle.request.level, 30);
-        assert_eq!(battle.disappear_object_ids, vec!["LAKEOFRAGE_GYARADOS"]);
-        assert!(battle.reload_map_after_battle);
 
         let mut request = battle.request.clone();
         request.battle_music = data
             .wild_battle_music_for_map_time("LakeOfRage", TimeOfDay::Day)
             .expect("Red Gyarados battle music from pack data");
-        let mut rng = Random::new(1);
+        let mut divider = crystal_core::random::ReplayDivider::new([0, 0]);
         let start = data
-            .static_wild_battle_start(request, &mut rng)
+            .static_wild_battle_start(
+                request,
+                crystal_core::random::CrystalRandomState::default(),
+                &mut divider,
+            )
             .expect("Red Gyarados battle starts from pack data");
         assert_eq!(start.enemy_pokemon.dvs, Dv::from_non_hp(14, 10, 10, 10));
     }
@@ -2089,12 +2037,6 @@
         assert_eq!(battle.request.battle_type, "BATTLETYPE_FORCEITEM");
         assert_eq!(battle.request.species, "SNORLAX");
         assert_eq!(battle.request.level, 50);
-        assert_eq!(
-            battle.disappear_object_ids,
-            vec!["VERMILIONCITY_BIG_SNORLAX"]
-        );
-        assert_eq!(battle.post_battle_event_flags, vec!["EVENT_FOUGHT_SNORLAX"]);
-        assert!(battle.reload_map_after_battle);
     }
 
     #[test]
@@ -2116,6 +2058,117 @@
             ),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn scripted_trainer_battle_follows_exact_post_battle_jump_for_object_event_trainer() {
+        let scripts = BTreeMap::from([
+            (
+                "RivalBattleScript".to_string(),
+                serde_json::json!([
+                    {"command":"showemote","args":["EMOTE_SHOCK","START_RIVAL","15"]},
+                    {"command":"winlosstext","args":["RivalWinText","RivalLossText"]},
+                    {"command":"loadtrainer","args":["RIVAL1","RIVAL1_3_TOTODILE"]},
+                    {"command":"startbattle","args":[]},
+                    {"command":"reloadmapafterbattle","args":[]},
+                    {"command":"sjump","args":[".returnfrombattle"]}
+                ]),
+            ),
+            (
+                ".returnfrombattle@RivalBattleScript".to_string(),
+                serde_json::json!([
+                    {"command":"setevent","args":["EVENT_RIVAL_BATTLE"]},
+                    {"command":"end","args":[]}
+                ]),
+            ),
+        ]);
+
+        let battles = parse_scripted_trainer_battles("Start", &scripts)
+            .expect("exact post-battle continuation parses");
+        assert_eq!(battles.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&battles[0])
+                .expect("serialize slim battle descriptor")
+                .as_object()
+                .expect("battle descriptor object")
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "loadtrainer_command_index".to_string(),
+                "request".to_string(),
+                "source_script".to_string(),
+                "startbattle_command_index".to_string(),
+            ])
+        );
+
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_flag_commands =
+            parse_script_flag_commands("Start", &scripts).expect("script flag commands parse");
+        module.script_control_commands =
+            parse_script_control_commands("Start", &scripts).expect("script control commands parse");
+        module.scripts = scripts;
+        module.scripted_trainer_battles = battles;
+        let mut rival = test_object("START_RIVAL", "EVENT_RIVAL_BATTLE", 1, 1);
+        rival.object_type = "OBJECTTYPE_TRAINER".to_string();
+        rival.script = "ObjectEvent".to_string();
+        module.objects = vec![rival];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let mut state = GameState::default();
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_RIVAL_BATTLE"),
+            Ok(false)
+        );
+
+        let jump = data
+            .apply_script_control_command(
+                &mut state,
+                "Start",
+                "Start",
+                "RivalBattleScript",
+                5,
+            )
+            .expect("compiled cursor follows exact post-battle jump");
+        let ScriptControlAction::Jump { target_script, .. } = jump else {
+            panic!("post-battle sjump did not yield a compiled cursor jump");
+        };
+        assert_eq!(target_script, ".returnfrombattle@RivalBattleScript");
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_RIVAL_BATTLE"),
+            Ok(false)
+        );
+        let flag_command = data
+            .script_flag_command("Start", &target_script, 0)
+            .expect("continued cursor resolves exact setevent")
+            .clone();
+        crystal_core::systems::script_flags::apply_script_flag_mutation(
+            &mut state,
+            flag_command,
+        )
+        .expect("continued cursor applies exact setevent");
+        assert_eq!(
+            state.flags.is_event_flag_set("EVENT_RIVAL_BATTLE"),
+            Ok(true)
+        );
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        assert!(
+            !report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "trainer_object_missing_battle_request"
+                    && diagnostic.subject == "Start:START_RIVAL"
+            }),
+            "exact ObjectEvent trainer bridge was rejected: {:#?}",
+            report.diagnostics
+        );
+
     }
 
     #[test]
@@ -2152,131 +2205,6 @@
                 "Malformed loadvar command in MalformedWildBattle for Route29: expected 2 args, found 3."
             ),
             "{error:#}"
-        );
-    }
-
-    #[test]
-    fn scripted_static_battle_effects_hide_pack_object_by_exact_disappear_id() {
-        let root = repository_root_for_tests();
-        let asset_root = AssetRoot::new(&root);
-        let data = asset_root
-            .load_base_game_data()
-            .expect("load base game data");
-        let module = data
-            .map_module("VermilionCity")
-            .expect("assemble VermilionCity module");
-        let map = data
-            .overworld_map("VermilionCity")
-            .expect("assemble VermilionCity map");
-        let tileset = asset_root
-            .load_tileset_collision("johto")
-            .expect("load johto collision");
-        let mut session = OverworldSession::with_events_and_objects(
-            map,
-            module.events.clone(),
-            module.objects.clone(),
-            tileset,
-            TilePosition::new(2, 2),
-        );
-        let snorlax = module
-            .scripted_wild_battles
-            .iter()
-            .find(|battle| battle.source_script == "VermilionSnorlax")
-            .expect("Snorlax battle");
-        assert!(
-            session
-                .objects
-                .iter()
-                .find(|object| object.object_identifier.as_deref()
-                    == Some("VERMILIONCITY_BIG_SNORLAX"))
-                .map(|object| session.is_object_visible(object))
-                .unwrap_or(false)
-        );
-
-        let mut state = GameState::default();
-        let effects = ScriptedBattleEffects {
-            event_flags: snorlax.post_battle_event_flags.clone(),
-            script_flags: snorlax.post_battle_script_flags.clone(),
-            disappear_object_ids: snorlax.disappear_object_ids.clone(),
-        };
-        let outcome = apply_scripted_battle_effects_to_session(&mut state, &mut session, &effects)
-            .expect("Snorlax effects apply");
-
-        assert_eq!(outcome.event_flags_set, vec!["EVENT_FOUGHT_SNORLAX"]);
-        assert_eq!(
-            outcome.disappeared_objects[0].event_flag,
-            "EVENT_VERMILION_CITY_SNORLAX"
-        );
-        assert_eq!(
-            state.flags.is_event_flag_set("EVENT_FOUGHT_SNORLAX"),
-            Ok(true)
-        );
-        assert_eq!(
-            state
-                .flags
-                .is_event_flag_set("EVENT_VERMILION_CITY_SNORLAX"),
-            Ok(true)
-        );
-        let snorlax_object = session
-            .objects
-            .iter()
-            .find(|object| object.object_identifier.as_deref() == Some("VERMILIONCITY_BIG_SNORLAX"))
-            .expect("Snorlax object");
-        assert!(!session.is_object_visible(snorlax_object));
-    }
-
-    #[test]
-    fn scripted_static_battle_pre_flags_and_disappear_flags_are_distinct() {
-        let root = repository_root_for_tests();
-        let asset_root = AssetRoot::new(&root);
-        let data = asset_root
-            .load_base_game_data()
-            .expect("load base game data");
-        let module = data
-            .map_module("WhirlIslandLugiaChamber")
-            .expect("assemble Lugia chamber module");
-        let map = data
-            .overworld_map("WhirlIslandLugiaChamber")
-            .expect("assemble Lugia chamber map");
-        let tileset = asset_root
-            .load_tileset_collision("johto")
-            .expect("load johto collision");
-        let mut session = OverworldSession::with_events_and_objects(
-            map,
-            module.events.clone(),
-            module.objects.clone(),
-            tileset,
-            TilePosition::new(2, 2),
-        );
-        let lugia = module
-            .scripted_wild_battles
-            .iter()
-            .find(|battle| battle.source_script == "Lugia")
-            .expect("Lugia battle");
-
-        let mut state = GameState::default();
-        let effects = ScriptedBattleEffects {
-            event_flags: lugia.pre_battle_event_flags.clone(),
-            script_flags: lugia.post_battle_script_flags.clone(),
-            disappear_object_ids: lugia.disappear_object_ids.clone(),
-        };
-        let outcome = apply_scripted_battle_effects_to_session(&mut state, &mut session, &effects)
-            .expect("Lugia effects apply");
-
-        assert_eq!(outcome.event_flags_set, vec!["EVENT_FOUGHT_LUGIA"]);
-        assert_eq!(
-            outcome.disappeared_objects[0].event_flag,
-            "EVENT_WHIRL_ISLAND_LUGIA_CHAMBER_LUGIA"
-        );
-        assert_eq!(
-            state.flags.is_event_flag_set("EVENT_FOUGHT_LUGIA"),
-            Ok(true)
-        );
-        assert_eq!(
-            state
-                .flags
-                .is_event_flag_set("EVENT_WHIRL_ISLAND_LUGIA_CHAMBER_LUGIA"),
-            Ok(true)
         );
     }
 
@@ -3158,6 +3086,246 @@
                         .is_some_and(|args| args.len() == 3)
             }),
             "changeugdoor must be expanded into concrete changeblock commands"
+        );
+    }
+
+    #[test]
+    fn script_control_compares_party_count_to_pret_party_length_byte() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+        assert_eq!(
+            data.script_numeric_constants().get("PARTY_LENGTH"),
+            Some(&(crystal_core::models::PARTY_SIZE as i32))
+        );
+
+        let command = data
+            .map_module("VioletPokecenter1F")
+            .expect("assemble VioletPokecenter1F module")
+            .script_control_commands
+            .iter()
+            .find(|command| {
+                command.source_script == "VioletPokecenter1F_ElmsAideScript"
+                    && command.command == "ifequal"
+                    && command.compare_value.as_deref() == Some("PARTY_LENGTH")
+            })
+            .expect("Togepi Egg party-full branch");
+
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("6".to_string());
+        let action = data
+            .apply_script_control_command(
+                &mut state,
+                "VioletPokecenter1F",
+                "VioletPokecenter1F",
+                &command.source_script,
+                command.command_index,
+            )
+            .expect("compare VAR_PARTYCOUNT with PARTY_LENGTH");
+
+        assert!(matches!(
+            action,
+            ScriptControlAction::Jump { target_script, .. }
+                if target_script == ".PartyFull@VioletPokecenter1F_ElmsAideScript"
+        ));
+    }
+
+    #[test]
+    fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+        let route44 = data
+            .map_module("Route44")
+            .expect("assemble Route44 module")
+            .clone();
+        let command = route44
+            .script_control_commands
+            .iter()
+            .find(|command| {
+                command.source_script == "TrainerBirdKeeperVance1"
+                    && command.command == "endifjustbattled"
+            })
+            .expect("Vance after-battle guard")
+            .clone();
+        let trainer_command_index = route44
+            .scripts
+            .get("TrainerBirdKeeperVance1")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|commands| {
+                commands.iter().position(|command| {
+                    command
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("trainer")
+                })
+            })
+            .expect("Vance trainer table command");
+
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(crystal_core::models::Pokemon::new_for_tests(
+            data.pokemon
+                .get("PIDGEY")
+                .expect("compiled PIDGEY species")
+                .clone(),
+            20,
+            crystal_core::models::Dv::default(),
+        ));
+        let start = data
+            .start_scripted_trainer_battle(
+                &mut state,
+                "Route44",
+                "Route44",
+                "TrainerBirdKeeperVance1",
+                trainer_command_index,
+            )
+            .expect("start Vance's trainer-table battle");
+        assert!(matches!(start, TrainerBattleStartStatus::Started(_)));
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wRunningTrainerBattleScript")
+                .map(String::as_str),
+            Some("0")
+        );
+        loop {
+            let BattleMemory::Trainer { enemy_pokemon, .. } = &mut state.battle else {
+                panic!("Vance trainer table did not activate a trainer battle");
+            };
+            enemy_pokemon.hp = 0;
+            data.claim_active_trainer_battle_rewards_now(&mut state)
+                .expect("claim Vance's trainer battle rewards");
+            if data
+                .advance_active_trainer_battle(&mut state)
+                .expect("advance Vance's trainer battle")
+                .trainer_defeated
+            {
+                break;
+            }
+        }
+
+        let mut divider = crystal_core::random::ReplayDivider::new([]);
+        let completion = data
+            .complete_scripted_trainer_battle(
+                &mut state,
+                "Route44",
+                "Route44",
+                "TrainerBirdKeeperVance1",
+                trainer_command_index,
+                true,
+                false,
+                &mut divider,
+            )
+            .expect("complete Vance's trainer-table battle");
+        assert!(completion.continued_after_battle);
+        assert_eq!(state.battle_result, 0);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(
+            state.script_runtime.variables.get("_value").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wRunningTrainerBattleScript")
+                .map(String::as_str),
+            Some("-1")
+        );
+        let post_battle_action = data
+            .apply_script_control_command(
+                &mut state,
+                "Route44",
+                "Route44",
+                &command.source_script,
+                command.command_index,
+            )
+            .expect("post-battle Vance dispatch reaches its guard");
+        assert!(matches!(
+            post_battle_action,
+            ScriptControlAction::End {
+                just_battled_guard: true,
+                ..
+            }
+        ));
+
+        let manual_talk = data
+            .start_scripted_trainer_battle(
+                &mut state,
+                "Route44",
+                "Route44",
+                "TrainerBirdKeeperVance1",
+                trainer_command_index,
+            )
+            .expect("talk to beaten Vance");
+        assert!(matches!(
+            manual_talk,
+            TrainerBattleStartStatus::AlreadyDefeated { .. }
+        ));
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wRunningTrainerBattleScript")
+                .map(String::as_str),
+            Some("0")
+        );
+        let manual_action = data
+            .apply_script_control_command(
+                &mut state,
+                "Route44",
+                "Route44",
+                &command.source_script,
+                command.command_index,
+            )
+            .expect("manual talk reaches Vance's phone dialogue");
+        assert!(matches!(manual_action, ScriptControlAction::Continue { .. }));
+
+        let mut lost_state = GameState::default();
+        lost_state.storage.party.pokemon[0] = Some(
+            crystal_core::models::Pokemon::new_for_tests(
+                data.pokemon
+                    .get("PIDGEY")
+                    .expect("compiled PIDGEY species")
+                    .clone(),
+                20,
+                crystal_core::models::Dv::default(),
+            ),
+        );
+        data.start_scripted_trainer_battle(
+            &mut lost_state,
+            "Route44",
+            "Route44",
+            "TrainerBirdKeeperVance1",
+            trainer_command_index,
+        )
+        .expect("start loss-continuation trainer battle");
+        let mut divider = crystal_core::random::ReplayDivider::new([]);
+        let lost = data
+            .complete_scripted_trainer_battle(
+                &mut lost_state,
+                "Route44",
+                "Route44",
+                "TrainerBirdKeeperVance1",
+                trainer_command_index,
+                false,
+                true,
+                &mut divider,
+            )
+            .expect("complete can-lose trainer battle");
+        assert!(lost.continued_after_battle);
+        assert_eq!(lost_state.battle_result, 1);
+        assert_eq!(lost_state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(
+            lost_state
+                .script_runtime
+                .variables
+                .get("_value")
+                .map(String::as_str),
+            Some("1")
         );
     }
 
@@ -4168,6 +4336,359 @@
     }
 
     #[test]
+    fn battle_tower_hallway_callasm_routes_all_level_groups_from_wram() {
+        let root = repository_root_for_tests();
+        let data = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+        let hallway = data
+            .map_module("BattleTowerHallway")
+            .expect("assemble Battle Tower hallway");
+        let callasm = hallway
+            .script_runtime_commands
+            .iter()
+            .find(|command| {
+                command.command == "callasm"
+                    && command.source_script == "BattleTowerHallwayChooseBattleRoomScript"
+            })
+            .expect("hallway battle-room WRAM callasm");
+        let session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "BattleTowerHallway".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            hallway.events.clone(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let walk_script =
+            ".WalkToChosenBattleRoom@BattleTowerHallwayChooseBattleRoomScript";
+
+        for (level_group, expected_branch, expected_movement) in [
+            (
+                1,
+                walk_script,
+                "MovementData_BattleTowerHallwayWalkTo1020Room",
+            ),
+            (
+                2,
+                walk_script,
+                "MovementData_BattleTowerHallwayWalkTo1020Room",
+            ),
+            (
+                3,
+                ".L30L40@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo3040Room",
+            ),
+            (
+                4,
+                ".L30L40@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo3040Room",
+            ),
+            (
+                5,
+                ".L50L60@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo5060Room",
+            ),
+            (
+                6,
+                ".L50L60@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo5060Room",
+            ),
+            (
+                7,
+                ".L70L80@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo7080Room",
+            ),
+            (
+                8,
+                ".L70L80@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo7080Room",
+            ),
+            (
+                9,
+                ".L90L100@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo90100Room",
+            ),
+            (
+                10,
+                ".L90L100@BattleTowerHallwayChooseBattleRoomScript",
+                "MovementData_BattleTowerHallwayWalkTo90100Room",
+            ),
+        ] {
+            let mut state = GameState::default();
+            state.battle_tower.level_group = level_group;
+            state.script_runtime.script_value = Some("255".to_string());
+            let mut session = session.clone();
+            let expected_value = level_group.to_string();
+
+            let (_, outcome) = data
+                .apply_script_runtime_command_in_session(
+                    &mut state,
+                    &mut session,
+                    "BattleTowerHallway",
+                    &callasm.source_script,
+                    callasm.command_index,
+                    ScriptRuntimeInputs::default(),
+                )
+                .expect("load Battle Tower level group through compiled callasm");
+
+            assert!(matches!(
+                outcome,
+                ScriptRuntimeOutcome::ScriptValueSet { ref value, .. }
+                    if value == &expected_value
+            ));
+            assert_eq!(
+                state.script_runtime.script_value.as_deref(),
+                Some(expected_value.as_str())
+            );
+            assert_eq!(
+                state
+                    .script_runtime
+                    .memory
+                    .get("wScriptVar")
+                    .map(String::as_str),
+                Some(expected_value.as_str())
+            );
+            assert!(
+                state.script_runtime.command_queue.is_empty(),
+                "level group {level_group} callasm must finish synchronously"
+            );
+
+            let mut selected_script = walk_script.to_string();
+            for command_index in 0..8 {
+                match data
+                    .apply_script_control_command(
+                        &mut state,
+                        "BattleTowerHallway",
+                        "BattleTowerHallway",
+                        walk_script,
+                        command_index,
+                    )
+                    .expect("route Battle Tower level group")
+                {
+                    ScriptControlAction::Continue { .. } => {}
+                    ScriptControlAction::Jump { target_script, .. } => {
+                        selected_script = target_script;
+                        break;
+                    }
+                    action => panic!(
+                        "level group {level_group} produced unexpected hallway action {action:?}"
+                    ),
+                }
+            }
+            assert_eq!(selected_script, expected_branch, "level group {level_group}");
+            assert!(hallway.script_object_commands.iter().any(|command| {
+                command.command == "applymovement"
+                    && command.source_script == selected_script
+                    && command.movement.as_deref() == Some(expected_movement)
+            }));
+        }
+    }
+
+    #[test]
+    fn callasm_conditional_return_uses_preserved_cpu_flags() {
+        let mut module = test_map_module("CpuReturnMap", "CPU_RETURN_MAP", None);
+        module.scripts = BTreeMap::from([
+            (
+                "CpuReturnScript".to_string(),
+                serde_json::json!([
+                    {"command": "callasm", "args": ["CheckCanDeletePhoneNumber"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+            (
+                "CheckCanDeletePhoneNumber".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["a", "$5"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "cp", "args": ["$0"]},
+                    {"command": "ld", "args": ["a", "$7"]},
+                    {"command": "ret", "args": ["nz"]},
+                    {"command": "ld", "args": ["a", "$9"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+        ]);
+        module.script_runtime_commands = vec![ScriptRuntimeCommand {
+            command: "callasm".to_string(),
+            args: vec!["CheckCanDeletePhoneNumber".to_string()],
+            source_script: "CpuReturnScript".to_string(),
+            command_index: 0,
+        }];
+        let events = module.events.clone();
+        let data = GameDataSet {
+            maps: [("CpuReturnMap".to_string(), module)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "CpuReturnMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            events,
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let mut state = GameState::default();
+
+        let (_, outcome) = data
+            .apply_script_runtime_command_in_session(
+                &mut state,
+                &mut session,
+                "CpuReturnMap",
+                "CpuReturnScript",
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute conditional-return callasm");
+
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::ScriptValueSet { ref value, .. } if value == "5"
+        ));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("5"));
+        assert!(state.script_runtime.command_queue.is_empty());
+    }
+
+    #[test]
+    fn phone_callasm_targets_retain_non_accumulator_engine_dispatch() {
+        let root = repository_root_for_tests();
+        let base = AssetRoot::new(root)
+            .load_base_game_data()
+            .expect("load base game data");
+        let scripts = base
+            .phone_scripts
+            .iter()
+            .flat_map(|payload| {
+                payload
+                    .as_object()
+                    .expect("phone script payload object")
+                    .iter()
+                    .map(|(label, body)| (label.clone(), body.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let callasms = scripts
+            .iter()
+            .flat_map(|(source_script, body)| {
+                body.as_array()
+                    .expect("phone script body array")
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(command_index, command)| {
+                        (command.get("command").and_then(serde_json::Value::as_str)
+                            == Some("callasm"))
+                        .then(|| ScriptRuntimeCommand {
+                            command: "callasm".to_string(),
+                            args: command
+                                .get("args")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("phone callasm args")
+                                .iter()
+                                .map(|arg| {
+                                    arg.as_str().expect("phone callasm string arg").to_string()
+                                })
+                                .collect(),
+                            source_script: source_script.clone(),
+                            command_index,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            callasms
+                .iter()
+                .filter_map(|command| command.args.first().cloned())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                ".LoadBillScript".to_string(),
+                ".LoadElmScript".to_string(),
+                "HangUp".to_string(),
+                "InitCallReceiveDelay".to_string(),
+                "RingTwice_StartCall".to_string(),
+            ])
+        );
+
+        let mut module = test_map_module("PhoneRuntime", "PHONE_RUNTIME", None);
+        module.scripts = scripts;
+        module.script_runtime_commands = callasms.clone();
+        let events = module.events.clone();
+        let data = GameDataSet {
+            maps: [("PhoneRuntime".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+        let session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "PhoneRuntime".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            events,
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        for command in callasms {
+            let mut state = GameState::default();
+            let mut session = session.clone();
+            let (_, outcome) = data
+                .apply_script_runtime_command_in_session(
+                    &mut state,
+                    &mut session,
+                    "PhoneRuntime",
+                    &command.source_script,
+                    command.command_index,
+                    ScriptRuntimeInputs::default(),
+                )
+                .expect("dispatch non-accumulator phone callasm");
+
+            assert!(matches!(
+                outcome,
+                ScriptRuntimeOutcome::EffectRecorded {
+                    ref command,
+                    ..
+                } if command == "callasm"
+            ));
+            assert_eq!(state.script_runtime.script_value, None);
+            assert_eq!(state.script_runtime.command_queue.len(), 1);
+            assert_eq!(
+                state.script_runtime.command_queue[0].target,
+                command.args[0]
+            );
+        }
+    }
+
+    #[test]
     fn script_runtime_name_commands_write_pack_owned_display_buffers() {
         let mut module = test_map_module("RuntimeNameMap", "RUNTIME_NAME_MAP", None);
         module.script_runtime_commands = vec![
@@ -4502,4 +5023,3 @@
         );
         assert_eq!(missing_music_state, before_missing_music);
     }
-

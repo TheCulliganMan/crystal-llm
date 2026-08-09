@@ -87,8 +87,8 @@ pub struct DirectFieldEncounterMoveOutcome {
 pub struct SweetScentFieldMoveOutcome {
     pub actor_party_index: usize,
     pub actor_species: String,
-    pub wild_encounter: WildEncounterRoll,
-    pub wild_battle: WildBattleStart,
+    pub wild_encounter: Option<WildEncounterRoll>,
+    pub wild_battle: Option<WildBattleStart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +384,7 @@ impl<'a> ModpackCompiler<'a> {
             COMPILED_GAME_PACK_FORMAT_VERSION,
             &data,
             &compiled_audio,
+            &runtime_files,
             &report,
         )?;
         Ok(CompiledModpack {
@@ -484,20 +485,52 @@ fn prepare_pcm_for_runtime(audio_asset: &mut ModpackAudioAsset, bytes: Vec<u8>) 
     Ok(output)
 }
 
+pub const REQUIRED_VENDOR_RUNTIME_FILE_KEYS: &[&str] = &[
+    "vendor/pokecrystal/constants/credits_constants.asm",
+    "vendor/pokecrystal/constants/move_constants.asm",
+    "vendor/pokecrystal/data/credits_script.asm",
+    "vendor/pokecrystal/data/credits_strings.asm",
+    "vendor/pokecrystal/data/moves/descriptions.asm",
+    "vendor/pokecrystal/gfx/card_flip/card_flip.pal",
+    "vendor/pokecrystal/gfx/card_flip/card_flip.tilemap",
+    "vendor/pokecrystal/gfx/card_flip/card_flip_1.png",
+    "vendor/pokecrystal/gfx/card_flip/card_flip_2.png",
+    "vendor/pokecrystal/gfx/card_flip/off.png",
+    "vendor/pokecrystal/gfx/card_flip/on.png",
+    "vendor/pokecrystal/gfx/diploma/diploma.pal",
+    "vendor/pokecrystal/gfx/diploma/diploma.png",
+    "vendor/pokecrystal/gfx/diploma/page1.tilemap",
+    "vendor/pokecrystal/gfx/overworld/heal_machine.pal",
+    "vendor/pokecrystal/gfx/overworld/heal_machine.png",
+    "vendor/pokecrystal/gfx/overworld/magnet_train_bg.tilemap",
+    "vendor/pokecrystal/gfx/overworld/magnet_train_fg.tilemap",
+    "vendor/pokecrystal/gfx/slots/slots.pal",
+    "vendor/pokecrystal/gfx/slots/slots.tilemap",
+    "vendor/pokecrystal/gfx/slots/slots_1.png",
+    "vendor/pokecrystal/gfx/slots/slots_2.png",
+    "vendor/pokecrystal/gfx/tilesets/train_station.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/aerodactyl.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/cursor.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/hooh.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/kabuto.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/omanyte.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/start_cancel.png",
+    "vendor/pokecrystal/gfx/unown_puzzle/tile_borders.png",
+];
+
 fn compile_runtime_files(asset_root: &AssetRoot) -> Result<BTreeMap<String, Vec<u8>>> {
     let root = asset_root.runtime_assets();
     let mut files = BTreeMap::new();
     collect_runtime_files(&root, &root, &mut files)?;
-    for relative in [
-        "vendor/pokecrystal/constants/credits_constants.asm",
-        "vendor/pokecrystal/data/credits_strings.asm",
-        "vendor/pokecrystal/data/credits_script.asm",
-    ] {
+    for &relative in REQUIRED_VENDOR_RUNTIME_FILE_KEYS {
         let source = asset_root.repository_root.join(relative);
         let bytes = std::fs::read(&source)
             .with_context(|| format!("read embedded vendor runtime asset {}", source.display()))?;
-        files.insert(relative.to_string(), bytes);
+        if files.insert(relative.to_string(), bytes).is_some() {
+            anyhow::bail!("duplicate embedded runtime asset '{relative}'");
+        }
     }
+    validate_compiled_runtime_files(&files)?;
     Ok(files)
 }
 

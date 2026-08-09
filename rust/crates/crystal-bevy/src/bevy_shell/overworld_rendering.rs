@@ -485,6 +485,43 @@ fn field_warp_prompt_label(warp: &crate::core::map::WarpEvent) -> String {
     )
 }
 
+/// Field-owned screens that present a complete LCD through the retained
+/// full-screen surface. The presenter is retired only after these states
+/// close and the complete overworld replacement has been staged.
+fn retained_field_fullscreen_active(runtime_shell: &BevyRuntimeShell) -> bool {
+    (runtime_shell.pending_name_choice.is_some()
+        && runtime_shell.pending_standard_capture.is_none())
+        || runtime_shell.pending_name_input.is_some()
+        || runtime_shell.visible_slot_machine.is_some()
+        || runtime_shell.visible_card_flip.is_some()
+        || runtime_shell.visible_unown_puzzle.is_some()
+        || runtime_shell.visible_diploma.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.hall_of_fame_pc_index.is_some()
+        || runtime_shell.pokedex_menu_open
+        || runtime_shell.pokegear_menu_open
+        || runtime_shell.trainer_card_open
+        || (runtime_shell.party_menu_open && runtime_shell.fly_cursor.is_some())
+        || (runtime_shell.storage_cursor.is_some() && !runtime_shell.party_menu_open)
+        || (runtime_shell.pc_item_cursor.is_some()
+            && !visible_field_pack_is_open(runtime_shell))
+        || runtime_shell.bill_pc_box_cursor.is_some()
+}
+
+fn textbox_frame_id(frame: crate::core::state::FrameType) -> u8 {
+    use crate::core::state::FrameType;
+    match frame {
+        FrameType::Frame1 => 1,
+        FrameType::Frame2 => 2,
+        FrameType::Frame3 => 3,
+        FrameType::Frame4 => 4,
+        FrameType::Frame5 => 5,
+        FrameType::Frame6 => 6,
+        FrameType::Frame7 => 7,
+        FrameType::Frame8 => 8,
+    }
+}
+
 fn spawn_field_command_menu(
     commands: &mut Commands,
     snapshot: &RuntimeShellSnapshot,
@@ -524,13 +561,15 @@ fn spawn_field_command_menu(
     }
 
     if runtime_shell.hall_of_fame_pc_index.is_some() {
-        spawn_visible_hall_of_fame_pc(
+        if let Err(error) = spawn_visible_hall_of_fame_pc(
             commands,
             runtime_shell,
             rendered_art,
             asset_root,
             images,
-        );
+        ) {
+            *render_error = Some(error);
+        }
         return;
     }
     if runtime_shell.visible_card_flip.is_some() {
@@ -601,7 +640,11 @@ fn spawn_field_command_menu(
         return;
     }
     if runtime_shell.trainer_card_open {
-        spawn_trainer_card_screen(commands, snapshot, runtime_shell, rendered_art, images);
+        if let Err(error) =
+            spawn_trainer_card_screen(commands, snapshot, runtime_shell, rendered_art, images)
+        {
+            *render_error = Some(error);
+        }
         return;
     }
     if runtime_shell.pokedex_menu_open {
@@ -757,35 +800,42 @@ fn spawn_field_command_menu(
     let origin_x = PLAYFIELD_LEFT + TILE_SIZE * 11.0;
     let origin_y = PLAYFIELD_TOP - TILE_SIZE * 13.8;
     let two_columns = scene_menu_uses_two_columns(&entries);
-    let panel_height = if two_columns {
-        TILE_SIZE * 3.0
-    } else {
-        TILE_SIZE * (entries.len().max(1) as f32 * 0.66 + 1.0)
-    };
+    let window_height = if two_columns { 5 } else { 7 };
+    let window_left = 10.0;
+    let window_top = 11.0;
+    let window_width = 8;
+    let (center_x, center_y) = field_window_center(
+        window_left,
+        window_top,
+        window_width as f32,
+        window_height as f32,
+    );
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.10, 0.11, 0.10),
-                custom_size: Some(Vec2::new(TILE_SIZE * 7.35, panel_height + TILE_SIZE * 0.18)),
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(
+                    TILE_SIZE * (window_width - 2) as f32,
+                    TILE_SIZE * (window_height - 2) as f32,
+                )),
                 ..default()
             },
-            transform: Transform::from_xyz(origin_x + TILE_SIZE * 2.5, origin_y, 3.3),
+            transform: Transform::from_xyz(center_x, center_y, 3.3),
             ..default()
         },
         FieldCommandMarker,
     ));
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
-                custom_size: Some(Vec2::new(TILE_SIZE * 7.0, panel_height - TILE_SIZE * 0.16)),
-                ..default()
-            },
-            transform: Transform::from_xyz(origin_x + TILE_SIZE * 2.5, origin_y, 3.35),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    if let Some(frame) = battle_window_frame_art(rendered_art, asset_root, images) {
+        spawn_field_command_window_frame_tiles(
+            commands,
+            frame,
+            window_left,
+            window_top,
+            window_width,
+            window_height,
+            3.35,
+        );
+    }
     for (index, entry) in entries.iter().take(FIELD_TEXT_BOX_VISIBLE_ROWS).enumerate() {
         let (x, y) = scene_menu_entry_position(origin_x, origin_y, index, two_columns);
         let display_entry = scene_menu_display_entry(entry, two_columns);
@@ -808,27 +858,21 @@ fn spawn_visible_hall_of_fame_pc(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     let Some(boundary) = runtime_shell
         .special_boundary
         .as_ref()
         .filter(|boundary| boundary.label == "HallOfFamePC")
     else {
-        return;
+        return Ok(());
     };
-    let (center_x, center_y) = field_window_center(0.0, 0.0, 20.0, 18.0);
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.97, 0.97, 0.97),
-                custom_size: Some(Vec2::new(TILE_SIZE * 20.0, TILE_SIZE * 18.0)),
-                ..default()
-            },
-            transform: Transform::from_xyz(center_x, center_y, 5.8),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [247, 247, 247, 255],
+        5.8,
+        images,
+    )?;
     if let Some(frame) = battle_window_frame_art(rendered_art, asset_root, images) {
         spawn_scene_dialog_window_frame_tiles(commands, frame, 0.0, 0.0, 20, 9, 5.9);
     }
@@ -845,6 +889,7 @@ fn spawn_visible_hall_of_fame_pc(
             6.0,
         );
     }
+    Ok(())
 }
 
 fn spawn_visible_slot_machine(
@@ -855,23 +900,30 @@ fn spawn_visible_slot_machine(
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let Some(machine) = runtime_shell.visible_slot_machine.as_ref() else { return Ok(()); };
-    let frame = load_visible_slot_machine_frame(asset_root, machine, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(TILE_SIZE * 20.0, TILE_SIZE * 18.0)),
-                ..default()
-            },
-            transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + TILE_SIZE * 9.5,
-                PLAYFIELD_TOP - TILE_SIZE * 8.5,
-                3.3,
-            ),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    if rendered_art.slot_machine_sources.is_none()
+        && rendered_art.slot_machine_source_error.is_none()
+    {
+        match load_slot_machine_render_sources(asset_root) {
+            Ok(sources) => rendered_art.slot_machine_sources = Some(sources),
+            Err(error) => rendered_art.slot_machine_source_error = Some(format!("{error:#}")),
+        }
+    }
+    if let Some(error) = rendered_art.slot_machine_source_error.as_deref() {
+        anyhow::bail!(error.to_string());
+    }
+    let sources = rendered_art
+        .slot_machine_sources
+        .as_ref()
+        .context("slot machine render sources are unavailable")?;
+    let frame = render_visible_slot_machine_frame(sources, machine, images)?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.3,
+        images,
+    )?;
     for (text, tile_x, tile_y) in [
         (format!("{:04}", machine.coins), 5.0, 1.0),
         (format!("{:04}", machine.payout), 11.0, 1.0),
@@ -892,23 +944,28 @@ fn spawn_visible_card_flip(
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let Some(game) = runtime_shell.visible_card_flip.as_ref() else { return Ok(()); };
-    let frame = load_visible_card_flip_frame(asset_root, game, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(TILE_SIZE * 20.0, TILE_SIZE * 18.0)),
-                ..default()
-            },
-            transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + TILE_SIZE * 9.5,
-                PLAYFIELD_TOP - TILE_SIZE * 8.5,
-                3.3,
-            ),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    if rendered_art.card_flip_sources.is_none() && rendered_art.card_flip_source_error.is_none() {
+        match load_card_flip_render_sources(asset_root) {
+            Ok(sources) => rendered_art.card_flip_sources = Some(sources),
+            Err(error) => rendered_art.card_flip_source_error = Some(format!("{error:#}")),
+        }
+    }
+    if let Some(error) = rendered_art.card_flip_source_error.as_deref() {
+        anyhow::bail!(error.to_string());
+    }
+    let sources = rendered_art
+        .card_flip_sources
+        .as_ref()
+        .context("Card Flip render sources are unavailable")?;
+    let frame = render_visible_card_flip_frame(sources, game, images)?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.3,
+        images,
+    )?;
     let (message_x, message_y) = battle_hud_tile_origin(1.0, 13.0);
     spawn_field_command_bitmap_text(
         commands,
@@ -977,11 +1034,7 @@ fn spawn_visible_card_flip(
     Ok(())
 }
 
-fn load_visible_card_flip_frame(
-    asset_root: &AssetRoot,
-    game: &VisibleCardFlip,
-    images: &mut Assets<Image>,
-) -> Result<SpriteFrame> {
+fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRenderSources> {
     const WIDTH: usize = 160;
     const HEIGHT: usize = 144;
     const TILE: usize = 8;
@@ -1045,13 +1098,29 @@ fn load_visible_card_flip_frame(
             &mut target,
         );
     }
+    Ok(CardFlipRenderSources {
+        base: target,
+        light_on,
+        palettes,
+    })
+}
+
+fn render_visible_card_flip_frame(
+    sources: &CardFlipRenderSources,
+    game: &VisibleCardFlip,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    const WIDTH: usize = 160;
+    const HEIGHT: usize = 144;
+    const TILE: usize = 8;
+    let mut target = sources.base.clone();
     let completed_rounds = game.revealed.iter().filter(|flag| **flag).count().min(12);
     for round in 0..completed_rounds {
         let linear_tile = 9 + round;
         blit_paletted_slot_tile(
-            &light_on,
+            &sources.light_on,
             0,
-            &palettes[card_flip_background_palette(linear_tile % 20, linear_tile / 20)],
+            &sources.palettes[card_flip_background_palette(linear_tile % 20, linear_tile / 20)],
             (linear_tile % 20) * TILE,
             (linear_tile / 20) * TILE,
             false,
@@ -1115,11 +1184,7 @@ fn compact_card_flip_symbol(symbol: &str) -> &'static str {
     }
 }
 
-fn load_visible_slot_machine_frame(
-    asset_root: &AssetRoot,
-    machine: &VisibleSlotMachine,
-    images: &mut Assets<Image>,
-) -> Result<SpriteFrame> {
+fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachineRenderSources> {
     const WIDTH: usize = 160;
     const HEIGHT: usize = 144;
     const TILE: usize = 8;
@@ -1146,6 +1211,22 @@ fn load_visible_slot_machine_frame(
             sheet, source_tile, &palettes[palette], tile_x * TILE, tile_y * TILE, false, &mut target,
         );
     }
+    Ok(SlotMachineRenderSources {
+        base: target,
+        symbols,
+        palettes,
+    })
+}
+
+fn render_visible_slot_machine_frame(
+    sources: &SlotMachineRenderSources,
+    machine: &VisibleSlotMachine,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    const WIDTH: usize = 160;
+    const HEIGHT: usize = 144;
+    const TILE: usize = 8;
+    let mut target = sources.base.clone();
     for reel in 0..3 {
         for row in 0..3 {
             let symbol_index = slot_symbol_palette_index(&machine.windows[reel][2 - row])?;
@@ -1153,9 +1234,9 @@ fn load_visible_slot_machine_frame(
             for icon_y in 0..2 {
                 for icon_x in 0..2 {
                     blit_paletted_slot_tile(
-                        &symbols,
+                        &sources.symbols,
                         base_tile + icon_y * 2 + icon_x,
-                        &palettes[symbol_index],
+                        &sources.palettes[symbol_index],
                         [5, 9, 13][reel] * TILE + icon_x * TILE,
                         [4, 6, 8][row] * TILE + icon_y * TILE,
                         true,
@@ -1246,47 +1327,44 @@ fn blit_paletted_slot_tile(
 fn spawn_visible_unown_puzzle(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
-    _rendered_art: &mut RenderedTilesetArt,
+    rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
     let Some(puzzle) = runtime_shell.visible_unown_puzzle.as_ref() else {
         return Ok(());
     };
-    let frame = load_visible_unown_puzzle_frame(asset_root, puzzle, images)?;
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(TILE_SIZE * 20.0, TILE_SIZE * 18.0)),
-                ..default()
-            },
-            transform: Transform::from_xyz(
-                PLAYFIELD_LEFT + TILE_SIZE * 9.5,
-                PLAYFIELD_TOP - TILE_SIZE * 8.5,
-                3.6,
-            ),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    if rendered_art.unown_puzzle_sources.is_none()
+        && rendered_art.unown_puzzle_source_error.is_none()
+    {
+        match load_unown_puzzle_render_sources(asset_root) {
+            Ok(sources) => rendered_art.unown_puzzle_sources = Some(sources),
+            Err(error) => rendered_art.unown_puzzle_source_error = Some(format!("{error:#}")),
+        }
+    }
+    if let Some(error) = rendered_art.unown_puzzle_source_error.as_deref() {
+        anyhow::bail!(error.to_string());
+    }
+    let sources = rendered_art
+        .unown_puzzle_sources
+        .as_ref()
+        .context("Unown puzzle render sources are unavailable")?;
+    let frame = render_visible_unown_puzzle_frame(sources, puzzle, images)?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.6,
+        images,
+    )?;
     Ok(())
 }
 
-fn load_visible_unown_puzzle_frame(
-    asset_root: &AssetRoot,
-    puzzle: &VisibleUnownPuzzle,
-    images: &mut Assets<Image>,
-) -> Result<SpriteFrame> {
-    const WIDTH: usize = 160;
-    const HEIGHT: usize = 144;
+fn load_unown_puzzle_render_sources(asset_root: &AssetRoot) -> Result<UnownPuzzleRenderSources> {
     const TILE: usize = 8;
     const PIECE: usize = 24;
     let root = asset_root.resolve_vendor("gfx/unown_puzzle");
-    let puzzle_path = root.join(format!("{}.png", puzzle.puzzle_id.to_ascii_lowercase()));
-    let source = image::open(&puzzle_path)
-        .with_context(|| format!("decode Unown puzzle PNG {}", puzzle_path.display()))?
-        .to_rgba8();
     let border = image::open(root.join("tile_borders.png"))
         .context("decode Unown puzzle piece borders")?
         .to_rgba8();
@@ -1296,7 +1374,6 @@ fn load_visible_unown_puzzle_frame(
     let start_cancel = image::open(root.join("start_cancel.png"))
         .context("decode Unown puzzle START/CANCEL graphics")?
         .to_rgba8();
-    anyhow::ensure!(source.dimensions() == (48, 48), "invalid Unown puzzle dimensions");
     anyhow::ensure!(border.dimensions() == (64, 8), "invalid Unown border dimensions");
     anyhow::ensure!(cursor.dimensions() == (16, 16), "invalid Unown cursor dimensions");
     anyhow::ensure!(start_cancel.dimensions() == (152, 8), "invalid Unown START/CANCEL dimensions");
@@ -1308,12 +1385,91 @@ fn load_visible_unown_puzzle_frame(
         }
     }
 
+    let mut puzzle_pieces = HashMap::new();
+    for puzzle_id in ["aerodactyl", "hooh", "kabuto", "omanyte"] {
+        let puzzle_path = root.join(format!("{puzzle_id}.png"));
+        let source = image::open(&puzzle_path)
+            .with_context(|| format!("decode Unown puzzle PNG {}", puzzle_path.display()))?
+            .to_rgba8();
+        anyhow::ensure!(
+            source.dimensions() == (48, 48),
+            "invalid Unown puzzle dimensions for {puzzle_id}"
+        );
+        let mut pieces = Vec::with_capacity(16);
+        for piece_index in 0..16 {
+            let mut piece = image::RgbaImage::new(PIECE as u32, PIECE as u32);
+            let source_x = (piece_index % 4) * 12;
+            let source_y = (piece_index / 4) * 12;
+            for y in 0..PIECE {
+                for x in 0..PIECE {
+                    piece.put_pixel(
+                        x as u32,
+                        y as u32,
+                        *source.get_pixel(
+                            (source_x + x / 2) as u32,
+                            (source_y + y / 2) as u32,
+                        ),
+                    );
+                }
+            }
+            for (border_index, (x, y)) in [
+                (0, 0),
+                (8, 0),
+                (16, 0),
+                (0, 8),
+                (16, 8),
+                (0, 16),
+                (8, 16),
+                (16, 16),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                overlay_unown_border(&border, border_index * TILE, &mut piece, x, y);
+            }
+            pieces.push(piece);
+        }
+        puzzle_pieces.insert(puzzle_id.to_string(), pieces);
+    }
+    Ok(UnownPuzzleRenderSources {
+        pieces: puzzle_pieces,
+        cursor,
+        start_cancel,
+    })
+}
+
+fn render_visible_unown_puzzle_frame(
+    sources: &UnownPuzzleRenderSources,
+    puzzle: &VisibleUnownPuzzle,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    const WIDTH: usize = 160;
+    const HEIGHT: usize = 144;
+    const TILE: usize = 8;
+    const PIECE: usize = 24;
+    let puzzle_id = puzzle.puzzle_id.to_ascii_lowercase();
+    let pieces = sources
+        .pieces
+        .get(&puzzle_id)
+        .with_context(|| format!("unknown Unown puzzle art {puzzle_id}"))?;
+
     let mut target = vec![248_u8; WIDTH * HEIGHT * 4];
     for pixel in target.chunks_exact_mut(4) {
         pixel[3] = 255;
     }
     let draw_tile = |tile: usize, x: usize, y: usize, target: &mut [u8]| {
-        blit_unown_rgba(&start_cancel, tile * TILE, 0, TILE, TILE, x, y, false, false, target);
+        blit_unown_rgba(
+            &sources.start_cancel,
+            tile * TILE,
+            0,
+            TILE,
+            TILE,
+            x,
+            y,
+            false,
+            false,
+            target,
+        );
     };
     // The ASM fills the LCD with PUZZLE_BORDER ($ee), then carves the 12x12
     // center from PUZZLE_VOID ($ef). Both tiles live immediately after the
@@ -1327,24 +1483,6 @@ fn load_visible_unown_puzzle_frame(
         for tile_x in 4..16 {
             draw_tile(2, tile_x * TILE, tile_y * TILE, &mut target);
         }
-    }
-
-    let mut pieces = Vec::with_capacity(16);
-    for piece_index in 0..16 {
-        let mut piece = image::RgbaImage::new(PIECE as u32, PIECE as u32);
-        let source_x = (piece_index % 4) * 12;
-        let source_y = (piece_index / 4) * 12;
-        for y in 0..PIECE {
-            for x in 0..PIECE {
-                piece.put_pixel(x as u32, y as u32, *source.get_pixel((source_x + x / 2) as u32, (source_y + y / 2) as u32));
-            }
-        }
-        for (border_index, (x, y)) in [
-            (0, 0), (8, 0), (16, 0), (0, 8), (16, 8), (0, 16), (8, 16), (16, 16),
-        ].into_iter().enumerate() {
-            overlay_unown_border(&border, border_index * TILE, &mut piece, x, y);
-        }
-        pieces.push(piece);
     }
 
     for y in 0..6 {
@@ -1393,7 +1531,7 @@ fn load_visible_unown_puzzle_frame(
         ];
         for (index, (tile, flip_x, flip_y)) in cursor_tiles.into_iter().enumerate() {
             blit_unown_rgba(
-                &cursor, (tile % 2) * TILE, (tile / 2) * TILE, TILE, TILE,
+                &sources.cursor, (tile % 2) * TILE, (tile / 2) * TILE, TILE, TILE,
                 cursor_x + (index % 3) * TILE, cursor_y + (index / 3) * TILE,
                 flip_x, flip_y, &mut target,
             );
@@ -1486,7 +1624,7 @@ fn spawn_visible_kurt_apricorn_menu(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(TILE_SIZE * (width - 2.0), TILE_SIZE * (height - 2.0))),
                 ..default()
             },
@@ -1593,18 +1731,13 @@ fn spawn_field_pokedex_screen(
         || snapshot.progression.pokedex_seen_species.contains(&species.species_id);
     let caught = scripted_capture_entry
         || snapshot.progression.pokedex_caught_species.contains(&species.species_id);
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.12, 0.18, 0.24),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [31, 46, 61, 255],
+        3.4,
+        images,
+    )?;
     if runtime_shell.pokedex_detail_open && seen {
         spawn_field_pokedex_detail(
             commands, snapshot, runtime_shell, species, caught, rendered_art, asset_root, images,
@@ -1723,18 +1856,13 @@ fn spawn_field_pokegear_screen(
             );
         }
     }
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.90, 0.82, 0.55),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [230, 209, 140, 255],
+        3.4,
+        images,
+    )?;
     let cards = [
         (PokegearPage::Clock, "CLOCK"),
         (PokegearPage::Map, "MAP"),
@@ -1814,18 +1942,13 @@ fn spawn_field_fly_map_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.68, 0.82, 0.58),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [173, 209, 148, 255],
+        3.4,
+        images,
+    )?;
     let destinations = active_fly_destinations(snapshot, &runtime_shell.shell);
     let selected = strict_readonly_cursor_index(
         &runtime_shell.fly_cursor,
@@ -1998,7 +2121,8 @@ fn spawn_field_pack_screen(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.96, 0.96, 0.91),
+                // gfx/pack/pack.pal color zero: RGB 31,31,31.
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                 ..default()
             },
@@ -3133,11 +3257,6 @@ fn spawn_scene_dialog(
         spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
         return Ok(());
     }
-    let entries = visible_scene_dialog_entries(snapshot, runtime_shell)?;
-    if entries.is_empty() {
-        return Ok(());
-    }
-
     if let Some(choice) = runtime_shell.pending_name_choice.as_ref() {
         spawn_visible_name_choice_screen(
             commands,
@@ -3146,7 +3265,7 @@ fn spawn_scene_dialog(
             asset_root,
             images,
             choice,
-        );
+        )?;
         return Ok(());
     }
     if let Some(input) = runtime_shell.pending_name_input.as_ref() {
@@ -3157,7 +3276,7 @@ fn spawn_scene_dialog(
             asset_root,
             images,
             input,
-        );
+        )?;
         return Ok(());
     }
     if let Some(shop) = snapshot.pending_shop.as_ref() {
@@ -3195,6 +3314,11 @@ fn spawn_scene_dialog(
             images,
         )
     {
+        return Ok(());
+    }
+
+    let entries = visible_scene_dialog_entries(snapshot, runtime_shell)?;
+    if entries.is_empty() {
         return Ok(());
     }
 
@@ -3241,19 +3365,18 @@ fn spawn_visible_diploma(
         RenderAssetUsages::default(),
     );
     image.sampler = ImageSampler::nearest();
-    let (x, y) = field_window_center(0.0, 0.0, 20.0, 18.0);
-    commands.spawn((
-        SpriteBundle {
-            texture: images.add(image),
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(20.0 * TILE_SIZE, 18.0 * TILE_SIZE)),
-                ..default()
-            },
-            transform: Transform::from_xyz(x, y, 20.0),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    let frame = SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(WIDTH as f32, HEIGHT as f32),
+    };
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        20.0,
+        images,
+    )?;
     for (text, tile_x, tile_y) in [
         ("PLAYER".to_string(), 2.0, 5.0),
         (snapshot.trainer.player_name.clone(), 9.0, 5.0),
@@ -3361,7 +3484,7 @@ fn spawn_visible_unown_words(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(
                     TILE_SIZE * (width - 2.0),
                     TILE_SIZE * (height - 2.0),
@@ -3373,7 +3496,7 @@ fn spawn_visible_unown_words(
         },
         FieldCommandMarker,
     ));
-    if let Some(frame) = battle_window_frame_art(rendered_art, asset_root, images) {
+    if let Some(frame) = window_frame_art(rendered_art, asset_root, images, 2) {
         spawn_field_command_window_frame_tiles(
             commands,
             frame,
@@ -3456,19 +3579,18 @@ fn spawn_visible_magnet_train(
         RenderAssetUsages::default(),
     );
     image.sampler = ImageSampler::nearest();
-    let (x, y) = field_window_center(0.0, 0.0, 20.0, 18.0);
-    commands.spawn((
-        SpriteBundle {
-            texture: images.add(image),
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(20.0 * TILE_SIZE, 18.0 * TILE_SIZE)),
-                ..default()
-            },
-            transform: Transform::from_xyz(x, y, 20.0),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    let frame = SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(WIDTH as f32, HEIGHT as f32),
+    };
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        20.0,
+        images,
+    )?;
     Ok(())
 }
 
@@ -3761,7 +3883,7 @@ fn spawn_visible_balance_window(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(
                     TILE_SIZE * (width_tiles.saturating_sub(2)) as f32,
                     TILE_SIZE * (height_tiles.saturating_sub(2)) as f32,
@@ -3909,24 +4031,23 @@ fn spawn_field_shop_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.96, 0.96, 0.91),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 4.0),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
     let shop_notice = if runtime_shell.shop_welcome_seen {
         runtime_shell.shop_notice.as_deref()
     } else {
         Some("Welcome! How may I\nhelp you?")
     };
     if let Some(notice) = shop_notice {
+        spawn_battle_window(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            0.0,
+            12.0,
+            20.0,
+            6.0,
+            4.1,
+        );
         let visible_notice = visible_revealed_shell_notice_text(runtime_shell, notice);
         for (index, line) in wrap_boot_text_for_box(&visible_notice, 18, 4).iter().enumerate() {
             let (x, y) = battle_hud_tile_origin(1.0, 12.0 + index as f32);
@@ -3945,6 +4066,12 @@ fn spawn_field_shop_screen(
         return Ok(());
     }
     if let Some(cursor) = runtime_shell.shop_top_cursor.as_ref() {
+        spawn_battle_window(
+            commands, rendered_art, asset_root, images, 0.0, 0.0, 8.0, 9.0, 4.1,
+        );
+        spawn_battle_window(
+            commands, rendered_art, asset_root, images, 11.0, 0.0, 9.0, 3.0, 4.1,
+        );
         let selected = strict_readonly_cursor_index(
             &Some(cursor.clone()), "shop:top", 3,
         )
@@ -3982,6 +4109,15 @@ fn spawn_field_shop_screen(
                 item_ids.len()
             )
         })?;
+    spawn_battle_window(
+        commands, rendered_art, asset_root, images, 1.0, 3.0, 19.0, 10.0, 4.1,
+    );
+    spawn_battle_window(
+        commands, rendered_art, asset_root, images, 11.0, 0.0, 9.0, 3.0, 4.1,
+    );
+    spawn_battle_window(
+        commands, rendered_art, asset_root, images, 0.0, 12.0, 20.0, 6.0, 4.1,
+    );
     for (tile_x, tile_y, text) in [
         (1.0, 0.5, if selling { "SELL".to_string() } else { "BUY".to_string() }),
         (12.0, 0.5, format!("¥{}", snapshot.trainer.money)),
@@ -4045,22 +4181,9 @@ fn spawn_field_shop_screen(
     }
     if let Some(quantity) = runtime_shell.shop_quantity.as_ref() {
         anyhow::ensure!(quantity.quantity > 0, "shop quantity prompt has zero quantity");
-        commands.spawn((
-            SpriteBundle {
-                sprite: Sprite {
-                    color: Color::rgb(1.0, 1.0, 1.0),
-                    custom_size: Some(Vec2::new(TILE_SIZE * 13.0, TILE_SIZE * 3.0)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(
-                    battle_hud_tile_origin(13.5, 15.5).0,
-                    battle_hud_tile_origin(13.5, 15.5).1,
-                    4.3,
-                ),
-                ..default()
-            },
-            SceneDialogMarker,
-        ));
+        spawn_battle_window(
+            commands, rendered_art, asset_root, images, 7.0, 15.0, 13.0, 3.0, 4.3,
+        );
         let total = u32::from(quantity.unit_price) * u32::from(quantity.quantity);
         let (x, y) = battle_hud_tile_origin(8.0, 15.0);
         spawn_scene_dialog_bitmap_text(
@@ -4090,18 +4213,13 @@ fn spawn_field_storage_screen(
                 snapshot.storage.current_pc_box
             )
         })?;
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.83, 0.91, 0.96),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 4.0),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [212, 232, 245, 255],
+        4.0,
+        images,
+    )?;
     if runtime_shell.pc_notice.is_some() {
         spawn_pc_notice(commands, runtime_shell, rendered_art, asset_root, images);
         return Ok(());
@@ -4341,18 +4459,13 @@ fn spawn_field_pc_item_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.90, 0.93, 0.84),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 4.0),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [230, 237, 214, 255],
+        4.0,
+        images,
+    )?;
     let items = snapshot
         .bag
         .pc_items
@@ -4420,18 +4533,13 @@ fn spawn_field_pc_box_selection_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(0.83, 0.91, 0.96),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 4.0),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [212, 232, 245, 255],
+        4.0,
+        images,
+    )?;
     let selected = strict_readonly_cursor_index(
         &runtime_shell.bill_pc_box_cursor,
         "pc:bill-boxes",
@@ -4683,7 +4791,7 @@ fn spawn_visible_yes_no_prompt_box(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(
                     TILE_SIZE * (FIELD_YES_NO_WIDTH_TILES - 2.0),
                     TILE_SIZE * (FIELD_YES_NO_HEIGHT_TILES - 2.0),
@@ -4744,7 +4852,7 @@ fn spawn_scene_dialog_text_box(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(
                     TILE_SIZE * (FIELD_TEXT_BOX_WIDTH_TILES - 2.0),
                     TILE_SIZE * (FIELD_TEXT_BOX_HEIGHT_TILES - 2.0),
@@ -4777,7 +4885,7 @@ fn spawn_visible_name_entry_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
     input: &PendingNameInput,
-) {
+) -> Result<()> {
     let key = NameEntryArtKey {
         label: input.label.clone(),
         value: input.value.clone(),
@@ -4785,7 +4893,9 @@ fn spawn_visible_name_entry_screen(
         cursor_row: input.cursor_row,
         case: input.case,
     };
-    if !rendered_art.name_entry_cache.contains_key(&key) {
+    if !rendered_art.name_entry_cache.contains_key(&key)
+        && !rendered_art.name_entry_errors.contains_key(&key)
+    {
         match load_name_entry_frame(asset_root, input, images) {
             Ok(frame) => {
                 rendered_art.name_entry_errors.remove(&key);
@@ -4797,40 +4907,29 @@ fn spawn_visible_name_entry_screen(
                     .insert(key.clone(), error.to_string());
             }
         }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.name_entry_cache,
+            &mut rendered_art.name_entry_errors,
+            &mut rendered_art.name_entry_cache_order,
+            key.clone(),
+            images,
+        );
     }
     let Some(frame) = rendered_art.name_entry_cache.get(&key).cloned() else {
-        return;
+        return Ok(());
     };
-    let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
-    let screen_size = Vec2::new(
-        NAME_ENTRY_SCREEN_TILE_WIDTH as f32 * TILE_SIZE,
-        NAME_ENTRY_SCREEN_TILE_HEIGHT as f32 * TILE_SIZE,
-    );
-    let screen_center = name_entry_screen_center();
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::WHITE,
-                custom_size: Some(screen_size),
-                ..default()
-            },
-            transform: Transform::from_xyz(screen_center.x, screen_center.y, 5.9),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
-    commands.spawn((
-        SpriteBundle {
-            texture: frame.handle,
-            sprite: Sprite {
-                custom_size: Some(frame.size * scale),
-                ..default()
-            },
-            transform: Transform::from_xyz(screen_center.x, screen_center.y, 6.0),
-            ..default()
-        },
-        SceneDialogMarker,
-    ));
+    // Naming is a true 20x18 LCD screen, not an overworld dialog overlay.
+    // Commit it into the same retained allocation as Oak/title so the first
+    // naming frame and every cursor move cannot expose the staged field below.
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        6.0,
+        images,
+    )?;
+    Ok(())
 }
 
 fn spawn_visible_name_choice_screen(
@@ -4840,7 +4939,7 @@ fn spawn_visible_name_choice_screen(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
     choice: &VisibleNameChoice,
-) {
+) -> Result<()> {
     if let Some(capture) = runtime_shell.pending_standard_capture.as_ref() {
         spawn_battle_window(
             commands,
@@ -4899,8 +4998,19 @@ fn spawn_visible_name_choice_screen(
                 6.3,
             );
         }
-        return;
+        return Ok(());
     }
+    // The new-game preset-name menu is a complete LCD scene. Its 10x15
+    // window intentionally occupies only the left half, but the remainder is
+    // blank background—not the already initialized bedroom. Keep capture
+    // nickname YES/NO prompts as battle overlays via the branch above.
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [255, 255, 255, 255],
+        5.8,
+        images,
+    )?;
     const LEFT_TILE: f32 = 0.0;
     const TOP_TILE: f32 = 0.0;
     const WIDTH_TILES: usize = 10;
@@ -4910,7 +5020,7 @@ fn spawn_visible_name_choice_screen(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(0.91, 0.96, 0.86),
+                color: Color::WHITE,
                 custom_size: Some(Vec2::new(
                     WIDTH_TILES as f32 * TILE_SIZE,
                     HEIGHT_TILES as f32 * TILE_SIZE,
@@ -4968,6 +5078,7 @@ fn spawn_visible_name_choice_screen(
             6.1,
         );
     }
+    Ok(())
 }
 
 fn spawn_scene_dialog_bitmap_text(
@@ -5152,6 +5263,7 @@ const NAME_ENTRY_BIG_CURSOR_OAM: [(i16, i16, i16, i16, usize, bool, bool); 10] =
     (4, 0, 0, 0, 0, true, true),
 ];
 
+#[cfg(test)]
 fn name_entry_screen_center() -> Vec3 {
     Vec3::new(
         PLAYFIELD_LEFT + NAME_ENTRY_SCREEN_TILE_WIDTH as f32 * TILE_SIZE * 0.5,

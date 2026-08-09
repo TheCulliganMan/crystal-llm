@@ -1257,6 +1257,326 @@
     }
 
     #[test]
+    fn verifier_rejects_script_control_targets_that_are_not_runtime_executable() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts.insert(
+            "MainScript".to_string(),
+            serde_json::json!([
+                {"command": "sjump", "args": ["DataTarget"]},
+                {"command": "farscall", "args": ["MissingTarget"]}
+            ]),
+        );
+        module.scripts.insert(
+            "DataTarget".to_string(),
+            serde_json::json!([
+                {"command": "conditional_event", "args": ["EVENT_POSTER", ".Script"]}
+            ]),
+        );
+        module.script_control_commands = vec![
+            ScriptControlCommand {
+                command: "sjump".to_string(),
+                compare_value: None,
+                target_label: Some("DataTarget".to_string()),
+                resolved_target_script: Some("DataTarget".to_string()),
+                source_script: "MainScript".to_string(),
+                command_index: 0,
+            },
+            ScriptControlCommand {
+                command: "farscall".to_string(),
+                compare_value: None,
+                target_label: Some("MissingTarget".to_string()),
+                resolved_target_script: None,
+                source_script: "MainScript".to_string(),
+                command_index: 1,
+            },
+        ];
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "non_executable_script_control_target"
+                && diagnostic.subject == "Start:MainScript:0"
+                && diagnostic.message.contains("DataTarget")
+                && diagnostic.message.contains("conditional_event")
+        }), "missing non-executable control-target diagnostic: {:?}", report.diagnostics);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_script_control_command"
+                && diagnostic.subject == "Start:MainScript:1"
+                && diagnostic.message.contains("missing resolved target script")
+        }), "missing unresolved control-target diagnostic: {:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn every_exported_script_control_edge_targets_a_runtime_executable_body() {
+        let asset_root = AssetRoot::new(repository_root_for_tests());
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load source-backed base game data");
+        let report = verify_game_data(&asset_root, &data, &PlayabilityRules::default());
+        let issues = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == "non_executable_script_control_target"
+                    || (diagnostic.code == "invalid_script_control_command"
+                        && diagnostic.message.contains("missing resolved target script"))
+            })
+            .map(|diagnostic| {
+                format!(
+                    "{}: {}",
+                    diagnostic.subject,
+                    diagnostic.message
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(issues, Vec::<String>::new());
+    }
+
+    #[test]
+    fn verifier_proves_complete_reachable_callasm_cpu_control_flow() {
+        let repository_root = repository_root_for_tests();
+        let standard_scripts: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository_root.join("apps/web/assets/data/story_events/StandardScripts.json"),
+            )
+            .expect("read exported StandardScripts catalog"),
+        )
+        .expect("parse exported StandardScripts catalog");
+        let phone_scripts: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository_root.join("apps/web/assets/data/phone_scripts/phone.json"),
+            )
+            .expect("read exported phone script catalog"),
+        )
+        .expect("parse exported phone script catalog");
+        let hallway_scripts: BTreeMap<String, Value> = serde_json::from_slice(
+            &std::fs::read(
+                repository_root.join("apps/web/assets/data/maps/BattleTowerHallway.json"),
+            )
+            .expect("read exported Battle Tower hallway scripts"),
+        )
+        .expect("parse exported Battle Tower hallway scripts");
+        let map_attributes: BTreeMap<String, MapAttributes> = serde_json::from_slice(
+            &std::fs::read(repository_root.join("apps/web/assets/data/map_attributes.json"))
+                .expect("read exported map attributes"),
+        )
+        .expect("parse exported map attributes");
+
+        let mut hallway = test_map_module("BattleTowerHallway", "BATTLE_TOWER_HALLWAY", None);
+        hallway.script_runtime_commands =
+            parse_script_runtime_commands("BattleTowerHallway", &hallway_scripts)
+                .expect("materialize exact hallway callasm");
+        hallway.scripts = hallway_scripts;
+        let mut data = GameDataSet {
+            maps: [("BattleTowerHallway".to_string(), hallway)]
+                .into_iter()
+                .collect(),
+            map_attributes,
+            story_events: vec![standard_scripts],
+            phone_scripts: vec![phone_scripts],
+            ..GameDataSet::default()
+        };
+        data.materialize_global_scripts()
+            .expect("materialize exact global callasm bodies");
+
+        let mut diagnostics = Vec::new();
+        verify_script_runtime_commands(&data, &mut diagnostics);
+        let callasm_issues = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "non_executable_callasm_target")
+            .map(|diagnostic| {
+                (
+                    diagnostic.subject.as_str(),
+                    diagnostic.message.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !callasm_issues
+                .iter()
+                .any(|(subject, _)| *subject
+                    == "BattleTowerHallway:BattleTowerHallwayChooseBattleRoomScript:1"),
+            "the exact accumulator routine must be certified: {callasm_issues:?}"
+        );
+        for subject in [
+            "GlobalScripts:AskRockSmashScript:0",
+            "GlobalScripts:RockSmashScript:0",
+            "GlobalScripts:AskStrengthScript:0",
+            "GlobalScripts:Script_UsedStrength:0",
+        ] {
+            assert!(
+                !callasm_issues
+                    .iter()
+                    .any(|(actual, _)| *actual == subject),
+                "the exact branching routine {subject} must be certified: {callasm_issues:?}"
+            );
+        }
+        assert!(
+            !callasm_issues
+                .iter()
+                .any(|(subject, _)| *subject == "GlobalScripts:RockSmashScript:8"),
+            "the exact RockMonEncounter body must be accepted only through its typed consumer: {callasm_issues:?}"
+        );
+
+        data.global_scripts
+            .as_mut()
+            .expect("materialized global module")
+            .definitions
+            .get_mut("RockMonEncounter")
+            .and_then(Value::as_array_mut)
+            .expect("RockMonEncounter body")[9] =
+            serde_json::json!({"command":"call","args":["BattleRandom"]});
+        let mut mutated_diagnostics = Vec::new();
+        verify_script_runtime_commands(&data, &mut mutated_diagnostics);
+        assert!(mutated_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "non_executable_callasm_target"
+                && diagnostic.subject == "GlobalScripts:RockSmashScript:8"
+                && diagnostic.message.contains("exact typed routine requires call")
+                && diagnostic.message.contains("RandomRange")
+        }), "a forged RockMonEncounter body at the canonical label must fail closed: {mutated_diagnostics:?}");
+        for (subject, target) in [
+            ("GlobalScripts:Script_ReceivePhoneCall:1", "RingTwice_StartCall"),
+            ("GlobalScripts:Script_ReceivePhoneCall:4", "HangUp"),
+            ("GlobalScripts:Script_ReceivePhoneCall:6", "InitCallReceiveDelay"),
+            ("GlobalScripts:Script_SpecialBillCall:0", ".LoadBillScript"),
+            ("GlobalScripts:Script_SpecialElmCall:0", ".LoadElmScript"),
+        ] {
+            assert!(
+                callasm_issues.iter().any(|(actual, message)| {
+                    *actual == subject && message.contains(target)
+                }),
+                "phone CPU target {target} must fail closed without a typed consumer: {callasm_issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_callasm_unresolved_operands_and_party_preconditions() {
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.scripts = BTreeMap::from([
+            (
+                "MainScript".to_string(),
+                serde_json::json!([
+                    {"command": "callasm", "args": ["MissingMemoryRoutine"]},
+                    {"command": "callasm", "args": ["MissingPartyRoutine"]},
+                    {"command": "callasm", "args": ["UnsupportedDestinationRoutine"]},
+                    {"command": "callasm", "args": ["DroppedStoreRoutine"]},
+                    {"command": "callasm", "args": ["OpaqueBankToScriptRoutine"]},
+                    {"command": "callasm", "args": ["OpaqueWbkToScriptRoutine"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+            (
+                "MissingMemoryRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["a", "[wArbitraryMissing]"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+            (
+                "MissingPartyRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "call", "args": ["GetNickname"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+            (
+                "UnsupportedDestinationRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["bc", "$1"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+            (
+                "DroppedStoreRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["a", "1"]},
+                    {"command": "push", "args": ["af"]},
+                    {"command": "ld", "args": ["[wArbitrarySideEffect]", "a"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "pop", "args": ["af"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+            (
+                "OpaqueBankToScriptRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["a", "BANK(wAnything)"]},
+                    {"command": "push", "args": ["af"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "pop", "args": ["af"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+            (
+                "OpaqueWbkToScriptRoutine".to_string(),
+                serde_json::json!([
+                    {"command": "ldh", "args": ["a", "[rWBK]"]},
+                    {"command": "push", "args": ["af"]},
+                    {"command": "ld", "args": ["[wScriptVar]", "a"]},
+                    {"command": "pop", "args": ["af"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+        ]);
+        module.script_runtime_commands = (0..6)
+            .map(|command_index| ScriptRuntimeCommand {
+                command: "callasm".to_string(),
+                args: vec![
+                    [
+                        "MissingMemoryRoutine",
+                        "MissingPartyRoutine",
+                        "UnsupportedDestinationRoutine",
+                        "DroppedStoreRoutine",
+                        "OpaqueBankToScriptRoutine",
+                        "OpaqueWbkToScriptRoutine",
+                    ][command_index]
+                        .to_string(),
+                ],
+                source_script: "MainScript".to_string(),
+                command_index,
+            })
+            .collect();
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let mut diagnostics = Vec::new();
+        verify_script_runtime_commands(&data, &mut diagnostics);
+
+        for (subject, expected) in [
+            ("Start:MainScript:0", "wArbitraryMissing"),
+            ("Start:MainScript:1", "selected-party"),
+            ("Start:MainScript:2", "operand shape"),
+            ("Start:MainScript:3", "wArbitrarySideEffect"),
+            ("Start:MainScript:4", "opaque bank byte"),
+            ("Start:MainScript:5", "opaque bank byte"),
+        ] {
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == "non_executable_callasm_target"
+                        && diagnostic.subject == subject
+                        && diagnostic.message.contains(expected)
+                }),
+                "missing fail-closed {expected} diagnostic for {subject}: {:?}",
+                diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn verifier_rejects_unknown_script_scene_targets_without_normalization() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.map_script_section_commands = vec![MapScriptSectionCommand {
@@ -1995,43 +2315,91 @@
     }
 
     #[test]
+    fn verifier_requires_roaming_catalog_without_an_init_roam_mons_declaration() {
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &GameDataSet::default(),
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing_runtime_roaming_pokemon"
+                && diagnostic.subject == "roaming_pokemon"
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_roaming_inactive_group_collision_with_unrelated_runtime_map() {
+        let mut metadata = test_runtime_map_metadata("UNRELATED_MAP", "UnrelatedMap");
+        metadata.group_id = 0xfe;
+        metadata.map_id = 99;
+        let data = GameDataSet {
+            pokemon: [
+                ("RAIKOU".to_string(), species()),
+                ("ENTEI".to_string(), species()),
+            ]
+            .into_iter()
+            .collect(),
+            roaming_pokemon: roaming_catalog_for_tests("RAIKOU", "ENTEI"),
+            runtime_map_metadata: [("UNRELATED_MAP".to_string(), metadata)]
+                .into_iter()
+                .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "roaming_inactive_group_collides_with_runtime_map"
+        }));
+    }
+
+    #[test]
+    fn verifier_requires_every_roaming_graph_location_in_runtime_map_metadata() {
+        let data = GameDataSet {
+            pokemon: [
+                ("RAIKOU".to_string(), species()),
+                ("ENTEI".to_string(), species()),
+            ]
+            .into_iter()
+            .collect(),
+            roaming_pokemon: roaming_catalog_for_tests("RAIKOU", "ENTEI"),
+            runtime_map_metadata: [(
+                "ONLY_FIRST_ROUTE".to_string(),
+                test_runtime_map_metadata("ONLY_FIRST_ROUTE", "OnlyFirstRoute"),
+            )]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("roaming_init_map_missing_from_runtime_metadata"));
+        assert!(codes.contains("roaming_route_map_missing_from_runtime_metadata"));
+        assert!(codes.contains("roaming_connection_map_missing_from_runtime_metadata"));
+    }
+
+    #[test]
     fn verifier_rejects_malformed_roaming_pokemon_without_coercion() {
+        let mut roaming_pokemon = roaming_catalog_for_tests("RAIKOU", "ENTEI");
+        roaming_pokemon.init_writes[0].species = "RAI KOU".to_string();
+        roaming_pokemon.init_writes[0].level = 0;
+        roaming_pokemon.init_writes[1].species = "raikou".to_string();
         let data = GameDataSet {
             pokemon: [("RAIKOU".to_string(), species())].into_iter().collect(),
-            roaming_pokemon: BTreeMap::from([
-                (
-                    String::new(),
-                    RoamingPokemonDefinition {
-                        level: 0,
-                        map_group: 1,
-                        map_number: 1,
-                    },
-                ),
-                (
-                    "RAI KOU".to_string(),
-                    RoamingPokemonDefinition {
-                        level: 40,
-                        map_group: 1,
-                        map_number: 2,
-                    },
-                ),
-                (
-                    "raikou".to_string(),
-                    RoamingPokemonDefinition {
-                        level: 40,
-                        map_group: 1,
-                        map_number: 3,
-                    },
-                ),
-                (
-                    "RAIKOU".to_string(),
-                    RoamingPokemonDefinition {
-                        level: 40,
-                        map_group: 1,
-                        map_number: 4,
-                    },
-                ),
-            ]),
+            roaming_pokemon,
             ..GameDataSet::default()
         };
 
@@ -2042,22 +2410,18 @@
         );
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "empty_roaming_pokemon_species"
-                && diagnostic.subject == "roaming_pokemon:"
+            diagnostic.code == "invalid_roaming_pokemon_catalog"
+                && diagnostic.message.contains("slot 0 species is invalid: RAI KOU")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_roaming_pokemon_level"
-                && diagnostic.subject == "roaming_pokemon:"
+            diagnostic.code == "invalid_roaming_pokemon_catalog"
+                && diagnostic.message.contains("slot 0 level 0 is outside 1..=100")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_roaming_pokemon_species"
-                && diagnostic.subject == "roaming_pokemon:RAI KOU"
-                && diagnostic.message.contains("RAI KOU")
-        }));
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_roaming_pokemon_species"
-                && diagnostic.subject == "roaming_pokemon:raikou"
-                && diagnostic.message.contains("raikou")
+            diagnostic.code == "invalid_roaming_pokemon_catalog"
+                && diagnostic
+                    .message
+                    .contains("slot 1 species raikou is missing from Pokemon data")
         }));
     }
 
@@ -2573,6 +2937,7 @@
                     "EVENT BUG".to_string(),
                     "EVENT_MISSING".to_string(),
                 ],
+                encounters: bug_contest_encounters_for_tests(),
             }),
             ..GameDataSet::default()
         };
@@ -4212,6 +4577,10 @@
             .script_movement("Start", "StartScript", "LocalMovement")
             .expect("local movement");
         assert_eq!(local.label, "LocalMovement");
+        let local_child = data
+            .script_movement("Start", ".OnRight@StartScript", "LocalMovement")
+            .expect("local child script resolves movement in its parent scope");
+        assert_eq!(local_child.source_script.as_deref(), Some("StartScript"));
         let global = data
             .script_movement("Start", "StartScript", "GlobalMovement")
             .expect("exact source-bound movement");
@@ -4499,4 +4868,3 @@
             "{error}"
         );
     }
-

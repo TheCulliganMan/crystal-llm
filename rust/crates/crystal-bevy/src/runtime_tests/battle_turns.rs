@@ -21,7 +21,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -95,7 +95,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -149,7 +149,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -201,7 +201,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -250,16 +250,16 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let mut player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 8), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let mut player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 8),
+        )
+        .enemy_pokemon;
         player.original_trainer_name = "PLAYER".to_string();
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -312,7 +312,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -375,7 +375,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -423,7 +423,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -453,7 +453,8 @@
         assert!(session.state.battle_rewarded_enemy_party_indices.is_empty());
         assert_eq!(session.state.battle_escape_attempts, 0);
         assert_eq!(session.state.battle_player_stat_drop_guard_turns, 0);
-        assert_eq!(session.state.money, 355);
+        assert_eq!(session.state.battle_result, 2);
+        assert_eq!(session.state.money, 300, "DRAW skips CheckPayDay");
         assert_eq!(session.state.battle_pay_day_money, 0);
         assert!(!session.state.bag.has_item(&runtime.data.items["POKE_DOLL"]));
         let _ = std::fs::remove_dir_all(root);
@@ -485,7 +486,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -535,7 +536,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -586,7 +587,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -628,7 +629,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -671,7 +672,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -710,23 +711,24 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let mut player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 15), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let mut player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 15),
+        )
+        .enemy_pokemon;
         player.original_trainer_name = "PLAYER".to_string();
         player.experience =
             calculate_experience(&runtime.data.growth_rates, "GROWTH_MEDIUM_FAST", 16).unwrap() - 1;
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
             .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
             .expect("start battle");
+        let static_origin = static_wild_origin_from_state(&session.state);
         assert_eq!(session.state.battle_active_party_index, Some(0));
         match &mut session.state.battle {
             BattleMemory::StaticWild {
@@ -741,6 +743,7 @@
         }
         session.state.money = 100;
         session.state.battle_pay_day_money = 60;
+        session.divider = crystal_core::random::RuntimeDividerSource::replay([0, 200]);
 
         let rewards = session
             .claim_active_wild_battle_rewards(&runtime)
@@ -771,6 +774,21 @@
         );
         assert_eq!(session.state.money, 160);
         assert_eq!(session.state.battle_pay_day_money, 0);
+        let pending = session
+            .state
+            .pending_static_wild_terminal
+            .as_ref()
+            .expect("victory retains the script-resume identity");
+        assert_eq!(pending.battle_result, 0);
+        assert!(pending.win_cleanup_applied);
+        let random_state_after_rewards = session.state.random_state;
+        session.divider = crystal_core::random::RuntimeDividerSource::replay([]);
+        session
+            .complete_scripted_wild_battle(&runtime, static_origin)
+            .expect("victory resumes without repeating payout or Pokerus");
+        assert_eq!(session.state.money, 160);
+        assert_eq!(session.state.random_state, random_state_after_rewards);
+        assert!(session.state.pending_static_wild_terminal.is_none());
         runtime
             .save_game(
                 root.join("battle-rewards.crystalsave"),
@@ -806,15 +824,15 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let player = runtime
-            .data
-            .static_wild_battle_start(static_wild_request("CHIKORITA", 15), &mut Random::new(7))
-            .expect("player pokemon")
-            .enemy_pokemon;
+        let player = static_wild_battle_start_for_tests(
+            &runtime.data,
+            static_wild_request("CHIKORITA", 15),
+        )
+        .enemy_pokemon;
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
         session
@@ -830,6 +848,106 @@
         let error = error_debug(error);
         assert!(error.contains("DefeatedPokemonNotFainted"), "{error}");
         assert_eq!(session.state, before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_ordinary_capture_records_win_cleanup_and_rejects_short_or_tailed_trace() {
+        let root = temp_repository_root("ordinary-capture-win-cleanup");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(
+                minimal_runtime_data_with_scripted_battles(),
+                report(),
+            ),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime.clone(), 0)
+            .expect("runtime game shell");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 10, Dv::default());
+        player.pokerus = 0xa2;
+        let enemy = Pokemon::new_for_tests(runtime_species(), 6, Dv::default());
+        let state = &mut shell.session_mut().state;
+        state.storage.party.pokemon[0] = Some(player);
+        state.sync_party_from_storage();
+        state.battle = BattleMemory::Wild {
+            roaming_slot: None,
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "RuntimeMap".to_string(),
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        state.money = 100;
+        state.battle_pay_day_money = 45;
+        let capture = CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 4,
+            animation_shakes: 4,
+            final_catch_rate: u8::MAX,
+            rng_seed_after: state.rng_seed,
+            ball_id: Some("MASTER_BALL".to_string()),
+        };
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 100]);
+        let replay_base = shell.session().clone();
+        let before = shell.session().state().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        let completion = shell
+            .complete_active_wild_capture(&capture, None)
+            .expect("ordinary capture performs exact WIN cleanup once");
+
+        assert!(completion.stored.is_some());
+        assert_eq!(shell.session().state().battle_result, 0);
+        assert_eq!(shell.session().state().money, 145);
+        assert!(shell.session().state().pending_static_wild_terminal.is_none());
+        let frame = shell.retained_runtime_commands()[retained_before].clone();
+        let command = crystal_assets::decode_runtime_mutation_command_frame(&frame, &before)
+            .expect("decode recorded capture completion");
+        let RuntimeMutationCommand::CompleteActiveWildCapture(recorded) = command else {
+            panic!("capture must journal its typed completion command");
+        };
+        assert_eq!(recorded.divider_trace.samples, vec![0, 100]);
+
+        let mut remote = replay_base.clone();
+        remote
+            .apply_runtime_command_frame(&runtime, &frame)
+            .expect("remote capture replay consumes the exact recorded trace");
+        assert_eq!(remote.state, shell.session().state);
+
+        for (trace, message) in [
+            (vec![0], "divider replay exhausted after 1 samples"),
+            (vec![0, 100, 77], "1 unconsumed samples after 2 reads"),
+        ] {
+            let mut rejected = replay_base.clone();
+            let request = rejected
+                .runtime_command_frame(
+                    1,
+                    1,
+                    RuntimeMutationCommand::CompleteActiveWildCapture(
+                        RuntimeCaptureCompletionCommand {
+                            outcome: capture.clone(),
+                            nickname: None,
+                            divider_trace: RuntimeDividerTrace::new(trace),
+                        },
+                    ),
+                )
+                .expect("frame malformed capture replay");
+            let rejected_before = rejected.clone();
+            let error = rejected
+                .apply_runtime_command_frame(&runtime, &request)
+                .expect_err("malformed capture divider trace rejects atomically");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(rejected, rejected_before);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -856,7 +974,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("player party Pokemon");
         session.state.sync_party_from_storage();
         session
@@ -892,7 +1010,7 @@
         assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 1 });
         assert_eq!(stored.pokemon.species.id, "CHIKORITA");
         assert_eq!(stored.pokemon.level, start.level);
-        assert_eq!(session.state.battle_result & (1 << 6), 1 << 6);
+        assert_eq!(session.state.battle_result, 0);
         assert_eq!(
             session.state.storage.party.pokemon[1]
                 .as_ref()
@@ -913,6 +1031,14 @@
         assert_eq!(session.state.battle_active_party_index, None);
         assert_eq!(session.state.money, 245);
         assert_eq!(session.state.battle_pay_day_money, 0);
+        assert!(
+            session
+                .state
+                .pending_static_wild_terminal
+                .as_ref()
+                .expect("static capture retains resume origin")
+                .win_cleanup_applied
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -952,9 +1078,35 @@
             )
             .expect("add deposited Pokemon");
         shell.switch_current_pc_box(1).expect("switch PC box");
+        let retained_before_deposit = shell.retained_runtime_commands().len();
         let deposit = shell
             .deposit_party_pokemon_to_current_box(1)
             .expect("deposit party Pokemon");
+
+        let deposit_commands = &shell.retained_runtime_commands()[retained_before_deposit..];
+        assert_eq!(deposit_commands.len(), 3);
+        assert!(matches!(
+            crystal_assets::decode_runtime_mutation_command_payload(deposit_commands[0].payload())
+                .expect("decode PC pause command"),
+            RuntimeMutationCommand::SetGameLogicPaused(command) if command.paused
+        ));
+        assert!(matches!(
+            crystal_assets::decode_runtime_mutation_command_payload(deposit_commands[1].payload())
+                .expect("decode PC deposit command"),
+            RuntimeMutationCommand::DepositPartyPokemonToCurrentBox(command)
+                if command.party_index == 1
+        ));
+        assert!(matches!(
+            crystal_assets::decode_runtime_mutation_command_payload(deposit_commands[2].payload())
+                .expect("decode PC resume command"),
+            RuntimeMutationCommand::SetGameLogicPaused(command) if !command.paused
+        ));
+        assert!(!shell.session().state().game_logic_paused);
+        assert_eq!(
+            deposit.state_checksum,
+            crystal_core::multiplayer::game_state_checksum(shell.session().state())
+                .expect("checksum final PC deposit state")
+        );
 
         let withdraw = shell
             .withdraw_current_box_pokemon_to_party(deposit.box_slot)
@@ -996,7 +1148,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("player party Pokemon");
         session.state.sync_party_from_storage();
         session
@@ -1077,6 +1229,7 @@
             .expect("compiled script gift shell");
         let script_dispatch = script_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeGiftScript",
                 12,
                 ScriptRuntimeInputs {
@@ -1102,6 +1255,7 @@
         let before_mismatched_rng = mismatched_rng_shell.session.state().clone();
         let mismatched_rng = mismatched_rng_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeGiftScript",
                 12,
                 ScriptRuntimeInputs {
@@ -1131,6 +1285,7 @@
         let missing_inputs = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
             .expect("missing input gift shell")
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeGiftScript",
                 12,
                 ScriptRuntimeInputs::default(),
@@ -1143,6 +1298,7 @@
         let before_unexpected_gift_input = unexpected_gift_input_shell.session.state().clone();
         let unexpected_gift_input = unexpected_gift_input_shell
             .apply_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeWildScript",
                 4,
                 ScriptRuntimeInputs {
@@ -1173,7 +1329,7 @@
         generated_input_shell.session_mut().state.player_id = 0x2222;
         generated_input_shell.session_mut().state.rng_seed = 0x1234_5678;
         let generated_inputs = generated_input_shell
-            .compiled_script_runtime_inputs("RuntimeGiftScript", 12)
+            .compiled_script_runtime_inputs("RuntimeMap", "RuntimeGiftScript", 12)
             .expect("compiled gift command inputs");
         assert_eq!(
             generated_inputs.gift_original_trainer_name.as_deref(),
@@ -1185,7 +1341,7 @@
         assert_eq!(generated_inputs.gift_nickname_accepted, Some(false));
         assert_eq!(generated_inputs.gift_nickname, None);
         let missing_runtime_inputs = generated_input_shell
-            .compiled_script_runtime_inputs("RuntimeGiftScript", 99)
+            .compiled_script_runtime_inputs("RuntimeMap", "RuntimeGiftScript", 99)
             .expect_err("missing compiled runtime command input row rejected");
         assert!(
             missing_runtime_inputs
@@ -1196,11 +1352,11 @@
 
         assert_eq!(
             grant.outcome.location,
-            CaptureStorageLocation::Party { slot: 0 }
+            Some(CaptureStorageLocation::Party { slot: 0 })
         );
         assert_eq!(
             dispatched.outcome.location,
-            CaptureStorageLocation::Party { slot: 0 }
+            Some(CaptureStorageLocation::Party { slot: 0 })
         );
         assert_eq!(grant.outcome.pokemon.species.id, "CHIKORITA");
         assert_eq!(dispatched.outcome.pokemon.species.id, "CHIKORITA");
@@ -1319,12 +1475,33 @@
                 {"command": "opentext", "args": []},
                 {"command": "opentext", "args": []},
                 {"command": "opentext", "args": []},
-                {"command": "opentext", "args": []},
+                {"command": "winlosstext", "args": ["RuntimeWinText", "RuntimeLossText"]},
                 {"command": "loadtrainer", "args": ["RIVAL1", "RIVAL1"]},
                 {"command": "startbattle", "args": []},
                 {"command": "setval", "args": ["11"]}
             ]),
         );
+        map.script_map_commands
+            .retain(|command| command.source_script != "RuntimeTrainerScript");
+        map.script_flag_commands
+            .retain(|command| command.source_script != "RuntimeTrainerScript");
+        map.script_runtime_commands.extend([
+            ScriptRuntimeCommand {
+                command: "winlosstext".to_string(),
+                args: vec![
+                    "RuntimeWinText".to_string(),
+                    "RuntimeLossText".to_string(),
+                ],
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 6,
+            },
+            ScriptRuntimeCommand {
+                command: "loadtrainer".to_string(),
+                args: vec!["RIVAL1".to_string(), "RIVAL1".to_string()],
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 7,
+            },
+        ]);
         map.script_variable_commands.push(ScriptVariableCommand {
             command: "setval".to_string(),
             target: None,
@@ -1345,7 +1522,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("player party Pokemon");
         session.state.sync_party_from_storage();
 
@@ -1357,11 +1534,83 @@
             .session
             .state
             .storage
-            .register_capture(dispatch_player)
+            .register_capture_in_box(0, dispatch_player)
             .expect("dispatch player party Pokemon");
         dispatch_shell.session.state.sync_party_from_storage();
+        let win_loss_step = dispatch_shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                "RuntimeTrainerScript",
+                6,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs { accepted: None },
+            )
+            .expect("compiled winlosstext dispatch");
+        assert_eq!(
+            win_loss_step.next_cursor,
+            Some(RuntimeCompiledScriptCursor {
+                origin_map_name: "RuntimeMap".to_string(),
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 7,
+            })
+        );
+        assert_eq!(
+            dispatch_shell
+                .session
+                .state()
+                .script_runtime
+                .memory
+                .get("wWinTextPointer")
+                .map(String::as_str),
+            Some("RuntimeWinText")
+        );
+        assert_eq!(
+            dispatch_shell
+                .session
+                .state()
+                .script_runtime
+                .memory
+                .get("wLossTextPointer")
+                .map(String::as_str),
+            Some("RuntimeLossText")
+        );
+        let load_trainer_step = dispatch_shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                "RuntimeTrainerScript",
+                7,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs { accepted: None },
+            )
+            .expect("compiled loadtrainer dispatch");
+        assert_eq!(
+            load_trainer_step.next_cursor,
+            Some(RuntimeCompiledScriptCursor {
+                origin_map_name: "RuntimeMap".to_string(),
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 8,
+            })
+        );
+        for (symbol, expected) in [
+            ("wBattleScriptFlags", "129"),
+            ("wOtherTrainerClass", "RIVAL1"),
+            ("wOtherTrainerID", "RIVAL1"),
+        ] {
+            assert_eq!(
+                dispatch_shell
+                    .session
+                    .state()
+                    .script_runtime
+                    .memory
+                    .get(symbol)
+                    .map(String::as_str),
+                Some(expected),
+                "{symbol}"
+            );
+        }
         let dispatched = dispatch_shell
-            .apply_compiled_script_command(
+            .step_compiled_script_command(
+                "RuntimeMap",
                 "RuntimeTrainerScript",
                 8,
                 ScriptRuntimeInputs::default(),
@@ -1369,7 +1618,7 @@
             )
             .expect("compiled scripted trainer battle dispatch");
         let RuntimeMutationResult::ScriptedTrainerBattleStarted(dispatched_start) =
-            dispatched.result
+            dispatched.mutation.result
         else {
             panic!("compiled startbattle must dispatch as scripted trainer battle");
         };
@@ -1377,6 +1626,15 @@
             panic!("dispatched trainer should not already be defeated");
         };
         assert_eq!(dispatched_start.trainer_id, "RIVAL1");
+        assert_eq!(dispatched_start.trainer_class, "RIVAL1");
+        assert_eq!(dispatched_start.win_text, "RuntimeWinText");
+        assert_eq!(dispatched_start.loss_text, "RuntimeLossText");
+        assert!(matches!(
+            dispatched.boundary,
+            Some(RuntimeCompiledScriptBoundary::ActiveBattle(
+                RuntimeShellPhase::TrainerBattle
+            ))
+        ));
 
         let start = session
             .start_scripted_trainer_battle(&runtime, "RuntimeMap", "RuntimeTrainerScript", 8)
@@ -1413,7 +1671,7 @@
                 .state
                 .bag
                 .quantity(&runtime.data.items["MASTER_BALL"]),
-            1
+            0
         );
         match &mut session.state.battle {
             BattleMemory::Trainer {
@@ -1461,7 +1719,7 @@
         assert_eq!(session.state.battle_pay_day_money, 0);
         assert_eq!(
             session.state.script_runtime.script_value.as_deref(),
-            Some("1")
+            Some("0")
         );
         assert_eq!(
             session
@@ -1470,7 +1728,7 @@
                 .variables
                 .get("_value")
                 .map(String::as_str),
-            Some("1")
+            Some("0")
         );
         assert_eq!(
             session
@@ -1479,14 +1737,21 @@
                 .is_event_flag_set("EVENT_BEAT_RUNTIME_RIVAL"),
             Ok(true)
         );
-        let effects = completion.effects.expect("trainer effects apply");
         assert_eq!(
-            effects.event_flags_set,
-            vec!["EVENT_RUNTIME_TRAINER_POST".to_string()]
+            session
+                .state
+                .flags
+                .is_event_flag_set("EVENT_RUNTIME_TRAINER_POST"),
+            Ok(false),
+            "battle completion alone must not execute source setevent"
         );
         assert_eq!(
-            effects.script_flags_set,
-            vec!["ENGINE_RUNTIME_TRAINER_POST".to_string()]
+            session
+                .state
+                .flags
+                .is_engine_flag_set("ENGINE_RUNTIME_TRAINER_POST"),
+            Ok(false),
+            "battle completion alone must not execute source setflag"
         );
 
         let mut battle_shell = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
@@ -1497,9 +1762,20 @@
             .session
             .state
             .storage
-            .register_capture(shell_player)
+            .register_capture_in_box(0, shell_player)
             .expect("shell player party Pokemon");
         battle_shell.session.state.sync_party_from_storage();
+        for command_index in [6, 7] {
+            battle_shell
+                .step_compiled_script_command(
+                    "RuntimeMap",
+                    "RuntimeTrainerScript",
+                    command_index,
+                    ScriptRuntimeInputs::default(),
+                    ScriptPhoneInputs::default(),
+                )
+                .expect("step scripted trainer setup command");
+        }
         let start_step = battle_shell
             .step_compiled_script_command(
                 "RuntimeMap",
@@ -1544,7 +1820,6 @@
                 8,
                 true,
                 false,
-                start_step.next_cursor.clone(),
                 4,
                 ScriptRuntimeInputs::default(),
                 ScriptPhoneInputs::default(),
@@ -1569,7 +1844,12 @@
             .start_scripted_trainer_battle(&runtime, "RuntimeMap", "RuntimeTrainerScript", 9)
             .expect_err("command indexes are exact");
         let error = error_debug(error);
-        assert!(error.contains("has no scripted trainer battle at RuntimeTrainerScript:9"));
+        assert!(
+            error.contains(
+                "has no scripted or trainer-table battle at RuntimeTrainerScript:9"
+            ),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1604,7 +1884,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("player party Pokemon");
         session.state.sync_party_from_storage();
         let start = session
@@ -1750,7 +2030,7 @@
         session
             .state
             .storage
-            .register_capture(player)
+            .register_capture_in_box(0, player)
             .expect("player party Pokemon");
         session.state.sync_party_from_storage();
         let start = session
@@ -2411,7 +2691,7 @@
         session
             .state
             .storage
-            .register_capture(pokemon)
+            .register_capture_in_box(0, pokemon)
             .expect("register runtime party pokemon");
         session.state.sync_party_from_storage();
     }
@@ -2436,12 +2716,12 @@
         session
             .state
             .storage
-            .register_capture(wounded_runtime_pokemon("CHIKORITA"))
+            .register_capture_in_box(0, wounded_runtime_pokemon("CHIKORITA"))
             .expect("store first");
         session
             .state
             .storage
-            .register_capture(wounded_runtime_pokemon("CYNDAQUIL"))
+            .register_capture_in_box(0, wounded_runtime_pokemon("CYNDAQUIL"))
             .expect("store second");
         session.state.sync_party_from_storage();
 
@@ -2502,7 +2782,7 @@
         session
             .state
             .storage
-            .register_capture(wounded_runtime_pokemon("CHIKORITA"))
+            .register_capture_in_box(0, wounded_runtime_pokemon("CHIKORITA"))
             .expect("store");
         session.state.sync_party_from_storage();
 
@@ -2985,12 +3265,12 @@
         session
             .state
             .storage
-            .register_capture(egg)
+            .register_capture_in_box(0, egg)
             .expect("store egg");
         session
             .state
             .storage
-            .register_capture(chikorita)
+            .register_capture_in_box(0, chikorita)
             .expect("store mon");
         session.state.sync_party_from_storage();
 
@@ -3140,7 +3420,7 @@
             session
                 .state
                 .storage
-                .register_capture(beast)
+                .register_capture_in_box(0, beast)
                 .expect("store beast");
         }
         session.state.sync_party_from_storage();
@@ -3245,7 +3525,7 @@
         session
             .state
             .storage
-            .register_capture(pokemon)
+            .register_capture_in_box(0, pokemon)
             .expect("store party mon");
         session.state.sync_party_from_storage();
         session.state.current_pc_box = 2;
@@ -3584,7 +3864,7 @@
         session
             .state
             .storage
-            .register_capture(pokemon)
+            .register_capture_in_box(0, pokemon)
             .expect("store party mon");
         session.state.sync_party_from_storage();
         let mut happiness_command_shell = RuntimeGameShell {
@@ -3828,7 +4108,7 @@
         session
             .state
             .storage
-            .register_capture(wounded_runtime_pokemon("CHIKORITA"))
+            .register_capture_in_box(0, wounded_runtime_pokemon("CHIKORITA"))
             .expect("store photo mon");
         session.state.sync_party_from_storage();
         let mut previous_checksum = None;
@@ -3941,7 +4221,7 @@
             card_name,
             payout,
             coins,
-            rng_seed_after,
+            random_state_after,
             ..
         } = card_result.outcome.effect
         else {
@@ -3951,7 +4231,7 @@
         assert!(!card_name.is_empty());
         assert_eq!(coins, coins_before - 3 + payout);
         assert_eq!(session.state.coins, coins);
-        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(session.state.random_state, random_state_after);
         assert_eq!(session.state.script_runtime.active_menu, None);
 
         session.state.script_runtime.variables.insert(

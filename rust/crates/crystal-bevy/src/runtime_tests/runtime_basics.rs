@@ -36,6 +36,7 @@
     use crystal_core::systems::learnsets::LearnsetEntry;
     use crystal_core::systems::script_audio::{ScriptAudioCommand, ScriptAudioCue};
     use crystal_core::systems::script_control::{ScriptControlAction, ScriptControlCommand};
+    use crystal_core::systems::script_flags::ScriptFlagCommand;
     use crystal_core::systems::script_objects::{
         ScriptMovement, ScriptMovementStep, ScriptObjectCommand,
     };
@@ -63,6 +64,34 @@
 
     fn error_debug(error: impl std::fmt::Debug + std::fmt::Display) -> String {
         format!("{error:#}")
+    }
+
+    fn magikarp_lengths_for_tests(
+    ) -> Vec<crystal_core::systems::special_routines::MagikarpLengthEntry> {
+        [
+            (110, 1),
+            (310, 2),
+            (710, 4),
+            (2710, 20),
+            (7710, 50),
+            (17710, 100),
+            (32710, 150),
+            (47710, 150),
+            (57710, 100),
+            (62710, 50),
+            (64710, 20),
+            (65210, 5),
+            (65410, 2),
+            (65510, 1),
+        ]
+        .into_iter()
+        .map(|(threshold, divisor)| {
+            crystal_core::systems::special_routines::MagikarpLengthEntry {
+                threshold,
+                divisor,
+            }
+        })
+        .collect()
     }
 
     #[test]
@@ -226,6 +255,13 @@
     fn load_minimal_compiled_runtime(
         name: &str,
     ) -> (std::path::PathBuf, AssetRoot, CrystalRuntime) {
+        load_minimal_compiled_runtime_with_runtime_files(name, BTreeMap::new())
+    }
+
+    fn load_minimal_compiled_runtime_with_runtime_files(
+        name: &str,
+        runtime_files: BTreeMap<String, Vec<u8>>,
+    ) -> (std::path::PathBuf, AssetRoot, CrystalRuntime) {
         let root = temp_repository_root(name);
         write_midi(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_NONE.mid"));
         write_midi(&root.join("apps/web/assets/data/content-packs/test/music/MUSIC_ROUTE_29.mid"));
@@ -248,7 +284,8 @@
         write_floor_tileset(&root, "johto");
         let data_root = root.join("apps/web/assets/data");
         let data = minimal_runtime_data_with_oak_intro();
-        let pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report_for(&data));
+        let pack = CompiledGamePack::new_unchecked_for_tests(data.clone(), report_for(&data))
+            .with_runtime_files_for_tests(runtime_files);
         crystal_assets::write_compiled_game_pack_for_tests(
             data_root.join("runtime.crystalpack"),
             &pack,
@@ -258,6 +295,23 @@
         let runtime = CrystalRuntime::load_from_compiled_pack(&asset_root, "runtime.crystalpack")
             .expect("load runtime");
         (root, asset_root, runtime)
+    }
+
+    fn complete_vendor_runtime_files() -> BTreeMap<String, Vec<u8>> {
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repository root");
+        crystal_assets::REQUIRED_VENDOR_RUNTIME_FILE_KEYS
+            .iter()
+            .map(|&key| {
+                let path = repository_root.join(key);
+                let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+                    panic!("read required vendor asset {}: {error}", path.display())
+                });
+                (key.to_string(), bytes)
+            })
+            .collect()
     }
 
     fn runtime_species() -> PokemonSpecies {
@@ -1007,15 +1061,49 @@
                     options: vec!["CHIKORITA".to_string()],
                 }
             });
-        data.roaming_pokemon
-            .entry("CHIKORITA".to_string())
-            .or_insert_with(
-                || crystal_core::systems::special_routines::RoamingPokemonDefinition {
-                    level: 40,
-                    map_group: 1,
-                    map_number: 1,
+        if data.roaming_pokemon.is_empty() {
+            use crystal_core::systems::special_routines::{
+                RoamingMapLocation, RoamingPokemonCatalog, RoamingPokemonInitWrite,
+                RoamingPokemonRoute,
+            };
+
+            data.roaming_pokemon = RoamingPokemonCatalog {
+                slot_count: 3,
+                inactive_map: RoamingMapLocation {
+                    map_group: 0xfe,
+                    map_number: 0xfd,
                 },
-            );
+                init_writes: vec![
+                    RoamingPokemonInitWrite {
+                        slot: 0,
+                        species: "CHIKORITA".to_string(),
+                        level: 40,
+                        map_group: 1,
+                        map_number: 1,
+                        hp: 0,
+                    },
+                    RoamingPokemonInitWrite {
+                        slot: 1,
+                        species: "CHIKORITA".to_string(),
+                        level: 40,
+                        map_group: 1,
+                        map_number: 2,
+                        hp: 0,
+                    },
+                ],
+                routes: (0_u8..16)
+                    .map(|index| RoamingPokemonRoute {
+                        map_group: 1,
+                        map_number: index + 1,
+                        connections: vec![RoamingMapLocation {
+                            map_group: 1,
+                            map_number: (index + 1) % 16 + 1,
+                        }],
+                    })
+                    .collect(),
+                jump_mask: 15,
+            };
+        }
         data.buena_prizes
             .entry("POKE_BALL".to_string())
             .or_insert(1);
@@ -1046,6 +1134,23 @@
                     timer_seconds: 0,
                     selected_contestant_count: 1,
                     contestant_flags: vec!["EVENT_RUNTIME_CONTESTANT".to_string()],
+                    encounters: {
+                        let mut encounters = (0..10)
+                            .map(|_| crystal_core::systems::special_routines::BugContestEncounterEntry {
+                                weight: 10,
+                                species: "CHIKORITA".to_string(),
+                                min_level: 5,
+                                max_level: 5,
+                            })
+                            .collect::<Vec<_>>();
+                        encounters.push(crystal_core::systems::special_routines::BugContestEncounterEntry {
+                            weight: u8::MAX,
+                            species: "CHIKORITA".to_string(),
+                            min_level: 5,
+                            max_level: 5,
+                        });
+                        encounters
+                    },
                 });
         }
         if data.battle_tower_rules.is_none() {
@@ -1117,12 +1222,7 @@
                 }];
         }
         if data.magikarp_lengths.is_empty() {
-            data.magikarp_lengths = vec![
-                crystal_core::systems::special_routines::MagikarpLengthEntry {
-                    threshold: 1,
-                    divisor: 1,
-                },
-            ];
+            data.magikarp_lengths = magikarp_lengths_for_tests();
         }
         if data.happiness_data.is_none() {
             data.happiness_data = Some(crystal_core::systems::special_routines::HappinessData {
@@ -1447,11 +1547,13 @@
                                 weight: 100,
                                 species: "CHIKORITA".to_string(),
                                 level: 10,
+                                sleep_turns_by_time: Default::default(),
                             }],
                             rare: vec![FieldEncounterEntry {
                                 weight: 100,
                                 species: "CHIKORITA".to_string(),
                                 level: 12,
+                                sleep_turns_by_time: Default::default(),
                             }],
                         },
                     ),
@@ -1462,6 +1564,7 @@
                                 weight: 100,
                                 species: "CHIKORITA".to_string(),
                                 level: 15,
+                                sleep_turns_by_time: Default::default(),
                             }],
                             rare: Vec::new(),
                         },
@@ -1471,6 +1574,56 @@
                 .collect(),
             },
         );
+    }
+
+    fn add_runtime_rock_smash_global_scripts(data: &mut GameDataSet) {
+        data.special_routines.insert(
+            "WarpToSpawnPoint".to_string(),
+            SpecialRoutineRule::default(),
+        );
+        data.story_event_script_constants
+            .global
+            .insert("CHIKORITA".to_string(), 152);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/web/assets/data/story_events/StandardScripts.json");
+        let exported: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read canonical StandardScripts export"),
+        )
+        .expect("parse canonical StandardScripts export");
+        let exported = exported
+            .get("StandardScripts")
+            .and_then(serde_json::Value::as_object)
+            .expect("StandardScripts definitions");
+        let definitions = data
+            .story_events
+            .iter_mut()
+            .find_map(|catalog| catalog.get_mut("StandardScripts"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("minimal StandardScripts catalog");
+        for label in [
+            "RockMonEncounter",
+            ".no_battle@RockMonEncounter",
+            "RockSmashScript",
+            ".done@RockSmashScript",
+            "RockSmashFromMenuScript",
+            "MovementData_RockSmash",
+            "UseRockSmashText",
+        ] {
+            definitions.insert(
+                label.to_string(),
+                exported.get(label).unwrap_or_else(|| panic!("{label} export")).clone(),
+            );
+        }
+        definitions
+            .get_mut("StdScripts")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("minimal StdScripts roots")
+            .extend([
+                serde_json::json!({"command": "add_stdscript", "args": ["RockSmashScript"]}),
+                serde_json::json!({"command": "add_stdscript", "args": ["RockSmashFromMenuScript"]}),
+            ]);
+        data.materialize_global_scripts()
+            .expect("materialize exact Rock Smash common scripts");
     }
 
     fn minimal_runtime_data_with_oak_intro() -> GameDataSet {
@@ -2377,6 +2530,11 @@
                 {"command": "closetext", "args": []},
                 {"command": "loadwildmon", "args": ["CHIKORITA", "6"]},
                 {"command": "startbattle", "args": []},
+                {"command": "reloadmapafterbattle", "args": []},
+                {"command": "setevent", "args": ["EVENT_RUNTIME_WILD_DONE"]},
+                {"command": "setflag", "args": ["ENGINE_RUNTIME_WILD_DONE"]},
+                {"command": "disappear", "args": ["RUNTIME_STATIC_MON"]},
+                {"command": "end", "args": []},
             ]),
         );
         map.scripts.insert(
@@ -2391,6 +2549,10 @@
                 {"command": "closetext", "args": []},
                 {"command": "loadtrainer", "args": ["RIVAL1", "RIVAL1"]},
                 {"command": "startbattle", "args": []},
+                {"command": "reloadmapafterbattle", "args": []},
+                {"command": "setevent", "args": ["EVENT_RUNTIME_TRAINER_POST"]},
+                {"command": "setflag", "args": ["ENGINE_RUNTIME_TRAINER_POST"]},
+                {"command": "end", "args": []},
             ]),
         );
         map.scripts.insert(
@@ -2442,11 +2604,6 @@
                 level: 6,
                 source_script: "RuntimeWildScript".to_string(),
             },
-            reload_map_after_battle: true,
-            pre_battle_event_flags: vec!["EVENT_RUNTIME_WILD_READY".to_string()],
-            post_battle_event_flags: vec!["EVENT_RUNTIME_WILD_DONE".to_string()],
-            post_battle_script_flags: vec!["ENGINE_RUNTIME_WILD_DONE".to_string()],
-            disappear_object_ids: vec!["RUNTIME_STATIC_MON".to_string()],
         });
         map.scripted_trainer_battles.push(ScriptedTrainerBattle {
             source_script: "RuntimeTrainerScript".to_string(),
@@ -2461,9 +2618,67 @@
                 request.source_script = "RuntimeTrainerScript".to_string();
                 request
             },
-            reload_map_after_battle: false,
-            post_battle_event_flags: vec!["EVENT_RUNTIME_TRAINER_POST".to_string()],
-            post_battle_script_flags: vec!["ENGINE_RUNTIME_TRAINER_POST".to_string()],
+        });
+        map.script_map_commands.extend([
+            ScriptMapCommand {
+                command: "reloadmapafterbattle".to_string(),
+                target_map: None,
+                x: None,
+                y: None,
+                facing: None,
+                map_setup: None,
+                source_script: "RuntimeWildScript".to_string(),
+                command_index: 5,
+            },
+            ScriptMapCommand {
+                command: "reloadmapafterbattle".to_string(),
+                target_map: None,
+                x: None,
+                y: None,
+                facing: None,
+                map_setup: None,
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 9,
+            },
+        ]);
+        map.script_flag_commands.extend([
+            ScriptFlagCommand {
+                command: "setevent".to_string(),
+                flag_id: "EVENT_RUNTIME_WILD_DONE".to_string(),
+                source_script: "RuntimeWildScript".to_string(),
+                command_index: 6,
+            },
+            ScriptFlagCommand {
+                command: "setflag".to_string(),
+                flag_id: "ENGINE_RUNTIME_WILD_DONE".to_string(),
+                source_script: "RuntimeWildScript".to_string(),
+                command_index: 7,
+            },
+            ScriptFlagCommand {
+                command: "setevent".to_string(),
+                flag_id: "EVENT_RUNTIME_TRAINER_POST".to_string(),
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 10,
+            },
+            ScriptFlagCommand {
+                command: "setflag".to_string(),
+                flag_id: "ENGINE_RUNTIME_TRAINER_POST".to_string(),
+                source_script: "RuntimeTrainerScript".to_string(),
+                command_index: 11,
+            },
+        ]);
+        map.script_object_commands.push(ScriptObjectCommand {
+            command: "disappear".to_string(),
+            object_id: Some("RUNTIME_STATIC_MON".to_string()),
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: None,
+            emote: None,
+            duration: None,
+            source_script: "RuntimeWildScript".to_string(),
+            command_index: 8,
         });
         map.gift_pokemon_scripts.push(GiftPokemonScript {
             species_id: "CHIKORITA".to_string(),
@@ -2675,6 +2890,218 @@
     }
 
     #[test]
+    fn runtime_file_bytes_partition_materialization_cache_identity() {
+        let key = "data/runtime-cache-probe.bin".to_string();
+        let mut runtime_files_a = complete_vendor_runtime_files();
+        runtime_files_a.insert(key.clone(), b"pack-a".to_vec());
+        let mut runtime_files_b = complete_vendor_runtime_files();
+        runtime_files_b.insert(key, b"pack-b".to_vec());
+        let (root_a, _, runtime_a) = load_minimal_compiled_runtime_with_runtime_files(
+            "runtime-file-cache-a",
+            runtime_files_a,
+        );
+        let (root_b, _, runtime_b) = load_minimal_compiled_runtime_with_runtime_files(
+            "runtime-file-cache-b",
+            runtime_files_b,
+        );
+        let expected_mount_a = std::env::temp_dir().join(format!(
+            "crystal-pack-assets-{}-{}",
+            std::process::id(),
+            runtime_a.pack_identity().content_hash
+        ));
+        let expected_mount_b = std::env::temp_dir().join(format!(
+            "crystal-pack-assets-{}-{}",
+            std::process::id(),
+            runtime_b.pack_identity().content_hash
+        ));
+        let _ = std::fs::remove_dir_all(&expected_mount_a);
+        let _ = std::fs::remove_dir_all(&expected_mount_b);
+
+        let mounted_a = runtime_a
+            .materialize_runtime_files()
+            .expect("materialize pack A runtime files");
+        assert_eq!(
+            std::fs::read(
+                mounted_a
+                    .runtime_assets()
+                    .join("data/runtime-cache-probe.bin")
+            )
+            .expect("read pack A cache byte probe"),
+            b"pack-a"
+        );
+        let mounted_b = runtime_b
+            .materialize_runtime_files()
+            .expect("materialize pack B runtime files");
+        assert_eq!(
+            std::fs::read(
+                mounted_b
+                    .runtime_assets()
+                    .join("data/runtime-cache-probe.bin")
+            )
+            .expect("read pack B cache byte probe"),
+            b"pack-b"
+        );
+        assert_ne!(
+            runtime_a.pack_identity().content_hash,
+            runtime_b.pack_identity().content_hash
+        );
+        assert_ne!(mounted_a.repository_root, mounted_b.repository_root);
+
+        let _ = std::fs::remove_dir_all(expected_mount_a);
+        let _ = std::fs::remove_dir_all(expected_mount_b);
+        let _ = std::fs::remove_dir_all(root_a);
+        let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn runtime_file_bundle_materializes_exact_vendor_dependency_closure_from_empty_root() {
+        let runtime_files = complete_vendor_runtime_files();
+        let (root, asset_root, runtime) = load_minimal_compiled_runtime_with_runtime_files(
+            "runtime-file-vendor-closure",
+            runtime_files.clone(),
+        );
+        assert!(
+            !asset_root.vendor_pokecrystal().exists(),
+            "runtime fixture root must not contain a repository vendor checkout"
+        );
+        assert_eq!(
+            runtime
+                .runtime_files
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            crystal_assets::REQUIRED_VENDOR_RUNTIME_FILE_KEYS
+        );
+        let expected_mount = std::env::temp_dir().join(format!(
+            "crystal-pack-assets-{}-{}",
+            std::process::id(),
+            runtime.pack_identity().content_hash
+        ));
+        let _ = std::fs::remove_dir_all(&expected_mount);
+
+        let mounted = runtime
+            .materialize_runtime_files()
+            .expect("materialize complete vendor runtime bundle");
+        for &key in crystal_assets::REQUIRED_VENDOR_RUNTIME_FILE_KEYS {
+            assert_eq!(
+                std::fs::read(mounted.repository_root.join(key)).unwrap_or_else(|error| {
+                    panic!("read materialized vendor asset {key}: {error}")
+                }),
+                runtime_files[key],
+                "materialized vendor asset bytes must come from the compiled pack: {key}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(expected_mount);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_file_materialization_rejects_path_aliases_before_writing() {
+        let (root, _, runtime) = load_minimal_compiled_runtime("runtime-file-invalid-paths");
+        let absolute_escape = root.join("absolute-escape.bin");
+        let cases = [
+            (
+                "data/./current-alias.bin".to_string(),
+                "must not include current-directory components",
+            ),
+            (
+                "../parent-escape.bin".to_string(),
+                "must not traverse parent directories",
+            ),
+            (
+                r"data\..\parent-escape.bin".to_string(),
+                "must not traverse parent directories",
+            ),
+            (
+                "data//double-alias.bin".to_string(),
+                "must not contain empty path components",
+            ),
+            (
+                r"data\\double-alias.bin".to_string(),
+                "must not contain empty path components",
+            ),
+            (
+                "data/trailing-alias.bin/".to_string(),
+                "must not contain empty path components",
+            ),
+            (
+                r"data\trailing-alias.bin\".to_string(),
+                "must not contain empty path components",
+            ),
+            (r"C:\absolute-escape.bin".to_string(), "must be relative"),
+            (
+                r"\\server\share\escape.bin".to_string(),
+                "must be relative",
+            ),
+            (
+                r"data\portable-separator.bin".to_string(),
+                "must use forward-slash separators",
+            ),
+            (
+                absolute_escape.to_string_lossy().into_owned(),
+                "must be relative",
+            ),
+        ];
+
+        for (key, expected) in cases {
+            let mut invalid_runtime = runtime.clone();
+            invalid_runtime.runtime_files =
+                BTreeMap::from([(key.clone(), b"must-not-write".to_vec())]);
+            let mount = std::env::temp_dir().join(format!(
+                "crystal-pack-assets-{}-{}",
+                std::process::id(),
+                invalid_runtime.pack_identity().content_hash
+            ));
+            let _ = std::fs::remove_dir_all(&mount);
+
+            let error = invalid_runtime
+                .materialize_runtime_files()
+                .expect_err("aliased runtime-file key must be rejected")
+                .to_string();
+            assert!(error.contains(expected) && error.contains(&key), "{error}");
+            assert!(
+                !mount.exists(),
+                "runtime-file validation must finish before creating the mount"
+            );
+            assert!(
+                !absolute_escape.exists(),
+                "absolute runtime-file key must never be written"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn release_audio_programs_do_not_reference_external_pcm_files() {
+        for (path, source) in [
+            (
+                "crystal-audio/src/lib.rs",
+                include_str!("../../../crystal-audio/src/lib.rs"),
+            ),
+            ("crystal-bevy/src/lib.rs", include_str!("../lib.rs")),
+            (
+                "crystal-bevy/src/bevy_shell.rs",
+                include_str!("../bevy_shell.rs"),
+            ),
+            (
+                "crystal-bevy/src/bevy_shell/graphics_assets.rs",
+                include_str!("../bevy_shell/graphics_assets.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains("PcmFile"),
+                "{path} must not retain an external-file audio source"
+            );
+        }
+        assert!(
+            !include_str!("../lib.rs").contains("from_game_data_with_external_audio_root"),
+            "the zero-caller external audio-root constructor must stay removed"
+        );
+    }
+
+    #[test]
     fn regenerated_pack_keeps_pcm_lazy_until_playback() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -2779,6 +3206,44 @@
             "{error:#}"
         );
         let _ = std::fs::remove_dir_all(reject_root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visible_title_recovers_backup_only_save_before_offering_continue() {
+        let (root, asset_root, runtime) = load_minimal_compiled_runtime("title-backup-save");
+        let save_path = root.join("target/crystal-bevy/saves/core-modular.crystalsave");
+        let mut shell = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
+            .expect("game shell");
+        shell.save(&save_path).expect("write primary save");
+        shell.save(&save_path).expect("rotate primary save to backup");
+        let backup_path = PathBuf::from(format!("{}.bak", save_path.display()));
+        assert!(backup_path.exists(), "second save must create a backup");
+        std::fs::remove_file(&save_path).expect("remove primary save");
+
+        let smoke = smoke_visible_shell_title(
+            asset_root,
+            runtime,
+            0,
+            Some(save_path.clone()),
+            true,
+        )
+        .expect("title Continue must recover the validated backup save");
+
+        assert_eq!(smoke.selected, "CONTINUE");
+        assert_eq!(
+            smoke.title_entries,
+            vec![
+                ">CONTINUE".to_string(),
+                " NEW GAME".to_string(),
+                " OPTION".to_string()
+            ]
+        );
+        assert!(
+            save_path.exists(),
+            "reading the valid backup must restore the primary save"
+        );
+        assert_eq!(smoke.saved_frame, Some(0));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4393,26 +4858,6 @@
                 .require_pending_special_battle_type("BATTLETYPE_NORMAL")
                 .is_err()
         );
-        let missing_static_wild = RuntimeStaticWildBattleOriginKey {
-            map_name: "RuntimeMap".to_string(),
-            source_script: "RuntimeWildScript".to_string(),
-            battle_type: "BATTLETYPE_NORMAL".to_string(),
-            species: "CHIKORITA".to_string(),
-            level: 5,
-            reload_map_after_battle: false,
-        };
-        assert!(shell.runtime().static_wild_battle_origin_keys().is_empty());
-        assert!(
-            !shell
-                .runtime()
-                .has_static_wild_battle_origin(&missing_static_wild)
-        );
-        assert!(
-            shell
-                .runtime()
-                .require_static_wild_battle_origin(&missing_static_wild)
-                .is_err()
-        );
         let missing_wild_encounter = RuntimeWildEncounterOriginKey {
             map_name: "RuntimeMap".to_string(),
             species: "CHIKORITA".to_string(),
@@ -5966,13 +6411,6 @@
                 .require_pending_special_battle_type("BATTLETYPE_NORMAL")
                 .is_err()
         );
-        assert!(shell.static_wild_battle_origin_keys().is_empty());
-        assert!(!shell.has_static_wild_battle_origin(&missing_static_wild));
-        assert!(
-            shell
-                .require_static_wild_battle_origin(&missing_static_wild)
-                .is_err()
-        );
         assert!(
             shell
                 .wild_encounter_origin_keys()
@@ -6412,78 +6850,101 @@
                 .expect("input journal fingerprint")
         );
         assert_eq!(input_journal_frame.journal(), &input_journal.journal);
-        let save_resume_message = shell
-            .save_resume_replay_message(
-                &link_descriptor,
-                input_journal.clone(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .expect("save resume replay message");
-        let LinkMessage::SaveResumeReplay(save_resume_replay) = save_resume_message else {
-            panic!("expected save resume replay message");
-        };
-        assert_eq!(
-            save_resume_replay.checkpoint(),
-            &link_descriptor.save_checkpoint
-        );
-        assert_eq!(
-            save_resume_replay
-                .replay()
-                .input_journal()
-                .journal()
-                .start_checksum(),
-            link_descriptor.save_checkpoint.checkpoint().checksum()
-        );
-        assert_eq!(
-            save_resume_replay.replay().terminal_checksum(),
-            &terminal_checksum
-        );
+        let replay_descriptor = shell
+            .link_session_descriptor("runtime-replay", 1, "P1")
+            .expect("runtime replay descriptor");
         let mut recorded_journal_shell = shell.clone();
+        recorded_journal_shell.clear_retained_runtime_commands();
         let recorded_journal = recorded_journal_shell
-            .record_local_input_journal(&link_descriptor, vec![vec![GameButton::Right]])
+            .record_local_input_journal(&replay_descriptor, vec![vec![GameButton::Right]])
             .expect("record local runtime input journal");
         assert_eq!(
             recorded_journal.journal.start_checksum(),
-            &link_descriptor.checksum
+            &replay_descriptor.checksum
         );
-        assert_eq!(recorded_journal.journal.players(), &BTreeSet::from([7]));
+        assert_eq!(recorded_journal.journal.players(), &BTreeSet::from([1]));
         assert_eq!(recorded_journal.journal.frames().len(), 1);
         assert_eq!(
             recorded_journal.journal.frames()[0].frame(),
             initial.state_checksum.frame()
         );
         assert_eq!(
-            recorded_journal.journal.frames()[0].joypad_mask_for(7),
+            recorded_journal.journal.frames()[0].joypad_mask_for(1),
             Some(B_PAD_RIGHT)
         );
         assert_eq!(
             recorded_journal.journal.terminal_checksum(),
             &recorded_journal_shell
-                .state_checksum_frame(7)
+                .state_checksum_frame(1)
                 .expect("recorded terminal checksum")
         );
+        let replay_commands = recorded_journal_shell
+            .retained_runtime_commands()
+            .iter()
+            .cloned()
+            .map(|command| {
+                SessionRuntimeCommandFrame::new(
+                    replay_descriptor.session.clone(),
+                    command,
+                )
+                .expect("bind replay command")
+            })
+            .collect();
+        let replay_results = recorded_journal_shell
+            .retained_runtime_results()
+            .iter()
+            .cloned()
+            .map(|result| {
+                SessionRuntimeCommandResultFrame::new(
+                    replay_descriptor.session.clone(),
+                    result,
+                )
+                .expect("bind replay result")
+            })
+            .collect();
+        let save_resume_message = recorded_journal_shell
+            .save_resume_replay_message(
+                &replay_descriptor,
+                recorded_journal.clone(),
+                replay_commands,
+                replay_results,
+                Vec::new(),
+            )
+            .expect("save exact command-authoritative replay message");
+        let LinkMessage::SaveResumeReplay(save_resume_replay) = save_resume_message else {
+            panic!("expected save resume replay message");
+        };
+        assert_eq!(
+            save_resume_replay.checkpoint(),
+            &replay_descriptor.save_checkpoint
+        );
         let mut replayed_journal_shell = shell.clone();
+        replayed_journal_shell.clear_retained_runtime_commands();
         replayed_journal_shell
-            .validate_local_input_journal_start(&link_descriptor, &recorded_journal.journal)
+            .validate_local_input_journal_start(&replay_descriptor, &recorded_journal.journal)
             .expect("preflight local input journal");
         let replayed_journal = replayed_journal_shell
-            .apply_local_input_journal(&link_descriptor, recorded_journal.journal.clone())
-            .expect("apply local runtime input journal");
+            .apply_deterministic_replay_bundle(
+                &replay_descriptor,
+                save_resume_replay.replay(),
+            )
+            .expect("apply exact runtime command replay");
         assert_eq!(
             replayed_journal.terminal_checksum,
             recorded_journal.terminal_checksum
         );
         assert_eq!(
             replayed_journal_shell
-                .state_checksum_frame(7)
+                .state_checksum_frame(1)
                 .expect("replayed terminal checksum"),
             recorded_journal.terminal_checksum
         );
         assert!(
             replayed_journal_shell
-                .validate_local_input_journal_start(&link_descriptor, &recorded_journal.journal)
+                .validate_local_input_journal_start(
+                    &replay_descriptor,
+                    &recorded_journal.journal,
+                )
                 .is_err()
         );
         assert_eq!(
@@ -6885,8 +7346,8 @@
             initial
                 .special
                 .roaming_pokemon
-                .get("CHIKORITA")
-                .map(|rule| rule.level),
+                .init_write(0)
+                .map(|write| write.level),
             Some(40)
         );
         assert_eq!(initial.special.buena_prizes.get("POKE_BALL"), Some(&1));
@@ -7348,6 +7809,7 @@
                 12,
                 RuntimeMutationCommand::ApplyOverworldInput(RuntimeOverworldInputCommand {
                     buttons: vec![GameButton::Down],
+                    divider_trace: RuntimeDividerTrace::new([]),
                 }),
             )
             .expect("runtime command frame");
@@ -7634,6 +8096,7 @@
         );
         let enemy = Pokemon::new_for_tests(runtime_species(), 14, Dv::default());
         shell.session_mut().state.battle = BattleMemory::Wild {
+            roaming_slot: None,
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
             map_name: "RuntimeMap".to_string(),

@@ -47,7 +47,7 @@
     "pack:dry-run": "npm pack --dry-run --workspace @pokecrystal/core && npm pack --dry-run --workspace @pokecrystal/assets && npm pack --dry-run --workspace @pokecrystal/exporters && npm pack --dry-run --workspace @pokecrystal/cli && npm pack --dry-run --workspace @pokecrystal/agents",
     "release:check": "npm run verify:asm && CI=1 npm run build:packages && CI=1 npm run test:core && CI=1 npm run test:assets && CI=1 npm run test:exporters && CI=1 npm run test:cli -- --runInBand --ci && CI=1 npm run test:agents -- --ci && npm run pack:dry-run",
     "typecheck": "npm run lint:types --workspace @pokecrystal/core && npm run lint:types --workspace @pokecrystal/assets && npm run lint:types --workspace @pokecrystal/exporters && npm run lint:types --workspace @pokecrystal/cli && npm run lint:types --workspace @pokecrystal/agents && npm run lint:types --workspace @pokecrystal/web",
-    "export:core": "npm run export:core --workspace @pokecrystal/exporters",
+    "export:core": "./export",
     "verify:asm": "node scripts/verify-asm-source.mjs",
     "verify:pack": "node scripts/verify-pack-provenance.mjs",
     "asm:boot": "uv run --project tools/asm-oracle python tools/asm-oracle/boot_smoke.py vendor/pokecrystal/pokecrystal.gbc",

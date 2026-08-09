@@ -7,7 +7,9 @@ use crate::battle::capture::{
     StoredCapture, complete_active_wild_capture_result, throw_ball_from_bag,
 };
 use crate::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
-use crate::battle::start::deactivate_battle;
+use crate::battle::start::{
+    deactivate_battle_after_draw, deactivate_battle_after_loss, deactivate_battle_after_win,
+};
 use crate::battle::stats::BattleStatMultiplierTables;
 use crate::battle::turn::{
     BattleAction, BattleEvent, BattleSide, BattleTurnCommitError, BattleTurnError, BattleTurnInput,
@@ -58,6 +60,8 @@ pub enum ActiveBattleFlowError {
     CaptureUse(#[from] CaptureUseError),
     #[error("capture completion error: {0}")]
     CaptureComplete(String),
+    #[error("capture storage error: {0}")]
+    CaptureStorage(String),
     #[error("battle item error: {0:?}")]
     BattleItem(#[from] BattleItemError),
     #[error("bag update error: {0}")]
@@ -174,19 +178,37 @@ fn resolve_active_battle_capture_or_escape_item(
         })?;
     if item.battle_capture_ball == Some(true) {
         let (player, enemy, context) = active_capture_context(state, item_id)?;
-        let capture = throw_ball_from_bag(
-            &mut state.bag,
-            item,
-            &player,
-            &enemy,
-            context,
-            capture_rules,
-            wobble_probabilities,
-            rng,
-        )?
-        .ok_or_else(|| ActiveBattleFlowError::MissingBagItem {
-            item_id: item_id.to_string(),
-        })?;
+        let capture = if !context.trainer_battle
+            && !state
+                .storage
+                .has_capture_space_in_box(state.current_pc_box)
+                .map_err(ActiveBattleFlowError::CaptureStorage)?
+        {
+            CaptureOutcome {
+                caught: false,
+                blocked: true,
+                storage_full: true,
+                wobble_count: 0,
+                animation_shakes: 0,
+                final_catch_rate: 0,
+                rng_seed_after: rng.seed(),
+                ball_id: Some(item.script_name.clone()),
+            }
+        } else {
+            throw_ball_from_bag(
+                &mut state.bag,
+                item,
+                &player,
+                &enemy,
+                context,
+                capture_rules,
+                wobble_probabilities,
+                rng,
+            )?
+            .ok_or_else(|| ActiveBattleFlowError::MissingBagItem {
+                item_id: item_id.to_string(),
+            })?
+        };
         state.rng_seed = capture.rng_seed_after;
         let completion = if capture.caught && !capture.blocked {
             complete_active_wild_capture_result(state, &capture)
@@ -319,12 +341,17 @@ fn battle_flow_end_from_turn(turn: &BattleTurnOutcome) -> ActiveBattleFlowEnd {
 }
 
 pub fn force_end_active_battle_to_overworld(state: &mut GameState) -> ActiveBattleFlowEnd {
+    let player_has_usable_pokemon = state.storage.party.pokemon.iter().flatten().any(|pokemon| {
+        !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0
+    });
     let end = match &state.battle {
         BattleMemory::Inactive => ActiveBattleFlowEnd::Ongoing,
         BattleMemory::Wild { enemy_pokemon, .. }
         | BattleMemory::StaticWild { enemy_pokemon, .. } => {
             if enemy_pokemon.hp == 0 {
                 ActiveBattleFlowEnd::EnemyFainted
+            } else if !player_has_usable_pokemon {
+                ActiveBattleFlowEnd::PlayerFainted
             } else {
                 ActiveBattleFlowEnd::PlayerFled
             }
@@ -337,6 +364,15 @@ pub fn force_end_active_battle_to_overworld(state: &mut GameState) -> ActiveBatt
             }
         }
     };
-    deactivate_battle(state);
+    match end {
+        ActiveBattleFlowEnd::EnemyFainted | ActiveBattleFlowEnd::Caught => {
+            deactivate_battle_after_win(state)
+        }
+        ActiveBattleFlowEnd::PlayerFled | ActiveBattleFlowEnd::EnemyFled => {
+            deactivate_battle_after_draw(state)
+        }
+        ActiveBattleFlowEnd::PlayerFainted => deactivate_battle_after_loss(state),
+        ActiveBattleFlowEnd::Ongoing => {}
+    }
     end
 }

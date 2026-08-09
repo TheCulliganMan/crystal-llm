@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  echo "Usage: ./export"
+  echo "Export the canonical game pack with the Rust crystal-assets exporter."
+  exit 0
+fi
+
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target-pack-core}"
+exec cargo run --quiet \
+  --manifest-path "$repo_root/rust/Cargo.toml" \
+  -p crystal-assets \
+  --bin pack_core \
+  -- "$repo_root" "$@"

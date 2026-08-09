@@ -238,4 +238,34 @@ describe("Game loop timing", () => {
       drawSpy.mockRestore();
     }
   });
+
+  it("keeps the last completed overworld frame while a replacement tileset is loading", async () => {
+    const game = await buildGame();
+    const internals = game as GameLoopInternals;
+    const ui = (game as unknown as { ui: { clearScreen: () => void; update: () => void } }).ui;
+    const clearScreenSpy = jest.spyOn(ui, "clearScreen");
+    const updateSpy = jest.spyOn(ui, "update");
+    const overworld = game.getOverworld() as Overworld & {
+      map_surface: Surface | null;
+      _composite_surface: Surface | null;
+    };
+    const originalMapSurface = overworld.map_surface;
+    const originalCompositeSurface = overworld._composite_surface;
+
+    try {
+      // Map loading clears these surfaces until the tileset promise resolves.
+      overworld.map_surface = null;
+      overworld._composite_surface = null;
+
+      internals.draw();
+
+      expect(clearScreenSpy).not.toHaveBeenCalled();
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      overworld.map_surface = originalMapSurface;
+      overworld._composite_surface = originalCompositeSurface;
+      clearScreenSpy.mockRestore();
+      updateSpy.mockRestore();
+    }
+  });
 });

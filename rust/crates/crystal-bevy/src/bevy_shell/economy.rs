@@ -1775,7 +1775,6 @@ fn use_battle_escape_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &
     runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
     mark_runtime_snapshot_dirty(runtime_shell);
     if used.escaped {
-        queue_visible_pay_day_payout(runtime_shell, &snapshot);
         finish_visible_wild_battle_exit(runtime_shell, scripted_static_wild, "battle_escape")?;
     } else {
         reset_visible_battle_action_cursors(runtime_shell);
@@ -1834,54 +1833,6 @@ fn use_guard_spec_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &str) -> 
     Ok(())
 }
 
-fn start_or_complete_visible_scripted_wild_battle(
-    runtime_shell: &mut BevyRuntimeShell,
-) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    if let Some(battle) = snapshot.battle {
-        let RuntimeBattleKind::StaticWild { source_script, .. } = battle.kind else {
-            anyhow::bail!("active battle is not a scripted wild battle");
-        };
-        complete_visible_scripted_wild_battle(
-            runtime_shell,
-            &snapshot.overworld.map_name,
-            &source_script,
-        )?;
-        return Ok(());
-    }
-    let key = runtime_shell
-        .shell
-        .scripted_wild_battle_keys()
-        .into_iter()
-        .find(|key| key.map_name == snapshot.overworld.map_name)
-        .with_context(|| {
-            format!(
-                "map {} has no compiled scripted wild battle",
-                snapshot.overworld.map_name
-            )
-        })?;
-    record_visible_runtime_action(
-        runtime_shell,
-        format!(
-            "battle:start_static_wild:{}:{}:{}",
-            key.map_name.as_str(),
-            key.source_script.as_str(),
-            key.startbattle_command_index
-        ),
-    )?;
-    let start = runtime_shell.shell.start_scripted_wild_battle(
-        &key.map_name,
-        &key.source_script,
-        key.startbattle_command_index,
-    )?;
-    prepare_visible_battle_entry(runtime_shell)?;
-    runtime_shell.last_audio_events.push(format!(
-        "scripted wild start source={} species={} level={} start={:?}",
-        key.source_script, key.species, key.level, start
-    ));
-    Ok(())
-}
-
 fn start_or_complete_visible_scripted_trainer_battle(
     runtime_shell: &mut BevyRuntimeShell,
 ) -> Result<()> {
@@ -1934,57 +1885,37 @@ fn start_or_complete_visible_scripted_trainer_battle(
 
 fn complete_visible_scripted_wild_battle(
     runtime_shell: &mut BevyRuntimeShell,
-    map_name: &str,
-    source_script: &str,
+    origin: &VisibleStaticWildOrigin,
 ) -> Result<()> {
-    let key = runtime_shell
-        .shell
-        .scripted_wild_battle_keys()
-        .into_iter()
-        .find(|key| key.map_name == map_name && key.source_script == source_script)
-        .with_context(|| {
-            format!(
-                "compiled scripted wild battle key missing for {} on {}",
-                source_script, map_name
-            )
-        })?;
     record_visible_runtime_action(
         runtime_shell,
         format!(
             "battle:complete_static_wild:{}:{}:{}",
-            key.map_name.as_str(),
-            key.source_script.as_str(),
-            key.startbattle_command_index
+            origin.map_name,
+            origin.source_script,
+            origin.startbattle_command_index
         ),
     )?;
-    let next_cursor = Some(RuntimeCompiledScriptCursor {
-        origin_map_name: key.map_name.clone(),
-        source_script: key.source_script.clone(),
-        command_index: key.startbattle_command_index + 1,
-    });
     let completed = runtime_shell
         .shell
         .complete_scripted_wild_battle_and_run_compiled_script(
-            &key.map_name,
-            &key.source_script,
-            key.startbattle_command_index,
-            next_cursor,
+            origin.clone(),
             256,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
         )?;
     let completion = completed.completion;
     runtime_shell.last_audio_events.push(format!(
-        "scripted wild complete source={} reload={} effects={:?} resumed_steps={} checksum={:?}",
-        key.source_script,
-        key.reload_map_after_battle,
-        completion.effects,
+        "scripted wild complete source={} reload={} resumed_steps={} checksum={:?}",
+        origin.source_script,
+        completed
+            .run
+            .steps
+            .iter()
+            .any(|step| step.command == "reloadmapafterbattle"),
         completed.run.steps.len(),
         completion.state_checksum
     ));
-    if key.reload_map_after_battle {
-        reset_visible_map_reload_after_battle(runtime_shell, "scripted_wild_battle_reload");
-    }
     let reached_boundary =
         integrate_visible_compiled_script_run(runtime_shell, &completed.run.steps)?;
     arm_visible_active_script_cursor_from_run(runtime_shell, completed.run.next_cursor);
@@ -2005,11 +1936,28 @@ fn complete_visible_scripted_trainer_battle(
 ) -> Result<()> {
     let battle_before_completion = runtime_shell.shell.snapshot()?;
     let player_name = battle_before_completion.trainer.player_name.clone();
+    let (active_trainer_class, active_trainer_id) = match battle_before_completion
+        .battle
+        .as_ref()
+        .map(|battle| &battle.kind)
+    {
+        Some(RuntimeBattleKind::Trainer {
+            trainer_class,
+            trainer_id,
+            ..
+        }) => (trainer_class.as_str(), trainer_id.as_str()),
+        _ => anyhow::bail!("active battle is not a scripted trainer battle"),
+    };
     let key = runtime_shell
         .shell
         .scripted_trainer_battle_keys()
         .into_iter()
-        .find(|key| key.map_name == map_name && key.source_script == source_script)
+        .find(|key| {
+            key.map_name == map_name
+                && key.source_script == source_script
+                && key.trainer_class == active_trainer_class
+                && key.trainer_id == active_trainer_id
+        })
         .with_context(|| {
             format!(
                 "compiled scripted trainer battle key missing for {} on {}",
@@ -2027,11 +1975,6 @@ fn complete_visible_scripted_trainer_battle(
             can_lose
         ),
     )?;
-    let next_cursor = Some(RuntimeCompiledScriptCursor {
-        origin_map_name: key.map_name.clone(),
-        source_script: key.source_script.clone(),
-        command_index: key.startbattle_command_index + 1,
-    });
     let completed = runtime_shell
         .shell
         .complete_scripted_trainer_battle_and_run_compiled_script(
@@ -2040,7 +1983,6 @@ fn complete_visible_scripted_trainer_battle(
             key.startbattle_command_index,
             won,
             can_lose,
-            next_cursor,
             256,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -2061,17 +2003,12 @@ fn complete_visible_scripted_trainer_battle(
     }
     queue_visible_pay_day_payout(runtime_shell, &battle_before_completion);
     runtime_shell.last_audio_events.push(format!(
-        "scripted trainer complete source={} reload={} effects={:?} resumed_steps={} checksum={:?}",
+        "scripted trainer complete source={} resumed_steps={} checksum={:?}",
         key.source_script,
-        key.reload_map_after_battle,
-        completion.effects,
         completed.run.steps.len(),
         completion.state_checksum
     ));
     if completion.continued_after_battle {
-        if key.reload_map_after_battle {
-            reset_visible_map_reload_after_battle(runtime_shell, "scripted_trainer_battle_reload");
-        }
         let reached_boundary =
             integrate_visible_compiled_script_run(runtime_shell, &completed.run.steps)?;
         arm_visible_active_script_cursor_from_run(runtime_shell, completed.run.next_cursor);
@@ -2363,12 +2300,59 @@ fn finish_visible_wild_battle_with_first_move(runtime_shell: &mut BevyRuntimeShe
             continue;
         }
         if visible_active_battle_player_fainted(&snapshot) {
-            anyhow::bail!("visible wild battle smoke player Pokemon fainted before battle ended");
+            let active_moves = snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.is_active_battle_pokemon)
+                .map(|slot| {
+                    slot.pokemon
+                        .moves
+                        .iter()
+                        .map(|learned| {
+                            let power = snapshot
+                                .moves
+                                .iter()
+                                .find(|known| known.move_id == learned.name)
+                                .map_or(0, |known| known.power);
+                            format!("{}({power})", learned.name)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            anyhow::bail!(
+                "visible wild battle smoke player Pokemon fainted before battle ended; moves={active_moves:?}"
+            );
         }
         select_visible_battle_action(runtime_shell, VisibleBattleAction::Fight)?;
         if runtime_shell.battle_move_cursor.is_none() {
             press_visible_battle_a_button(runtime_shell)?;
         }
+        let move_index = snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.is_active_battle_pokemon)
+            .and_then(|slot| {
+                slot.pokemon
+                    .moves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, learned)| learned.current_pp > 0)
+                    .max_by_key(|(_, learned)| {
+                        snapshot
+                            .moves
+                            .iter()
+                            .find(|known| known.move_id == learned.name)
+                            .map_or(0, |known| known.power)
+                    })
+                    .map(|(index, _)| index)
+            })
+            .unwrap_or(0);
+        runtime_shell.battle_move_cursor = Some(MenuCursor {
+            surface_id: "battle:moves".to_string(),
+            option_index: move_index,
+        });
         press_visible_battle_a_button(runtime_shell)?;
     }
     anyhow::bail!("visible wild battle smoke did not finish within 32 turns")
@@ -2646,10 +2630,7 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
             throw_visible_battle_ball_id(runtime_shell, 0, "POKE_BALL".to_string())
         }
         VisibleBattleAction::Pack
-            if matches!(
-                battle.battle_type.as_str(),
-                "BATTLETYPE_CONTEST" | "BATTLETYPE_BUG_CONTEST" | "BATTLETYPE_PARK"
-            ) =>
+            if battle.battle_type == "BATTLETYPE_CONTEST" =>
         {
             if snapshot.bug_contest.park_balls_remaining == 0 {
                 record_visible_runtime_action(runtime_shell, "battle:park_ball:none")?;

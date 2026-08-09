@@ -2243,6 +2243,13 @@ export class Game {
     if (shouldPreserveInputCaptureOverlay) {
       return;
     }
+    // A tileset refresh intentionally releases the old map surfaces while its
+    // replacement loads. Do not present the clear that normally starts a
+    // frame in that interval: it would replace the last complete overworld
+    // frame with black until the asynchronous rebuild finishes.
+    if (this.currentState === "overworld" && !this.hasCompleteOverworldFrame()) {
+      return;
+    }
     this.ui.clearScreen([0, 0, 0]);
     const shouldDrawBootPixels = !(this.ui instanceof TextUI);
     switch (this.currentState) {
@@ -2324,6 +2331,14 @@ export class Game {
     if (!(this.currentState === "battle" && this.battleUi?.presented_this_frame)) {
       this.ui.update();
     }
+  }
+
+  private hasCompleteOverworldFrame(): boolean {
+    const overworld = this.overworld as Overworld & {
+      map_surface?: Surface | null;
+      _composite_surface?: Surface | null;
+    };
+    return Boolean(overworld._composite_surface ?? overworld.map_surface);
   }
 
   private handleInput(): void {

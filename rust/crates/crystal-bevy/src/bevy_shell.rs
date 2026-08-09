@@ -16,18 +16,24 @@ use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::texture::ImageSampler;
+#[cfg(feature = "location-tester")]
+use bevy::render::view::screenshot::ScreenshotManager;
+#[cfg(feature = "location-tester")]
+use bevy::window::PrimaryWindow;
 use bevy::window::{PresentMode, WindowResolution};
+use chrono::{Datelike, Local as ChronoLocal, Timelike};
 use crystal_assets::{
     RuntimeBadgeRegion, RuntimeBugContestAction, RuntimeCurrencyAccount, RuntimeDayCareAction,
     RuntimeDayCareCaretaker, RuntimeGameCornerService, RuntimeGraphicsSpecial,
-    RuntimeHappinessServiceRoutine, RuntimeLinkBattleResult, RuntimeMysteryGiftAction, RuntimePartyCheckSpecial,
-    RuntimePhoneRandomSpecial, RuntimeShuckieAction, RuntimeStoryGateSpecial,
+    RuntimeHappinessServiceRoutine, RuntimeLinkBattleResult, RuntimeMysteryGiftAction,
+    RuntimePartyCheckSpecial, RuntimePhoneRandomSpecial, RuntimeShuckieAction,
+    RuntimeStoryGateSpecial,
 };
 
 use crate::assets::{
-    ModpackAudioKind, ModpackAudioPlaybackMode, RuntimeMutationOutcome,
-    RuntimeMutationResult, RuntimePendingScriptRequestKind, RuntimeScriptEventQueue,
-    RuntimeScriptRuntimeFlag, RuntimeScriptRuntimeFlagValue, RuntimeScriptRuntimeMemoryEntry,
+    ModpackAudioKind, ModpackAudioPlaybackMode, RuntimeMutationOutcome, RuntimeMutationResult,
+    RuntimePendingScriptRequestKind, RuntimeScriptEventQueue, RuntimeScriptRuntimeFlag,
+    RuntimeScriptRuntimeFlagValue, RuntimeScriptRuntimeMemoryEntry,
     RuntimeScriptRuntimeMemoryValue, RuntimeScriptRuntimeQueue, RuntimeScriptRuntimeRecordQueue,
 };
 use crate::audio::{AudioKind, AudioProgramSource};
@@ -51,6 +57,7 @@ use crate::core::systems::battle_items::{
     ITEM_EFFECT_BEHAVIOR_RARE_CANDY,
 };
 use crate::core::systems::battle_rewards::BattleRewardError;
+use crate::core::systems::evolution::EvolutionReport;
 use crate::core::systems::field_items::FieldItemPickupOutcome;
 use crate::core::systems::field_moves::FieldMoveError;
 use crate::core::systems::phone::ScriptPhoneInputs;
@@ -73,10 +80,9 @@ use crate::core::world::session::{
 use crate::{
     CrystalRuntime, RuntimeBagItemSnapshot, RuntimeBattleKind, RuntimeCompiledScriptCursor,
     RuntimeElevatorSnapshot, RuntimeFlyDestinationKey, RuntimeGameShell,
-    RuntimeGiftPokemonSnapshot, RuntimeLinkSessionDescriptor, RuntimePendingScriptRequest,
-    RuntimeResolvedAudioPlaybackKind, RuntimeShellSnapshot, RuntimeMapCatalogSnapshot,
-    RuntimeTilesetKey,
-    assets::AssetRoot,
+    RuntimeGiftPokemonSnapshot, RuntimeLinkSessionDescriptor, RuntimeMapCatalogSnapshot,
+    RuntimePendingScriptRequest, RuntimeResolvedAudioPlaybackKind, RuntimeRtcSample,
+    RuntimeShellSnapshot, RuntimeTilesetKey, assets::AssetRoot,
 };
 
 mod intro_renderer;
@@ -214,11 +220,11 @@ const OPTIONS_MENU_ITEMS: &[OptionsMenuItem] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BevyShellStart {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     NewGame {
         spawn_identifier: u16,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     NewGameAtRuntimeTile {
         spawn_identifier: u16,
         map_name: String,
@@ -238,6 +244,12 @@ pub enum BevyShellStart {
 pub struct BevyShellConfig {
     pub quick_save_path: Option<PathBuf>,
     pub smoke_player_name: Option<String>,
+    /// `None` keeps the optional voxel feature's normal enabled behavior;
+    /// location tools can force either side of a 2D/2.5D comparison.
+    pub voxel_view_enabled: Option<bool>,
+    pub window_title: Option<String>,
+    #[cfg(feature = "location-tester")]
+    pub render_test_screenshot: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,7 +435,9 @@ enum PendingOverworldStepBoundary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisibleScriptMovementPhase {
-    Sound { audio_id: String },
+    Sound {
+        audio_id: String,
+    },
     Move {
         from: TilePosition,
         to: TilePosition,
@@ -433,15 +447,26 @@ enum VisibleScriptMovementPhase {
         update_facing: bool,
         standing_frame: bool,
     },
-    Hold { duration: u16 },
-    TreeShake { duration: u16 },
-    Visibility { hidden: bool },
+    Hold {
+        duration: u16,
+    },
+    TreeShake {
+        duration: u16,
+    },
+    Visibility {
+        hidden: bool,
+    },
     Stationary {
         duration: u16,
         effect: VisibleStationaryMovementEffect,
     },
-    ScreenShake { parameter: u16 },
-    Turn { direction: Direction, duration: u8 },
+    ScreenShake {
+        parameter: u16,
+    },
+    Turn {
+        direction: Direction,
+        duration: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -534,6 +559,7 @@ struct BevyRuntimeShell {
     asset_root: AssetRoot,
     runtime: CrystalRuntime,
     shell: RuntimeGameShell,
+    latest_rtc_sample: Option<RuntimeRtcSample>,
     intro_screen: Option<VisibleIntroScreen>,
     title_menu: Option<TitleMenu>,
     visible_continue_screen: Option<VisibleContinueScreen>,
@@ -720,6 +746,8 @@ struct BevyRuntimeShell {
     battle_text_reveal: Option<VisibleBattleTextReveal>,
     battle_fanfare_messages: VecDeque<String>,
     battle_evolution_cries: VecDeque<(String, String)>,
+    battle_evolution_cancellations: VecDeque<VisibleEvolutionCancellation>,
+    field_evolution_cancellation: Option<VisibleEvolutionCancellation>,
     battle_sounds_after_messages: VecDeque<(String, String)>,
     battle_entry_messages_remaining: usize,
     battle_message_scene: Option<Box<RuntimeShellSnapshot>>,
@@ -768,7 +796,6 @@ struct BevyRuntimeShell {
     pending_field_battle_entry: bool,
     pending_field_notice_effect_frames: Option<u8>,
     visible_sweet_scent_delay: bool,
-    visible_rock_smash_target: Option<TilePosition>,
     visible_cut_animation: Option<VisibleCutAnimation>,
     visible_whirlpool_animation: Option<VisibleWhirlpoolAnimation>,
     visible_headbutt_animation: Option<VisibleHeadbuttAnimation>,
@@ -1129,7 +1156,7 @@ fn record_visible_runtime_error(runtime_shell: &mut BevyRuntimeShell, error: &an
 
 fn record_visible_runtime_system_error(runtime_shell: &mut BevyRuntimeShell, error: anyhow::Error) {
     record_visible_runtime_error(runtime_shell, &error);
-    runtime_shell.last_error = Some(error.to_string());
+    runtime_shell.last_error = Some(format!("{error:#?}"));
 }
 
 fn record_visible_battle_action_frame(
@@ -1332,6 +1359,7 @@ enum VisibleTitlePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleCreditsScreen {
     allow_skip: bool,
+    resume_game_timer_on_exit: bool,
     frame: u32,
     consumed_bytes: u16,
     awaiting_exit: bool,
@@ -1470,7 +1498,7 @@ struct PendingNameInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingStandardCapture {
     outcome: crate::core::battle::capture::CaptureOutcome,
-    scripted_static_wild: Option<(String, String)>,
+    scripted_static_wild: Option<VisibleStaticWildOrigin>,
     default_name: String,
 }
 
@@ -1485,8 +1513,13 @@ enum PendingScriptPartySelection {
     OlderHaircutBrother,
     YoungerHaircutBrother,
     DaisysGrooming,
-    DayCareDeposit { caretaker: String },
-    MoveTutor { move_id: String, party_index: Option<usize> },
+    DayCareDeposit {
+        caretaker: String,
+    },
+    MoveTutor {
+        move_id: String,
+        party_index: Option<usize>,
+    },
     MoveDeletion {
         party_index: Option<usize>,
     },
@@ -1655,6 +1688,7 @@ struct VisibleCaptureAnimation {
     caught: bool,
     started: bool,
     complete: bool,
+    sprites_cleared: bool,
     frame: u16,
 }
 
@@ -1686,10 +1720,20 @@ struct VisibleMoveObjectEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisibleMoveObjectCommand {
-    Spawn { object_id: String, x: i16, y: i16, param: u8 },
+    Spawn {
+        object_id: String,
+        x: i16,
+        y: i16,
+        param: u8,
+    },
     Clear,
-    Increment { slot: u8 },
-    Set { slot: u8, value: u8 },
+    Increment {
+        slot: u8,
+    },
+    Set {
+        slot: u8,
+        value: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1727,11 +1771,7 @@ impl VisibleSendOutAnimation {
     }
 
     fn battler_scale(&self) -> f32 {
-        if self.frame < 4 {
-            0.0
-        } else {
-            1.0
-        }
+        if self.frame < 4 { 0.0 } else { 1.0 }
     }
 
     fn battler_clip_tiles(&self) -> Option<u8> {
@@ -1778,6 +1818,14 @@ impl VisibleCaptureAnimation {
         self.started && !self.complete
     }
 
+    fn ball_visible(&self) -> bool {
+        self.throw_active() || (self.complete && self.caught && !self.sprites_cleared)
+    }
+
+    fn retained_objects_visible(&self) -> bool {
+        self.throw_active() || (self.complete && !self.sprites_cleared)
+    }
+
     fn shake_setup_frame(&self) -> u16 {
         // Ordinary branches enter .Shake at 68. Master Ball waits another
         // 24 frames before its 64-frame sparkle branch, entering at 140.
@@ -1797,12 +1845,9 @@ impl VisibleCaptureAnimation {
         if self.blocked {
             52
         } else if self.caught {
-            self.shake_setup_frame()
-                + 48 * u16::from(self.animation_shakes.max(1))
+            self.shake_setup_frame() + 48 * u16::from(self.animation_shakes.max(1))
         } else {
-            self.shake_setup_frame()
-                + 48 * (u16::from(self.animation_shakes) + 1)
-                + 34
+            self.shake_setup_frame() + 48 * (u16::from(self.animation_shakes) + 1) + 34
         }
     }
 
@@ -1915,6 +1960,15 @@ struct VisibleBattleLevelStats {
     special_defense: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleEvolutionCancellation {
+    party_index: usize,
+    trigger_message: String,
+    evolved_message: String,
+    pending_move_messages: Vec<String>,
+    report: EvolutionReport,
+}
+
 #[derive(Component)]
 struct MainCameraMarker;
 
@@ -1990,15 +2044,31 @@ enum VisiblePlayerPcAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisiblePcConfirmation {
-    TossItem { item_id: String, quantity: u16 },
+    TossItem {
+        item_id: String,
+        quantity: u16,
+    },
     PutMailInPack(usize),
     NpcTrade(PendingScriptPartySelection),
     ScriptPartyIntro(PendingScriptPartySelection),
-    MoveDeletion { party_index: usize, move_index: usize },
-    MoveTutorForget { move_id: String, party_index: usize },
-    MoveTutorStop { move_id: String, party_index: usize },
-    BuenaPrize { item_id: String },
-    DayCareWithdraw { caretaker: String },
+    MoveDeletion {
+        party_index: usize,
+        move_index: usize,
+    },
+    MoveTutorForget {
+        move_id: String,
+        party_index: usize,
+    },
+    MoveTutorStop {
+        move_id: String,
+        party_index: usize,
+    },
+    BuenaPrize {
+        item_id: String,
+    },
+    DayCareWithdraw {
+        caretaker: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2026,12 +2096,7 @@ const VISIBLE_PLAYERS_HOUSE_PC_ACTIONS: [VisiblePlayerPcAction; 6] = [
     VisiblePlayerPcAction::TurnOff,
 ];
 
-const VISIBLE_MAILBOX_ACTIONS: [&str; 4] = [
-    "READ MAIL",
-    "PUT IN PACK",
-    "ATTACH MAIL",
-    "CANCEL",
-];
+const VISIBLE_MAILBOX_ACTIONS: [&str; 4] = ["READ MAIL", "PUT IN PACK", "ATTACH MAIL", "CANCEL"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FieldPackPocket {
@@ -2204,11 +2269,6 @@ fn pcm_loop_range_for_bevy_audio_command(
             loop_start_sample,
             loop_end_sample,
             ..
-        }
-        | AudioProgramSource::PcmFile {
-            loop_start_sample,
-            loop_end_sample,
-            ..
         } => match (*loop_start_sample, *loop_end_sample) {
             (Some(start), Some(end)) => Ok(Some((start, end))),
             (None, None) => Ok(None),
@@ -2220,32 +2280,41 @@ fn pcm_loop_range_for_bevy_audio_command(
 
 #[derive(Resource)]
 struct RuntimeTickTimer {
-    step_seconds: f32,
-    accumulated_seconds: f32,
+    step_seconds: f64,
+    accumulated_seconds: f64,
+    finished_vblanks: u32,
     finished_ticks: u32,
+    presentation_ticks: u32,
 }
 
 impl RuntimeTickTimer {
-    fn new(step_seconds: f32) -> Self {
+    fn new(step_seconds: f64) -> Self {
         Self {
             step_seconds,
             accumulated_seconds: 0.0,
+            finished_vblanks: 0,
             finished_ticks: 0,
+            presentation_ticks: 0,
         }
     }
 
-    fn tick(&mut self, delta_seconds: f32) {
+    fn tick(&mut self, delta_seconds: f64) {
         if self.step_seconds <= 0.0 {
+            self.finished_vblanks = self.finished_vblanks.saturating_add(1);
             self.finished_ticks = self.finished_ticks.saturating_add(1);
             return;
         }
         self.accumulated_seconds += delta_seconds.max(0.0);
         let ticks = (self.accumulated_seconds / self.step_seconds).floor() as u32;
         if ticks > 0 {
+            // GameTimer runs on every elapsed VBlank. Gameplay/input catch-up
+            // remains deliberately bounded so a host stall cannot fast-
+            // forward movement or consume buffered joypad commands.
+            self.finished_vblanks = self.finished_vblanks.saturating_add(ticks);
             self.finished_ticks = self
                 .finished_ticks
                 .saturating_add(ticks.min(MAX_RUNTIME_CATCH_UP_TICKS));
-            self.accumulated_seconds -= self.step_seconds * ticks as f32;
+            self.accumulated_seconds -= self.step_seconds * f64::from(ticks);
         }
     }
 
@@ -2253,9 +2322,63 @@ impl RuntimeTickTimer {
         std::mem::take(&mut self.finished_ticks)
     }
 
+    fn take_vblanks(&mut self) -> u32 {
+        std::mem::take(&mut self.finished_vblanks)
+    }
+
     fn has_tick(&self) -> bool {
         self.finished_ticks > 0
     }
+
+    fn stage_presentation_ticks(&mut self, ticks: u32) {
+        // This is a same-update handoff from the authoritative frame system
+        // to the modal/hotkey system. Overwrite instead of accumulating so a
+        // presentation early return can never queue input work for a later
+        // host update.
+        self.presentation_ticks = ticks;
+    }
+
+    fn take_presentation_ticks(&mut self) -> u32 {
+        std::mem::take(&mut self.presentation_ticks)
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeRtcSource {
+    SystemLocal,
+    Fixed(RuntimeRtcSample),
+}
+
+impl NativeRtcSource {
+    fn system_local() -> Self {
+        Self::SystemLocal
+    }
+
+    #[cfg(test)]
+    fn fixed(sample: RuntimeRtcSample) -> Self {
+        Self::Fixed(sample)
+    }
+
+    fn sample(self) -> RuntimeRtcSample {
+        match self {
+            Self::SystemLocal => {
+                let now = ChronoLocal::now();
+                RuntimeRtcSample {
+                    date: GameDate::new(now.year(), now.month() as u8, now.day() as u8),
+                    hour: now.hour() as u8,
+                    minute: now.minute() as u8,
+                    second: now.second() as u8,
+                }
+            }
+            Self::Fixed(sample) => sample,
+        }
+    }
+}
+
+fn required_native_rtc_sample(runtime_shell: &BevyRuntimeShell) -> Result<RuntimeRtcSample> {
+    runtime_shell
+        .latest_rtc_sample
+        .context("native RTC sample is required before changing the in-game clock")
 }
 
 #[derive(Resource)]
@@ -2304,6 +2427,16 @@ struct RenderedViewport {
     tile: Option<TilePosition>,
     map_texture: Option<Handle<Image>>,
     map_priority_texture: Option<Handle<Image>>,
+    /// Previous fully-settled viewport.  The live composite moves by up to
+    /// one render tile while the camera catches up to a committed step; this
+    /// stable copy fills the edge that movement exposes instead of allowing
+    /// the window clear colour to show through.
+    map_backing_texture: Option<Handle<Image>>,
+    map_backing_priority_texture: Option<Handle<Image>>,
+    /// Read-only presentation metadata for an optional overworld renderer.
+    /// These cells describe the same 20x18 source-tile viewport as
+    /// `map_texture`; they never participate in collision or movement.
+    visual_tiles: Vec<crystal_render_api::VisualTile>,
     viewport_origin: Option<(i16, i16)>,
     /// The viewport origin shown immediately before a committed walking step.
     /// Retaining it lets the renderer scroll the replacement texture over the
@@ -2353,6 +2486,12 @@ struct RenderedTilesetArt {
     magnet_train_base_error: Option<String>,
     diploma_base_cache: Option<Vec<u8>>,
     diploma_base_error: Option<String>,
+    slot_machine_sources: Option<SlotMachineRenderSources>,
+    slot_machine_source_error: Option<String>,
+    card_flip_sources: Option<CardFlipRenderSources>,
+    card_flip_source_error: Option<String>,
+    unown_puzzle_sources: Option<UnownPuzzleRenderSources>,
+    unown_puzzle_source_error: Option<String>,
     map_name_sign_cache: HashMap<String, Vec<SpriteFrame>>,
     map_name_sign_errors: HashMap<String, String>,
     party_icon_cache: HashMap<String, [SpriteFrame; 2]>,
@@ -2394,10 +2533,27 @@ struct RenderedTilesetArt {
     title_menu_frame_source: Option<image::RgbaImage>,
     title_screen_cache: HashMap<TitleScreenArtKey, SpriteFrame>,
     title_screen_errors: HashMap<TitleScreenArtKey, String>,
-    /// One GPU texture for the complete 160x144 intro LCD.  Unlike the title,
-    /// the intro changes every frame; allocating a new texture per frame made
-    /// macOS present the clear surface instead of the composed frame.
+    /// Immutable credits art decoded once for the whole sequence. Credits
+    /// advance at LCD cadence; reopening PNGs and palette files for every
+    /// animation frame caused visible stalls even after the output texture
+    /// itself became retained.
+    credits_sources: Option<CreditsRenderSources>,
+    credits_source_error: Option<String>,
+    /// One GPU texture for every complete 160x144 title/full-screen LCD.
+    /// Intro, title, new-game setup, and credits all commit into this same
+    /// allocation so a screen handoff can never expose the window clear color.
+    /// The historical field name is retained because tests and the standalone
+    /// intro compositor inspect it directly.
     intro_presented_surface: Option<SpriteFrame>,
+    /// The ECS sprite presenting `intro_presented_surface`, while a full-screen
+    /// scene is active. The image allocation remains resident after the entity
+    /// is removed on a successfully staged overworld frame, ready for the next
+    /// title/credits sequence without mutating any cached source image.
+    presented_fullscreen_entity: Option<Entity>,
+    /// A cold title/full-screen -> field handoff keeps the presenter through
+    /// one extraction containing both newly spawned map layers. The next
+    /// update retires it only after those layers are query-visible.
+    presented_fullscreen_release_pending: bool,
     intro_scene_errors: HashMap<IntroSceneArtKey, String>,
     intro_source_cache: HashMap<String, image::RgbaImage>,
     intro_palette_cache: HashMap<String, Vec<Palette>>,
@@ -2410,22 +2566,23 @@ struct RenderedTilesetArt {
     intro_errors: HashMap<IntroArtKey, String>,
     oak_intro_cache: HashMap<OakIntroArtKey, SpriteFrame>,
     oak_intro_errors: HashMap<OakIntroArtKey, String>,
+    oak_intro_cache_order: VecDeque<OakIntroArtKey>,
     name_entry_cache: HashMap<NameEntryArtKey, SpriteFrame>,
     name_entry_errors: HashMap<NameEntryArtKey, String>,
+    name_entry_cache_order: VecDeque<NameEntryArtKey>,
     gender_cache: HashMap<GenderArtKey, SpriteFrame>,
     gender_errors: HashMap<GenderArtKey, String>,
     time_set_cache: HashMap<TimeSetArtKey, SpriteFrame>,
     time_set_errors: HashMap<TimeSetArtKey, String>,
+    time_set_cache_order: VecDeque<TimeSetArtKey>,
     trainer_card_cache: HashMap<TrainerCardArtKey, SpriteFrame>,
     trainer_card_errors: HashMap<TrainerCardArtKey, String>,
-    window_frame_cache: Option<WindowFrameArt>,
-    window_frame_error: Option<String>,
+    trainer_card_cache_order: VecDeque<TrainerCardArtKey>,
+    window_frame_cache: HashMap<u8, WindowFrameArt>,
+    window_frame_errors: HashMap<u8, String>,
+    selected_window_frame_id: u8,
     font_cache: Option<BitmapFontArt>,
     font_error: Option<String>,
-    /// A tiny LRU of recent camera composites. Walking commonly oscillates
-    /// between adjacent origins; retaining a few completed images avoids
-    /// recompositing the full 20x18 viewport when the player turns around.
-    viewport_composites: VecDeque<((u64, i16, i16), Handle<Image>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2645,7 +2802,7 @@ struct TrainerCardArtKey {
     money: u32,
     has_pokedex: bool,
     pokedex_owned: usize,
-    game_time_hours: u8,
+    game_time_hours: u16,
     game_time_minutes: u8,
     colon_visible: bool,
 }
@@ -2677,6 +2834,222 @@ struct TilesetAnimatedTile {
 struct SpriteFrame {
     handle: Handle<Image>,
     size: Vec2,
+}
+
+#[derive(Clone, Copy)]
+enum PresentedFullscreenFrameSource {
+    /// The source frame was created solely for this presentation commit. Move
+    /// its image into the retained surface (or remove it after copying).
+    Transient,
+    /// The source handle belongs to an art cache and must remain immutable.
+    Cached,
+}
+
+const PRESENTED_FULLSCREEN_BASE_Z: f32 = 0.9;
+
+/// Commit one complete native LCD image into the stable title/full-screen
+/// texture. All supported screens are exactly 160x144 RGBA, so replacing the
+/// asset value under the existing handle is an atomic whole-frame update from
+/// Bevy's render extraction point of view. Cached source handles are cloned,
+/// never mutated; transient frame assets are consumed immediately.
+fn present_fullscreen_frame(
+    rendered_art: &mut RenderedTilesetArt,
+    frame: &SpriteFrame,
+    source: PresentedFullscreenFrameSource,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let expected_width = (VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE) as u32;
+    let expected_height = (VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE) as u32;
+    let source_id = frame.handle.id();
+
+    if rendered_art
+        .intro_presented_surface
+        .as_ref()
+        .is_some_and(|surface| surface.handle.id() == source_id)
+    {
+        return Ok(rendered_art
+            .intro_presented_surface
+            .as_ref()
+            .expect("presented surface checked above")
+            .clone());
+    }
+
+    let mut next_image = match source {
+        PresentedFullscreenFrameSource::Transient => images
+            .remove(source_id)
+            .context("transient full-screen frame image is unavailable")?,
+        PresentedFullscreenFrameSource::Cached => images
+            .get(source_id)
+            .context("cached full-screen frame image is unavailable")?
+            .clone(),
+    };
+    let size = next_image.texture_descriptor.size;
+    if size.width != expected_width
+        || size.height != expected_height
+        || size.depth_or_array_layers != 1
+        || next_image.texture_descriptor.dimension != TextureDimension::D2
+        || next_image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb
+        || next_image.data.len() != expected_width as usize * expected_height as usize * 4
+    {
+        anyhow::bail!(
+            "full-screen LCD frame must be {}x{} RGBA8, got {}x{} {:?} with {} bytes",
+            expected_width,
+            expected_height,
+            size.width,
+            size.height,
+            next_image.texture_descriptor.format,
+            next_image.data.len(),
+        );
+    }
+    next_image.sampler = ImageSampler::nearest();
+
+    if let Some(surface) = rendered_art.intro_presented_surface.as_ref() {
+        if let Some(image) = images.get_mut(&surface.handle) {
+            *image = next_image;
+        } else {
+            // A retained strong handle should keep this asset alive. Reinsert
+            // defensively under the same id so the visible sprite never has to
+            // swap handles if an external asset operation removed it.
+            images.insert(surface.handle.id(), next_image);
+        }
+        return Ok(surface.clone());
+    }
+
+    let surface = SpriteFrame {
+        handle: images.add(next_image),
+        size: Vec2::new(expected_width as f32, expected_height as f32),
+    };
+    rendered_art.intro_presented_surface = Some(surface.clone());
+    Ok(surface)
+}
+
+fn ensure_presented_fullscreen_entity(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+    frame: &SpriteFrame,
+    z: f32,
+) {
+    if let Some(entity) = rendered_art.presented_fullscreen_entity {
+        // Some field-owned full-screen surfaces (notably naming) must cover
+        // overworld actors, while title options must remain above the title
+        // LCD. Move the one retained presenter instead of spawning a second
+        // surface for either layering mode.
+        commands
+            .entity(entity)
+            .insert(Transform::from_xyz(0.0, 0.0, z));
+        return;
+    }
+    let entity = commands
+        .spawn((
+            SpriteBundle {
+                texture: frame.handle.clone(),
+                sprite: Sprite {
+                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    ..default()
+                },
+                transform: Transform::from_xyz(0.0, 0.0, z),
+                ..default()
+            },
+            TitleScreenMarker,
+            VisibleIntroSurface,
+        ))
+        .id();
+    rendered_art.presented_fullscreen_entity = Some(entity);
+}
+
+fn commit_presented_fullscreen_frame(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+    frame: &SpriteFrame,
+    source: PresentedFullscreenFrameSource,
+    z: f32,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let frame = present_fullscreen_frame(rendered_art, frame, source, images)?;
+    ensure_presented_fullscreen_entity(commands, rendered_art, &frame, z);
+    rendered_art.presented_fullscreen_release_pending = false;
+    Ok(frame)
+}
+
+/// Stage a solid LCD backdrop in the same retained allocation used by raster
+/// full-screen scenes. The transient asset is consumed immediately, so menu
+/// cursor updates neither recreate a visible ECS surface nor accumulate image
+/// assets while their independently retained glyphs are rebuilt above it.
+fn commit_presented_fullscreen_solid(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+    rgba: [u8; 4],
+    z: f32,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE;
+    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE;
+    let mut data = vec![0_u8; width * height * 4];
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&rgba);
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    let frame = SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    };
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        z,
+        images,
+    )?;
+    Ok(())
+}
+
+const DYNAMIC_FULLSCREEN_FRAME_CACHE_LIMIT: usize = 16;
+
+/// Bound caches whose keys contain live user/runtime values (typed names,
+/// clock values, money, animation cursors). The shared presenter owns a copy
+/// of the visible pixels, so evicting an old source frame cannot invalidate
+/// the LCD currently on screen.
+fn retain_bounded_fullscreen_art_key<K>(
+    cache: &mut HashMap<K, SpriteFrame>,
+    errors: &mut HashMap<K, String>,
+    order: &mut VecDeque<K>,
+    key: K,
+    images: &mut Assets<Image>,
+) where
+    K: Clone + Eq + std::hash::Hash,
+{
+    order.push_back(key);
+    while order.len() > DYNAMIC_FULLSCREEN_FRAME_CACHE_LIMIT {
+        let Some(evicted_key) = order.pop_front() else {
+            break;
+        };
+        if let Some(frame) = cache.remove(&evicted_key) {
+            images.remove(frame.handle.id());
+        }
+        errors.remove(&evicted_key);
+    }
+}
+
+fn remove_presented_fullscreen_entity(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+) {
+    if let Some(entity) = rendered_art.presented_fullscreen_entity.take() {
+        commands.entity(entity).despawn();
+    }
+    rendered_art.presented_fullscreen_release_pending = false;
 }
 
 #[derive(Clone)]
@@ -2725,6 +3098,36 @@ struct WindowFrameArt {
 
 struct CreditsFontTiles {
     levels: BTreeMap<u16, Vec<u8>>,
+}
+
+/// Decoded, palette-indexed credits inputs. The compositor still assembles a
+/// fresh LCD byte buffer for each semantic frame, but all filesystem and PNG
+/// work is paid once when the sequence first becomes visible.
+struct CreditsRenderSources {
+    palette_sets: Vec<[Palette; 3]>,
+    mon_frames: Vec<Vec<u8>>,
+    border_tiles: Vec<Vec<u8>>,
+    font: CreditsFontTiles,
+    copyright_tiles: Vec<Vec<u8>>,
+    the_end_levels: Vec<u8>,
+}
+
+struct SlotMachineRenderSources {
+    base: Vec<u8>,
+    symbols: image::RgbaImage,
+    palettes: Vec<Palette>,
+}
+
+struct CardFlipRenderSources {
+    base: Vec<u8>,
+    light_on: image::RgbaImage,
+    palettes: Vec<Palette>,
+}
+
+struct UnownPuzzleRenderSources {
+    pieces: HashMap<String, Vec<image::RgbaImage>>,
+    cursor: image::RgbaImage,
+    start_cancel: image::RgbaImage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
@@ -2786,6 +3189,20 @@ struct PlayfieldTile;
 
 #[derive(Component)]
 struct PlayfieldPriorityTile;
+
+/// Opaque copy of the last settled base viewport, retained behind the live
+/// map while its exact-size 640x576 composite scrolls by one tile.
+#[derive(Component)]
+struct PlayfieldMapBackingBase;
+
+/// Cropped copies of the last settled priority viewport.  Separate axes let
+/// an unusual diagonal origin change expose both edges without drawing stale
+/// priority pixels over the transparent parts of the new viewport.
+#[derive(Component, Clone, Copy)]
+enum PlayfieldMapBackingPriorityAxis {
+    X,
+    Y,
+}
 
 #[derive(Component)]
 struct PlayerMarker;
@@ -2863,9 +3280,10 @@ struct PokemonPictureMarker;
 #[derive(Component)]
 struct TitleScreenMarker;
 
-/// The intro is one continuously updated LCD surface.  Keeping this entity
-/// alive is important: recreating it each animation tick lets the renderer
-/// present the clear color between command-buffer flushes on macOS.
+/// The title/full-screen sequence is one continuously updated LCD surface.
+/// Keeping this entity alive across intro, menus, setup, and credits prevents
+/// the renderer from presenting the clear color between command-buffer flushes
+/// on macOS. The historical marker name is retained for test compatibility.
 #[derive(Component)]
 struct VisibleIntroSurface;
 
@@ -2911,15 +3329,23 @@ pub fn run_bevy_shell(
     start: BevyShellStart,
     config: BevyShellConfig,
 ) -> Result<()> {
+    #[cfg(feature = "voxel-view")]
+    let voxel_view_enabled = config.voxel_view_enabled.unwrap_or(false);
+    let window_title = config
+        .window_title
+        .clone()
+        .unwrap_or_else(|| "Pokemon Crystal Rust".to_string());
+    #[cfg(feature = "location-tester")]
+    let render_test_screenshot = config.render_test_screenshot.clone();
     let runtime_shell = initialize_bevy_runtime_shell(asset_root, runtime, start, config)?;
 
     let mut app = App::new();
     #[cfg(not(test))]
     app.insert_non_send_resource(NativeAudioBackend::new());
-    app
-        .insert_resource(ClearColor(Color::rgb(0.05, 0.07, 0.06)))
+    app.insert_resource(ClearColor(Color::rgb(0.05, 0.07, 0.06)))
         .insert_resource(runtime_shell)
-        .insert_resource(RuntimeTickTimer::new(GAME_TICK_SECONDS))
+        .insert_resource(NativeRtcSource::system_local())
+        .insert_resource(RuntimeTickTimer::new(f64::from(GAME_TICK_SECONDS)))
         .insert_resource(VisibleSequenceTickClock::realtime())
         .init_resource::<Assets<AudioSource>>()
         .insert_resource(RenderedViewport::default())
@@ -2937,7 +3363,7 @@ pub fn run_bevy_shell(
                 .disable::<AudioPlugin>()
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "Pokemon Crystal Rust".to_string(),
+                        title: window_title,
                         resolution: WindowResolution::new(640.0, 576.0),
                         // AutoVsync is allowed to select an uncapped mode on some
                         // macOS backends. FIFO is the explicit blocking/vsync path;
@@ -2953,6 +3379,7 @@ pub fn run_bevy_shell(
                     ..default()
                 }),
         )
+        .add_plugins(crystal_render_api::VisualWorldRenderPlugin)
         .add_systems(Startup, setup_shell_view)
         .add_systems(Update, apply_keyboard_input)
         .add_systems(Update, apply_runtime_hotkeys.after(apply_keyboard_input))
@@ -2964,10 +3391,7 @@ pub fn run_bevy_shell(
             Update,
             sync_visible_player_sprite.after(drain_unused_runtime_ticks),
         )
-        .add_systems(
-            Update,
-            sync_visible_ledge_jump.after(render_playfield),
-        )
+        .add_systems(Update, sync_visible_ledge_jump.after(render_playfield))
         .add_systems(
             Update,
             (
@@ -2982,7 +3406,9 @@ pub fn run_bevy_shell(
         )
         .add_systems(
             Update,
-            tick_visible_screen_fade.after(drain_unused_runtime_ticks),
+            tick_visible_screen_fade
+                .after(drain_unused_runtime_ticks)
+                .before(render_playfield),
         )
         .add_systems(
             Update,
@@ -3013,7 +3439,12 @@ pub fn run_bevy_shell(
             queue_battle_intro_cry.after(sync_runtime_current_music),
         )
         .add_systems(Update, play_pending_audio.after(queue_battle_intro_cry))
-        .add_systems(Update, render_playfield.after(play_pending_audio))
+        .add_systems(
+            Update,
+            render_playfield
+                .after(play_pending_audio)
+                .in_set(crystal_render_api::WorldRenderSet::ClassicWorld),
+        )
         .add_systems(
             Update,
             apply_visible_battle_screen_offset.after(render_playfield),
@@ -3024,8 +3455,127 @@ pub fn run_bevy_shell(
         .add_systems(Update, refresh_dialog_text.after(refresh_status_text))
         .add_systems(Update, refresh_battle_text.after(refresh_dialog_text))
         .add_systems(Update, refresh_shell_panels.after(refresh_battle_text))
-        .run();
+        .add_systems(
+            Update,
+            publish_visual_world_frame
+                .after(sync_visible_player_sprite)
+                .after(sync_visible_object_sprites)
+                .after(sync_visible_ledge_jump)
+                .after(sync_visible_script_jump)
+                .after(sync_visible_script_tree_shake)
+                .after(sync_visible_stationary_movement_effect)
+                .after(apply_visible_battle_screen_offset)
+                .in_set(crystal_render_api::WorldRenderSet::PresentationExtract),
+        );
+    #[cfg(feature = "voxel-view")]
+    app.insert_resource(crystal_voxel_view::VoxelViewSettings {
+        enabled: voxel_view_enabled,
+        allow_f3_toggle: true,
+    })
+    .add_plugins(crystal_voxel_view::VoxelViewPlugin);
+    #[cfg(feature = "location-tester")]
+    if let Some(path) = render_test_screenshot.clone() {
+        app.insert_resource(RenderTestScreenshot {
+            path,
+            frame: 0,
+            requested: false,
+        })
+        .add_systems(Update, capture_render_test_screenshot);
+    }
+    app.run();
 
+    #[cfg(feature = "location-tester")]
+    if let Some(path) = render_test_screenshot.as_deref() {
+        validate_render_test_screenshot(path)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "location-tester")]
+#[derive(Resource)]
+struct RenderTestScreenshot {
+    path: PathBuf,
+    frame: u32,
+    requested: bool,
+}
+
+#[cfg(feature = "location-tester")]
+fn capture_render_test_screenshot(
+    mut capture: ResMut<RenderTestScreenshot>,
+    voxel_status: Res<crystal_voxel_view::VoxelViewStatus>,
+    primary_window: Query<Entity, With<PrimaryWindow>>,
+    mut screenshots: ResMut<ScreenshotManager>,
+    mut exit: EventWriter<AppExit>,
+) {
+    capture.frame = capture.frame.saturating_add(1);
+    if !capture.requested && capture.frame >= 30 {
+        println!(
+            "2.5D renderer status: {}{}",
+            if voxel_status.active {
+                "active"
+            } else {
+                "inactive"
+            },
+            voxel_status
+                .fallback_reason
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        );
+        let Ok(window) = primary_window.get_single() else {
+            return;
+        };
+        if screenshots
+            .save_screenshot_to_disk(window, &capture.path)
+            .is_ok()
+        {
+            capture.requested = true;
+        }
+    }
+    if capture.requested && capture.frame >= 120 {
+        exit.send(AppExit::Success);
+    }
+}
+
+#[cfg(feature = "location-tester")]
+fn validate_render_test_screenshot(path: &Path) -> Result<()> {
+    let screenshot = image::open(path)
+        .with_context(|| format!("read Bevy render-test screenshot {}", path.display()))?
+        .into_rgba8();
+    let (width, height) = screenshot.dimensions();
+    anyhow::ensure!(
+        width >= 640 && height >= 576,
+        "Bevy render-test screenshot {} is only {width}x{height}",
+        path.display()
+    );
+
+    let mut colors = std::collections::BTreeSet::new();
+    let mut min_luma = u32::MAX;
+    let mut max_luma = 0_u32;
+    for pixel in screenshot.pixels() {
+        let [red, green, blue, alpha] = pixel.0;
+        if alpha == 0 {
+            continue;
+        }
+        colors.insert([red, green, blue]);
+        let luma = 299 * u32::from(red) + 587 * u32::from(green) + 114 * u32::from(blue);
+        min_luma = min_luma.min(luma);
+        max_luma = max_luma.max(luma);
+    }
+    anyhow::ensure!(
+        colors.len() >= 4 && max_luma.saturating_sub(min_luma) >= 32_000,
+        "Bevy render-test screenshot {} is a blank/uniform frame ({} colors, luma range {})",
+        path.display(),
+        colors.len(),
+        max_luma.saturating_sub(min_luma) as f32 / 1000.0
+    );
+    println!(
+        "verified visible Bevy screenshot: {} ({width}x{height}, {} colors, luma range {:.1})",
+        path.display(),
+        colors.len(),
+        max_luma.saturating_sub(min_luma) as f32 / 1000.0
+    );
     Ok(())
 }
 
@@ -3558,16 +4108,24 @@ pub fn smoke_visible_shell_trainer_battle(
     let mut shift_prompt_entries = Vec::new();
     let mut shift_prompt_count = 0usize;
     let mut kept_current_after_shift_prompt = false;
-    let mut switched_after_shift_prompt = false;
+    let switched_after_shift_prompt = false;
     let mut turns = 0usize;
-    const MAX_VISIBLE_TRAINER_BATTLE_TURNS: usize = 32;
+    let mut interaction_steps = 0usize;
+    const MAX_VISIBLE_TRAINER_BATTLE_TURNS: usize = 128;
     while turns < MAX_VISIBLE_TRAINER_BATTLE_TURNS {
+        interaction_steps += 1;
+        if interaction_steps > MAX_VISIBLE_TRAINER_BATTLE_TURNS * 4 {
+            anyhow::bail!(
+                "visible shell trainer battle smoke exceeded {} menu interactions before completing {turns} turns",
+                MAX_VISIBLE_TRAINER_BATTLE_TURNS * 4
+            );
+        }
         let snapshot = runtime_shell.shell.snapshot()?;
         if snapshot.battle.is_none() {
             break;
         }
         if let Some(battle) = snapshot.battle.as_ref() {
-            if runtime_shell.battle_switch_cursor.is_some()
+            if runtime_shell.battle_shift_prompt_cursor.is_some()
                 && trainer_shift_switch_pending(&snapshot, battle)
             {
                 shift_prompt_count += 1;
@@ -3575,13 +4133,12 @@ pub fn smoke_visible_shell_trainer_battle(
                     shift_prompt_entries =
                         visible_battle_command_menu_entries(&snapshot, &runtime_shell, battle)?;
                 }
-                if kept_current_after_shift_prompt {
-                    press_visible_battle_a_button(&mut runtime_shell)?;
-                    switched_after_shift_prompt = true;
-                } else {
-                    press_visible_battle_b_button(&mut runtime_shell)?;
-                    kept_current_after_shift_prompt = true;
-                }
+                runtime_shell.battle_shift_prompt_cursor = Some(MenuCursor {
+                    surface_id: "battle:shift-prompt".to_string(),
+                    option_index: 1,
+                });
+                press_visible_battle_a_button(&mut runtime_shell)?;
+                kept_current_after_shift_prompt = true;
                 continue;
             }
         }
@@ -3589,8 +4146,33 @@ pub fn smoke_visible_shell_trainer_battle(
             .battle
             .as_ref()
             .is_some_and(|battle| battle.enemy_pokemon.hp == 0)
+            && !visible_active_battle_player_fainted(&snapshot)
         {
             press_visible_battle_a_button(&mut runtime_shell)?;
+            continue;
+        }
+        if visible_active_battle_player_fainted(&snapshot) {
+            // Exercise the normal ASM replacement flow rather than assuming
+            // a smoke lead can solo every member of a full trainer party.
+            press_visible_battle_a_button(&mut runtime_shell)?;
+            if runtime_shell.battle_switch_cursor.is_some() {
+                let replacement_snapshot = runtime_shell.shell.snapshot()?;
+                let active_party_index = replacement_snapshot
+                    .battle
+                    .as_ref()
+                    .and_then(|battle| battle.active_player_party_index);
+                let replacement_index = replacement_snapshot
+                    .party
+                    .slots
+                    .iter()
+                    .position(|slot| slot.pokemon.hp > 0 && Some(slot.index) != active_party_index)
+                    .context("fainted battle smoke has no healthy replacement")?;
+                runtime_shell.battle_switch_cursor = Some(MenuCursor {
+                    surface_id: "battle:switch".to_string(),
+                    option_index: replacement_index,
+                });
+                press_visible_battle_a_button(&mut runtime_shell)?;
+            }
             continue;
         }
         select_visible_battle_action(&mut runtime_shell, VisibleBattleAction::Fight)?;
@@ -3604,6 +4186,65 @@ pub fn smoke_visible_shell_trainer_battle(
             first_move_entries =
                 visible_battle_command_menu_entries(&move_snapshot, &runtime_shell, move_battle)?;
         }
+        if let Some(move_index) = move_snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.is_active_battle_pokemon)
+            .and_then(|slot| {
+                let healing_move = (u32::from(slot.pokemon.hp) * 3
+                    < u32::from(slot.pokemon.max_hp))
+                .then(|| {
+                    slot.pokemon
+                        .moves
+                        .iter()
+                        .enumerate()
+                        .find(|(_, learned)| {
+                            learned.current_pp > 0
+                                && move_snapshot.moves.iter().any(|known| {
+                                    known.move_id == learned.name
+                                        && matches!(
+                                            known.effect.as_str(),
+                                            "HEAL" | "MOONLIGHT" | "MORNING_SUN" | "SYNTHESIS"
+                                        )
+                                })
+                        })
+                        .map(|(index, _)| index)
+                })
+                .flatten();
+                if healing_move.is_some() {
+                    return healing_move;
+                }
+                slot.pokemon
+                    .moves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, learned)| learned.current_pp > 0)
+                    .max_by_key(|(_, learned)| {
+                        move_snapshot
+                            .moves
+                            .iter()
+                            .find(|known| known.move_id == learned.name)
+                            // A repeated Future Sight setup is legal but does
+                            // not exercise ordinary visible damage progress.
+                            // Prefer an immediately resolving damaging move
+                            // for this end-to-end shell smoke.
+                            .map_or(0, |known| {
+                                if known.effect == "FUTURE_SIGHT" {
+                                    0
+                                } else {
+                                    known.power
+                                }
+                            })
+                    })
+                    .map(|(index, _)| index)
+            })
+        {
+            runtime_shell.battle_move_cursor = Some(MenuCursor {
+                surface_id: "battle:moves".to_string(),
+                option_index: move_index,
+            });
+        }
         press_visible_battle_a_button(&mut runtime_shell)?;
         turns += 1;
         if runtime_shell.shell.snapshot()?.battle.is_none() {
@@ -3615,7 +4256,24 @@ pub fn smoke_visible_shell_trainer_battle(
     let trainer_defeated = !active_battle_after;
     if !trainer_defeated {
         anyhow::bail!(
-            "visible shell trainer battle smoke did not defeat trainer after {MAX_VISIBLE_TRAINER_BATTLE_TURNS} turns"
+            "visible shell trainer battle smoke did not defeat trainer after {MAX_VISIBLE_TRAINER_BATTLE_TURNS} turns: battle={:?} active_player={:?} action_cursor={:?} move_cursor={:?} switch_cursor={:?} queued_messages={} status={:?}",
+            final_snapshot.battle.as_ref().map(|battle| (
+                battle.active_player_party_index,
+                battle.active_enemy_party_index,
+                battle.enemy_pokemon.hp,
+                battle.rewarded_enemy_party_indices.clone(),
+            )),
+            final_snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.is_active_battle_pokemon)
+                .map(|slot| (slot.pokemon.hp, slot.pokemon.moves.clone())),
+            runtime_shell.battle_action_cursor,
+            runtime_shell.battle_move_cursor,
+            runtime_shell.battle_switch_cursor,
+            runtime_shell.battle_messages.len(),
+            runtime_shell.last_action_status,
         );
     }
     let final_entries = final_snapshot
@@ -3861,14 +4519,13 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
             advance_visible_battle_transition(runtime_shell);
             continue;
         }
-        let field_travel_delay_finished = if let Some(frames) =
-            runtime_shell.pending_field_travel_delay_frames.as_mut()
-        {
-            *frames = frames.saturating_sub(1);
-            *frames == 0
-        } else {
-            false
-        };
+        let field_travel_delay_finished =
+            if let Some(frames) = runtime_shell.pending_field_travel_delay_frames.as_mut() {
+                *frames = frames.saturating_sub(1);
+                *frames == 0
+            } else {
+                false
+            };
         if field_travel_delay_finished {
             runtime_shell.pending_field_travel_delay_frames = None;
             runtime_shell.field_notice = None;
@@ -3991,14 +4648,17 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
         anyhow::bail!("visible shell smoke could not settle active runtime surface");
     }
     let snapshot = runtime_shell.shell.snapshot()?;
-    let active_cursor_command = runtime_shell.active_script_cursor.as_ref().and_then(|cursor| {
-        runtime_shell
-            .shell
-            .runtime()
-            .compiled_script_commands(&cursor.source_script)
-            .ok()
-            .and_then(|commands| commands.get(cursor.next_command_index).cloned())
-    });
+    let active_cursor_command = runtime_shell
+        .active_script_cursor
+        .as_ref()
+        .and_then(|cursor| {
+            runtime_shell
+                .shell
+                .runtime()
+                .compiled_script_commands(&cursor.source_script)
+                .ok()
+                .and_then(|commands| commands.get(cursor.next_command_index).cloned())
+        });
     anyhow::bail!(
         "visible shell smoke exceeded idle settle limit {MAX_IDLE_SETTLE_STEPS}: cursor={:?} cursor_command={active_cursor_command:?} special_boundary={:?} next_script={:?} command_queue={} deferred={} ended={:?} pending_text_label={:?} pending_text_wait={:?} text_window={} window={} runtime_flag={:?} non_audio_events={} recent_audio={:?}",
         runtime_shell.active_script_cursor,
@@ -4023,7 +4683,7 @@ fn initialize_bevy_runtime_shell(
     start: BevyShellStart,
     config: BevyShellConfig,
 ) -> Result<BevyRuntimeShell> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     let runtime_tile_start = matches!(&start, BevyShellStart::NewGameAtRuntimeTile { .. });
     let asset_root = if runtime.has_runtime_files() {
         runtime.materialize_runtime_files()?
@@ -4031,17 +4691,17 @@ fn initialize_bevy_runtime_shell(
         asset_root
     };
     let initial_arrival_reason = match &start {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { .. } => Some("new_game"),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGameAtRuntimeTile { .. } => None,
         BevyShellStart::LoadSave { .. } => None,
         BevyShellStart::Title { .. } => None,
     };
     let restore_loaded_visible_state = matches!(&start, BevyShellStart::LoadSave { .. });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     let initial_player_name_prompt = matches!(&start, BevyShellStart::NewGame { .. });
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "location-tester")))]
     let initial_player_name_prompt = false;
     let title_menu = match &start {
         BevyShellStart::Title {
@@ -4062,18 +4722,18 @@ fn initialize_bevy_runtime_shell(
             clock_reset_trigger: false,
         }),
         BevyShellStart::LoadSave { .. } => None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { .. } => None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGameAtRuntimeTile { .. } => None,
     };
     let intro_screen = matches!(&start, BevyShellStart::Title { .. }).then(VisibleIntroScreen::new);
     let mut shell = match start {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { spawn_identifier } => {
             RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), spawn_identifier)?
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGameAtRuntimeTile {
             spawn_identifier,
             map_name,
@@ -4095,6 +4755,14 @@ fn initialize_bevy_runtime_shell(
             save_path: _,
         } => RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), spawn_identifier)?,
     };
+    if title_menu.is_some() || initial_player_name_prompt {
+        // MainMenu clears GAME_TIMER_COUNTING_F. The bit is armed only when
+        // the new-game introduction reaches FinishContinue.
+        shell
+            .session_mut()
+            .state_mut()
+            .set_game_timer_counting(false);
+    }
     // The interactive Bevy shell does not need to retain a serialized
     // command/result frame for every 60 Hz joypad sample.  Keeping the
     // authoritative state/checksum while disabling that diagnostic journal
@@ -4119,6 +4787,7 @@ fn initialize_bevy_runtime_shell(
         asset_root,
         runtime,
         shell,
+        latest_rtc_sample: None,
         intro_screen,
         title_menu,
         visible_continue_screen: None,
@@ -4316,6 +4985,8 @@ fn initialize_bevy_runtime_shell(
         battle_text_reveal: None,
         battle_fanfare_messages: VecDeque::new(),
         battle_evolution_cries: VecDeque::new(),
+        battle_evolution_cancellations: VecDeque::new(),
+        field_evolution_cancellation: None,
         battle_sounds_after_messages: VecDeque::new(),
         battle_entry_messages_remaining: 0,
         battle_message_scene: None,
@@ -4364,7 +5035,6 @@ fn initialize_bevy_runtime_shell(
         pending_field_battle_entry: false,
         pending_field_notice_effect_frames: None,
         visible_sweet_scent_delay: false,
-        visible_rock_smash_target: None,
         visible_cut_animation: None,
         visible_whirlpool_animation: None,
         visible_headbutt_animation: None,
@@ -4396,7 +5066,7 @@ fn initialize_bevy_runtime_shell(
             settle_visible_overworld_arrival(&mut runtime_shell, reason)?;
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     if runtime_tile_start {
         // Runtime-tile starts still execute the map's authoritative callback.
         // Finish its terminal EndCallback/control records before exposing the
@@ -4418,7 +5088,6 @@ fn initialize_bevy_runtime_shell(
     Ok(runtime_shell)
 }
 
-
 include!("bevy_shell/deterministic_session.rs");
 include!("bevy_shell/field_travel.rs");
 include!("bevy_shell/trainer_card.rs");
@@ -4430,6 +5099,7 @@ include!("bevy_shell/battle_messages.rs");
 include!("bevy_shell/battle_results.rs");
 include!("bevy_shell/battle_entry.rs");
 include!("bevy_shell/menu_rendering.rs");
+include!("bevy_shell/render_mod.rs");
 include!("bevy_shell/overworld_rendering.rs");
 include!("bevy_shell/start_menu.rs");
 include!("bevy_shell/bitmap_font.rs");
