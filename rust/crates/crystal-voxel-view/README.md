@@ -15,6 +15,8 @@ relief profile covering New Bark's Johto artwork:
 - generated caps and sides use a separate solid-color material, so map art is
   never stretched down a wall;
 - player and NPC textures are vertical cards anchored at their feet;
+- a dedicated reverse-depth material reveals a translucent player silhouette
+  only through closer authored geometry, leaving visible player pixels intact;
 - the optional 3D camera casts directional terrain/actor shadows; the classic
   camera then composites the exact 2D UI, dialog, and fades above it;
 - the result is rendered below the existing 2D UI, dialog, fades, and battle

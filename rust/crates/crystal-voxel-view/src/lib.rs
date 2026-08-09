@@ -10,12 +10,17 @@ mod profile;
 use std::collections::{HashMap, HashSet};
 
 use bevy::{
-    asset::AssetId,
+    asset::{AssetId, load_internal_asset},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin},
     prelude::*,
     render::{
         camera::{ClearColorConfig, OrthographicProjection, Projection, RenderTarget, ScalingMode},
-        render_resource::Face,
+        mesh::MeshVertexBufferLayoutRef,
+        render_resource::{
+            AsBindGroup, CompareFunction, DepthStencilState, Face, RenderPipelineDescriptor,
+            ShaderRef, SpecializedMeshPipelineError,
+        },
         view::RenderLayers,
     },
 };
@@ -42,19 +47,35 @@ pub const CLASSIC_FALLBACK_RENDER_LAYER: usize = 30;
 const VOXEL_RENDER_LAYER: usize = 31;
 const NORMAL_ACTOR_CAMERA_PULL: f32 = 0.05;
 const ABOVE_PRIORITY_CAMERA_PULL: f32 = 0.75;
+const SILHOUETTE_SHADER_HANDLE: Handle<Shader> =
+    Handle::weak_from_u128(0x7a88_22d4_d773_4874_94d3_c20a_0dcc_f21a);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VoxelViewPlugin;
 
 impl Plugin for VoxelViewPlugin {
     fn build(&self, app: &mut App) {
+        load_internal_asset!(
+            app,
+            SILHOUETTE_SHADER_HANDLE,
+            "occlusion_silhouette.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(MaterialPlugin::<OcclusionSilhouetteMaterial>::default());
         app.init_resource::<VoxelViewSettings>()
             .init_resource::<VoxelViewStatus>()
             .init_resource::<VoxelScene>()
             .init_resource::<TerrainRevisionCache>()
             .init_resource::<ActorIdCache>()
+            .init_resource::<PlayerSilhouetteCache>()
             .add_systems(Startup, setup_voxel_view)
             .add_systems(Update, toggle_voxel_view.before(sync_voxel_view))
-            .add_systems(Update, sync_voxel_view.in_set(WorldRenderSet::RenderSync));
+            .add_systems(Update, sync_voxel_view.in_set(WorldRenderSet::RenderSync))
+            .add_systems(
+                Update,
+                sync_player_silhouette_system
+                    .after(sync_voxel_view)
+                    .in_set(WorldRenderSet::RenderSync),
+            );
     }
 }
 
@@ -101,6 +122,9 @@ struct VoxelTerrain;
 
 #[derive(Component)]
 struct VoxelActorCard;
+
+#[derive(Component)]
+struct VoxelActorSilhouette;
 
 type VoxelWorldCameraFilter = (
     With<VoxelWorldCamera>,
@@ -158,6 +182,52 @@ struct ActorTextureAssets {
 struct ActorIdCache {
     entities: HashMap<VisualActorId, Entity>,
     textures: HashMap<AssetId<Image>, ActorTextureAssets>,
+}
+
+#[derive(Resource, Default)]
+struct PlayerSilhouetteCache {
+    entity: Option<Entity>,
+    texture: Option<AssetId<Image>>,
+    material: Option<Handle<OcclusionSilhouetteMaterial>>,
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
+struct OcclusionSilhouetteMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    texture: Handle<Image>,
+    #[uniform(2)]
+    color: LinearRgba,
+}
+
+impl Material for OcclusionSilhouetteMaterial {
+    fn fragment_shader() -> ShaderRef {
+        SILHOUETTE_SHADER_HANDLE.into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+            // Bevy's 3D camera uses reversed depth. Strict Less draws the
+            // silhouette only where a closer terrain depth already exists;
+            // equal-depth pixels from the normal player card remain untouched.
+            configure_silhouette_depth(depth_stencil);
+        }
+        Ok(())
+    }
+}
+
+fn configure_silhouette_depth(depth_stencil: &mut DepthStencilState) {
+    depth_stencil.depth_compare = CompareFunction::Less;
+    depth_stencil.depth_write_enabled = false;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,6 +328,7 @@ fn sync_voxel_view(
         ),
         (
             With<VoxelActorCard>,
+            Without<VoxelActorSilhouette>,
             Without<VoxelWorldCamera>,
             Without<VoxelTerrain>,
         ),
@@ -556,6 +627,7 @@ fn sync_actor_cards(
         ),
         (
             With<VoxelActorCard>,
+            Without<VoxelActorSilhouette>,
             Without<VoxelWorldCamera>,
             Without<VoxelTerrain>,
         ),
@@ -630,6 +702,130 @@ fn sync_actor_cards(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_player_silhouette_system(
+    frame: Res<VisualWorldFrame>,
+    status: Res<VoxelViewStatus>,
+    scene: Res<VoxelScene>,
+    mut commands: Commands,
+    mut cache: ResMut<PlayerSilhouetteCache>,
+    mut materials: ResMut<Assets<OcclusionSilhouetteMaterial>>,
+    mut entities: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut Handle<OcclusionSilhouetteMaterial>,
+        ),
+        (
+            With<VoxelActorSilhouette>,
+            Without<VoxelActorCard>,
+            Without<VoxelWorldCamera>,
+            Without<VoxelTerrain>,
+        ),
+    >,
+) {
+    let Some(actor_quad) = scene.actor_quad.as_ref() else {
+        return;
+    };
+    if !status.active {
+        if let Some(entity) = cache.entity
+            && let Ok((_, mut visibility, _)) = entities.get_mut(entity)
+        {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    }
+    sync_player_silhouette(
+        &frame,
+        actor_quad,
+        &mut commands,
+        &mut cache,
+        &mut materials,
+        &mut entities,
+    );
+}
+
+fn sync_player_silhouette(
+    frame: &VisualWorldFrame,
+    actor_quad: &Handle<Mesh>,
+    commands: &mut Commands,
+    cache: &mut PlayerSilhouetteCache,
+    materials: &mut Assets<OcclusionSilhouetteMaterial>,
+    entities: &mut Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut Handle<OcclusionSilhouetteMaterial>,
+        ),
+        (
+            With<VoxelActorSilhouette>,
+            Without<VoxelActorCard>,
+            Without<VoxelWorldCamera>,
+            Without<VoxelTerrain>,
+        ),
+    >,
+) {
+    let Some(player) = frame
+        .actors
+        .iter()
+        .find(|actor| actor.id == VisualActorId::Player)
+    else {
+        if let Some(entity) = cache.entity.take() {
+            commands.entity(entity).despawn();
+        }
+        if let Some(material) = cache.material.take() {
+            materials.remove(material.id());
+        }
+        cache.texture = None;
+        return;
+    };
+    let Some(transform) = actor_transform(frame, player) else {
+        return;
+    };
+    let texture_id = player.texture.id();
+    let material = if cache.texture == Some(texture_id) {
+        cache.material.clone()
+    } else {
+        if let Some(previous) = cache.material.take() {
+            materials.remove(previous.id());
+        }
+        let material = materials.add(OcclusionSilhouetteMaterial {
+            texture: player.texture.clone(),
+            color: LinearRgba::new(0.20, 0.06, 0.32, 0.72),
+        });
+        cache.texture = Some(texture_id);
+        cache.material = Some(material.clone());
+        Some(material)
+    };
+    let Some(material) = material else {
+        return;
+    };
+
+    if let Some(entity) = cache.entity
+        && let Ok((mut current_transform, mut visibility, mut current_material)) =
+            entities.get_mut(entity)
+    {
+        *current_transform = transform;
+        *visibility = Visibility::Visible;
+        *current_material = material;
+        return;
+    }
+    cache.entity = Some(
+        commands
+            .spawn((
+                MaterialMeshBundle {
+                    mesh: actor_quad.clone(),
+                    material,
+                    transform,
+                    ..default()
+                },
+                RenderLayers::layer(VOXEL_RENDER_LAYER),
+                VoxelActorSilhouette,
+            ))
+            .id(),
+    );
 }
 
 fn actor_material(
@@ -729,4 +925,32 @@ enum TerrainSyncError {
 enum ActorSyncError {
     TextureUnavailable(VisualActorId),
     FootingUnavailable(VisualActorId),
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use bevy::render::render_resource::{DepthBiasState, StencilState, TextureFormat};
+
+    use super::*;
+
+    #[test]
+    fn silhouette_pass_reads_only_strictly_closer_reverse_depth() {
+        let mut depth = DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::GreaterEqual,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        };
+
+        configure_silhouette_depth(&mut depth);
+
+        assert_eq!(depth.depth_compare, CompareFunction::Less);
+        assert!(!depth.depth_write_enabled);
+    }
+
+    #[test]
+    fn optional_view_remains_disabled_by_default() {
+        assert!(!VoxelViewSettings::default().enabled);
+    }
 }
