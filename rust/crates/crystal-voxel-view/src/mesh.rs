@@ -301,11 +301,19 @@ fn append_textured_cell(
             if matches!(solid, SolidKind::Tree | SolidKind::Prop)
                 && let Some(images) = images
             {
+                let removable_ground = grouped_boundary_ground_mask(
+                    images,
+                    cells,
+                    shapes,
+                    geometry,
+                    column,
+                    row,
+                    index,
+                    cells[replacement],
+                )?;
                 append_masked_upright_band(
                     mesh,
-                    images,
-                    tile,
-                    cells[replacement],
+                    &removable_ground,
                     [x0, x1, band_bottom, band_top, plane_z],
                     [u0, u1, v0, v1],
                 )?;
@@ -337,8 +345,7 @@ fn authored_ground_cell(
         .iter()
         .enumerate()
         .filter(|(index, shape)| {
-            matches!(shape, CellShape::Flat)
-                && cells[*index].source.tile_index == ground_tile_index
+            matches!(shape, CellShape::Flat) && cells[*index].source.tile_index == ground_tile_index
         })
         // Coordinate order, not DTO order, makes the authored source stable.
         .min_by_key(|(index, _)| (cells[*index].row, cells[*index].column))
@@ -347,17 +354,12 @@ fn authored_ground_cell(
 
 fn append_masked_upright_band(
     mesh: &mut SurfaceMeshData,
-    images: &TerrainImageSamples,
-    source_tile: &VisualTile,
-    ground_tile: &VisualTile,
+    removable_ground: &[bool; 64],
     bounds: [f32; 5],
     uv: [f32; 4],
 ) -> Result<(), TerrainMeshError> {
-    let source = tile_rgba(images, source_tile)?;
-    let ground = tile_rgba(images, ground_tile)?;
     let [x0, x1, band_bottom, band_top, plane_z] = bounds;
     let [u0, u1, v0, v1] = uv;
-    let removable_ground = boundary_connected_ground_mask(source, ground);
 
     for pixel_y in 0..SOURCE_TILE_PIXELS {
         let mut pixel_x = 0;
@@ -407,21 +409,120 @@ fn append_masked_upright_band(
     Ok(())
 }
 
-fn boundary_connected_ground_mask(source: &[u8], ground: &[u8]) -> [bool; 64] {
-    debug_assert_eq!(SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS, 64);
-    let mut removable = [false; 64];
+#[allow(clippy::too_many_arguments)]
+fn grouped_boundary_ground_mask(
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    column: usize,
+    row: usize,
+    index: usize,
+    ground_tile: &VisualTile,
+) -> Result<[bool; 64], TerrainMeshError> {
+    let CellShape::FacadeBand {
+        plane_subtile_row,
+        band_from_top,
+        band_count,
+        ground_tile_index,
+        solid,
+    } = shapes[index]
+    else {
+        return Ok([false; 64]);
+    };
+    let target_plane =
+        row as isize - cells[index].source.subtile_row as isize + plane_subtile_row as isize;
+    let mut bands_by_column = vec![vec![None; usize::from(band_count)]; geometry.width];
+    for (candidate_index, shape) in shapes.iter().copied().enumerate() {
+        let CellShape::FacadeBand {
+            plane_subtile_row: candidate_plane_row,
+            band_from_top: candidate_band,
+            band_count: candidate_count,
+            ground_tile_index: candidate_ground,
+            solid: candidate_solid,
+        } = shape
+        else {
+            continue;
+        };
+        if candidate_count != band_count
+            || candidate_ground != ground_tile_index
+            || candidate_solid != solid
+        {
+            continue;
+        }
+        let candidate_row = candidate_index / geometry.width;
+        let candidate_column = candidate_index % geometry.width;
+        let candidate_plane = candidate_row as isize
+            - cells[candidate_index].source.subtile_row as isize
+            + candidate_plane_row as isize;
+        if candidate_plane == target_plane && candidate_band < band_count {
+            bands_by_column[candidate_column][usize::from(candidate_band)] = Some(candidate_index);
+        }
+    }
+    let complete = |candidate_column: usize| {
+        bands_by_column[candidate_column]
+            .iter()
+            .all(Option::is_some)
+    };
+    // A group clipped by the viewport has no trustworthy outer silhouette.
+    // Keep the visible fragment opaque instead of treating its clipped edge
+    // as transparent background (or disabling the optional renderer).
+    if !complete(column) {
+        return Ok([false; 64]);
+    }
+    let mut first_column = column;
+    while first_column > 0 && complete(first_column - 1) {
+        first_column -= 1;
+    }
+    let mut last_column = column;
+    while last_column + 1 < geometry.width && complete(last_column + 1) {
+        last_column += 1;
+    }
+
+    let group_columns = last_column - first_column + 1;
+    let pixel_width = group_columns * SOURCE_TILE_PIXELS;
+    let pixel_height = usize::from(band_count) * SOURCE_TILE_PIXELS;
+    let ground = tile_rgba(images, ground_tile)?;
+    let mut equals_ground = vec![false; pixel_width * pixel_height];
+    for group_column in first_column..=last_column {
+        for band in 0..usize::from(band_count) {
+            let source_index = bands_by_column[group_column][band]
+                .expect("complete facade group column was checked");
+            let source = tile_rgba(images, cells[source_index])?;
+            for pixel_y in 0..SOURCE_TILE_PIXELS {
+                for pixel_x in 0..SOURCE_TILE_PIXELS {
+                    let group_x = (group_column - first_column) * SOURCE_TILE_PIXELS + pixel_x;
+                    let group_y = band * SOURCE_TILE_PIXELS + pixel_y;
+                    equals_ground[group_y * pixel_width + group_x] =
+                        pixels_equal(source, ground, pixel_x, pixel_y);
+                }
+            }
+        }
+    }
+    let removable_group = boundary_connected_mask(pixel_width, pixel_height, &equals_ground);
+    let mut removable_cell = [false; 64];
+    let cell_x = (column - first_column) * SOURCE_TILE_PIXELS;
+    let cell_y = usize::from(band_from_top) * SOURCE_TILE_PIXELS;
+    for pixel_y in 0..SOURCE_TILE_PIXELS {
+        for pixel_x in 0..SOURCE_TILE_PIXELS {
+            removable_cell[pixel_y * SOURCE_TILE_PIXELS + pixel_x] =
+                removable_group[(cell_y + pixel_y) * pixel_width + cell_x + pixel_x];
+        }
+    }
+    Ok(removable_cell)
+}
+
+fn boundary_connected_mask(width: usize, height: usize, equals_ground: &[bool]) -> Vec<bool> {
+    debug_assert_eq!(equals_ground.len(), width * height);
+    let mut removable = vec![false; equals_ground.len()];
     let mut pending = VecDeque::new();
-    for y in 0..SOURCE_TILE_PIXELS {
-        for x in 0..SOURCE_TILE_PIXELS {
-            if x != 0
-                && y != 0
-                && x + 1 != SOURCE_TILE_PIXELS
-                && y + 1 != SOURCE_TILE_PIXELS
-            {
+    for y in 0..height {
+        for x in 0..width {
+            if x != 0 && y != 0 && x + 1 != width && y + 1 != height {
                 continue;
             }
-            if pixels_equal(source, ground, x, y) {
-                let index = y * SOURCE_TILE_PIXELS + x;
+            let index = y * width + x;
+            if equals_ground[index] {
                 if !removable[index] {
                     removable[index] = true;
                     pending.push_back((x, y));
@@ -432,15 +533,15 @@ fn boundary_connected_ground_mask(source: &[u8], ground: &[u8]) -> [bool; 64] {
     while let Some((x, y)) = pending.pop_front() {
         for (next_x, next_y) in [
             x.checked_sub(1).map(|next| (next, y)),
-            (x + 1 < SOURCE_TILE_PIXELS).then_some((x + 1, y)),
+            (x + 1 < width).then_some((x + 1, y)),
             y.checked_sub(1).map(|next| (x, next)),
-            (y + 1 < SOURCE_TILE_PIXELS).then_some((x, y + 1)),
+            (y + 1 < height).then_some((x, y + 1)),
         ]
         .into_iter()
         .flatten()
         {
-            let index = next_y * SOURCE_TILE_PIXELS + next_x;
-            if !removable[index] && pixels_equal(source, ground, next_x, next_y) {
+            let index = next_y * width + next_x;
+            if !removable[index] && equals_ground[index] {
                 removable[index] = true;
                 pending.push_back((next_x, next_y));
             }
@@ -453,13 +554,14 @@ fn tile_rgba<'a>(
     images: &'a TerrainImageSamples,
     tile: &VisualTile,
 ) -> Result<&'a [u8], TerrainMeshError> {
-    let sample = images
-        .pixels
-        .get(&tile.texture.id())
-        .ok_or(TerrainMeshError::MissingMaskImage {
-            column: tile.column,
-            row: tile.row,
-        })?;
+    let sample =
+        images
+            .pixels
+            .get(&tile.texture.id())
+            .ok_or(TerrainMeshError::MissingMaskImage {
+                column: tile.column,
+                row: tile.row,
+            })?;
     match sample {
         TileImageSample::Rgba(pixels) => Ok(pixels),
         TileImageSample::Invalid => Err(TerrainMeshError::InvalidMaskImage {
@@ -848,30 +950,34 @@ mod tests {
 
         assert_eq!(mesh.textured.quad_count(), 1);
         assert_eq!(mesh.solid.quad_count(), 0);
-        assert!(mesh
-            .textured
-            .positions
-            .iter()
-            .all(|position| position[1] == 0.0));
+        assert!(
+            mesh.textured
+                .positions
+                .iter()
+                .all(|position| position[1] == 0.0)
+        );
     }
 
     #[test]
-    fn mask_removes_only_boundary_connected_ground_pixels() {
-        let ground = [7_u8; SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS * 4];
-        let mut source = ground;
-        for y in 2..=4 {
-            for x in 2..=4 {
-                if x == 2 || x == 4 || y == 2 || y == 4 {
-                    let offset = (y * SOURCE_TILE_PIXELS + x) * 4;
-                    source[offset..offset + 4].copy_from_slice(&[1, 2, 3, 255]);
+    fn grouped_mask_does_not_treat_internal_tile_seams_as_an_outer_boundary() {
+        let width = SOURCE_TILE_PIXELS * 2;
+        let height = SOURCE_TILE_PIXELS * 2;
+        let mut equals_ground = vec![true; width * height];
+        for y in 3..=12 {
+            for x in 3..=12 {
+                if x == 3 || x == 12 || y == 3 || y == 12 {
+                    equals_ground[y * width + x] = false;
                 }
             }
         }
 
-        let removable = boundary_connected_ground_mask(&source, &ground);
+        let removable = boundary_connected_mask(width, height, &equals_ground);
         assert!(removable[0], "open background must be removed");
-        assert!(!removable[3 * SOURCE_TILE_PIXELS + 3], "enclosed face must remain");
-        assert!(!removable[2 * SOURCE_TILE_PIXELS + 2], "outline must remain");
+        assert!(
+            !removable[8 * width + 8],
+            "enclosed face crossing the x=8/y=8 tile seams must remain"
+        );
+        assert!(!removable[3 * width + 3], "outline must remain");
     }
 
     #[test]
