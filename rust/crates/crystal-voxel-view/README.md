@@ -22,7 +22,8 @@ relief profile covering New Bark's Johto artwork:
   the pitched scene instead of forcing a switch back to screen-space 2D;
 - a dedicated reverse-depth material reveals a translucent player silhouette
   only through closer authored geometry, leaving visible player pixels intact;
-- the optional 3D camera casts directional terrain/actor shadows; the classic
+- the optional 3D camera uses a 45-degree diorama angle and casts directional
+  terrain/actor shadows; the classic
   camera then composites the exact 2D UI, dialog, and fades above it;
 - the result is rendered below the existing 2D UI, dialog, fades, and battle
   compositor;

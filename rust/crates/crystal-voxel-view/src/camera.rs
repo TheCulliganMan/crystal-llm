@@ -7,7 +7,10 @@ use crate::{
     profile::{MAX_PROFILE_HEIGHT, MIN_PROFILE_HEIGHT, SOURCE_TILE_HEIGHT},
 };
 
-pub const CAMERA_PITCH_DEGREES: f32 = 65.0;
+/// Diorama view measured upward from the horizontal ground plane. Forty-five
+/// degrees gives terrain depth and authored vertical faces equal visual
+/// weight, instead of the previous more top-down 65-degree presentation.
+pub const CAMERA_PITCH_DEGREES: f32 = 45.0;
 const CAMERA_DISTANCE: f32 = 512.0;
 const PROJECTION_MARGIN: f32 = 1.02;
 
