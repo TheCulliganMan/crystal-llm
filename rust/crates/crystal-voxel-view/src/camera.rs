@@ -11,15 +11,17 @@ use crate::{
 /// degrees gives terrain depth and authored vertical faces equal visual
 /// weight, instead of the previous more top-down 65-degree presentation.
 pub const CAMERA_PITCH_DEGREES: f32 = 45.0;
-const CAMERA_DISTANCE: f32 = 512.0;
-const PROJECTION_MARGIN: f32 = 1.02;
+const CAMERA_FOCAL: f32 = 1.0;
+const FAR_DEPTH_MARGIN: f32 = 4096.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelCameraPose {
     pub eye: Vec3,
     pub target: Vec3,
     pub up: Vec3,
-    pub projection_size: Vec2,
+    pub vertical_fov_radians: f32,
+    pub near: f32,
+    pub far: f32,
 }
 
 impl VoxelCameraPose {
@@ -34,19 +36,24 @@ pub fn camera_pose(viewport_size: Vec2) -> VoxelCameraPose {
     let profile_scale = tile_height / SOURCE_TILE_HEIGHT;
     let target_height = (MAX_PROFILE_HEIGHT + MIN_PROFILE_HEIGHT) * 0.5 * profile_scale;
     let target = Vec3::new(0.0, target_height, 0.0);
+    let camera_distance = CAMERA_FOCAL * viewport_size.y;
     let eye = target
         + Vec3::new(
             0.0,
-            CAMERA_DISTANCE * pitch.sin(),
-            CAMERA_DISTANCE * pitch.cos(),
+            camera_distance * pitch.sin(),
+            camera_distance * pitch.cos(),
         );
     VoxelCameraPose {
         eye,
         target,
         up: Vec3::Y,
-        // Fixed projection and render target must have the same aspect ratio;
-        // a mismatched computed height would anisotropically stretch pixels.
-        projection_size: viewport_size * PROJECTION_MARGIN,
+        // Tie distance and field of view to the source viewport. Straight
+        // down, this frames exactly one viewport-height of world pixels;
+        // tilting introduces honest perspective instead of orthographically
+        // crushing the ground into a short rectangle.
+        vertical_fov_radians: 2.0 * (1.0 / (2.0 * CAMERA_FOCAL)).atan(),
+        near: (camera_distance * 0.05).max(1.0),
+        far: camera_distance * 4.0 + FAR_DEPTH_MARGIN,
     }
 }
 
@@ -81,27 +88,21 @@ mod tests {
     }
 
     #[test]
-    fn orthographic_extent_preserves_the_render_target_aspect() {
+    fn perspective_focal_frames_one_viewport_height_when_top_down() {
         let viewport = Vec2::new(160.0, 144.0);
-        let projection = camera_pose(viewport).projection_size;
-        assert_eq!(projection, viewport * PROJECTION_MARGIN);
-        assert!((projection.x / projection.y - viewport.x / viewport.y).abs() < 1.0e-6);
+        let pose = camera_pose(viewport);
+        let distance = CAMERA_FOCAL * viewport.y;
+        let framed_height = 2.0 * distance * (pose.vertical_fov_radians * 0.5).tan();
+        assert!((framed_height - viewport.y).abs() < 1.0e-5);
+        assert!(pose.near > 0.0);
+        assert!(pose.far > distance);
     }
 
     #[test]
-    fn runtime_projection_contains_profile_height_and_depth_corners() {
-        let viewport = Vec2::new(640.0, 576.0);
-        let pose = camera_pose(viewport);
-        let pitch = CAMERA_PITCH_DEGREES.to_radians();
-        let scale = viewport.y / EXPECTED_GRID_SIZE.y as f32 / SOURCE_TILE_HEIGHT;
-        let half_projection = pose.projection_size.y * 0.5;
-
-        for height in [MIN_PROFILE_HEIGHT * scale, MAX_PROFILE_HEIGHT * scale] {
-            for depth in [-viewport.y * 0.5, viewport.y * 0.5] {
-                let screen_y = (height - pose.target.y) * pitch.cos() - depth * pitch.sin();
-                assert!(screen_y.abs() <= half_projection);
-            }
-        }
+    fn runtime_projection_depth_range_contains_authored_world() {
+        let pose = camera_pose(Vec2::new(640.0, 576.0));
+        assert!(pose.near < (pose.eye - pose.target).length());
+        assert!(pose.far > (pose.eye - pose.target).length() + 640.0);
     }
 
     #[test]

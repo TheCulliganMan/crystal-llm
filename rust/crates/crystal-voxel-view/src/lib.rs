@@ -482,13 +482,10 @@ fn set_output_active(
         if active {
             let pose = camera_pose(frame.viewport_size);
             *transform = pose.transform();
-            *projection = Projection::Orthographic(OrthographicProjection {
-                near: 0.1,
-                far: 4096.0,
-                scaling_mode: ScalingMode::Fixed {
-                    width: pose.projection_size.x,
-                    height: pose.projection_size.y,
-                },
+            *projection = Projection::Perspective(PerspectiveProjection {
+                fov: pose.vertical_fov_radians,
+                near: pose.near,
+                far: pose.far,
                 ..default()
             });
         }
