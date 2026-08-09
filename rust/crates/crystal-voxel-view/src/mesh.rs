@@ -10,7 +10,7 @@ use bevy::{
 use crystal_render_api::{VisualTile, VisualWorldFrame};
 
 use crate::profile::{
-    CellShape, KANTO_GROUND_TILE_INDEX, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source,
+    CellShape, KANTO_GROUND_TILE_INDEX, LedgeFace, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source,
 };
 
 const TEXTURED_SHADE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -1273,6 +1273,90 @@ fn append_textured_cell(
                 );
             }
         }
+        CellShape::LedgeBand {
+            face,
+            plane_subtile,
+            band_from_top,
+            band_count,
+            top_tile_index,
+            height,
+        } => {
+            let top_source = cells
+                .iter()
+                .zip(shapes)
+                .enumerate()
+                .filter(|(_, (tile, shape))| {
+                    tile.source.tile_index == top_tile_index
+                        && shape.surface_height(geometry.tile_height)
+                            == height * geometry.tile_height / SOURCE_TILE_HEIGHT
+                })
+                .min_by_key(|(_, (tile, _))| (tile.row, tile.column))
+                .map(|(index, _)| index)
+                .ok_or(TerrainMeshError::MissingGroundSample {
+                    column: column as u32,
+                    row: row as u32,
+                    tile_index: top_tile_index,
+                })?;
+            let raised_height = height * geometry.tile_height / SOURCE_TILE_HEIGHT;
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                raised_height,
+                geometry.uv(top_source % geometry.width, top_source / geometry.width),
+            );
+            let tile = cells[index];
+            let band_top = raised_height - band_from_top as f32 * geometry.tile_height;
+            let band_bottom = band_top - geometry.tile_height;
+            let (u0, u1, v0, v1) = geometry.uv(column, row);
+            let origin_column = column as isize - tile.source.subtile_column as isize;
+            let origin_row = row as isize - tile.source.subtile_row as isize;
+            let (positions, normal, uvs) = match face {
+                LedgeFace::South => {
+                    let plane_z = geometry.origin_z
+                        + (origin_row + plane_subtile as isize) as f32 * geometry.tile_height;
+                    (
+                        [
+                            [x1, band_bottom, plane_z],
+                            [x1, band_top, plane_z],
+                            [x0, band_top, plane_z],
+                            [x0, band_bottom, plane_z],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+                    )
+                }
+                LedgeFace::West => {
+                    let plane_x = geometry.origin_x
+                        + (origin_column + plane_subtile as isize) as f32 * geometry.tile_width;
+                    (
+                        [
+                            [plane_x, band_bottom, z0],
+                            [plane_x, band_top, z0],
+                            [plane_x, band_top, z1],
+                            [plane_x, band_bottom, z1],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+                    )
+                }
+                LedgeFace::East => {
+                    let plane_x = geometry.origin_x
+                        + (origin_column + plane_subtile as isize) as f32 * geometry.tile_width;
+                    (
+                        [
+                            [plane_x, band_bottom, z1],
+                            [plane_x, band_top, z1],
+                            [plane_x, band_top, z0],
+                            [plane_x, band_bottom, z0],
+                        ],
+                        [1.0, 0.0, 0.0],
+                        [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
+                    )
+                }
+            };
+            append_quad(&mut mesh.textured, positions, normal, uvs, TEXTURED_SHADE);
+            debug_assert_eq!(band_count as f32 * geometry.tile_height, raised_height);
+        }
     }
     Ok(())
 }
@@ -1997,14 +2081,21 @@ fn facade_covers_south_edge(
     raised_height: f32,
     tile_height: f32,
 ) -> bool {
-    let CellShape::FacadeBand {
-        plane_subtile_row,
-        band_from_top,
-        band_count,
-        ..
-    } = shape
-    else {
-        return false;
+    let (plane_subtile_row, band_from_top, band_count) = match shape {
+        CellShape::FacadeBand {
+            plane_subtile_row,
+            band_from_top,
+            band_count,
+            ..
+        }
+        | CellShape::LedgeBand {
+            face: LedgeFace::South,
+            plane_subtile: plane_subtile_row,
+            band_from_top,
+            band_count,
+            ..
+        } => (plane_subtile_row, band_from_top, band_count),
+        _ => return false,
     };
     if band_from_top != 0 || band_count as f32 * tile_height < raised_height {
         return false;
@@ -2195,6 +2286,43 @@ mod tests {
             .map(|uv| uv[1])
             .fold(f32::NEG_INFINITY, f32::max);
         assert!((max_v - min_v - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn blackthorn_south_ledge_uses_two_native_face_bands() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                sources.push(source_with_tile(
+                    0x72,
+                    column as u8,
+                    row as u8,
+                    if row < 2 { 0x3c } else { 0x4c },
+                ));
+            }
+        }
+        let mesh =
+            build_terrain_mesh(&frame(4, 4, sources)).expect("authored mountain ledge should mesh");
+        let south_faces: Vec<_> = mesh
+            .textured
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.textured.normals.chunks_exact(4))
+            .filter(|(_, normal)| normal[0] == [0.0, 0.0, 1.0])
+            .map(|(positions, _)| positions)
+            .collect();
+        assert_eq!(south_faces.len(), 8);
+        assert!(south_faces.iter().all(|face| {
+            let min = face
+                .iter()
+                .map(|vertex| vertex[1])
+                .fold(f32::INFINITY, f32::min);
+            let max = face
+                .iter()
+                .map(|vertex| vertex[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min == 8.0
+        }));
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub const GROUND_HEIGHT: f32 = 0.0;
 pub const WATER_HEIGHT: f32 = -2.0;
 pub const COMPACT_BUILDING_HEIGHT: f32 = 16.0;
 pub const LARGE_BUILDING_HEIGHT: f32 = 32.0;
+pub const MOUNTAIN_LEDGE_HEIGHT: f32 = 16.0;
 pub const MAX_PROFILE_HEIGHT: f32 = LARGE_BUILDING_HEIGHT;
 pub const MIN_PROFILE_HEIGHT: f32 = WATER_HEIGHT;
 pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
@@ -41,6 +42,13 @@ pub enum SolidKind {
     Bank,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LedgeFace {
+    South,
+    West,
+    East,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CellShape {
     Flat,
@@ -57,6 +65,17 @@ pub enum CellShape {
         ground_tile_index: u16,
         solid: SolidKind,
     },
+    /// A source band folded onto a raised plateau edge. The claimed source
+    /// cell keeps top-facing plateau art at `height`; the same native band is
+    /// emitted upright at the shared south plane.
+    LedgeBand {
+        face: LedgeFace,
+        plane_subtile: u8,
+        band_from_top: u8,
+        band_count: u8,
+        top_tile_index: u16,
+        height: f32,
+    },
 }
 
 impl CellShape {
@@ -64,7 +83,7 @@ impl CellShape {
         let source_height = match self {
             Self::Flat | Self::FacadeBand { .. } => GROUND_HEIGHT,
             Self::Water => WATER_HEIGHT,
-            Self::RaisedTop { height, .. } => height,
+            Self::RaisedTop { height, .. } | Self::LedgeBand { height, .. } => height,
         };
         source_height * tile_height / SOURCE_TILE_HEIGHT
     }
@@ -72,6 +91,7 @@ impl CellShape {
     pub fn solid_kind(self) -> SolidKind {
         match self {
             Self::RaisedTop { solid, .. } | Self::FacadeBand { solid, .. } => solid,
+            Self::LedgeBand { .. } => SolidKind::Bank,
             Self::Flat => SolidKind::Building,
             Self::Water => SolidKind::Bank,
         }
@@ -222,6 +242,49 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
     }
 
     match source.metatile_id {
+        // Blackthorn's repeated south mountain edge is a two-row plateau
+        // over a two-row native cliff drawing. The drawing itself, not
+        // collision, names the raised surface and its exact face bands.
+        0x68 if source.subtile_column >= 2 => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
+        0x68 => CellShape::LedgeBand {
+            face: LedgeFace::West,
+            plane_subtile: 0,
+            band_from_top: 1 - source.subtile_column,
+            band_count: 2,
+            top_tile_index: 0x3c,
+            height: MOUNTAIN_LEDGE_HEIGHT,
+        },
+        0x69 if source.subtile_column < 2 => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
+        0x69 => CellShape::LedgeBand {
+            face: LedgeFace::East,
+            plane_subtile: 4,
+            band_from_top: source.subtile_column - 2,
+            band_count: 2,
+            top_tile_index: 0x3c,
+            height: MOUNTAIN_LEDGE_HEIGHT,
+        },
+        0x70 | 0x71 => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
+        0x72 if source.subtile_row < 2 => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
+        0x72 => CellShape::LedgeBand {
+            face: LedgeFace::South,
+            plane_subtile: 4,
+            band_from_top: source.subtile_row - 2,
+            band_count: 2,
+            top_tile_index: 0x3c,
+            height: MOUNTAIN_LEDGE_HEIGHT,
+        },
         // The compact house uses two source rows as a roof surface. Its two
         // lower rows become separate 8px facade bands on one shared seam.
         0x14 | 0x15 if source.subtile_row < 2 => CellShape::RaisedTop {
@@ -307,7 +370,15 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
 
 /// Presentation footing never puts actors on roofs, trees, sign cards, or the
 /// recessed water surface. Gameplay remains two-dimensional and authoritative.
-pub fn support_height(_source: &VisualTileSource, _tile_height: f32) -> f32 {
+pub fn support_height(source: &VisualTileSource, tile_height: f32) -> f32 {
+    if source.tileset_id.as_ref() == JOHTO_TILESET
+        && (matches!(source.metatile_id, 0x70 | 0x71)
+            || (source.metatile_id == 0x68 && source.subtile_column >= 2)
+            || (source.metatile_id == 0x69 && source.subtile_column < 2)
+            || (source.metatile_id == 0x72 && source.subtile_row < 2))
+    {
+        return MOUNTAIN_LEDGE_HEIGHT * tile_height / SOURCE_TILE_HEIGHT;
+    }
     GROUND_HEIGHT
 }
 
@@ -588,5 +659,77 @@ mod tests {
         assert_eq!(support_height(&source(0x18, 0, 0), 32.0), GROUND_HEIGHT);
         assert_eq!(support_height(&source(0x05, 0, 0), 32.0), GROUND_HEIGHT);
         assert_eq!(support_height(&source(0x54, 0, 0), 32.0), GROUND_HEIGHT);
+    }
+
+    #[test]
+    fn blackthorn_south_ledge_separates_raised_top_from_native_face_bands() {
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x72, 1, 1, 0x3c)),
+            CellShape::RaisedTop {
+                height: MOUNTAIN_LEDGE_HEIGHT,
+                solid: SolidKind::Bank,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x72, 1, 3, 0x4c)),
+            CellShape::LedgeBand {
+                face: LedgeFace::South,
+                plane_subtile: 4,
+                band_from_top: 1,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
+        assert_eq!(
+            support_height(
+                &source_for_tileset(JOHTO_TILESET, 0x72, 1, 1, 0x3c),
+                SOURCE_TILE_HEIGHT,
+            ),
+            MOUNTAIN_LEDGE_HEIGHT
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x71, 2, 2, 0x3c)),
+            CellShape::RaisedTop {
+                height: MOUNTAIN_LEDGE_HEIGHT,
+                solid: SolidKind::Bank,
+            }
+        );
+        assert_eq!(
+            support_height(
+                &source_for_tileset(JOHTO_TILESET, 0x71, 2, 2, 0x3c),
+                SOURCE_TILE_HEIGHT,
+            ),
+            MOUNTAIN_LEDGE_HEIGHT
+        );
+        assert_eq!(
+            support_height(
+                &source_for_tileset(JOHTO_TILESET, 0x72, 1, 3, 0x4c),
+                SOURCE_TILE_HEIGHT,
+            ),
+            GROUND_HEIGHT
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x68, 1, 2, 0x3b)),
+            CellShape::LedgeBand {
+                face: LedgeFace::West,
+                plane_subtile: 0,
+                band_from_top: 0,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x69, 3, 2, 0x3d)),
+            CellShape::LedgeBand {
+                face: LedgeFace::East,
+                plane_subtile: 4,
+                band_from_top: 1,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
     }
 }
