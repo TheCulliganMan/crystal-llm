@@ -269,15 +269,41 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             top_tile_index: 0x3c,
             height: MOUNTAIN_LEDGE_HEIGHT,
         },
+        // $6b/$6d draw the same L-shaped mountain volume with different
+        // surface decoration. Their northwest quadrant is the plateau; the
+        // right two columns are the native east face until the south course,
+        // whose lower two rows fold across the complete front edge. Keeping
+        // those sources on separate planes preserves the authored corner
+        // instead of stretching one cliff tile around both sides.
+        0x6b | 0x6d if source.subtile_row >= 2 => CellShape::LedgeBand {
+            face: LedgeFace::South,
+            plane_subtile: 4,
+            band_from_top: source.subtile_row - 2,
+            band_count: 2,
+            top_tile_index: 0x3c,
+            height: MOUNTAIN_LEDGE_HEIGHT,
+        },
+        0x6b | 0x6d if source.subtile_column >= 2 => CellShape::LedgeBand {
+            face: LedgeFace::East,
+            plane_subtile: 4,
+            band_from_top: source.subtile_column - 2,
+            band_count: 2,
+            top_tile_index: 0x3c,
+            height: MOUNTAIN_LEDGE_HEIGHT,
+        },
+        0x6b | 0x6d => CellShape::RaisedTop {
+            height: MOUNTAIN_LEDGE_HEIGHT,
+            solid: SolidKind::Bank,
+        },
         0x70 | 0x71 => CellShape::RaisedTop {
             height: MOUNTAIN_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
         },
-        0x72 if source.subtile_row < 2 => CellShape::RaisedTop {
+        0x72 | 0x73 if source.subtile_row < 2 => CellShape::RaisedTop {
             height: MOUNTAIN_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
         },
-        0x72 => CellShape::LedgeBand {
+        0x72 | 0x73 => CellShape::LedgeBand {
             face: LedgeFace::South,
             plane_subtile: 4,
             band_from_top: source.subtile_row - 2,
@@ -375,7 +401,10 @@ pub fn support_height(source: &VisualTileSource, tile_height: f32) -> f32 {
         && (matches!(source.metatile_id, 0x70 | 0x71)
             || (source.metatile_id == 0x68 && source.subtile_column >= 2)
             || (source.metatile_id == 0x69 && source.subtile_column < 2)
-            || (source.metatile_id == 0x72 && source.subtile_row < 2))
+            || (matches!(source.metatile_id, 0x6b | 0x6d)
+                && source.subtile_column < 2
+                && source.subtile_row < 2)
+            || (matches!(source.metatile_id, 0x72 | 0x73) && source.subtile_row < 2))
     {
         return MOUNTAIN_LEDGE_HEIGHT * tile_height / SOURCE_TILE_HEIGHT;
     }
@@ -731,5 +760,61 @@ mod tests {
                 height: MOUNTAIN_LEDGE_HEIGHT,
             }
         );
+    }
+
+    #[test]
+    fn blackthorn_corner_uses_two_authored_faces_around_one_raised_quadrant() {
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x6d, 1, 1, 0x3c)),
+            CellShape::RaisedTop {
+                height: MOUNTAIN_LEDGE_HEIGHT,
+                solid: SolidKind::Bank,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x6d, 3, 1, 0x3d)),
+            CellShape::LedgeBand {
+                face: LedgeFace::East,
+                plane_subtile: 4,
+                band_from_top: 1,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x6d, 1, 3, 0x4c)),
+            CellShape::LedgeBand {
+                face: LedgeFace::South,
+                plane_subtile: 4,
+                band_from_top: 1,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
+        assert_eq!(support_height(&source(0x6d, 1, 1), 8.0), 16.0);
+        assert_eq!(support_height(&source(0x6d, 3, 1), 8.0), 0.0);
+        assert_eq!(support_height(&source(0x6d, 1, 3), 8.0), 0.0);
+    }
+
+    #[test]
+    fn blackthorn_cave_doorway_keeps_native_face_art() {
+        assert!(matches!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x73, 2, 1, 0x3c)),
+            CellShape::RaisedTop { .. }
+        ));
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x73, 2, 3, 0x5d)),
+            CellShape::LedgeBand {
+                face: LedgeFace::South,
+                plane_subtile: 4,
+                band_from_top: 1,
+                band_count: 2,
+                top_tile_index: 0x3c,
+                height: MOUNTAIN_LEDGE_HEIGHT,
+            }
+        );
+        assert_eq!(support_height(&source(0x73, 2, 3), 8.0), 0.0);
     }
 }

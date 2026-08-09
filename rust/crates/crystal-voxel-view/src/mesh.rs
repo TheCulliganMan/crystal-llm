@@ -245,6 +245,7 @@ fn build_terrain_mesh_internal(
             )?;
         }
     }
+    let bank_runs = bank_column_runs(&shapes, &geometry);
 
     for row in 0..height {
         for column in 0..width {
@@ -253,7 +254,7 @@ fn build_terrain_mesh_internal(
                 continue;
             }
             append_textured_cell(
-                &mut mesh, &geometry, &cells, &shapes, column, row, index, images,
+                &mut mesh, &geometry, &cells, &shapes, &bank_runs, column, row, index, images,
             )?;
         }
     }
@@ -263,7 +264,9 @@ fn build_terrain_mesh_internal(
             if claimed_by_building[row * width + column] || claimed_by_tree[row * width + column] {
                 continue;
             }
-            append_exposed_sides(&mut mesh, &geometry, &cells, &shapes, column, row);
+            append_exposed_sides(
+                &mut mesh, &geometry, &cells, &shapes, &bank_runs, column, row,
+            );
         }
     }
 
@@ -287,6 +290,44 @@ struct TreePlacement {
     width: usize,
     height: usize,
     ground_tile_index: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BankColumnRun {
+    north: usize,
+    front: usize,
+}
+
+fn bank_column_runs(shapes: &[CellShape], geometry: &GridGeometry) -> Vec<Option<BankColumnRun>> {
+    let mut runs = vec![None; shapes.len()];
+    for column in 0..geometry.width {
+        let mut row = 0;
+        while row < geometry.height {
+            let index = row * geometry.width + column;
+            let is_bank = shapes[index].solid_kind() == SolidKind::Bank
+                && shapes[index].surface_height(geometry.tile_height) > 0.0;
+            if !is_bank {
+                row += 1;
+                continue;
+            }
+            let north = row;
+            while row + 1 < geometry.height {
+                let next = (row + 1) * geometry.width + column;
+                if shapes[next].solid_kind() != SolidKind::Bank
+                    || shapes[next].surface_height(geometry.tile_height) <= 0.0
+                {
+                    break;
+                }
+                row += 1;
+            }
+            let run = BankColumnRun { north, front: row };
+            for run_row in north..=row {
+                runs[run_row * geometry.width + column] = Some(run);
+            }
+            row += 1;
+        }
+    }
+    runs
 }
 
 fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
@@ -1192,12 +1233,26 @@ fn append_textured_cell(
     geometry: &GridGeometry,
     cells: &[&VisualTile],
     shapes: &[CellShape],
+    bank_runs: &[Option<BankColumnRun>],
     column: usize,
     row: usize,
     index: usize,
     images: Option<&TerrainImageSamples>,
 ) -> Result<(), TerrainMeshError> {
     let (x0, x1, z0, z1) = geometry.bounds(column, row);
+    if let Some(run) = bank_runs[index] {
+        let extent = run.front - run.north + 1;
+        let repeat = extent.min(2);
+        let source_row = run.north + (row - run.north) % repeat;
+        let source = source_row * geometry.width + column;
+        append_top(
+            &mut mesh.textured,
+            [x0, x1, z0, z1],
+            shapes[index].surface_height(geometry.tile_height),
+            geometry.uv(source % geometry.width, source / geometry.width),
+        );
+        return Ok(());
+    }
     match shapes[index] {
         CellShape::Flat | CellShape::Water | CellShape::RaisedTop { .. } => {
             append_top(
@@ -1273,90 +1328,7 @@ fn append_textured_cell(
                 );
             }
         }
-        CellShape::LedgeBand {
-            face,
-            plane_subtile,
-            band_from_top,
-            band_count,
-            top_tile_index,
-            height,
-        } => {
-            let top_source = cells
-                .iter()
-                .zip(shapes)
-                .enumerate()
-                .filter(|(_, (tile, shape))| {
-                    tile.source.tile_index == top_tile_index
-                        && shape.surface_height(geometry.tile_height)
-                            == height * geometry.tile_height / SOURCE_TILE_HEIGHT
-                })
-                .min_by_key(|(_, (tile, _))| (tile.row, tile.column))
-                .map(|(index, _)| index)
-                .ok_or(TerrainMeshError::MissingGroundSample {
-                    column: column as u32,
-                    row: row as u32,
-                    tile_index: top_tile_index,
-                })?;
-            let raised_height = height * geometry.tile_height / SOURCE_TILE_HEIGHT;
-            append_top(
-                &mut mesh.textured,
-                [x0, x1, z0, z1],
-                raised_height,
-                geometry.uv(top_source % geometry.width, top_source / geometry.width),
-            );
-            let tile = cells[index];
-            let band_top = raised_height - band_from_top as f32 * geometry.tile_height;
-            let band_bottom = band_top - geometry.tile_height;
-            let (u0, u1, v0, v1) = geometry.uv(column, row);
-            let origin_column = column as isize - tile.source.subtile_column as isize;
-            let origin_row = row as isize - tile.source.subtile_row as isize;
-            let (positions, normal, uvs) = match face {
-                LedgeFace::South => {
-                    let plane_z = geometry.origin_z
-                        + (origin_row + plane_subtile as isize) as f32 * geometry.tile_height;
-                    (
-                        [
-                            [x1, band_bottom, plane_z],
-                            [x1, band_top, plane_z],
-                            [x0, band_top, plane_z],
-                            [x0, band_bottom, plane_z],
-                        ],
-                        [0.0, 0.0, 1.0],
-                        [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
-                    )
-                }
-                LedgeFace::West => {
-                    let plane_x = geometry.origin_x
-                        + (origin_column + plane_subtile as isize) as f32 * geometry.tile_width;
-                    (
-                        [
-                            [plane_x, band_bottom, z0],
-                            [plane_x, band_top, z0],
-                            [plane_x, band_top, z1],
-                            [plane_x, band_bottom, z1],
-                        ],
-                        [-1.0, 0.0, 0.0],
-                        [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
-                    )
-                }
-                LedgeFace::East => {
-                    let plane_x = geometry.origin_x
-                        + (origin_column + plane_subtile as isize) as f32 * geometry.tile_width;
-                    (
-                        [
-                            [plane_x, band_bottom, z1],
-                            [plane_x, band_top, z1],
-                            [plane_x, band_top, z0],
-                            [plane_x, band_bottom, z0],
-                        ],
-                        [1.0, 0.0, 0.0],
-                        [[u1, v1], [u0, v1], [u0, v0], [u1, v0]],
-                    )
-                }
-            };
-            append_quad(&mut mesh.textured, positions, normal, uvs, TEXTURED_SHADE);
-            debug_assert_eq!(band_count as f32 * geometry.tile_height, raised_height);
-        }
+        CellShape::LedgeBand { .. } => unreachable!("bank runs are emitted before cell matching"),
     }
     Ok(())
 }
@@ -1872,7 +1844,7 @@ fn lerp_pixel(start: f32, end: f32, pixel: usize) -> f32 {
     start + (end - start) * pixel as f32 / SOURCE_TILE_PIXELS as f32
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
     North,
     South,
@@ -1898,6 +1870,7 @@ fn append_exposed_sides(
     geometry: &GridGeometry,
     cells: &[&VisualTile],
     shapes: &[CellShape],
+    bank_runs: &[Option<BankColumnRun>],
     column: usize,
     row: usize,
 ) {
@@ -1935,13 +1908,26 @@ fn append_exposed_sides(
         {
             continue;
         }
-
         if top == 0.0 && matches!(shapes[neighbor_index], CellShape::Water) {
             append_textured_shoreline(
                 &mut mesh.textured,
                 geometry,
                 column,
                 row,
+                direction,
+                [x0, x1, z0, z1],
+                bottom,
+                top,
+            );
+            continue;
+        }
+
+        if let Some(run) = bank_runs[index] {
+            append_bank_run_side(
+                &mut mesh.textured,
+                geometry,
+                run,
+                column,
                 direction,
                 [x0, x1, z0, z1],
                 bottom,
@@ -2004,6 +1990,109 @@ fn append_exposed_sides(
                 color,
             ),
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_bank_run_side(
+    mesh: &mut SurfaceMeshData,
+    geometry: &GridGeometry,
+    run: BankColumnRun,
+    column: usize,
+    direction: Direction,
+    bounds: [f32; 4],
+    bottom: f32,
+    top: f32,
+) {
+    let [x0, x1, z0, z1] = bounds;
+    let shade = match direction {
+        Direction::South => 1.0,
+        Direction::West => 0.76,
+        Direction::East => 0.86,
+        Direction::North => 0.68,
+    };
+    let color = [shade, shade, shade, 1.0];
+    let first_band = (bottom / geometry.tile_height).floor().max(0.0) as usize;
+    let last_band = (top / geometry.tile_height).ceil().max(0.0) as usize;
+    for band in first_band..last_band {
+        let band_floor = band as f32 * geometry.tile_height;
+        let band_ceiling = band_floor + geometry.tile_height;
+        let band_bottom = bottom.max(band_floor);
+        let band_top = top.min(band_ceiling);
+        let source_row = match direction {
+            Direction::North => (run.north + band).min(run.front),
+            Direction::South | Direction::West | Direction::East => {
+                run.front.saturating_sub(band).max(run.north)
+            }
+        };
+        let (u0, u1, v0, v1) = geometry.uv(column, source_row);
+        let crop_top = (band_ceiling - band_top) / geometry.tile_height;
+        let crop_bottom = (band_ceiling - band_bottom) / geometry.tile_height;
+        let cropped_v0 = v0 + (v1 - v0) * crop_top;
+        let cropped_v1 = v0 + (v1 - v0) * crop_bottom;
+        let (positions, normal, uvs) = match direction {
+            Direction::South => (
+                [
+                    [x1, band_bottom, z1],
+                    [x1, band_top, z1],
+                    [x0, band_top, z1],
+                    [x0, band_bottom, z1],
+                ],
+                [0.0, 0.0, 1.0],
+                [
+                    [u1, cropped_v1],
+                    [u1, cropped_v0],
+                    [u0, cropped_v0],
+                    [u0, cropped_v1],
+                ],
+            ),
+            Direction::West => (
+                [
+                    [x0, band_bottom, z1],
+                    [x0, band_top, z1],
+                    [x0, band_top, z0],
+                    [x0, band_bottom, z0],
+                ],
+                [-1.0, 0.0, 0.0],
+                [
+                    [u1, cropped_v1],
+                    [u1, cropped_v0],
+                    [u0, cropped_v0],
+                    [u0, cropped_v1],
+                ],
+            ),
+            Direction::East => (
+                [
+                    [x1, band_bottom, z0],
+                    [x1, band_top, z0],
+                    [x1, band_top, z1],
+                    [x1, band_bottom, z1],
+                ],
+                [1.0, 0.0, 0.0],
+                [
+                    [u0, cropped_v1],
+                    [u0, cropped_v0],
+                    [u1, cropped_v0],
+                    [u1, cropped_v1],
+                ],
+            ),
+            Direction::North => (
+                [
+                    [x0, band_bottom, z0],
+                    [x0, band_top, z0],
+                    [x1, band_top, z0],
+                    [x1, band_bottom, z0],
+                ],
+                [0.0, 0.0, -1.0],
+                [
+                    [u0, cropped_v1],
+                    [u0, cropped_v0],
+                    [u1, cropped_v0],
+                    [u1, cropped_v1],
+                ],
+            ),
+        };
+        append_quad(mesh, positions, normal, uvs, color);
     }
 }
 
@@ -2291,18 +2380,22 @@ mod tests {
     #[test]
     fn blackthorn_south_ledge_uses_two_native_face_bands() {
         let mut sources = Vec::new();
-        for row in 0..4 {
+        for row in 0..5 {
             for column in 0..4 {
-                sources.push(source_with_tile(
-                    0x72,
-                    column as u8,
-                    row as u8,
-                    if row < 2 { 0x3c } else { 0x4c },
-                ));
+                sources.push(if row < 4 {
+                    source_with_tile(
+                        0x72,
+                        column as u8,
+                        row as u8,
+                        if row < 2 { 0x3c } else { 0x4c },
+                    )
+                } else {
+                    flat_source()
+                });
             }
         }
         let mesh =
-            build_terrain_mesh(&frame(4, 4, sources)).expect("authored mountain ledge should mesh");
+            build_terrain_mesh(&frame(4, 5, sources)).expect("authored mountain ledge should mesh");
         let south_faces: Vec<_> = mesh
             .textured
             .positions
@@ -2323,6 +2416,106 @@ mod tests {
                 .fold(f32::NEG_INFINITY, f32::max);
             max - min == 8.0
         }));
+    }
+
+    #[test]
+    fn blackthorn_corner_emits_native_east_and_south_faces() {
+        let mut sources = Vec::new();
+        for row in 0..5 {
+            for column in 0..5 {
+                sources.push(if row < 4 && column < 4 {
+                    source_with_tile(
+                        0x6d,
+                        column as u8,
+                        row as u8,
+                        match (column >= 2, row >= 2) {
+                            (_, true) => 0x4c,
+                            (true, false) => 0x3d,
+                            _ => 0x3c,
+                        },
+                    )
+                } else {
+                    flat_source()
+                });
+            }
+        }
+        let mesh = build_terrain_mesh(&frame(5, 5, sources))
+            .expect("authored mountain corner should mesh");
+        let south_faces = mesh
+            .textured
+            .normals
+            .chunks_exact(4)
+            .filter(|normal| normal[0] == [0.0, 0.0, 1.0])
+            .count();
+        let east_faces = mesh
+            .textured
+            .normals
+            .chunks_exact(4)
+            .filter(|normal| normal[0] == [1.0, 0.0, 0.0])
+            .count();
+        assert_eq!(south_faces, 8);
+        assert_eq!(east_faces, 8);
+    }
+
+    #[test]
+    fn raised_plateau_run_reuses_native_directional_wall_courses() {
+        let sources = vec![
+            source_with_tile(0x69, 2, 0, 0x3d),
+            source_with_tile(0x69, 3, 0, 0x3d),
+            flat_source(),
+            source_with_tile(0x70, 0, 0, 0x3c),
+            flat_source(),
+        ];
+        let mesh = build_terrain_mesh(&frame(5, 1, sources))
+            .expect("connected plateau side should use authored wall art");
+        let target_east_x = 12.0;
+        let textured_east_courses = mesh
+            .textured
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.textured.normals.chunks_exact(4))
+            .filter(|(positions, normals)| {
+                normals[0] == [1.0, 0.0, 0.0]
+                    && positions
+                        .iter()
+                        .all(|position| position[0] == target_east_x)
+            })
+            .count();
+        let solid_east_faces = mesh
+            .solid
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.solid.normals.chunks_exact(4))
+            .filter(|(positions, normals)| {
+                normals[0] == [1.0, 0.0, 0.0]
+                    && positions
+                        .iter()
+                        .all(|position| position[0] == target_east_x)
+            })
+            .count();
+        assert_eq!(textured_east_courses, 2);
+        assert_eq!(solid_east_faces, 0);
+    }
+
+    #[test]
+    fn explicit_ledge_face_is_not_covered_by_a_generic_solid_side() {
+        let sources = vec![
+            source_with_tile(0x69, 2, 0, 0x3c),
+            source_with_tile(0x69, 3, 0, 0x3d),
+            flat_source(),
+        ];
+        let mesh =
+            build_terrain_mesh(&frame(3, 1, sources)).expect("authored east ledge should mesh");
+        let generic_faces = mesh
+            .solid
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.solid.normals.chunks_exact(4))
+            .filter(|(positions, normals)| {
+                normals[0] == [1.0, 0.0, 0.0] && positions.iter().all(|position| position[0] == 4.0)
+            })
+            .count();
+        assert_eq!(generic_faces, 0);
     }
 
     #[test]
