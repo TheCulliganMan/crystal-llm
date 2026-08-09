@@ -1,6 +1,6 @@
 //! Pure authored-profile mesh construction for the optional voxel renderer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::{
     asset::AssetId,
@@ -357,15 +357,20 @@ fn append_masked_upright_band(
     let ground = tile_rgba(images, ground_tile)?;
     let [x0, x1, band_bottom, band_top, plane_z] = bounds;
     let [u0, u1, v0, v1] = uv;
+    let removable_ground = boundary_connected_ground_mask(source, ground);
 
     for pixel_y in 0..SOURCE_TILE_PIXELS {
         let mut pixel_x = 0;
         while pixel_x < SOURCE_TILE_PIXELS {
-            while pixel_x < SOURCE_TILE_PIXELS && pixels_equal(source, ground, pixel_x, pixel_y) {
+            while pixel_x < SOURCE_TILE_PIXELS
+                && removable_ground[pixel_y * SOURCE_TILE_PIXELS + pixel_x]
+            {
                 pixel_x += 1;
             }
             let run_start = pixel_x;
-            while pixel_x < SOURCE_TILE_PIXELS && !pixels_equal(source, ground, pixel_x, pixel_y) {
+            while pixel_x < SOURCE_TILE_PIXELS
+                && !removable_ground[pixel_y * SOURCE_TILE_PIXELS + pixel_x]
+            {
                 pixel_x += 1;
             }
             if run_start == pixel_x {
@@ -400,6 +405,48 @@ fn append_masked_upright_band(
         }
     }
     Ok(())
+}
+
+fn boundary_connected_ground_mask(source: &[u8], ground: &[u8]) -> [bool; 64] {
+    debug_assert_eq!(SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS, 64);
+    let mut removable = [false; 64];
+    let mut pending = VecDeque::new();
+    for y in 0..SOURCE_TILE_PIXELS {
+        for x in 0..SOURCE_TILE_PIXELS {
+            if x != 0
+                && y != 0
+                && x + 1 != SOURCE_TILE_PIXELS
+                && y + 1 != SOURCE_TILE_PIXELS
+            {
+                continue;
+            }
+            if pixels_equal(source, ground, x, y) {
+                let index = y * SOURCE_TILE_PIXELS + x;
+                if !removable[index] {
+                    removable[index] = true;
+                    pending.push_back((x, y));
+                }
+            }
+        }
+    }
+    while let Some((x, y)) = pending.pop_front() {
+        for (next_x, next_y) in [
+            x.checked_sub(1).map(|next| (next, y)),
+            (x + 1 < SOURCE_TILE_PIXELS).then_some((x + 1, y)),
+            y.checked_sub(1).map(|next| (x, next)),
+            (y + 1 < SOURCE_TILE_PIXELS).then_some((x, y + 1)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let index = next_y * SOURCE_TILE_PIXELS + next_x;
+            if !removable[index] && pixels_equal(source, ground, next_x, next_y) {
+                removable[index] = true;
+                pending.push_back((next_x, next_y));
+            }
+        }
+    }
+    removable
 }
 
 fn tile_rgba<'a>(
@@ -806,6 +853,25 @@ mod tests {
             .positions
             .iter()
             .all(|position| position[1] == 0.0));
+    }
+
+    #[test]
+    fn mask_removes_only_boundary_connected_ground_pixels() {
+        let ground = [7_u8; SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS * 4];
+        let mut source = ground;
+        for y in 2..=4 {
+            for x in 2..=4 {
+                if x == 2 || x == 4 || y == 2 || y == 4 {
+                    let offset = (y * SOURCE_TILE_PIXELS + x) * 4;
+                    source[offset..offset + 4].copy_from_slice(&[1, 2, 3, 255]);
+                }
+            }
+        }
+
+        let removable = boundary_connected_ground_mask(&source, &ground);
+        assert!(removable[0], "open background must be removed");
+        assert!(!removable[3 * SOURCE_TILE_PIXELS + 3], "enclosed face must remain");
+        assert!(!removable[2 * SOURCE_TILE_PIXELS + 2], "outline must remain");
     }
 
     #[test]
