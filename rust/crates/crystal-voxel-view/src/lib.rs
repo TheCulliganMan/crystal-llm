@@ -34,6 +34,10 @@ pub use profile::{
 };
 
 pub const EXPECTED_GRID_SIZE: UVec2 = UVec2::new(20, 18);
+/// Layer used by the host's faithful world while 2.5D is active. A dedicated
+/// camera draws it first, providing exact coverage outside the pitched mesh
+/// and during viewport scrolling without inventing geometry.
+pub const CLASSIC_FALLBACK_RENDER_LAYER: usize = 30;
 
 const VOXEL_RENDER_LAYER: usize = 31;
 const NORMAL_ACTOR_CAMERA_PULL: f32 = 0.05;
@@ -88,6 +92,9 @@ fn toggle_voxel_view(keyboard: Res<ButtonInput<KeyCode>>, mut settings: ResMut<V
 
 #[derive(Component)]
 struct VoxelWorldCamera;
+
+#[derive(Component)]
+struct VoxelClassicFallbackCamera;
 
 #[derive(Component)]
 struct VoxelTerrain;
@@ -161,6 +168,21 @@ fn setup_voxel_view(
 ) {
     let initial_viewport = Vec2::new(160.0, 144.0);
     let pose = camera_pose(initial_viewport);
+    commands.spawn((
+        Camera2dBundle {
+            camera: Camera {
+                order: -1,
+                ..default()
+            },
+            projection: OrthographicProjection {
+                scaling_mode: ScalingMode::WindowSize(1.0),
+                ..default()
+            },
+            ..default()
+        },
+        RenderLayers::layer(CLASSIC_FALLBACK_RENDER_LAYER),
+        VoxelClassicFallbackCamera,
+    ));
     let camera = commands
         .spawn((
             Camera3dBundle {
@@ -168,11 +190,10 @@ fn setup_voxel_view(
                     order: 0,
                     is_active: false,
                     target: RenderTarget::Window(bevy::window::WindowRef::Primary),
-                    // During an exact-size viewport scroll the tilted mesh can
-                    // expose a narrow target edge. Keep that edge transparent
-                    // so the faithful 2D world underneath remains the fallback
-                    // instead of flashing an invented black strip.
-                    clear_color: ClearColorConfig::Default,
+                    // The dedicated camera above already drew the faithful 2D
+                    // world. Preserve it anywhere the pitched mesh has no
+                    // coverage instead of clearing to a letterbox color.
+                    clear_color: ClearColorConfig::None,
                     ..default()
                 },
                 projection: Projection::Orthographic(OrthographicProjection {

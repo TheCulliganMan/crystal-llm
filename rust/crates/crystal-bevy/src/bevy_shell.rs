@@ -3533,12 +3533,14 @@ fn sync_voxel_classic_world_layers(
 ) {
     for entity in &classic_world {
         if status.active {
-            // No camera renders this parking layer. The authored 3D camera
-            // draws the world first; the layer-0 camera then composites only
-            // the unchanged UI, dialog, fades, and other screen-space chrome.
-            commands
-                .entity(entity)
-                .insert(bevy::render::view::RenderLayers::layer(29));
+            // The voxel plugin's first camera draws this faithful world as a
+            // coverage layer. Its 3D camera then overlays authored geometry,
+            // and the layer-0 camera composites unchanged UI and fades.
+            commands.entity(entity).insert(
+                bevy::render::view::RenderLayers::layer(
+                    crystal_voxel_view::CLASSIC_FALLBACK_RENDER_LAYER,
+                ),
+            );
         } else {
             commands
                 .entity(entity)
