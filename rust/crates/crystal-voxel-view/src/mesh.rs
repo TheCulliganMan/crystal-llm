@@ -224,14 +224,7 @@ fn build_terrain_mesh_internal(
                 continue;
             }
             append_textured_cell(
-                &mut mesh.textured,
-                &geometry,
-                &cells,
-                &shapes,
-                column,
-                row,
-                index,
-                images,
+                &mut mesh, &geometry, &cells, &shapes, column, row, index, images,
             )?;
         }
     }
@@ -562,7 +555,7 @@ impl GridGeometry {
 
 #[allow(clippy::too_many_arguments)]
 fn append_textured_cell(
-    mesh: &mut SurfaceMeshData,
+    mesh: &mut TerrainMeshData,
     geometry: &GridGeometry,
     cells: &[&VisualTile],
     shapes: &[CellShape],
@@ -575,7 +568,7 @@ fn append_textured_cell(
     match shapes[index] {
         CellShape::Flat | CellShape::Water | CellShape::RaisedTop { .. } => {
             append_top(
-                mesh,
+                &mut mesh.textured,
                 [x0, x1, z0, z1],
                 shapes[index].surface_height(geometry.tile_height),
                 geometry.uv(column, row),
@@ -596,7 +589,7 @@ fn append_textured_cell(
                 },
             )?;
             append_top(
-                mesh,
+                &mut mesh.textured,
                 [x0, x1, z0, z1],
                 0.0,
                 geometry.uv(replacement % geometry.width, replacement / geometry.width),
@@ -624,15 +617,17 @@ fn append_textured_cell(
                     index,
                     cells[replacement],
                 )?;
-                append_masked_upright_band(
-                    mesh,
+                append_masked_upright_hull(
+                    &mut mesh.textured,
+                    &mut mesh.solid,
                     &removable_ground,
                     [x0, x1, band_bottom, band_top, plane_z],
                     [u0, u1, v0, v1],
+                    solid,
                 )?;
             } else {
                 append_quad(
-                    mesh,
+                    &mut mesh.textured,
                     [
                         [x1, band_bottom, plane_z],
                         [x1, band_top, plane_z],
@@ -665,11 +660,13 @@ fn authored_ground_cell(
         .map(|(index, _)| index)
 }
 
-fn append_masked_upright_band(
-    mesh: &mut SurfaceMeshData,
+fn append_masked_upright_hull(
+    textured: &mut SurfaceMeshData,
+    solid_mesh: &mut SurfaceMeshData,
     removable_ground: &[bool; 64],
     bounds: [f32; 5],
     uv: [f32; 4],
+    solid: SolidKind,
 ) -> Result<(), TerrainMeshError> {
     let [x0, x1, band_bottom, band_top, plane_z] = bounds;
     let [u0, u1, v0, v1] = uv;
@@ -701,7 +698,7 @@ fn append_masked_upright_band(
             let run_v0 = lerp_pixel(v0, v1, pixel_y);
             let run_v1 = lerp_pixel(v0, v1, pixel_y + 1);
             append_quad(
-                mesh,
+                textured,
                 [
                     [x_end, y_bottom, plane_z],
                     [x_end, y_top, plane_z],
@@ -717,9 +714,109 @@ fn append_masked_upright_band(
                 ],
                 TEXTURED_SHADE,
             );
+            let depth = upright_depth(solid);
+            append_quad(
+                textured,
+                [
+                    [x_start, y_bottom, plane_z - depth],
+                    [x_start, y_top, plane_z - depth],
+                    [x_end, y_top, plane_z - depth],
+                    [x_end, y_bottom, plane_z - depth],
+                ],
+                [0.0, 0.0, -1.0],
+                [
+                    [run_u0, run_v1],
+                    [run_u0, run_v0],
+                    [run_u1, run_v0],
+                    [run_u1, run_v1],
+                ],
+                [0.72, 0.72, 0.72, 1.0],
+            );
+        }
+    }
+
+    let depth = upright_depth(solid);
+    let back_z = plane_z - depth;
+    for pixel_y in 0..SOURCE_TILE_PIXELS {
+        for pixel_x in 0..SOURCE_TILE_PIXELS {
+            let index = pixel_y * SOURCE_TILE_PIXELS + pixel_x;
+            if removable_ground[index] {
+                continue;
+            }
+            let x_start = lerp_pixel(x0, x1, pixel_x);
+            let x_end = lerp_pixel(x0, x1, pixel_x + 1);
+            let y_top = lerp_pixel(band_top, band_bottom, pixel_y);
+            let y_bottom = lerp_pixel(band_top, band_bottom, pixel_y + 1);
+            let open = |x: isize, y: isize| {
+                x < 0
+                    || y < 0
+                    || x >= SOURCE_TILE_PIXELS as isize
+                    || y >= SOURCE_TILE_PIXELS as isize
+                    || removable_ground[y as usize * SOURCE_TILE_PIXELS + x as usize]
+            };
+            if open(pixel_x as isize - 1, pixel_y as isize) {
+                append_solid_quad(
+                    solid_mesh,
+                    [
+                        [x_start, y_bottom, plane_z],
+                        [x_start, y_top, plane_z],
+                        [x_start, y_top, back_z],
+                        [x_start, y_bottom, back_z],
+                    ],
+                    [-1.0, 0.0, 0.0],
+                    solid_color(solid, Direction::West),
+                );
+            }
+            if open(pixel_x as isize + 1, pixel_y as isize) {
+                append_solid_quad(
+                    solid_mesh,
+                    [
+                        [x_end, y_bottom, back_z],
+                        [x_end, y_top, back_z],
+                        [x_end, y_top, plane_z],
+                        [x_end, y_bottom, plane_z],
+                    ],
+                    [1.0, 0.0, 0.0],
+                    solid_color(solid, Direction::East),
+                );
+            }
+            if open(pixel_x as isize, pixel_y as isize - 1) {
+                append_solid_quad(
+                    solid_mesh,
+                    [
+                        [x_start, y_top, back_z],
+                        [x_end, y_top, back_z],
+                        [x_end, y_top, plane_z],
+                        [x_start, y_top, plane_z],
+                    ],
+                    [0.0, 1.0, 0.0],
+                    solid_color(solid, Direction::South),
+                );
+            }
+            if open(pixel_x as isize, pixel_y as isize + 1) {
+                append_solid_quad(
+                    solid_mesh,
+                    [
+                        [x_start, y_bottom, plane_z],
+                        [x_end, y_bottom, plane_z],
+                        [x_end, y_bottom, back_z],
+                        [x_start, y_bottom, back_z],
+                    ],
+                    [0.0, -1.0, 0.0],
+                    solid_color(solid, Direction::North),
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn upright_depth(solid: SolidKind) -> f32 {
+    match solid {
+        SolidKind::Tree => 6.0,
+        SolidKind::Prop => 2.0,
+        _ => 1.0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1287,14 +1384,38 @@ mod tests {
             sources.push(source_with_tile(0x05, 0, row, 0x1e + row as u16 * 0x10));
             sources.push(source_with_tile(0x01, 0, 0, 0x05));
         }
-        let mesh = build_terrain_mesh(&frame(2, 4, sources)).expect("tree group should mesh");
+        let frame = frame(2, 4, sources);
+        let mut samples = TerrainImageSamples::default();
+        for tile in &frame.tiles {
+            let rgba = if tile.source.metatile_id == 0x05 {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            samples
+                .pixels
+                .insert(tile.texture.id(), TileImageSample::Rgba(rgba.repeat(64)));
+        }
+        let mesh = build_terrain_mesh_with_samples(&frame, &samples)
+            .expect("tree group should mesh as a shallow silhouette hull");
         let upright = mesh
             .textured
             .normals
             .chunks_exact(4)
             .filter(|face| face[0] == [0.0, 0.0, 1.0])
             .count();
-        assert_eq!(upright, 4);
+        let backs = mesh
+            .textured
+            .normals
+            .chunks_exact(4)
+            .filter(|face| face[0] == [0.0, 0.0, -1.0])
+            .count();
+        assert!(upright > 0);
+        assert_eq!(backs, upright, "every tree front run needs a back run");
+        assert!(
+            mesh.solid.quad_count() > 0,
+            "the grouped tree silhouette needs a closed shallow hull"
+        );
     }
 
     #[test]
