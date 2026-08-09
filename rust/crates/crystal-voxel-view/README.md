@@ -56,4 +56,12 @@ cargo run -p crystal-bevy --example render_at_location \
   --pack /path/to/game.crystalpack \
   --map NewBarkTown --x 6 --y 8 --view 2.5d \
   --screenshot /tmp/new-bark-2.5d.png
+
+# Render the identical location in both modes. This writes
+# /tmp/new-bark-2d.png and /tmp/new-bark-2.5d.png.
+cargo run -p crystal-bevy --example render_at_location \
+  --features location-tester -- \
+  --pack /path/to/game.crystalpack \
+  --map NewBarkTown --x 6 --y 8 --view both \
+  --screenshot /tmp/new-bark.png
 ```

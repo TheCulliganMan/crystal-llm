@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, bail};
 use crystal_bevy::{
@@ -10,6 +10,7 @@ use crystal_bevy::{
 enum ViewMode {
     TwoD,
     TwoPointFiveD,
+    Both,
 }
 
 impl ViewMode {
@@ -17,7 +18,8 @@ impl ViewMode {
         match value {
             "2d" | "classic" => Ok(Self::TwoD),
             "2.5d" | "voxel" => Ok(Self::TwoPointFiveD),
-            _ => bail!("--view must be '2d' or '2.5d'"),
+            "both" | "compare" => Ok(Self::Both),
+            _ => bail!("--view must be '2d', '2.5d', or 'both'"),
         }
     }
 
@@ -25,6 +27,7 @@ impl ViewMode {
         match self {
             Self::TwoD => "2D",
             Self::TwoPointFiveD => "2.5D",
+            Self::Both => "2D + 2.5D",
         }
     }
 }
@@ -42,6 +45,9 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = parse_args(env::args().skip(1))?;
+    if args.view == ViewMode::Both {
+        return render_both(&args);
+    }
     let pack_path = args
         .pack
         .canonicalize()
@@ -102,6 +108,59 @@ fn main() -> Result<()> {
             ..Default::default()
         },
     )
+}
+
+fn render_both(args: &Args) -> Result<()> {
+    let map = args
+        .map
+        .as_deref()
+        .context("--map is required for --view both")?;
+    let output = args
+        .screenshot
+        .as_ref()
+        .context("--screenshot <prefix.png> is required for --view both")?;
+    let executable = env::current_exe().context("resolve render tester executable")?;
+
+    for (view, suffix) in [("2d", "2d"), ("2.5d", "2.5d")] {
+        let output = suffixed_output(output, suffix);
+        let mut command = Command::new(&executable);
+        command
+            .arg("--pack")
+            .arg(&args.pack)
+            .arg("--map")
+            .arg(map)
+            .arg("--view")
+            .arg(view)
+            .arg("--screenshot")
+            .arg(&output);
+        if let Some(x) = args.tile_x {
+            command.arg("--x").arg(x.to_string());
+        }
+        if let Some(y) = args.tile_y {
+            command.arg("--y").arg(y.to_string());
+        }
+        let status = command
+            .status()
+            .with_context(|| format!("launch {view} render for {map}"))?;
+        if !status.success() {
+            bail!("{view} render for {map} exited with {status}");
+        }
+        println!("wrote {}", output.display());
+    }
+    Ok(())
+}
+
+fn suffixed_output(output: &std::path::Path, suffix: &str) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = output
+        .file_stem()
+        .unwrap_or(output.as_os_str())
+        .to_string_lossy();
+    let extension = output
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+    parent.join(format!("{stem}-{suffix}{extension}"))
 }
 
 fn print_map_catalog(runtime: &CrystalRuntime) {
@@ -173,7 +232,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
 
 fn print_usage() {
     println!(
-        "cargo run -p crystal-bevy --example render_at_location --features location-tester -- \\\n         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \\\n         [--view 2d|2.5d] [--screenshot <output.png>]]"
+        "cargo run -p crystal-bevy --example render_at_location --features location-tester -- \\\n+         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \\\n+         [--view 2d|2.5d|both] [--screenshot <output-or-prefix.png>]]"
     );
 }
 
@@ -185,7 +244,20 @@ mod tests {
     fn parses_both_render_modes() {
         assert_eq!(ViewMode::parse("2d").unwrap(), ViewMode::TwoD);
         assert_eq!(ViewMode::parse("2.5d").unwrap(), ViewMode::TwoPointFiveD);
+        assert_eq!(ViewMode::parse("both").unwrap(), ViewMode::Both);
         assert!(ViewMode::parse("3d").is_err());
+    }
+
+    #[test]
+    fn comparison_outputs_are_labeled_without_losing_extension() {
+        assert_eq!(
+            suffixed_output(std::path::Path::new("/tmp/NewBark.png"), "2.5d"),
+            PathBuf::from("/tmp/NewBark-2.5d.png")
+        );
+        assert_eq!(
+            suffixed_output(std::path::Path::new("comparison"), "2d"),
+            PathBuf::from("comparison-2d")
+        );
     }
 
     #[test]
