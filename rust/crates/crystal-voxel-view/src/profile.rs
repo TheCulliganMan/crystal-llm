@@ -15,8 +15,13 @@ pub const MIN_PROFILE_HEIGHT: f32 = WATER_HEIGHT;
 pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
 
 const JOHTO_TILESET: &str = "johto";
+const KANTO_TILESET: &str = "kanto";
 const AUTHORED_WATER_TILESETS: [&str; 3] = ["johto_modern", "kanto", "cave"];
 const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
+const KANTO_TREE_TILE_INDICES: [u16; 8] = [0x2d, 0x2e, 0x3d, 0x3e, 0x40, 0x41, 0x50, 0x51];
+// Tree metatiles carry $2c in their open cells; using that exact background
+// keeps the mask palette-aware and guarantees the sample travels with the art.
+const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolidKind {
@@ -82,6 +87,22 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
         && source.tile_index == AUTHORED_WATER_TILE_INDEX
     {
         return CellShape::Water;
+    }
+
+    // Kanto's tree drawings are composed from stable 2x2 source-cell sets.
+    // Fold each set once at its own south edge instead of treating the whole
+    // metatile as a raised block or repeating a cell down a wall.
+    if source.tileset_id.as_ref() == KANTO_TILESET
+        && KANTO_TREE_TILE_INDICES.contains(&source.tile_index)
+    {
+        let group_row = source.subtile_row / 2;
+        return CellShape::FacadeBand {
+            plane_subtile_row: (group_row + 1) * 2,
+            band_from_top: source.subtile_row % 2,
+            band_count: 2,
+            ground_tile_index: KANTO_GROUND_TILE_INDEX,
+            solid: SolidKind::Tree,
+        };
     }
 
     if source.tileset_id.as_ref() != JOHTO_TILESET {
@@ -287,6 +308,34 @@ mod tests {
         }
         assert_eq!(
             shape_for_source(&source_for_tileset("house", 0x14, 1, 2, 0x14)),
+            CellShape::Flat
+        );
+    }
+
+    #[test]
+    fn kanto_tree_cells_form_independent_two_band_cards() {
+        assert_eq!(
+            shape_for_source(&source_for_tileset(KANTO_TILESET, 0x32, 0, 0, 0x40)),
+            CellShape::FacadeBand {
+                plane_subtile_row: 2,
+                band_from_top: 0,
+                band_count: 2,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+                solid: SolidKind::Tree,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(KANTO_TILESET, 0x32, 0, 3, 0x51)),
+            CellShape::FacadeBand {
+                plane_subtile_row: 4,
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+                solid: SolidKind::Tree,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset("johto_modern", 0x32, 0, 0, 0x40)),
             CellShape::Flat
         );
     }

@@ -111,10 +111,30 @@ fn build_terrain_mesh_internal(
         .into_iter()
         .map(|tile| tile.expect("complete tile grid was checked before meshing"))
         .collect();
-    let shapes: Vec<_> = cells
+    let mut shapes: Vec<_> = cells
         .iter()
         .map(|tile| shape_for_source(&tile.source))
         .collect();
+    // Upright profiles require an exact live background cell for both the
+    // vacated floor and pixel mask. A clipped viewport may not carry that
+    // evidence; resolve only that shape back to the documented flat baseline
+    // instead of failing the complete renderer or guessing from collision.
+    let available_flat_tiles: std::collections::HashSet<_> = cells
+        .iter()
+        .zip(&shapes)
+        .filter_map(|(tile, shape)| {
+            matches!(shape, CellShape::Flat).then_some(tile.source.tile_index)
+        })
+        .collect();
+    for shape in &mut shapes {
+        if let CellShape::FacadeBand {
+            ground_tile_index, ..
+        } = *shape
+            && !available_flat_tiles.contains(&ground_tile_index)
+        {
+            *shape = CellShape::Flat;
+        }
+    }
 
     let grid_width = frame.tile_size.x * frame.grid_size.x as f32;
     let grid_height = frame.tile_size.y * frame.grid_size.y as f32;
@@ -271,7 +291,6 @@ fn authored_ground_cell(
         .enumerate()
         .filter(|(index, shape)| {
             matches!(shape, CellShape::Flat)
-                && !cells[*index].priority
                 && cells[*index].source.tile_index == ground_tile_index
         })
         // Coordinate order, not DTO order, makes the authored source stable.
@@ -729,6 +748,22 @@ mod tests {
             .filter(|face| face[0] == [0.0, 0.0, 1.0])
             .count();
         assert_eq!(upright, 4);
+    }
+
+    #[test]
+    fn clipped_profile_without_ground_evidence_stays_flat() {
+        let mut tree = source_with_tile(0x32, 0, 0, 0x40);
+        tree.tileset_id = Arc::from("kanto");
+        let mesh = build_terrain_mesh(&frame(1, 1, vec![tree]))
+            .expect("missing profile evidence should preserve the flat baseline");
+
+        assert_eq!(mesh.textured.quad_count(), 1);
+        assert_eq!(mesh.solid.quad_count(), 0);
+        assert!(mesh
+            .textured
+            .positions
+            .iter()
+            .all(|position| position[1] == 0.0));
     }
 
     #[test]

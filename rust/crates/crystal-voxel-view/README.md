@@ -36,7 +36,10 @@ geometry and Bevy integration here are independently implemented for Crystal.
 
 The initial clean-room profile covers New Bark's compact and large buildings,
 trees, signs, and shallow water. Exact animated water cells are also recessed
-in the modern Johto, Kanto, and cave tilesets without lowering shoreline art.
+in the modern Johto, Kanto, and cave tilesets without lowering shoreline art;
+Kanto's exact two-cell tree bands form masked upright cards whenever their
+authored background cell is present in the visual snapshot. A clipped profile
+with missing art evidence stays flat instead of guessing or disabling 2.5D.
 Building facade rows fold onto one shared front plane while their vacated cells
 remain walkable ground. Profile metadata is mod-owned presentation data; it is
 neither inferred from collision nor fed back into movement, scripts, saves,
