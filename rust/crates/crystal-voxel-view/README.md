@@ -47,6 +47,9 @@ in the modern Johto, Kanto, and cave tilesets without lowering shoreline art;
 Kanto's exact two-cell tree bands form masked upright cards whenever their
 authored background cell is present in the visual snapshot. A clipped profile
 with missing art evidence stays flat instead of guessing or disabling 2.5D.
+The cave tileset's exact two-row rock drawings likewise fold into masked
+upright props while ambiguous wall contours remain flat pending a connected
+profile; cave collision is never treated as visual height.
 Building facade rows fold onto one shared front plane while their vacated cells
 remain walkable ground. Profile metadata is mod-owned presentation data; it is
 neither inferred from collision nor fed back into movement, scripts, saves,

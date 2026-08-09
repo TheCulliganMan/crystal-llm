@@ -16,12 +16,16 @@ pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
 
 const JOHTO_TILESET: &str = "johto";
 const KANTO_TILESET: &str = "kanto";
+const CAVE_TILESET: &str = "cave";
 const AUTHORED_WATER_TILESETS: [&str; 3] = ["johto_modern", "kanto", "cave"];
 const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
 const KANTO_TREE_TILE_INDICES: [u16; 8] = [0x2d, 0x2e, 0x3d, 0x3e, 0x40, 0x41, 0x50, 0x51];
 // Tree metatiles carry $2c in their open cells; using that exact background
 // keeps the mask palette-aware and guarantees the sample travels with the art.
 const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
+const CAVE_GROUND_TILE_INDEX: u16 = 0x01;
+const CAVE_ROCK_TOP_TILE_INDICES: [u16; 2] = [0x0c, 0x0d];
+const CAVE_ROCK_BOTTOM_TILE_INDICES: [u16; 2] = [0x1c, 0x1d];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolidKind {
@@ -79,6 +83,31 @@ pub fn supports_frame_profile(frame: &VisualWorldFrame) -> bool {
 }
 
 pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
+    // Cave's $0c/$0d/$1c/$1d cells are one exact two-row rock drawing. The
+    // metatile catalog places that same authored 16x16 prop at multiple
+    // quadrants. Fold each source row once at its local two-row origin; never
+    // promote the surrounding cave collision contour into a generic wall.
+    if source.tileset_id.as_ref() == CAVE_TILESET {
+        if CAVE_ROCK_TOP_TILE_INDICES.contains(&source.tile_index) {
+            return CellShape::FacadeBand {
+                plane_subtile_row: source.subtile_row,
+                band_from_top: 0,
+                band_count: 2,
+                ground_tile_index: CAVE_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            };
+        }
+        if CAVE_ROCK_BOTTOM_TILE_INDICES.contains(&source.tile_index) {
+            return CellShape::FacadeBand {
+                plane_subtile_row: source.subtile_row.saturating_sub(1),
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: CAVE_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            };
+        }
+    }
+
     // These three Crystal tilesets use tile $14 as their animated open-water
     // cell, including inside shoreline metatiles. Matching the source cell
     // rather than the whole metatile recesses water without lowering banks,
@@ -338,6 +367,35 @@ mod tests {
             shape_for_source(&source_for_tileset("johto_modern", 0x32, 0, 0, 0x40)),
             CellShape::Flat
         );
+    }
+
+    #[test]
+    fn cave_rock_rows_fold_once_without_raising_support() {
+        let top = source_for_tileset(CAVE_TILESET, 0x19, 0, 0, 0x0c);
+        let bottom = source_for_tileset(CAVE_TILESET, 0x19, 0, 1, 0x1c);
+
+        assert_eq!(
+            shape_for_source(&top),
+            CellShape::FacadeBand {
+                plane_subtile_row: 0,
+                band_from_top: 0,
+                band_count: 2,
+                ground_tile_index: CAVE_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&bottom),
+            CellShape::FacadeBand {
+                plane_subtile_row: 0,
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: CAVE_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            }
+        );
+        assert_eq!(support_height(&top, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
+        assert_eq!(support_height(&bottom, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
     }
 
     #[test]
