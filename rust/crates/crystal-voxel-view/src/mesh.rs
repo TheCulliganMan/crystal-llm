@@ -1,6 +1,9 @@
 //! Pure authored-profile mesh construction for the optional voxel renderer.
 
+use std::collections::HashMap;
+
 use bevy::{
+    asset::AssetId,
     prelude::{Assets, Image, Mesh},
     render::{mesh::Indices, render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
 };
@@ -10,6 +13,42 @@ use crate::profile::{CellShape, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source}
 
 const TEXTURED_SHADE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const SOURCE_TILE_PIXELS: usize = SOURCE_TILE_HEIGHT as usize;
+
+#[derive(Clone, Debug, Default)]
+pub struct TerrainImageSamples {
+    pixels: HashMap<AssetId<Image>, TileImageSample>,
+}
+
+#[derive(Clone, Debug)]
+enum TileImageSample {
+    Rgba(Vec<u8>),
+    Invalid,
+}
+
+impl TerrainImageSamples {
+    pub fn capture(frame: &VisualWorldFrame, images: &Assets<Image>) -> Self {
+        let mut samples = Self::default();
+        for tile in &frame.tiles {
+            samples.pixels.entry(tile.texture.id()).or_insert_with(|| {
+                let Some(image) = images.get(&tile.texture) else {
+                    return TileImageSample::Invalid;
+                };
+                let size = image.texture_descriptor.size;
+                let expected_len = SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS * 4;
+                if size.width as usize != SOURCE_TILE_PIXELS
+                    || size.height as usize != SOURCE_TILE_PIXELS
+                    || size.depth_or_array_layers != 1
+                    || image.data.len() != expected_len
+                {
+                    TileImageSample::Invalid
+                } else {
+                    TileImageSample::Rgba(image.data.clone())
+                }
+            });
+        }
+        samples
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SurfaceMeshData {
@@ -66,12 +105,20 @@ pub fn build_terrain_mesh_with_images(
     frame: &VisualWorldFrame,
     images: &Assets<Image>,
 ) -> Result<TerrainMeshData, TerrainMeshError> {
-    build_terrain_mesh_internal(frame, Some(images))
+    let samples = TerrainImageSamples::capture(frame, images);
+    build_terrain_mesh_with_samples(frame, &samples)
+}
+
+pub fn build_terrain_mesh_with_samples(
+    frame: &VisualWorldFrame,
+    samples: &TerrainImageSamples,
+) -> Result<TerrainMeshData, TerrainMeshError> {
+    build_terrain_mesh_internal(frame, Some(samples))
 }
 
 fn build_terrain_mesh_internal(
     frame: &VisualWorldFrame,
-    images: Option<&Assets<Image>>,
+    images: Option<&TerrainImageSamples>,
 ) -> Result<TerrainMeshData, TerrainMeshError> {
     frame
         .validate()
@@ -209,7 +256,7 @@ fn append_textured_cell(
     column: usize,
     row: usize,
     index: usize,
-    images: Option<&Assets<Image>>,
+    images: Option<&TerrainImageSamples>,
 ) -> Result<(), TerrainMeshError> {
     let (x0, x1, z0, z1) = geometry.bounds(column, row);
     match shapes[index] {
@@ -300,7 +347,7 @@ fn authored_ground_cell(
 
 fn append_masked_upright_band(
     mesh: &mut SurfaceMeshData,
-    images: &Assets<Image>,
+    images: &TerrainImageSamples,
     source_tile: &VisualTile,
     ground_tile: &VisualTile,
     bounds: [f32; 5],
@@ -356,28 +403,23 @@ fn append_masked_upright_band(
 }
 
 fn tile_rgba<'a>(
-    images: &'a Assets<Image>,
+    images: &'a TerrainImageSamples,
     tile: &VisualTile,
 ) -> Result<&'a [u8], TerrainMeshError> {
-    let image = images
-        .get(&tile.texture)
+    let sample = images
+        .pixels
+        .get(&tile.texture.id())
         .ok_or(TerrainMeshError::MissingMaskImage {
             column: tile.column,
             row: tile.row,
         })?;
-    let size = image.texture_descriptor.size;
-    let expected_len = SOURCE_TILE_PIXELS * SOURCE_TILE_PIXELS * 4;
-    if size.width as usize != SOURCE_TILE_PIXELS
-        || size.height as usize != SOURCE_TILE_PIXELS
-        || size.depth_or_array_layers != 1
-        || image.data.len() != expected_len
-    {
-        return Err(TerrainMeshError::InvalidMaskImage {
+    match sample {
+        TileImageSample::Rgba(pixels) => Ok(pixels),
+        TileImageSample::Invalid => Err(TerrainMeshError::InvalidMaskImage {
             column: tile.column,
             row: tile.row,
-        });
+        }),
     }
-    Ok(&image.data)
 }
 
 fn pixels_equal(source: &[u8], ground: &[u8], x: usize, y: usize) -> bool {

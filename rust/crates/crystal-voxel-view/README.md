@@ -14,6 +14,9 @@ relief profile covering New Bark's Johto artwork:
   and emit only differing pixel runs, avoiding opaque background rectangles;
 - generated caps and sides use a separate solid-color material, so map art is
   never stretched down a wall;
+- terrain meshing runs on Bevy's asynchronous compute pool and is keyed by the
+  complete visual revision; stale jobs are replaced while the faithful 2D
+  world remains available until authored geometry is ready;
 - player and NPC textures are vertical cards anchored at their feet;
 - a dedicated reverse-depth material reveals a translucent player silhouette
   only through closer authored geometry, leaving visible player pixels intact;

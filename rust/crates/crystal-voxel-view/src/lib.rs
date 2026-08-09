@@ -23,14 +23,15 @@ use bevy::{
         },
         view::RenderLayers,
     },
+    tasks::{AsyncComputeTaskPool, Task, futures_lite::future},
 };
 use crystal_render_api::{VisualActor, VisualActorId, VisualWorldFrame, WorldRenderSet};
 
 pub use camera::{CAMERA_PITCH_DEGREES, VoxelCameraPose, camera_pose};
 pub use footing::{actor_foot, footing_height, tile_at_visual_point, visual_point_to_voxel};
 pub use mesh::{
-    SurfaceMeshData, TerrainMeshData, TerrainMeshError, build_terrain_mesh,
-    build_terrain_mesh_with_images,
+    SurfaceMeshData, TerrainImageSamples, TerrainMeshData, TerrainMeshError, build_terrain_mesh,
+    build_terrain_mesh_with_images, build_terrain_mesh_with_samples,
 };
 pub use profile::{
     COMPACT_BUILDING_HEIGHT, CellShape, GROUND_HEIGHT, LARGE_BUILDING_HEIGHT, MAX_PROFILE_HEIGHT,
@@ -65,6 +66,7 @@ impl Plugin for VoxelViewPlugin {
             .init_resource::<VoxelViewStatus>()
             .init_resource::<VoxelScene>()
             .init_resource::<TerrainRevisionCache>()
+            .init_resource::<TerrainBuildQueue>()
             .init_resource::<ActorIdCache>()
             .init_resource::<PlayerSilhouetteCache>()
             .add_systems(Startup, setup_voxel_view)
@@ -172,6 +174,24 @@ struct TerrainRevisionCache {
     solid_mesh: Option<Handle<Mesh>>,
     textured_material: Option<Handle<StandardMaterial>>,
     solid_material: Option<Handle<StandardMaterial>>,
+}
+
+#[derive(Resource, Default)]
+struct TerrainBuildQueue {
+    key: Option<TerrainCacheKey>,
+    task: Option<Task<TerrainBuildResult>>,
+}
+
+struct TerrainBuildResult {
+    key: TerrainCacheKey,
+    frame: VisualWorldFrame,
+    terrain: Result<TerrainMeshData, TerrainMeshError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerrainSyncState {
+    Ready,
+    Pending,
 }
 
 struct ActorTextureAssets {
@@ -314,6 +334,7 @@ fn sync_voxel_view(
     mut commands: Commands,
     scene: Res<VoxelScene>,
     mut terrain_cache: ResMut<TerrainRevisionCache>,
+    mut terrain_builds: ResMut<TerrainBuildQueue>,
     mut actor_cache: ResMut<ActorIdCache>,
     images: Res<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -370,20 +391,31 @@ fn sync_voxel_view(
         return;
     }
 
-    if let Err(error) = sync_terrain(
+    let terrain_state = match sync_terrain(
         &frame,
         &mut commands,
         &mut terrain_cache,
+        &mut terrain_builds,
         &images,
         &mut meshes,
         &mut materials,
         &mut terrain_entities,
     ) {
-        let failure = format!("terrain sync failed: {error:?}");
+        Ok(state) => state,
+        Err(error) => {
+            let failure = format!("terrain sync failed: {error:?}");
+            status.active = false;
+            status.active_frames = 0;
+            status.fallback_reason = Some(failure.clone());
+            report_fallback_change(&mut last_failure, &failure);
+            set_output_active(&scene, false, &mut cameras, &frame);
+            return;
+        }
+    };
+    if terrain_state == TerrainSyncState::Pending {
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some(failure.clone());
-        report_fallback_change(&mut last_failure, &failure);
+        status.fallback_reason = Some("building authored terrain".to_owned());
         set_output_active(&scene, false, &mut cameras, &frame);
         return;
     }
@@ -469,15 +501,78 @@ fn sync_terrain(
     frame: &VisualWorldFrame,
     commands: &mut Commands,
     cache: &mut TerrainRevisionCache,
+    builds: &mut TerrainBuildQueue,
     images: &Assets<Image>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     terrain_entities: &mut Query<(&mut Visibility, &mut Transform), VoxelTerrainFilter>,
-) -> Result<(), TerrainSyncError> {
+) -> Result<TerrainSyncState, TerrainSyncError> {
     let next_key = TerrainCacheKey::from_frame(frame);
-    if cache.key.as_ref() != Some(&next_key) {
-        let terrain =
-            build_terrain_mesh_with_images(frame, images).map_err(TerrainSyncError::Mesh)?;
+    if cache.key.as_ref() != Some(&next_key) && builds.key.as_ref() != Some(&next_key) {
+        let build_frame = frame.clone();
+        let samples = TerrainImageSamples::capture(frame, images);
+        let build_key = next_key.clone();
+        builds.key = Some(next_key.clone());
+        builds.task = Some(AsyncComputeTaskPool::get().spawn(async move {
+            let terrain = build_terrain_mesh_with_samples(&build_frame, &samples);
+            TerrainBuildResult {
+                key: build_key,
+                frame: build_frame,
+                terrain,
+            }
+        }));
+    }
+
+    let completed = builds
+        .task
+        .as_mut()
+        .and_then(|task| future::block_on(future::poll_once(task)));
+    if let Some(completed) = completed {
+        builds.task = None;
+        builds.key = None;
+        if completed.key == next_key {
+            let terrain = completed.terrain.map_err(TerrainSyncError::Mesh)?;
+            apply_built_terrain(
+                &completed.frame,
+                completed.key,
+                terrain,
+                commands,
+                cache,
+                meshes,
+                materials,
+            )?;
+        }
+    }
+
+    let ready = cache.key.as_ref() == Some(&next_key);
+    if ready {
+        for entity in [cache.textured_entity, cache.solid_entity]
+            .into_iter()
+            .flatten()
+        {
+            if let Ok((mut visibility, mut transform)) = terrain_entities.get_mut(entity) {
+                *visibility = Visibility::Visible;
+                *transform = terrain_transform(frame);
+            }
+        }
+    }
+    Ok(if ready {
+        TerrainSyncState::Ready
+    } else {
+        TerrainSyncState::Pending
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_built_terrain(
+    frame: &VisualWorldFrame,
+    key: TerrainCacheKey,
+    terrain: TerrainMeshData,
+    commands: &mut Commands,
+    cache: &mut TerrainRevisionCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Result<(), TerrainSyncError> {
         let (textured_mesh, solid_mesh) = terrain.into_meshes();
 
         let textured_mesh_handle = update_mesh_asset(
@@ -531,18 +626,7 @@ fn sync_terrain(
             ));
         }
 
-        cache.key = Some(next_key);
-    }
-
-    for entity in [cache.textured_entity, cache.solid_entity]
-        .into_iter()
-        .flatten()
-    {
-        if let Ok((mut visibility, mut transform)) = terrain_entities.get_mut(entity) {
-            *visibility = Visibility::Visible;
-            *transform = terrain_transform(frame);
-        }
-    }
+        cache.key = Some(key);
     Ok(())
 }
 
