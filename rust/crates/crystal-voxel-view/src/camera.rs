@@ -7,8 +7,9 @@ use crate::{
     profile::{MAX_PROFILE_HEIGHT, MIN_PROFILE_HEIGHT, SOURCE_TILE_HEIGHT},
 };
 
-pub const CAMERA_PITCH_DEGREES: f32 = 55.0;
+pub const CAMERA_PITCH_DEGREES: f32 = 65.0;
 const CAMERA_DISTANCE: f32 = 512.0;
+const PROJECTION_MARGIN: f32 = 1.02;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelCameraPose {
@@ -42,7 +43,7 @@ pub fn camera_pose(viewport_size: Vec2) -> VoxelCameraPose {
         up: Vec3::Y,
         // Fixed projection and render target must have the same aspect ratio;
         // a mismatched computed height would anisotropically stretch pixels.
-        projection_size: viewport_size,
+        projection_size: viewport_size * PROJECTION_MARGIN,
     }
 }
 
@@ -80,8 +81,8 @@ mod tests {
     fn orthographic_extent_preserves_the_render_target_aspect() {
         let viewport = Vec2::new(160.0, 144.0);
         let projection = camera_pose(viewport).projection_size;
-        assert_eq!(projection, viewport);
-        assert!((projection.x / projection.y - viewport.x / viewport.y).abs() < f32::EPSILON);
+        assert_eq!(projection, viewport * PROJECTION_MARGIN);
+        assert!((projection.x / projection.y - viewport.x / viewport.y).abs() < 1.0e-6);
     }
 
     #[test]

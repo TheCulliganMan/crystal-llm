@@ -15,10 +15,7 @@ use bevy::{
     prelude::*,
     render::{
         camera::{ClearColorConfig, OrthographicProjection, Projection, RenderTarget, ScalingMode},
-        render_resource::{
-            Extent3d, Face, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-        },
-        texture::ImageSampler,
+        render_resource::Face,
         view::RenderLayers,
     },
 };
@@ -36,9 +33,6 @@ pub use profile::{
     support_height, supports_frame_profile,
 };
 
-pub const OUTPUT_WIDTH: u32 = 640;
-pub const OUTPUT_HEIGHT: u32 = 576;
-pub const PRESENTATION_DEPTH: f32 = 2.5;
 pub const EXPECTED_GRID_SIZE: UVec2 = UVec2::new(20, 18);
 
 const VOXEL_RENDER_LAYER: usize = 31;
@@ -73,6 +67,7 @@ pub struct VoxelViewSettings {
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct VoxelViewStatus {
     pub active: bool,
+    pub active_frames: u32,
     pub fallback_reason: Option<String>,
 }
 
@@ -95,9 +90,6 @@ fn toggle_voxel_view(keyboard: Res<ButtonInput<KeyCode>>, mut settings: ResMut<V
 struct VoxelWorldCamera;
 
 #[derive(Component)]
-struct VoxelPresentationSurface;
-
-#[derive(Component)]
 struct VoxelTerrain;
 
 #[derive(Component)]
@@ -105,12 +97,6 @@ struct VoxelActorCard;
 
 type VoxelWorldCameraFilter = (
     With<VoxelWorldCamera>,
-    Without<VoxelPresentationSurface>,
-    Without<VoxelTerrain>,
-    Without<VoxelActorCard>,
-);
-type VoxelPresentationFilter = (
-    With<VoxelPresentationSurface>,
     Without<VoxelTerrain>,
     Without<VoxelActorCard>,
 );
@@ -119,7 +105,6 @@ type VoxelTerrainFilter = (With<VoxelTerrain>, Without<VoxelActorCard>);
 #[derive(Resource, Default)]
 struct VoxelScene {
     camera: Option<Entity>,
-    presentation: Option<Entity>,
     actor_quad: Option<Handle<Mesh>>,
 }
 
@@ -171,48 +156,23 @@ struct ActorIdCache {
 #[allow(clippy::too_many_arguments)]
 fn setup_voxel_view(
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut scene: ResMut<VoxelScene>,
 ) {
-    let output_size = Extent3d {
-        width: OUTPUT_WIDTH,
-        height: OUTPUT_HEIGHT,
-        depth_or_array_layers: 1,
-    };
-    let mut output_image = Image {
-        texture_descriptor: TextureDescriptor {
-            label: Some("crystal_voxel_view_output"),
-            size: output_size,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Bgra8UnormSrgb,
-            mip_level_count: 1,
-            sample_count: 1,
-            usage: TextureUsages::TEXTURE_BINDING
-                | TextureUsages::COPY_DST
-                | TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        },
-        sampler: ImageSampler::nearest(),
-        ..default()
-    };
-    output_image.resize(output_size);
-    let output = images.add(output_image);
-
     let initial_viewport = Vec2::new(160.0, 144.0);
     let pose = camera_pose(initial_viewport);
     let camera = commands
         .spawn((
             Camera3dBundle {
                 camera: Camera {
-                    order: -1,
+                    order: 0,
                     is_active: false,
-                    target: RenderTarget::Image(output.clone()),
+                    target: RenderTarget::Window(bevy::window::WindowRef::Primary),
                     // During an exact-size viewport scroll the tilted mesh can
                     // expose a narrow target edge. Keep that edge transparent
                     // so the faithful 2D world underneath remains the fallback
                     // instead of flashing an invented black strip.
-                    clear_color: ClearColorConfig::Custom(Color::srgb(0.35, 0.0, 0.35)),
+                    clear_color: ClearColorConfig::Default,
                     ..default()
                 },
                 projection: Projection::Orthographic(OrthographicProjection {
@@ -233,27 +193,11 @@ fn setup_voxel_view(
             VoxelWorldCamera,
         ))
         .id();
-    let presentation = commands
-        .spawn((
-            SpriteBundle {
-                texture: output,
-                sprite: Sprite {
-                    custom_size: Some(Vec2::new(OUTPUT_WIDTH as f32, OUTPUT_HEIGHT as f32)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(0.0, 0.0, PRESENTATION_DEPTH),
-                visibility: Visibility::Hidden,
-                ..default()
-            },
-            VoxelPresentationSurface,
-        ))
-        .id();
-
     commands.spawn((
         DirectionalLightBundle {
             directional_light: DirectionalLight {
                 color: Color::srgb(1.0, 0.93, 0.82),
-                illuminance: 12_000.0,
+                illuminance: 3_000.0,
                 shadows_enabled: true,
                 shadow_depth_bias: 0.01,
                 shadow_normal_bias: 0.8,
@@ -267,7 +211,6 @@ fn setup_voxel_view(
     ));
 
     scene.camera = Some(camera);
-    scene.presentation = Some(presentation);
     scene.actor_quad = Some(meshes.add(actor_quad_mesh()));
 }
 
@@ -285,7 +228,6 @@ fn sync_voxel_view(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: Query<(&mut Camera, &mut Projection, &mut Transform), VoxelWorldCameraFilter>,
-    mut presentation: Query<(&mut Visibility, &mut Transform), VoxelPresentationFilter>,
     mut terrain_entities: Query<(&mut Visibility, &mut Transform), VoxelTerrainFilter>,
     mut actor_entities: Query<
         (
@@ -296,7 +238,6 @@ fn sync_voxel_view(
         (
             With<VoxelActorCard>,
             Without<VoxelWorldCamera>,
-            Without<VoxelPresentationSurface>,
             Without<VoxelTerrain>,
         ),
     >,
@@ -319,10 +260,11 @@ fn sync_voxel_view(
         None
     };
     let valid = failure.is_none();
-    let output_ready = set_output_active(&scene, valid, &mut cameras, &mut presentation, &frame);
+    let output_ready = set_output_active(&scene, valid, &mut cameras, &frame);
     if valid && !output_ready {
-        let failure = "voxel camera or presentation surface is unavailable";
+        let failure = "voxel world camera is unavailable";
         status.active = false;
+        status.active_frames = 0;
         status.fallback_reason = Some(failure.to_owned());
         report_fallback_change(&mut last_failure, failure);
         return;
@@ -330,6 +272,7 @@ fn sync_voxel_view(
     if !valid {
         let failure = failure.unwrap_or("unknown reason");
         status.active = false;
+        status.active_frames = 0;
         status.fallback_reason = Some(failure.to_owned());
         report_fallback_change(&mut last_failure, failure);
         return;
@@ -346,17 +289,19 @@ fn sync_voxel_view(
     ) {
         let failure = format!("terrain sync failed: {error:?}");
         status.active = false;
+        status.active_frames = 0;
         status.fallback_reason = Some(failure.clone());
         report_fallback_change(&mut last_failure, &failure);
-        set_output_active(&scene, false, &mut cameras, &mut presentation, &frame);
+        set_output_active(&scene, false, &mut cameras, &frame);
         return;
     }
 
     let Some(actor_quad) = scene.actor_quad.as_ref() else {
         status.active = false;
+        status.active_frames = 0;
         status.fallback_reason = Some("actor card mesh is unavailable".to_owned());
         report_fallback_change(&mut last_failure, "actor card mesh is unavailable");
-        set_output_active(&scene, false, &mut cameras, &mut presentation, &frame);
+        set_output_active(&scene, false, &mut cameras, &frame);
         return;
     };
     if let Err(error) = sync_actor_cards(
@@ -370,19 +315,23 @@ fn sync_voxel_view(
     ) {
         let failure = format!("actor sync failed: {error:?}");
         status.active = false;
+        status.active_frames = 0;
         status.fallback_reason = Some(failure.clone());
         report_fallback_change(&mut last_failure, &failure);
-        set_output_active(&scene, false, &mut cameras, &mut presentation, &frame);
+        set_output_active(&scene, false, &mut cameras, &frame);
         return;
     }
     status.active = true;
+    status.active_frames = status.active_frames.saturating_add(1);
     status.fallback_reason = None;
     last_failure.take();
 }
 
 fn report_fallback_change(last_failure: &mut Option<String>, failure: &str) {
     if last_failure.as_deref() != Some(failure) {
-        bevy::log::warn!("optional 2.5D renderer fell back to the classic view: {failure}");
+        if failure != "disabled" {
+            bevy::log::warn!("optional 2.5D renderer fell back to the classic view: {failure}");
+        }
         *last_failure = Some(failure.to_owned());
     }
 }
@@ -396,7 +345,6 @@ fn set_output_active(
     scene: &VoxelScene,
     active: bool,
     cameras: &mut Query<(&mut Camera, &mut Projection, &mut Transform), VoxelWorldCameraFilter>,
-    presentation: &mut Query<(&mut Visibility, &mut Transform), VoxelPresentationFilter>,
     frame: &VisualWorldFrame,
 ) -> bool {
     let mut camera_ready = false;
@@ -404,6 +352,8 @@ fn set_output_active(
         && let Ok((mut camera, mut projection, mut transform)) = cameras.get_mut(camera_entity)
     {
         camera_ready = true;
+        // The direct world camera is active only for a complete validated
+        // frame; otherwise the untouched classic layer remains authoritative.
         camera.is_active = active;
         if active {
             let pose = camera_pose(frame.viewport_size);
@@ -419,21 +369,7 @@ fn set_output_active(
             });
         }
     }
-    let mut presentation_ready = false;
-    if let Some(presentation_entity) = scene.presentation
-        && let Ok((mut visibility, mut transform)) = presentation.get_mut(presentation_entity)
-    {
-        presentation_ready = true;
-        *visibility = if active {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if active {
-            transform.translation = Vec3::new(0.0, 0.0, PRESENTATION_DEPTH);
-        }
-    }
-    camera_ready && presentation_ready
+    camera_ready
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -600,7 +536,6 @@ fn sync_actor_cards(
         (
             With<VoxelActorCard>,
             Without<VoxelWorldCamera>,
-            Without<VoxelPresentationSurface>,
             Without<VoxelTerrain>,
         ),
     >,

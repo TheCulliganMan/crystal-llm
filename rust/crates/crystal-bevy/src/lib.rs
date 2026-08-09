@@ -3510,6 +3510,26 @@ impl RuntimeGameShell {
         let mut cursor = Some(start);
         let mut steps = Vec::new();
         while let Some(current) = cursor.take() {
+            let follows_pending_next_script = !steps.is_empty()
+                && self
+                    .session
+                    .state()
+                    .script_runtime
+                    .next_script
+                    .as_ref()
+                    .is_some_and(|next| {
+                        next.origin_map_name == current.origin_map_name
+                            && next.script == current.source_script
+                    });
+            if follows_pending_next_script {
+                self.apply_runtime_mutation_command(RuntimeMutationCommand::TakeNextScript)
+                    .with_context(|| {
+                        format!(
+                            "consume followed script transition {}:{}",
+                            current.origin_map_name, current.source_script
+                        )
+                    })?;
+            }
             if steps.len() >= max_steps {
                 anyhow::bail!("compiled script runner exceeded max_steps {max_steps}");
             }

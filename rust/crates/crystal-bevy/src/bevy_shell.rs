@@ -3472,13 +3472,22 @@ pub fn run_bevy_shell(
         enabled: voxel_view_enabled,
         allow_f3_toggle: true,
     })
-    .add_plugins(crystal_voxel_view::VoxelViewPlugin);
+    .add_plugins(crystal_voxel_view::VoxelViewPlugin)
+    .add_systems(
+        Startup,
+        configure_voxel_composite_camera.after(setup_shell_view),
+    )
+    .add_systems(
+        Update,
+        sync_voxel_classic_world_layers.after(crystal_render_api::WorldRenderSet::RenderSync),
+    );
     #[cfg(feature = "location-tester")]
     if let Some(path) = render_test_screenshot.clone() {
         app.insert_resource(RenderTestScreenshot {
             path,
             frame: 0,
             requested: false,
+            requested_at: None,
         })
         .add_systems(Update, capture_render_test_screenshot);
     }
@@ -3492,12 +3501,59 @@ pub fn run_bevy_shell(
     Ok(())
 }
 
+#[cfg(feature = "voxel-view")]
+fn configure_voxel_composite_camera(
+    mut commands: Commands,
+    mut cameras: Query<(Entity, &mut Camera), With<MainCameraMarker>>,
+) {
+    for (entity, mut camera) in &mut cameras {
+        camera.order = 1;
+        camera.clear_color = bevy::render::camera::ClearColorConfig::None;
+        commands
+            .entity(entity)
+            .insert(bevy::render::view::RenderLayers::layer(0));
+    }
+}
+
+#[cfg(feature = "voxel-view")]
+fn sync_voxel_classic_world_layers(
+    status: Res<crystal_voxel_view::VoxelViewStatus>,
+    mut commands: Commands,
+    classic_world: Query<
+        Entity,
+        Or<(
+            With<PlayfieldTile>,
+            With<PlayfieldMapBackingBase>,
+            With<PlayfieldMapBackingPriorityAxis>,
+            With<PlayerMarker>,
+            With<ObjectMarker>,
+            With<LedgeShadowMarker>,
+        )>,
+    >,
+) {
+    for entity in &classic_world {
+        if status.active {
+            // No camera renders this parking layer. The authored 3D camera
+            // draws the world first; the layer-0 camera then composites only
+            // the unchanged UI, dialog, fades, and other screen-space chrome.
+            commands
+                .entity(entity)
+                .insert(bevy::render::view::RenderLayers::layer(29));
+        } else {
+            commands
+                .entity(entity)
+                .remove::<bevy::render::view::RenderLayers>();
+        }
+    }
+}
+
 #[cfg(feature = "location-tester")]
 #[derive(Resource)]
 struct RenderTestScreenshot {
     path: PathBuf,
     frame: u32,
     requested: bool,
+    requested_at: Option<u32>,
 }
 
 #[cfg(feature = "location-tester")]
@@ -3509,7 +3565,13 @@ fn capture_render_test_screenshot(
     mut exit: EventWriter<AppExit>,
 ) {
     capture.frame = capture.frame.saturating_add(1);
-    if !capture.requested && capture.frame >= 30 {
+    // Give the retained classic renderer, extracted visual frame, voxel mesh,
+    // and GPU render target several presented frames to settle. Capturing the
+    // first frame in which status flips active can still read the preceding
+    // classic frame from the window swapchain.
+    let presentation_settled = voxel_status.active_frames >= 30
+        || voxel_status.fallback_reason.as_deref() == Some("disabled");
+    if !capture.requested && capture.frame >= 90 && presentation_settled {
         println!(
             "2.5D renderer status: {}{}",
             if voxel_status.active {
@@ -3531,9 +3593,13 @@ fn capture_render_test_screenshot(
             .is_ok()
         {
             capture.requested = true;
+            capture.requested_at = Some(capture.frame);
         }
     }
-    if capture.requested && capture.frame >= 120 {
+    if capture
+        .requested_at
+        .is_some_and(|requested_at| capture.frame >= requested_at.saturating_add(60))
+    {
         exit.send(AppExit::Success);
     }
 }

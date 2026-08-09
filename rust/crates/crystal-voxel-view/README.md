@@ -15,9 +15,8 @@ relief profile covering New Bark's Johto artwork:
 - generated caps and sides use a separate solid-color material, so map art is
   never stretched down a wall;
 - player and NPC textures are vertical cards anchored at their feet;
-- the optional 3D pass casts directional terrain/actor shadows and presents
-  through a direct nearest-neighbor world surface before the exact 2D UI is
-  composited;
+- the optional 3D camera casts directional terrain/actor shadows; the classic
+  camera then composites the exact 2D UI, dialog, and fades above it;
 - the result is rendered below the existing 2D UI, dialog, fades, and battle
   compositor;
 - the normal launch remains the unchanged 2D presentation even when the
