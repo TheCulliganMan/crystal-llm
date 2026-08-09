@@ -199,16 +199,30 @@ fn build_terrain_mesh_internal(
     let mut claimed_by_building = vec![false; cell_count];
     let mut claimed_by_tree = vec![false; cell_count];
     if let Some(images) = images {
-        let placements = johto_building_placements(&cells, &geometry);
+        let placements = outdoor_building_placements(&cells, &geometry);
         for placement in &placements {
-            append_pixel_building(
+            if let Err(error) = append_pixel_building(
                 &mut mesh,
                 images,
                 &cells,
                 &geometry,
                 *placement,
                 &mut claimed_by_building,
-            )?;
+            ) {
+                if matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    // A clipped render halo may contain the complete drawing
+                    // but not its explicitly profiled ground texel. Keep only
+                    // that object as faithful flat art; one incomplete object
+                    // must not retire the entire optional renderer.
+                    for row in placement.row..placement.row + placement.height {
+                        for column in placement.column..placement.column + placement.width {
+                            claimed_by_building[row * geometry.width + column] = false;
+                        }
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
         }
         // A partial template at the viewport edge is not enough evidence to
         // invent half a building. Preserve the faithful flat drawing until
@@ -249,7 +263,7 @@ fn build_terrain_mesh_internal(
             if claimed_by_building[row * width + column] || claimed_by_tree[row * width + column] {
                 continue;
             }
-            append_exposed_sides(&mut mesh.solid, &geometry, &cells, &shapes, column, row);
+            append_exposed_sides(&mut mesh, &geometry, &cells, &shapes, column, row);
         }
     }
 
@@ -348,13 +362,16 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
     placements
 }
 
-fn johto_building_placements(
+fn outdoor_building_placements(
     cells: &[&VisualTile],
     geometry: &GridGeometry,
 ) -> Vec<BuildingPlacement> {
     let mut metatiles = HashMap::new();
     for tile in cells {
-        if !matches!(tile.source.tileset_id.as_ref(), "johto" | "johto_modern") {
+        if !matches!(
+            tile.source.tileset_id.as_ref(),
+            "johto" | "johto_modern" | "kanto"
+        ) {
             continue;
         }
         let origin = (
@@ -423,8 +440,114 @@ fn johto_building_placements(
             }
         }
     }
+
+    append_kanto_building_placements(&metatiles, geometry, &mut placements);
     placements.sort_by_key(|placement| (placement.row, placement.column));
+    placements.dedup();
     placements
+}
+
+fn append_kanto_building_placements(
+    metatiles: &HashMap<(isize, isize), (&str, u16)>,
+    geometry: &GridGeometry,
+    placements: &mut Vec<BuildingPlacement>,
+) {
+    let at = |x: isize, y: isize| {
+        metatiles
+            .get(&(x, y))
+            .and_then(|(tileset, id)| (*tileset == "kanto").then_some(*id))
+    };
+    let fits = |x: isize, y: isize, width: usize, height: usize| {
+        x >= 0
+            && y >= 0
+            && x as usize + width * 4 <= geometry.width
+            && y as usize + height * 4 <= geometry.height
+    };
+    let mut add = |x: isize, y: isize, width_blocks: usize, height_blocks: usize, roof_rows| {
+        if fits(x, y, width_blocks, height_blocks) {
+            placements.push(BuildingPlacement {
+                column: x as usize,
+                row: y as usize,
+                width: width_blocks * 4,
+                height: height_blocks * 4,
+                roof_rows,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+            });
+        }
+    };
+
+    for (&(x, y), &(tileset, first)) in metatiles {
+        if tileset != "kanto" {
+            continue;
+        }
+
+        // Kanto's large buildings use a roof-cap grammar: $20 begins the
+        // roof, zero or more $54 spans extend it, and $21 closes it. The
+        // next metatile row is the matching facade. This is the same
+        // connected-run idea used by the reference renderer, expressed in
+        // Crystal's stable metatile identities rather than collision.
+        if first == 0x20 {
+            for width_blocks in 2..=5 {
+                let last_x = x + ((width_blocks - 1) * 4) as isize;
+                if at(last_x, y) != Some(0x21)
+                    || (1..width_blocks - 1)
+                        .any(|column| at(x + (column * 4) as isize, y) != Some(0x54))
+                {
+                    continue;
+                }
+                let facade_y = y + 4;
+                let facade_start = at(x, facade_y);
+                let facade_end = at(last_x, facade_y);
+                if matches!(facade_start, Some(0x37 | 0x7c))
+                    && matches!(facade_end, Some(0x7e | 0x72 | 0x73))
+                    && (1..width_blocks - 1).all(|column| {
+                        matches!(
+                            at(x + (column * 4) as isize, facade_y),
+                            Some(0x3a | 0x7d | 0x7f)
+                        )
+                    })
+                {
+                    add(x, y, width_blocks, 2, 4);
+                    break;
+                }
+            }
+        }
+
+        // Gyms and civic buildings use explicit cap/middle/end courses.
+        if first == 0x0c {
+            for width_blocks in 2..=6 {
+                let last_x = x + ((width_blocks - 1) * 4) as isize;
+                if at(last_x, y) == Some(0x0e)
+                    && (1..width_blocks - 1)
+                        .all(|column| at(x + (column * 4) as isize, y) == Some(0x0d))
+                    && at(x, y + 4) == Some(0x10)
+                    && at(last_x, y + 4) == Some(0x12)
+                    && (1..width_blocks - 1)
+                        .all(|column| at(x + (column * 4) as isize, y + 4) == Some(0x11))
+                {
+                    add(x, y, width_blocks, 2, 4);
+                    break;
+                }
+            }
+        }
+
+        // Compact Kanto houses are complete one-metatile-high drawings,
+        // but are authored as left/right blocks. Their upper two tile rows
+        // are roof art and their lower two rows are the facade.
+        if matches!(first, 0x02 | 0x30) && at(x + 4, y) == Some(0x03) {
+            add(x, y, 2, 1, 2);
+        }
+        if first == 0x68 && at(x + 4, y) == Some(0x69) {
+            add(x, y, 2, 1, 2);
+        }
+        if first == 0x38
+            && at(x + 4, y) == Some(0x39)
+            && at(x, y + 4) == Some(0x3c)
+            && at(x + 4, y + 4) == Some(0x3d)
+        {
+            add(x, y, 2, 2, 4);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,19 +742,17 @@ fn append_pixel_building(
     placement: BuildingPlacement,
     claimed: &mut [bool],
 ) -> Result<(), TerrainMeshError> {
-    let ground_index = authored_ground_cell(
-        cells,
-        &cells
-            .iter()
-            .map(|tile| shape_for_source(&tile.source))
-            .collect::<Vec<_>>(),
-        placement.ground_tile_index,
-    )
-    .ok_or(TerrainMeshError::MissingGroundSample {
-        column: placement.column as u32,
-        row: placement.row as u32,
-        tile_index: placement.ground_tile_index,
-    })?;
+    let source_shapes = cells
+        .iter()
+        .map(|tile| shape_for_source(&tile.source))
+        .collect::<Vec<_>>();
+    let ground_index = authored_ground_cell(cells, &source_shapes, placement.ground_tile_index)
+        .or_else(|| common_flat_ground_outside(cells, &source_shapes, geometry, placement))
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: placement.ground_tile_index,
+        })?;
     let pixel_width = placement.width * SOURCE_TILE_PIXELS;
     let pixel_height = placement.height * SOURCE_TILE_PIXELS;
     let roof_pixels = placement.roof_rows * SOURCE_TILE_PIXELS;
@@ -687,6 +808,16 @@ fn append_pixel_building(
             roof_top[x] = y;
         }
     }
+    let darkest = shades[0];
+    let recessed = facade_recess_mask(
+        &inside,
+        &luminance,
+        pixel_width,
+        pixel_height,
+        roof_pixels,
+        darkest,
+    );
+    let recess_depth = pixel_z_size;
     for y in roof_pixels..pixel_height {
         for x in 0..pixel_width {
             if !inside[y * pixel_width + x] {
@@ -696,18 +827,83 @@ fn append_pixel_building(
             let x1 = x0 + pixel_x_size;
             let top = (pixel_height - y) as f32 * pixel_z_size;
             let bottom = top - pixel_z_size;
+            let front_z = facade_z
+                - recessed[y * pixel_width + x]
+                    .then_some(recess_depth)
+                    .unwrap_or(0.0);
             append_quad(
                 &mut mesh.textured,
                 [
-                    [x1, bottom, facade_z],
-                    [x1, top, facade_z],
-                    [x0, top, facade_z],
-                    [x0, bottom, facade_z],
+                    [x1, bottom, front_z],
+                    [x1, top, front_z],
+                    [x0, top, front_z],
+                    [x0, bottom, front_z],
                 ],
                 [0.0, 0.0, 1.0],
                 source_pixel_uv(geometry, placement, x, y, true),
                 TEXTURED_SHADE,
             );
+            if recessed[y * pixel_width + x] {
+                let open = |nx: isize, ny: isize| {
+                    nx < 0
+                        || ny < roof_pixels as isize
+                        || nx >= pixel_width as isize
+                        || ny >= pixel_height as isize
+                        || !recessed[ny as usize * pixel_width + nx as usize]
+                };
+                if open(x as isize - 1, y as isize) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x0, bottom, facade_z],
+                            [x0, top, facade_z],
+                            [x0, top, front_z],
+                            [x0, bottom, front_z],
+                        ],
+                        [1.0, 0.0, 0.0],
+                        solid_color(SolidKind::Building, Direction::West),
+                    );
+                }
+                if open(x as isize + 1, y as isize) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x1, bottom, front_z],
+                            [x1, top, front_z],
+                            [x1, top, facade_z],
+                            [x1, bottom, facade_z],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        solid_color(SolidKind::Building, Direction::East),
+                    );
+                }
+                if open(x as isize, y as isize - 1) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x0, top, front_z],
+                            [x1, top, front_z],
+                            [x1, top, facade_z],
+                            [x0, top, facade_z],
+                        ],
+                        [0.0, -1.0, 0.0],
+                        solid_color(SolidKind::Building, Direction::North),
+                    );
+                }
+                if open(x as isize, y as isize + 1) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x0, bottom, facade_z],
+                            [x1, bottom, facade_z],
+                            [x1, bottom, front_z],
+                            [x0, bottom, front_z],
+                        ],
+                        [0.0, 1.0, 0.0],
+                        solid_color(SolidKind::Building, Direction::South),
+                    );
+                }
+            }
         }
     }
 
@@ -746,7 +942,6 @@ fn append_pixel_building(
     }
 
     let building_x1 = building_x0 + pixel_width as f32 * pixel_x_size;
-    let darkest = shades[0];
     for source_y in roof_pixels..pixel_height {
         let west_source_x = (0..pixel_width.min(4))
             .find(|&x| {
@@ -840,6 +1035,90 @@ fn append_pixel_building(
         }
     }
     Ok(())
+}
+
+fn common_flat_ground_outside(
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: BuildingPlacement,
+) -> Option<usize> {
+    let mut votes: HashMap<u16, (usize, usize)> = HashMap::new();
+    for (index, (tile, shape)) in cells.iter().zip(shapes).enumerate() {
+        let column = index % geometry.width;
+        let row = index / geometry.width;
+        let inside_building = column >= placement.column
+            && column < placement.column + placement.width
+            && row >= placement.row
+            && row < placement.row + placement.height;
+        if inside_building || !matches!(shape, CellShape::Flat) {
+            continue;
+        }
+        let vote = votes.entry(tile.source.tile_index).or_insert((0, index));
+        vote.0 += 1;
+        if (tile.row, tile.column) < (cells[vote.1].row, cells[vote.1].column) {
+            vote.1 = index;
+        }
+    }
+    votes
+        .into_iter()
+        .max_by_key(|(tile_index, (count, _))| (*count, std::cmp::Reverse(*tile_index)))
+        .map(|(_, (_, index))| index)
+}
+
+fn facade_recess_mask(
+    inside: &[bool],
+    luminance: &[u16],
+    width: usize,
+    height: usize,
+    facade_start: usize,
+    darkest: u16,
+) -> Vec<bool> {
+    const MAX_PANE_EXTENT: usize = 24;
+    let mut recessed = vec![false; width * height];
+    let mut seen = vec![false; width * height];
+    for start_y in facade_start..height {
+        for start_x in 0..width {
+            let start = start_y * width + start_x;
+            if seen[start] || !inside[start] || luminance[start] == darkest {
+                continue;
+            }
+            let mut queue = VecDeque::from([start]);
+            let mut component = Vec::new();
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (start_x, start_x, start_y, start_y);
+            seen[start] = true;
+            while let Some(index) = queue.pop_front() {
+                component.push(index);
+                let x = index % width;
+                let y = index / width;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                for (nx, ny) in [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ] {
+                    if nx >= width || ny < facade_start || ny >= height {
+                        continue;
+                    }
+                    let neighbor = ny * width + nx;
+                    if !seen[neighbor] && inside[neighbor] && luminance[neighbor] != darkest {
+                        seen[neighbor] = true;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            if max_x - min_x < MAX_PANE_EXTENT && max_y - min_y < MAX_PANE_EXTENT {
+                for index in component {
+                    recessed[index] = true;
+                }
+            }
+        }
+    }
+    recessed
 }
 
 fn gable_height(wall_height: f32, roof_depth: f32, depth_from_north: f32) -> f32 {
@@ -1531,7 +1810,7 @@ impl Direction {
 }
 
 fn append_exposed_sides(
-    mesh: &mut SurfaceMeshData,
+    mesh: &mut TerrainMeshData,
     geometry: &GridGeometry,
     cells: &[&VisualTile],
     shapes: &[CellShape],
@@ -1573,6 +1852,20 @@ fn append_exposed_sides(
             continue;
         }
 
+        if top == 0.0 && matches!(shapes[neighbor_index], CellShape::Water) {
+            append_textured_shoreline(
+                &mut mesh.textured,
+                geometry,
+                column,
+                row,
+                direction,
+                [x0, x1, z0, z1],
+                bottom,
+                top,
+            );
+            continue;
+        }
+
         let solid = if matches!(shapes[index], CellShape::Water)
             || matches!(shapes[neighbor_index], CellShape::Water)
         {
@@ -1583,7 +1876,7 @@ fn append_exposed_sides(
         let color = solid_color(solid, direction);
         match direction {
             Direction::North => append_solid_quad(
-                mesh,
+                &mut mesh.solid,
                 [
                     [x0, bottom, z0],
                     [x0, top, z0],
@@ -1594,7 +1887,7 @@ fn append_exposed_sides(
                 color,
             ),
             Direction::South => append_solid_quad(
-                mesh,
+                &mut mesh.solid,
                 [
                     [x1, bottom, z1],
                     [x1, top, z1],
@@ -1605,7 +1898,7 @@ fn append_exposed_sides(
                 color,
             ),
             Direction::West => append_solid_quad(
-                mesh,
+                &mut mesh.solid,
                 [
                     [x0, bottom, z1],
                     [x0, top, z1],
@@ -1616,7 +1909,7 @@ fn append_exposed_sides(
                 color,
             ),
             Direction::East => append_solid_quad(
-                mesh,
+                &mut mesh.solid,
                 [
                     [x1, bottom, z0],
                     [x1, top, z0],
@@ -1628,6 +1921,73 @@ fn append_exposed_sides(
             ),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_textured_shoreline(
+    mesh: &mut SurfaceMeshData,
+    geometry: &GridGeometry,
+    column: usize,
+    row: usize,
+    direction: Direction,
+    bounds: [f32; 4],
+    bottom: f32,
+    top: f32,
+) {
+    let [x0, x1, z0, z1] = bounds;
+    let (u0, u1, v0, v1) = geometry.uv(column, row);
+    let source_fraction = ((top - bottom) / geometry.tile_height).clamp(0.0, 1.0);
+    let cropped_v0 = v1 - (v1 - v0) * source_fraction;
+    let shade = match direction {
+        Direction::North => 0.68,
+        Direction::South => 1.0,
+        Direction::West => 0.76,
+        Direction::East => 0.86,
+    };
+    let color = [shade, shade, shade, 1.0];
+    let (positions, normal, uvs) = match direction {
+        Direction::North => (
+            [
+                [x0, bottom, z0],
+                [x0, top, z0],
+                [x1, top, z0],
+                [x1, bottom, z0],
+            ],
+            [0.0, 0.0, -1.0],
+            [[u0, v1], [u0, cropped_v0], [u1, cropped_v0], [u1, v1]],
+        ),
+        Direction::South => (
+            [
+                [x1, bottom, z1],
+                [x1, top, z1],
+                [x0, top, z1],
+                [x0, bottom, z1],
+            ],
+            [0.0, 0.0, 1.0],
+            [[u1, v1], [u1, cropped_v0], [u0, cropped_v0], [u0, v1]],
+        ),
+        Direction::West => (
+            [
+                [x0, bottom, z1],
+                [x0, top, z1],
+                [x0, top, z0],
+                [x0, bottom, z0],
+            ],
+            [-1.0, 0.0, 0.0],
+            [[u1, v1], [u1, cropped_v0], [u0, cropped_v0], [u0, v1]],
+        ),
+        Direction::East => (
+            [
+                [x1, bottom, z0],
+                [x1, top, z0],
+                [x1, top, z1],
+                [x1, bottom, z1],
+            ],
+            [1.0, 0.0, 0.0],
+            [[u0, v1], [u0, cropped_v0], [u1, cropped_v0], [u1, v1]],
+        ),
+    };
+    append_quad(mesh, positions, normal, uvs, color);
 }
 
 fn facade_covers_south_edge(
@@ -1766,6 +2126,18 @@ mod tests {
         }
     }
 
+    fn source_for_tileset(
+        tileset_id: &str,
+        metatile_id: u16,
+        subtile_column: u8,
+        subtile_row: u8,
+        tile_index: u16,
+    ) -> VisualTileSource {
+        let mut source = source_with_tile(metatile_id, subtile_column, subtile_row, tile_index);
+        source.tileset_id = Arc::from(tileset_id);
+        source
+    }
+
     fn frame(width: u32, height: u32, sources: Vec<VisualTileSource>) -> VisualWorldFrame {
         assert_eq!(sources.len(), (width * height) as usize);
         VisualWorldFrame {
@@ -1802,6 +2174,27 @@ mod tests {
             .expect("one unknown cell should remain a flat surface");
         assert_eq!(mesh.textured.quad_count(), 1);
         assert_eq!(mesh.solid.quad_count(), 0);
+    }
+
+    #[test]
+    fn shoreline_drop_uses_cropped_ground_art_instead_of_a_solid_wall() {
+        let ground = source_for_tileset("kanto", 0x01, 0, 0, 0x2c);
+        let water = source_for_tileset("kanto", 0x15, 0, 0, 0x14);
+        let mesh = build_terrain_mesh(&frame(2, 1, vec![ground, water]))
+            .expect("authored water edge should mesh");
+
+        assert_eq!(mesh.textured.quad_count(), 3);
+        assert_eq!(mesh.solid.quad_count(), 0);
+        let shoreline_uvs = &mesh.textured.uvs[8..12];
+        let min_v = shoreline_uvs
+            .iter()
+            .map(|uv| uv[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_v = shoreline_uvs
+            .iter()
+            .map(|uv| uv[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_v - min_v - 0.25).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1878,7 +2271,7 @@ mod tests {
         };
 
         assert_eq!(
-            johto_building_placements(&cells, &geometry),
+            outdoor_building_placements(&cells, &geometry),
             vec![BuildingPlacement {
                 column: 0,
                 row: 0,
@@ -1917,7 +2310,7 @@ mod tests {
         };
 
         assert_eq!(
-            johto_building_placements(&cells, &geometry),
+            outdoor_building_placements(&cells, &geometry),
             vec![BuildingPlacement {
                 column: 0,
                 row: 0,
@@ -1926,6 +2319,106 @@ mod tests {
                 roof_rows: 2,
                 ground_tile_index: 0x06,
             }]
+        );
+    }
+
+    #[test]
+    fn kanto_connected_roof_and_facade_courses_form_one_building() {
+        let metatiles = [[0x20, 0x54, 0x21], [0x37, 0x3a, 0x7e]];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..12 {
+                sources.push(source_for_tileset(
+                    "kanto",
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                    if column == 11 && row == 7 { 0x2c } else { 0x30 },
+                ));
+            }
+        }
+        let frame = frame(12, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 12,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -48.0,
+            origin_z: -32.0,
+        };
+
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 12,
+                height: 8,
+                roof_rows: 4,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+            }]
+        );
+    }
+
+    #[test]
+    fn kanto_unknown_adjacency_does_not_invent_a_building() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..8 {
+                sources.push(source_for_tileset(
+                    "kanto",
+                    if column < 4 { 0x20 } else { 0x22 },
+                    (column % 4) as u8,
+                    row as u8,
+                    0x30,
+                ));
+            }
+        }
+        let frame = frame(8, 4, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 8,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -32.0,
+            origin_z: -16.0,
+        };
+        assert!(outdoor_building_placements(&cells, &geometry).is_empty());
+    }
+
+    #[test]
+    fn recognized_building_without_ground_evidence_stays_faithfully_flat() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..8 {
+                sources.push(source_for_tileset(
+                    "kanto",
+                    if column < 4 { 0x02 } else { 0x03 },
+                    (column % 4) as u8,
+                    row as u8,
+                    0x30,
+                ));
+            }
+        }
+        let frame = frame(8, 4, sources);
+        let mut samples = TerrainImageSamples::default();
+        for tile in &frame.tiles {
+            samples.pixels.insert(
+                tile.texture.id(),
+                TileImageSample::Rgba([90, 80, 70, 255].repeat(64)),
+            );
+        }
+        let mesh = build_terrain_mesh_with_samples(&frame, &samples)
+            .expect("one incomplete object must not disable the optional renderer");
+        assert_eq!(mesh.textured.quad_count(), 32);
+        assert_eq!(mesh.solid.quad_count(), 0);
+        assert!(
+            mesh.textured
+                .positions
+                .iter()
+                .all(|position| position[1] == 0.0)
         );
     }
 
@@ -1939,6 +2432,36 @@ mod tests {
         assert!(south_slope[2] < 0.0);
         assert!(north_slope[2] > 0.0);
         assert!((south_slope[1] - north_slope[1]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn small_enclosed_facade_pane_recesses_but_siding_stays_flush() {
+        let width = 32;
+        let height = 16;
+        let mut inside = vec![true; width * height];
+        let mut luminance = vec![300_u16; width * height];
+        // A black frame encloses a small 6x6 bright pane.
+        for y in 3..11 {
+            for x in 3..11 {
+                if x == 3 || x == 10 || y == 3 || y == 10 {
+                    luminance[y * width + x] = 0;
+                }
+            }
+        }
+        // Outside art is not eligible even if it has a non-black shade.
+        inside[15 * width + 31] = false;
+        let recessed = facade_recess_mask(&inside, &luminance, width, height, 0, 0);
+
+        assert!(recessed[6 * width + 6]);
+        assert!(
+            !recessed[3 * width + 3],
+            "the proud black frame stays flush"
+        );
+        assert!(
+            !recessed[1 * width + 20],
+            "the broad connected siding course must not become one deep panel"
+        );
+        assert!(!recessed[15 * width + 31]);
     }
 
     #[test]

@@ -22,6 +22,8 @@ const LIGHTHOUSE_TILESET: &str = "lighthouse";
 const AUTHORED_WATER_TILESETS: [&str; 3] = ["johto_modern", "kanto", "cave"];
 const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
 const KANTO_TREE_TILE_INDICES: [u16; 8] = [0x2d, 0x2e, 0x3d, 0x3e, 0x40, 0x41, 0x50, 0x51];
+const KANTO_POST_METATILES: [u16; 2] = [0x1b, 0x5f];
+const KANTO_POST_GROUND_TILE_INDEX: u16 = 0x23;
 // Tree metatiles carry $2c in their open cells; using that exact background
 // keeps the mask palette-aware and guarantees the sample travels with the art.
 pub(crate) const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
@@ -199,6 +201,19 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             band_count: 2,
             ground_tile_index: KANTO_GROUND_TILE_INDEX,
             solid: SolidKind::Tree,
+        };
+    }
+
+    if source.tileset_id.as_ref() == KANTO_TILESET
+        && KANTO_POST_METATILES.contains(&source.metatile_id)
+    {
+        let group_row = source.subtile_row / 2;
+        return CellShape::FacadeBand {
+            plane_subtile_row: (group_row + 1) * 2,
+            band_from_top: source.subtile_row % 2,
+            band_count: 2,
+            ground_tile_index: KANTO_POST_GROUND_TILE_INDEX,
+            solid: SolidKind::Prop,
         };
     }
 
@@ -438,15 +453,33 @@ mod tests {
     }
 
     #[test]
+    fn kanto_post_metatiles_split_into_independent_two_band_objects() {
+        assert_eq!(
+            shape_for_source(&source_for_tileset(KANTO_TILESET, 0x1b, 0, 0, 0x0e)),
+            CellShape::FacadeBand {
+                plane_subtile_row: 2,
+                band_from_top: 0,
+                band_count: 2,
+                ground_tile_index: KANTO_POST_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            }
+        );
+        assert_eq!(
+            shape_for_source(&source_for_tileset(KANTO_TILESET, 0x1b, 3, 3, 0x23)),
+            CellShape::FacadeBand {
+                plane_subtile_row: 4,
+                band_from_top: 1,
+                band_count: 2,
+                ground_tile_index: KANTO_POST_GROUND_TILE_INDEX,
+                solid: SolidKind::Prop,
+            }
+        );
+    }
+
+    #[test]
     fn modern_city_trees_rails_and_signs_use_their_authored_depth_classes() {
         assert_eq!(
-            shape_for_source(&source_for_tileset(
-                JOHTO_MODERN_TILESET,
-                0x05,
-                2,
-                3,
-                0x3f,
-            )),
+            shape_for_source(&source_for_tileset(JOHTO_MODERN_TILESET, 0x05, 2, 3, 0x3f,)),
             CellShape::FacadeBand {
                 plane_subtile_row: 4,
                 band_from_top: 3,
@@ -456,13 +489,7 @@ mod tests {
             }
         );
         assert_eq!(
-            shape_for_source(&source_for_tileset(
-                JOHTO_MODERN_TILESET,
-                0x40,
-                1,
-                0,
-                0x5a,
-            )),
+            shape_for_source(&source_for_tileset(JOHTO_MODERN_TILESET, 0x40, 1, 0, 0x5a,)),
             CellShape::FacadeBand {
                 plane_subtile_row: 2,
                 band_from_top: 0,
@@ -472,13 +499,7 @@ mod tests {
             }
         );
         assert_eq!(
-            shape_for_source(&source_for_tileset(
-                JOHTO_MODERN_TILESET,
-                0x49,
-                2,
-                3,
-                0x59,
-            )),
+            shape_for_source(&source_for_tileset(JOHTO_MODERN_TILESET, 0x49, 2, 3, 0x59,)),
             CellShape::FacadeBand {
                 plane_subtile_row: 4,
                 band_from_top: 1,
@@ -488,13 +509,7 @@ mod tests {
             }
         );
         assert_eq!(
-            shape_for_source(&source_for_tileset(
-                JOHTO_MODERN_TILESET,
-                0x45,
-                0,
-                1,
-                0x5e,
-            )),
+            shape_for_source(&source_for_tileset(JOHTO_MODERN_TILESET, 0x45, 0, 1, 0x5e,)),
             CellShape::FacadeBand {
                 plane_subtile_row: 2,
                 band_from_top: 1,
