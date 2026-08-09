@@ -160,7 +160,8 @@ impl VisualWorldFrame {
         if self.grid_size.x == 0 || self.grid_size.y == 0 {
             return Err(VisualWorldFrameError::EmptyGrid);
         }
-        if self.viewport_size != self.tile_size * self.grid_size.as_vec2() {
+        let terrain_size = self.tile_size * self.grid_size.as_vec2();
+        if self.viewport_size.x > terrain_size.x || self.viewport_size.y > terrain_size.y {
             return Err(VisualWorldFrameError::ViewportGridMismatch);
         }
 
@@ -352,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn active_frame_requires_viewport_to_match_tile_grid_extent() {
+    fn active_frame_requires_terrain_to_cover_the_viewport() {
         let mut frame = active_frame();
         frame.viewport_size.x += 1.0;
 
@@ -360,6 +361,15 @@ mod tests {
             frame.validate(),
             Err(VisualWorldFrameError::ViewportGridMismatch)
         );
+    }
+
+    #[test]
+    fn active_frame_allows_terrain_beyond_the_game_boy_viewport() {
+        let mut frame = active_frame();
+        frame.grid_size = UVec2::new(3, 1);
+        frame.tiles.push(visual_tile(2, 0, 11));
+
+        assert_eq!(frame.validate(), Ok(()));
     }
 
     #[test]

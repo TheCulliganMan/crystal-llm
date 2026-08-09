@@ -72,6 +72,18 @@ fn publish_visual_world_frame(
     if !center.is_finite() {
         return;
     }
+    #[cfg(feature = "voxel-view")]
+    let (published_map_texture, published_grid_size) = {
+        let Some(texture) = rendered.visual_world_texture.as_ref() else {
+            return;
+        };
+        (texture.clone(), rendered.visual_world_grid_size)
+    };
+    #[cfg(not(feature = "voxel-view"))]
+    let (published_map_texture, published_grid_size) = (
+        map_texture.clone(),
+        UVec2::new(VIEWPORT_TILES_X as u32, VIEWPORT_TILES_Y as u32),
+    );
 
     let mut actors = Vec::with_capacity(
         players.iter().count() + objects.iter().count() + grass_rustles.iter().count(),
@@ -145,11 +157,11 @@ fn publish_visual_world_frame(
         active: true,
         map_id: Arc::from(map_id),
         terrain_revision,
-        map_texture: map_texture.clone(),
+        map_texture: published_map_texture,
         center,
         viewport_size: Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT),
         tile_size: Vec2::splat(TILE_SIZE),
-        grid_size: UVec2::new(VIEWPORT_TILES_X as u32, VIEWPORT_TILES_Y as u32),
+        grid_size: published_grid_size,
         tiles: rendered.visual_tiles.clone(),
         actors,
     };
@@ -209,10 +221,10 @@ fn visual_actor(
 }
 
 fn visual_tile_grid_is_complete(tiles: &[crystal_render_api::VisualTile]) -> bool {
-    let Ok(width) = usize::try_from(VIEWPORT_TILES_X) else {
+    let Ok(width) = usize::try_from(VISUAL_WORLD_TILES_X) else {
         return false;
     };
-    let Ok(height) = usize::try_from(VIEWPORT_TILES_Y) else {
+    let Ok(height) = usize::try_from(VISUAL_WORLD_TILES_Y) else {
         return false;
     };
     tiles.len() == width * height
@@ -248,9 +260,9 @@ mod render_mod_tests {
     use super::*;
 
     fn complete_visual_grid() -> Vec<crystal_render_api::VisualTile> {
-        (0..VIEWPORT_TILES_Y as u32)
+        (0..VISUAL_WORLD_TILES_Y as u32)
             .flat_map(|row| {
-                (0..VIEWPORT_TILES_X as u32).map(move |column| crystal_render_api::VisualTile {
+                (0..VISUAL_WORLD_TILES_X as u32).map(move |column| crystal_render_api::VisualTile {
                     column,
                     row,
                     source: crystal_render_api::VisualTileSource {
@@ -259,11 +271,11 @@ mod render_mod_tests {
                         subtile_column: u8::try_from(column % 4)
                             .expect("test subtile column fits u8"),
                         subtile_row: u8::try_from(row % 4).expect("test subtile row fits u8"),
-                        tile_index: u16::try_from(row * VIEWPORT_TILES_X as u32 + column)
+                        tile_index: u16::try_from(row * VISUAL_WORLD_TILES_X as u32 + column)
                             .expect("test tile index fits u16"),
                     },
                     texture: Handle::weak_from_u128(
-                        1 + u128::from(row * VIEWPORT_TILES_X as u32 + column),
+                        1 + u128::from(row * VISUAL_WORLD_TILES_X as u32 + column),
                     ),
                     priority: false,
                 })
@@ -272,7 +284,7 @@ mod render_mod_tests {
     }
 
     #[test]
-    fn visual_tile_grid_requires_one_row_major_cell_per_viewport_position() {
+    fn visual_tile_grid_requires_one_row_major_cell_per_terrain_position() {
         let mut tiles = complete_visual_grid();
         assert!(visual_tile_grid_is_complete(&tiles));
 

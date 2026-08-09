@@ -90,6 +90,12 @@ mod intro_renderer;
 const GAME_TICK_SECONDS: f32 = GB_FRAME_DURATION_SECONDS as f32;
 const VIEWPORT_TILES_X: i16 = 20;
 const VIEWPORT_TILES_Y: i16 = 18;
+#[cfg(feature = "voxel-view")]
+const VISUAL_WORLD_HALO_TILES: i16 = 16;
+#[cfg(not(feature = "voxel-view"))]
+const VISUAL_WORLD_HALO_TILES: i16 = 0;
+const VISUAL_WORLD_TILES_X: i16 = VIEWPORT_TILES_X + VISUAL_WORLD_HALO_TILES * 2;
+const VISUAL_WORLD_TILES_Y: i16 = VIEWPORT_TILES_Y + VISUAL_WORLD_HALO_TILES * 2;
 // The Game Boy Color LCD is exactly 20 by 18 tiles.  Render source tiles at a
 // uniform 4x integer scale so every game surface occupies the 640 by 576
 // window; using 3x left an exposed, non-Game-Boy backing area around screens.
@@ -2437,6 +2443,13 @@ struct RenderedViewport {
     /// These cells describe the same 20x18 source-tile viewport as
     /// `map_texture`; they never participate in collision or movement.
     visual_tiles: Vec<crystal_render_api::VisualTile>,
+    /// Feature-gated terrain surface extending beyond the Game Boy viewport.
+    /// It is consumed only by the optional voxel renderer and never displayed
+    /// or consulted by the faithful 2D path.
+    #[cfg(feature = "voxel-view")]
+    visual_world_texture: Option<Handle<Image>>,
+    #[cfg(feature = "voxel-view")]
+    visual_world_grid_size: UVec2,
     viewport_origin: Option<(i16, i16)>,
     /// The viewport origin shown immediately before a committed walking step.
     /// Retaining it lets the renderer scroll the replacement texture over the
@@ -3537,11 +3550,11 @@ fn sync_voxel_classic_world_layers(
             // The voxel plugin's first camera draws this faithful world as a
             // coverage layer. Its 3D camera then overlays authored geometry,
             // and the layer-0 camera composites unchanged UI and fades.
-            commands.entity(entity).insert(
-                bevy::render::view::RenderLayers::layer(
+            commands
+                .entity(entity)
+                .insert(bevy::render::view::RenderLayers::layer(
                     crystal_voxel_view::CLASSIC_FALLBACK_RENDER_LAYER,
-                ),
-            );
+                ));
         } else {
             commands
                 .entity(entity)
@@ -4796,7 +4809,8 @@ fn initialize_bevy_runtime_shell(
         #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGameAtRuntimeTile { .. } => None,
     };
-    let intro_screen = matches!(&start, BevyShellStart::Title { .. }).then(VisibleIntroScreen::new);
+    let intro_screen = matches!(&start, BevyShellStart::Title { .. })
+        .then(VisibleIntroScreen::new_for_presentation);
     let mut shell = match start {
         #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { spawn_identifier } => {

@@ -11,6 +11,7 @@ const TITLE_MAIN_MENU_CURSOR_OFFSET: usize = 1;
 const TITLE_MAIN_MENU_FADE_SPEED: u32 = 24;
 const TITLE_MAIN_MENU_DAY_STRINGS: [&str; 7] =
     ["SUN", "MON", "TUES", "WEDNES", "THURS", "FRI", "SATUR"];
+const BOOT_UI_WHITE: [u8; 4] = [255, 255, 255, 255];
 
 fn load_visible_title_main_menu_frame(
     runtime_shell: &BevyRuntimeShell,
@@ -1559,28 +1560,11 @@ fn load_gender_selection_frame(
     let frame = image::open(assets.join("gfx/frames/1.png"))
         .context("decode gender-selection textbox frame PNG")?
         .to_rgba8();
-    let background = load_gender_selection_background(
-        &assets.join("gfx/new_game/gender_screen.pal"),
-        &assets.join("gfx/new_game/gender_screen.2bpp"),
-    )
-    .context("load gender-selection background tile and palette")?;
-
     let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
     let height = TIME_SET_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
     let mut data = vec![0_u8; width * height * 4];
-    for tile_y in 0..TIME_SET_SCREEN_TILE_HEIGHT {
-        for tile_x in 0..TIME_SET_SCREEN_TILE_WIDTH {
-            for row in 0..SOURCE_TILE_SIZE {
-                for column in 0..SOURCE_TILE_SIZE {
-                    let pixel = background[row * SOURCE_TILE_SIZE + column];
-                    let offset = ((tile_y * SOURCE_TILE_SIZE + row) * width
-                        + tile_x * SOURCE_TILE_SIZE
-                        + column)
-                        * 4;
-                    data[offset..offset + 4].copy_from_slice(&pixel);
-                }
-            }
-        }
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&BOOT_UI_WHITE);
     }
 
     draw_time_set_textbox(
@@ -1804,11 +1788,9 @@ fn load_time_set_frame(
 
     let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
     let height = TIME_SET_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
-    let mut data = vec![248_u8; width * height * 4];
+    let mut data = vec![0_u8; width * height * 4];
     for pixel in data.chunks_exact_mut(4) {
-        pixel[1] = 248;
-        pixel[2] = 248;
-        pixel[3] = 255;
+        pixel.copy_from_slice(&BOOT_UI_WHITE);
     }
 
     match time_set.phase {
@@ -2066,7 +2048,7 @@ fn draw_time_set_window(
     let y_px = y_tiles * SOURCE_TILE_SIZE;
     for y in y_px + SOURCE_TILE_SIZE..y_px + (height_tiles - 1) * SOURCE_TILE_SIZE {
         for x in x_px + SOURCE_TILE_SIZE..x_px + (width_tiles - 1) * SOURCE_TILE_SIZE {
-            put_time_set_pixel(target, x, y, [255, 255, 255, 255]);
+            put_time_set_pixel(target, x, y, BOOT_UI_WHITE);
         }
     }
     blit_time_set_tile_image(frame, 0, 0, x_px, y_px, false, false, false, target);
@@ -4325,6 +4307,13 @@ fn render_playfield(
         rendered.shell_render_key = Some(shell_render_key);
         return;
     }
+    if visible_scene_dialog_entries(&snapshot, &runtime_shell)
+        .is_ok_and(|entries| entries.is_empty())
+    {
+        for entity in scene_dialogs.iter() {
+            commands.entity(entity).despawn();
+        }
+    }
     // Save/menu/script bookkeeping can change the semantic checksum without
     // changing any pixels in the overworld. Retain the existing map, player,
     // and object entities in that case; rebuilding them here was the other
@@ -4336,6 +4325,9 @@ fn render_playfield(
         && snapshot.battle.is_none()
         && snapshot.ui.text.is_none()
         && snapshot.ui.pending_yes_no.is_none()
+        // Closing a dialog changes no world geometry. Do not let the cheap
+        // world-only path retain its now-orphaned textbox entities.
+        && scene_dialogs.iter().next().is_none()
         && snapshot.ui.menu.is_none()
         && snapshot.pending_shop.is_none()
         && snapshot.ui.active_pokemon_picture.is_none()
@@ -4874,11 +4866,21 @@ fn render_playfield(
         usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
     );
     let mut visual_tiles = Vec::with_capacity(
-        usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
+        usize::try_from(VISUAL_WORLD_TILES_X * VISUAL_WORLD_TILES_Y).unwrap_or_default(),
+    );
+    #[cfg(feature = "voxel-view")]
+    let mut visual_world_tile_handles = Vec::with_capacity(
+        usize::try_from(VISUAL_WORLD_TILES_X * VISUAL_WORLD_TILES_Y).unwrap_or_default(),
     );
     let mut visual_tileset_ids = HashMap::<&str, Arc<str>>::new();
-    for y in 0..VIEWPORT_TILES_Y {
-        for x in 0..VIEWPORT_TILES_X {
+    for visual_y in 0..VISUAL_WORLD_TILES_Y {
+        for visual_x in 0..VISUAL_WORLD_TILES_X {
+            let x = visual_x - VISUAL_WORLD_HALO_TILES;
+            let y = visual_y - VISUAL_WORLD_HALO_TILES;
+            let inside_viewport = x >= 0
+                && y >= 0
+                && x < VIEWPORT_TILES_X
+                && y < VIEWPORT_TILES_Y;
             let map_x = i32::from(start_x) + i32::from(x);
             let map_y = i32::from(start_y) + i32::from(y);
             let (source_map, source_x, source_y) = connection_render_source(
@@ -4969,7 +4971,11 @@ fn render_playfield(
                 );
                 return;
             };
-            viewport_tile_handles.push(tile_handle.clone());
+            if inside_viewport {
+                viewport_tile_handles.push(tile_handle.clone());
+            }
+            #[cfg(feature = "voxel-view")]
+            visual_world_tile_handles.push(tile_handle.clone());
             // Collision data remains private to the faithful 2D compositor:
             // it selects the classic foreground-priority layer, but is never
             // exported as optional-renderer height or shape information.
@@ -5012,8 +5018,8 @@ fn render_playfield(
                 .or_insert_with(|| Arc::from(source_tileset.tileset_id.as_str()))
                 .clone();
             visual_tiles.push(crystal_render_api::VisualTile {
-                column: x as u32,
-                row: y as u32,
+                column: visual_x as u32,
+                row: visual_y as u32,
                 source: crystal_render_api::VisualTileSource {
                     tileset_id: visual_tileset_id,
                     metatile_id: block,
@@ -5056,7 +5062,9 @@ fn render_playfield(
             } else {
                 None
             };
-            priority_viewport_tiles.push(priority_spec);
+            if inside_viewport {
+                priority_viewport_tiles.push(priority_spec);
+            }
         }
     }
     let previous_viewport_origin = rendered.viewport_origin;
@@ -5090,6 +5098,20 @@ fn render_playfield(
     );
     rendered.map_texture = Some(viewport_texture.clone());
     rendered.map_priority_texture = Some(priority_viewport_texture.clone());
+    #[cfg(feature = "voxel-view")]
+    {
+        rendered.visual_world_texture = Some(compose_visual_world_tiles(
+            &visual_world_tile_handles,
+            VISUAL_WORLD_TILES_X as usize,
+            VISUAL_WORLD_TILES_Y as usize,
+            rendered.visual_world_texture.clone(),
+            &mut images,
+        ));
+        rendered.visual_world_grid_size = UVec2::new(
+            VISUAL_WORLD_TILES_X as u32,
+            VISUAL_WORLD_TILES_Y as u32,
+        );
+    }
     rendered.visual_tiles = visual_tiles;
     rendered.viewport_origin = Some((start_x, start_y));
     rendered.walk_viewport_origin = if origin_changing_walk {

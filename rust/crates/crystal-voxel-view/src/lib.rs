@@ -39,13 +39,15 @@ pub use profile::{
     support_height, supports_frame_profile,
 };
 
-pub const EXPECTED_GRID_SIZE: UVec2 = UVec2::new(20, 18);
 /// Layer used by the host's faithful world while 2.5D is active. A dedicated
 /// camera draws it first, providing exact coverage outside the pitched mesh
 /// and during viewport scrolling without inventing geometry.
 pub const CLASSIC_FALLBACK_RENDER_LAYER: usize = 30;
 
 const VOXEL_RENDER_LAYER: usize = 31;
+/// Logical LCD grid used only to derive source-pixel camera scale. The
+/// optional terrain grid may extend beyond it in every direction.
+pub const EXPECTED_GRID_SIZE: UVec2 = UVec2::new(20, 18);
 const NORMAL_ACTOR_CAMERA_PULL: f32 = 0.05;
 const ABOVE_PRIORITY_CAMERA_PULL: f32 = 0.75;
 const SILHOUETTE_SHADER_HANDLE: Handle<Shader> =
@@ -280,10 +282,10 @@ fn setup_voxel_view(
                     order: 0,
                     is_active: false,
                     target: RenderTarget::Window(bevy::window::WindowRef::Primary),
-                    // The dedicated camera above already drew the faithful 2D
-                    // world. Preserve it anywhere the pitched mesh has no
-                    // coverage instead of clearing to a letterbox color.
-                    clear_color: ClearColorConfig::None,
+                    // Full-map terrain extends beyond the LCD crop. Clear the
+                    // finite horizon to sky so the faithful 2D viewport can
+                    // never leak through as a vertical backdrop behind it.
+                    clear_color: ClearColorConfig::Custom(Color::srgb(0.72, 0.83, 0.78)),
                     ..default()
                 },
                 projection: Projection::Orthographic(OrthographicProjection {
@@ -361,10 +363,6 @@ fn sync_voxel_view(
         Some("waiting for an active world frame")
     } else if frame.validate().is_err() {
         Some("world frame validation failed")
-    } else if frame.grid_size != EXPECTED_GRID_SIZE {
-        Some("world frame grid is not 20x18")
-    } else if !grid_extent_matches_viewport(&frame) {
-        Some("world frame extent does not match its viewport")
     } else if !supports_frame_profile(&frame) {
         Some("world frame is not supported by the visual profile")
     } else if !images.contains(&frame.map_texture) {
@@ -458,11 +456,6 @@ fn report_fallback_change(last_failure: &mut Option<String>, failure: &str) {
         }
         *last_failure = Some(failure.to_owned());
     }
-}
-
-fn grid_extent_matches_viewport(frame: &VisualWorldFrame) -> bool {
-    let extent = frame.tile_size * frame.grid_size.as_vec2();
-    (extent - frame.viewport_size).abs().max_element() <= 0.001
 }
 
 fn set_output_active(

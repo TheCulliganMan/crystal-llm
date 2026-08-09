@@ -31,8 +31,10 @@ pub fn tile_at_visual_point(frame: &VisualWorldFrame, point: Vec2) -> Option<UVe
         return None;
     }
 
-    let column = (relative_x / frame.tile_size.x).floor() as u32;
-    let row = (relative_y / frame.tile_size.y).floor() as u32;
+    let terrain_size = frame.tile_size * frame.grid_size.as_vec2();
+    let terrain_margin = (terrain_size - frame.viewport_size) * 0.5;
+    let column = ((relative_x + terrain_margin.x) / frame.tile_size.x).floor() as u32;
+    let row = ((relative_y + terrain_margin.y) / frame.tile_size.y).floor() as u32;
     (column < frame.grid_size.x && row < frame.grid_size.y).then_some(UVec2::new(column, row))
 }
 

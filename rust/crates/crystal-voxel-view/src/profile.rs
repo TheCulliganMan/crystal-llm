@@ -17,6 +17,7 @@ pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
 const JOHTO_TILESET: &str = "johto";
 const KANTO_TILESET: &str = "kanto";
 const CAVE_TILESET: &str = "cave";
+const LIGHTHOUSE_TILESET: &str = "lighthouse";
 const AUTHORED_WATER_TILESETS: [&str; 3] = ["johto_modern", "kanto", "cave"];
 const AUTHORED_WATER_TILE_INDEX: u16 = 0x14;
 const KANTO_TREE_TILE_INDICES: [u16; 8] = [0x2d, 0x2e, 0x3d, 0x3e, 0x40, 0x41, 0x50, 0x51];
@@ -26,6 +27,8 @@ const KANTO_GROUND_TILE_INDEX: u16 = 0x2c;
 const CAVE_GROUND_TILE_INDEX: u16 = 0x01;
 const CAVE_ROCK_TOP_TILE_INDICES: [u16; 2] = [0x0c, 0x0d];
 const CAVE_ROCK_BOTTOM_TILE_INDICES: [u16; 2] = [0x1c, 0x1d];
+const LIGHTHOUSE_WALL_METATILES: [u16; 3] = [0x3c, 0x3d, 0x3e];
+const LIGHTHOUSE_FLOOR_TILE_INDEX: u16 = 0x2e;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolidKind {
@@ -106,6 +109,22 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
                 solid: SolidKind::Prop,
             };
         }
+    }
+
+    // The lighthouse perimeter blocks are complete four-row wall drawings in
+    // Crystal's lighthouse metatile catalog. Fold those authored rows once
+    // onto their south edge. Interior floor, stairs, furniture, and the 6F
+    // chamber remain flat until they receive their own explicit profiles.
+    if source.tileset_id.as_ref() == LIGHTHOUSE_TILESET
+        && LIGHTHOUSE_WALL_METATILES.contains(&source.metatile_id)
+    {
+        return CellShape::FacadeBand {
+            plane_subtile_row: 4,
+            band_from_top: source.subtile_row,
+            band_count: 4,
+            ground_tile_index: LIGHTHOUSE_FLOOR_TILE_INDEX,
+            solid: SolidKind::Bank,
+        };
     }
 
     // These three Crystal tilesets use tile $14 as their animated open-water
@@ -396,6 +415,41 @@ mod tests {
         );
         assert_eq!(support_height(&top, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
         assert_eq!(support_height(&bottom, SOURCE_TILE_HEIGHT), GROUND_HEIGHT);
+    }
+
+    #[test]
+    fn lighthouse_perimeter_uses_native_wall_bands_only() {
+        for metatile_id in LIGHTHOUSE_WALL_METATILES {
+            for row in 0..4 {
+                assert_eq!(
+                    shape_for_source(&source_for_tileset(
+                        LIGHTHOUSE_TILESET,
+                        metatile_id,
+                        1,
+                        row,
+                        0x5e,
+                    )),
+                    CellShape::FacadeBand {
+                        plane_subtile_row: 4,
+                        band_from_top: row,
+                        band_count: 4,
+                        ground_tile_index: LIGHTHOUSE_FLOOR_TILE_INDEX,
+                        solid: SolidKind::Bank,
+                    }
+                );
+            }
+        }
+
+        assert_eq!(
+            shape_for_source(&source_for_tileset(
+                LIGHTHOUSE_TILESET,
+                0x27,
+                0,
+                0,
+                LIGHTHOUSE_FLOOR_TILE_INDEX,
+            )),
+            CellShape::Flat
+        );
     }
 
     #[test]

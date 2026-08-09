@@ -359,6 +359,59 @@ fn compose_viewport_tiles(
     images.add(image)
 }
 
+#[cfg(feature = "voxel-view")]
+fn compose_visual_world_tiles(
+    tile_handles: &[Handle<Image>],
+    grid_width: usize,
+    grid_height: usize,
+    existing: Option<Handle<Image>>,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    let width = grid_width * SOURCE_TILE_SIZE;
+    let height = grid_height * SOURCE_TILE_SIZE;
+    let mut data = vec![0_u8; width * height * 4];
+    for (tile_index, handle) in tile_handles.iter().enumerate() {
+        let Some(tile) = images.get(handle) else {
+            continue;
+        };
+        let tile_x = (tile_index % grid_width) * SOURCE_TILE_SIZE;
+        let tile_y = (tile_index / grid_width) * SOURCE_TILE_SIZE;
+        for source_y in 0..SOURCE_TILE_SIZE {
+            let source_start = source_y * SOURCE_TILE_SIZE * 4;
+            let source_end = source_start + SOURCE_TILE_SIZE * 4;
+            if source_end > tile.data.len() {
+                continue;
+            }
+            let destination = ((tile_y + source_y) * width + tile_x) * 4;
+            data[destination..destination + SOURCE_TILE_SIZE * 4]
+                .copy_from_slice(&tile.data[source_start..source_end]);
+        }
+    }
+    if let Some(handle) = existing {
+        if let Some(image) = images.get_mut(&handle)
+            && image.texture_descriptor.size.width == width as u32
+            && image.texture_descriptor.size.height == height as u32
+        {
+            image.data = data;
+            image.sampler = ImageSampler::nearest();
+            return handle;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    images.add(image)
+}
+
 fn compose_priority_viewport_tiles(
     tile_specs: &[Option<(Handle<Image>, usize)>],
     existing: Option<Handle<Image>>,
@@ -2090,10 +2143,30 @@ const TITLE_SCREEN_WIDTH: usize = 20 * SOURCE_TILE_SIZE;
 const TITLE_SCREEN_HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
 const TITLE_LOGO_ROWS: usize = 7;
 const TITLE_LOGO_COLS: usize = 20;
-const TITLE_SUICUNE_START_Y_TILE: usize = 11;
+const TITLE_BG_SCY: usize = 8;
+const TITLE_LOGO_ASM_Y_TILE: usize = 3;
+const TITLE_SUICUNE_ASM_Y_TILE: usize = 12;
+const TITLE_VERSION_WINDOW_Y: usize = 0x88;
 const TITLE_VERSION_TEXT_START_TILE: u8 = 0x0c;
 const TITLE_VERSION_TEXT_START_COLUMN: usize = 3;
 const TITLE_VERSION_TEXT_COLUMNS: usize = 13;
+
+#[derive(Clone, Copy)]
+enum NativeTitleScroll {
+    None,
+    EntranceInterlaced(u8),
+}
+
+impl NativeTitleScroll {
+    fn at_scanline(self, y: usize) -> i16 {
+        match self {
+            Self::None => 0,
+            Self::EntranceInterlaced(scx) if y < 80 && y % 2 == 0 => i16::from(scx),
+            Self::EntranceInterlaced(scx) if y < 80 => i16::from(0_u8.wrapping_sub(scx)),
+            Self::EntranceInterlaced(_) => 0,
+        }
+    }
+}
 
 fn load_title_screen_frame(
     asset_root: &AssetRoot,
@@ -2155,6 +2228,11 @@ fn draw_native_title_background(
     target: &mut [u8],
     priority_map: &mut [u8],
 ) -> Result<()> {
+    let background_scroll = if matches!(title.phase, VisibleTitlePhase::Entrance) {
+        NativeTitleScroll::EntranceInterlaced(title.scx)
+    } else {
+        NativeTitleScroll::None
+    };
     let suicune_frame_start = [0x80_u8, 0x88, 0x00, 0x08][((title.frame / 8) as usize) % 4];
     for row in 0..6 {
         for col in 0..8 {
@@ -2172,8 +2250,8 @@ fn draw_native_title_background(
                     .context("title palette bank missing BG palette 0")?,
                 false,
                 (6 + col) * SOURCE_TILE_SIZE,
-                (TITLE_SUICUNE_START_Y_TILE + row) * SOURCE_TILE_SIZE,
-                i16::from(title.scx),
+                (TITLE_SUICUNE_ASM_Y_TILE + row) * SOURCE_TILE_SIZE - TITLE_BG_SCY,
+                background_scroll,
                 target,
                 Some(priority_map),
             );
@@ -2193,8 +2271,8 @@ fn draw_native_title_background(
                 palette,
                 true,
                 col * SOURCE_TILE_SIZE,
-                (3 + row) * SOURCE_TILE_SIZE,
-                i16::from(title.scx),
+                (TITLE_LOGO_ASM_Y_TILE + row) * SOURCE_TILE_SIZE - TITLE_BG_SCY,
+                background_scroll,
                 target,
                 Some(priority_map),
             );
@@ -2238,8 +2316,8 @@ fn draw_native_title_version_window(
             palette,
             true,
             (TITLE_VERSION_TEXT_START_COLUMN + col) * SOURCE_TILE_SIZE,
-            0,
-            0,
+            TITLE_VERSION_WINDOW_Y,
+            NativeTitleScroll::None,
             target,
             Some(priority_map),
         );
@@ -2284,7 +2362,7 @@ fn blit_native_title_tile(
     transparent_zero: bool,
     dest_x: usize,
     dest_y: usize,
-    scroll_x: i16,
+    scroll: NativeTitleScroll,
     target: &mut [u8],
     mut priority_map: Option<&mut [u8]>,
 ) {
@@ -2310,7 +2388,7 @@ fn blit_native_title_tile(
             if transparent_zero && palette_index == 0 {
                 continue;
             }
-            let draw_x = (dest_x as i16 + col as i16 - scroll_x)
+            let draw_x = (dest_x as i16 + col as i16 - scroll.at_scanline(draw_y))
                 .rem_euclid(TITLE_SCREEN_WIDTH as i16) as usize;
             let [red, green, blue] = palette[palette_index];
             let offset = (draw_y * TITLE_SCREEN_WIDTH + draw_x) * 4;
