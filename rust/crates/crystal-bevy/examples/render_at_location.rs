@@ -36,16 +36,19 @@ impl ViewMode {
 struct Args {
     pack: PathBuf,
     map: Option<String>,
+    maps: Vec<String>,
+    all_maps: bool,
     tile_x: Option<i16>,
     tile_y: Option<i16>,
     view: ViewMode,
     list_maps: bool,
     screenshot: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = parse_args(env::args().skip(1))?;
-    if args.view == ViewMode::Both {
+    if args.view == ViewMode::Both && !args.all_maps && args.maps.is_empty() {
         return render_both(&args);
     }
     let pack_path = args
@@ -63,6 +66,10 @@ fn main() -> Result<()> {
     if args.list_maps {
         print_map_catalog(&runtime);
         return Ok(());
+    }
+
+    if args.all_maps || !args.maps.is_empty() {
+        return render_map_batch(&args, &runtime);
     }
 
     let map = args
@@ -108,6 +115,97 @@ fn main() -> Result<()> {
             ..Default::default()
         },
     )
+}
+
+fn render_map_batch(args: &Args, runtime: &CrystalRuntime) -> Result<()> {
+    let output_dir = args
+        .output_dir
+        .as_ref()
+        .context("--output-dir <directory> is required with --maps or --all-maps")?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create batch output directory {}", output_dir.display()))?;
+    let executable = env::current_exe().context("resolve render tester executable")?;
+    let maps = if args.all_maps {
+        runtime.map_ids().into_iter().collect::<Vec<_>>()
+    } else {
+        args.maps.clone()
+    };
+    if maps.is_empty() {
+        bail!("batch map selection is empty");
+    }
+
+    for map in maps {
+        let (width, height) = runtime
+            .data()
+            .saved_map_tile_bounds(&map)
+            .with_context(|| format!("unknown or dimensionless map {map}"))?;
+        let (tile_x, tile_y) = nearest_walkable_tile(runtime, &map, width, height)
+            .with_context(|| format!("find a walkable batch location on {map}"))?;
+        let output = output_dir.join(format!("{}.png", safe_file_stem(&map)));
+        let view = match args.view {
+            ViewMode::TwoD => "2d",
+            ViewMode::TwoPointFiveD => "2.5d",
+            ViewMode::Both => "both",
+        };
+        let status = Command::new(&executable)
+            .arg("--pack")
+            .arg(&args.pack)
+            .arg("--map")
+            .arg(&map)
+            .arg("--x")
+            .arg(tile_x.to_string())
+            .arg("--y")
+            .arg(tile_y.to_string())
+            .arg("--view")
+            .arg(view)
+            .arg("--screenshot")
+            .arg(&output)
+            .status()
+            .with_context(|| format!("launch batch render for {map}"))?;
+        if !status.success() {
+            bail!("batch render for {map} exited with {status}");
+        }
+    }
+    Ok(())
+}
+
+fn nearest_walkable_tile(
+    runtime: &CrystalRuntime,
+    map: &str,
+    width: u16,
+    height: u16,
+) -> Result<(i16, i16)> {
+    let center_x = i32::from(width / 2);
+    let center_y = i32::from(height / 2);
+    let mut candidates = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|&(x, y)| {
+        let dx = i32::from(x) - center_x;
+        let dy = i32::from(y) - center_y;
+        (dx * dx + dy * dy, y, x)
+    });
+    for (x, y) in candidates {
+        let x = i16::try_from(x)?;
+        let y = i16::try_from(y)?;
+        let tile = crystal_bevy::core::world::map::TilePosition::new(x, y);
+        if runtime.data().overworld_session(map, tile, 0).is_ok() {
+            return Ok((x, y));
+        }
+    }
+    bail!("map has no walkable runtime tile")
+}
+
+fn safe_file_stem(map: &str) -> String {
+    map.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn render_both(args: &Args) -> Result<()> {
@@ -189,22 +287,35 @@ fn require_in_bounds(map: &str, x: i16, y: i16, width: u16, height: u16) -> Resu
 fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut pack = None;
     let mut map = None;
+    let mut maps = Vec::new();
+    let mut all_maps = false;
     let mut tile_x = None;
     let mut tile_y = None;
     let mut view = ViewMode::TwoD;
     let mut list_maps = false;
     let mut screenshot = None;
+    let mut output_dir = None;
     let mut values = values.into_iter();
     while let Some(flag) = values.next() {
         match flag.as_str() {
             "--pack" => pack = Some(PathBuf::from(next_value(&mut values, "--pack")?)),
             "--map" => map = Some(next_value(&mut values, "--map")?),
+            "--maps" => maps.extend(
+                next_value(&mut values, "--maps")?
+                    .split(',')
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            ),
+            "--all-maps" => all_maps = true,
             "--x" => tile_x = Some(next_value(&mut values, "--x")?.parse::<i16>()?),
             "--y" => tile_y = Some(next_value(&mut values, "--y")?.parse::<i16>()?),
             "--view" => view = ViewMode::parse(&next_value(&mut values, "--view")?)?,
             "--list-maps" => list_maps = true,
             "--screenshot" => {
                 screenshot = Some(PathBuf::from(next_value(&mut values, "--screenshot")?))
+            }
+            "--output-dir" => {
+                output_dir = Some(PathBuf::from(next_value(&mut values, "--output-dir")?))
             }
             "-h" | "--help" => {
                 print_usage();
@@ -216,11 +327,14 @@ fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Args> {
     Ok(Args {
         pack: pack.context("--pack <game.crystalpack> is required")?,
         map,
+        maps,
+        all_maps,
         tile_x,
         tile_y,
         view,
         list_maps,
         screenshot,
+        output_dir,
     })
 }
 
@@ -232,7 +346,7 @@ fn next_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
 
 fn print_usage() {
     println!(
-        "cargo run -p crystal-bevy --example render_at_location --features location-tester -- \\\n+         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \\\n+         [--view 2d|2.5d|both] [--screenshot <output-or-prefix.png>]]"
+        "cargo run -p crystal-bevy --example render_at_location --features location-tester -- \\\n+         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \\\n+         [--view 2d|2.5d|both] [--screenshot <output-or-prefix.png>] | \\\n+         (--maps <id,id,...> | --all-maps) --output-dir <directory> \\\n+         [--view 2d|2.5d|both]]"
     );
 }
 
@@ -265,5 +379,11 @@ mod tests {
         assert!(require_in_bounds("Map", 0, 0, 10, 8).is_ok());
         assert!(require_in_bounds("Map", 10, 0, 10, 8).is_err());
         assert!(require_in_bounds("Map", -1, 0, 10, 8).is_err());
+    }
+
+    #[test]
+    fn batch_output_stems_are_filesystem_safe() {
+        assert_eq!(safe_file_stem("NewBarkTown"), "NewBarkTown");
+        assert_eq!(safe_file_stem("Map / Test"), "Map___Test");
     }
 }

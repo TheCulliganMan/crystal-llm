@@ -230,7 +230,16 @@ fn visual_terrain_revision(
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     map_visual_key.hash(&mut hasher);
     viewport_origin.hash(&mut hasher);
-    tiles.hash(&mut hasher);
+    // Geometry is selected by stable source identity, not by the current
+    // animation-frame image handle. Hashing live handles here caused water
+    // animation to replace the async mesh request every frame, so a cave with
+    // animated water could remain on the classic view forever.
+    for tile in tiles {
+        tile.column.hash(&mut hasher);
+        tile.row.hash(&mut hasher);
+        tile.source.hash(&mut hasher);
+        tile.priority.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -308,7 +317,7 @@ mod render_mod_tests {
 
         let mut changed_texture = complete_visual_grid();
         changed_texture[0].texture = Handle::weak_from_u128(10_000);
-        assert_ne!(
+        assert_eq!(
             baseline,
             visual_terrain_revision(7, (-4, 12), &changed_texture)
         );

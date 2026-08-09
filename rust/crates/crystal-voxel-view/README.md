@@ -76,4 +76,14 @@ cargo run -p crystal-bevy --example render_at_location \
   --pack /path/to/game.crystalpack \
   --map NewBarkTown --x 6 --y 8 --view both \
   --screenshot /tmp/new-bark.png
+
+# Batch-audit selected map centers in both presentations. Each map receives
+# independently verified 2D and 2.5D screenshots in the output directory.
+cargo run -p crystal-bevy --example render_at_location \
+  --features location-tester -- \
+  --pack /path/to/game.crystalpack \
+  --maps NewBarkTown,UnionCaveB1F,CeladonCity --view both \
+  --output-dir /tmp/crystal-render-audit
+
+# Use --all-maps instead of --maps to audit every dimensioned runtime map.
 ```
