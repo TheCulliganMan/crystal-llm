@@ -728,6 +728,7 @@ fn drain_visible_text_events(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     runtime_shell
         .last_audio_events
         .push(format!("drained text events {:?}", drained));
+    mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
 }
 
@@ -757,9 +758,6 @@ fn drain_visible_non_audio_script_events_without_record(
     }
     if !script_events.map_events.is_empty() {
         queues.push(RuntimeScriptEventQueue::Map);
-    }
-    if !script_events.text_events.is_empty() {
-        queues.push(RuntimeScriptEventQueue::Text);
     }
     if !script_events.control_events.is_empty() {
         queues.push(RuntimeScriptEventQueue::Control);

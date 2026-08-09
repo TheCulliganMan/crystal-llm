@@ -46,6 +46,23 @@ describe("ItemSystem", () => {
         expect(gameState.sram.balls["MASTER_BALL"]).toBe(1);
     });
 
+    it("loads a missing canonical definition when the loader cache is only partially populated", () => {
+      const silverWing = testItem({
+        name: "SILVER WING",
+        script_name: "SILVER_WING",
+        pocket: ItemPocket.KEY_ITEM,
+      });
+      const partialLoader = {
+        itemData: new Map([["POTION", contentItem("POTION")]]),
+        get_item: jest.fn((name: string) => name === "SILVER_WING" ? silverWing : null),
+      };
+      const partialItemSystem = new ItemSystem(gameState, partialLoader);
+
+      expect(partialItemSystem.addItem("SILVER_WING")).toBe(true);
+      expect(partialLoader.get_item).toHaveBeenCalledWith("SILVER_WING");
+      expect(gameState.sram.key_items.SILVER_WING).toBe(1);
+    });
+
     it("adds an item to the correct pocket", () => {
       expect(itemSystem.addItem("POTION", 1)).toBe(true);
       expect(gameState.sram.items["POTION"]).toBe(1);

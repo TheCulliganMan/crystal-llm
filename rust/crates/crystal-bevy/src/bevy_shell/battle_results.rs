@@ -1012,6 +1012,19 @@ fn integrate_visible_script_mutation_outcome(
             runtime_shell
                 .last_audio_events
                 .push(format!("script text {text:?}"));
+            match text {
+                crate::core::systems::script_text::ScriptTextAction::YesNo { .. } => {
+                    runtime_shell.yes_no_cursor = Some(MenuCursor {
+                        surface_id: "ui:yes-no".to_string(),
+                        option_index: 0,
+                    });
+                    mark_runtime_snapshot_dirty(runtime_shell);
+                }
+                crate::core::systems::script_text::ScriptTextAction::Close { .. } => {
+                    runtime_shell.yes_no_cursor = None;
+                }
+                _ => {}
+            }
             set_shell_action_status(runtime_shell, "TEXT");
         }
         RuntimeMutationResult::ScriptVariableApplied(variable) => {
@@ -1245,10 +1258,11 @@ fn begin_visible_script_movement(
                     .overworld
                     .objects
                     .iter()
-                    .find(|object| {
+                    .enumerate()
+                    .find(|(_, object)| {
                         object.object_identifier.as_deref() == Some(movement.object_id.as_str())
                     })
-                    .cloned()
+                    .map(|(slot, object)| (slot, object.clone()))
             } else {
                 None
             };
@@ -1270,15 +1284,20 @@ fn begin_visible_script_movement(
                     .visible_object_facings
                     .insert(movement.object_id.clone(), movement.previous_facing);
                 if movement.previous_hidden {
-                    scene.visible_objects.retain(|object| {
-                        object.object_identifier.as_deref() != Some(movement.object_id.as_str())
-                    });
+                    if let Some(index) = scene.visible_objects.iter().position(|object| {
+                        object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+                    }) {
+                        scene.visible_objects.remove(index);
+                        scene.visible_object_slots.remove(index);
+                    }
                 } else if !scene.visible_objects.iter().any(|object| {
                     object.object_identifier.as_deref() == Some(movement.object_id.as_str())
                 }) {
-                    scene.visible_objects.push(revealed_object.with_context(|| {
+                    let (slot, object) = revealed_object.with_context(|| {
                         format!("queued movement cannot restore unknown object {}", movement.object_id)
-                    })?);
+                    })?;
+                    scene.visible_objects.push(object);
+                    scene.visible_object_slots.push(slot);
                 }
             }
         }
@@ -1315,23 +1334,28 @@ fn begin_visible_script_movement(
             .visible_object_facings
             .insert(movement.object_id.clone(), movement.previous_facing);
         if movement.previous_hidden {
-            scene.visible_objects.retain(|object| {
-                object.object_identifier.as_deref() != Some(movement.object_id.as_str())
-            });
+            if let Some(index) = scene.visible_objects.iter().position(|object| {
+                object.object_identifier.as_deref() == Some(movement.object_id.as_str())
+            }) {
+                scene.visible_objects.remove(index);
+                scene.visible_object_slots.remove(index);
+            }
         } else if !scene.visible_objects.iter().any(|object| {
             object.object_identifier.as_deref() == Some(movement.object_id.as_str())
         }) {
-            if let Some(object) = runtime_shell
+            if let Some((slot, object)) = runtime_shell
                 .shell
                 .session()
                 .overworld
                 .objects
                 .iter()
-                .find(|object| {
+                .enumerate()
+                .find(|(_, object)| {
                     object.object_identifier.as_deref() == Some(movement.object_id.as_str())
                 })
             {
                 scene.visible_objects.push(object.clone());
+                scene.visible_object_slots.push(slot);
             }
         }
     }

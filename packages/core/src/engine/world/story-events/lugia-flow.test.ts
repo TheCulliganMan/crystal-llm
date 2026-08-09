@@ -55,7 +55,7 @@ describe("Lugia story flow", () => {
     runner.run("PewterCityGrampsScript");
     drainRunner(runner);
 
-    expect(gameState.sram.items.SILVER_WING).toBe(1);
+    expect(gameState.sram.key_items.SILVER_WING).toBe(1);
     expect(gameState.wram.event_flags.EVENT_GOT_SILVER_WING).toBe(true);
   });
 
@@ -104,7 +104,7 @@ describe("Lugia story flow", () => {
     expect(overworld.appear_object).not.toHaveBeenCalled();
 
     overworld.remove_object.mockClear();
-    gameState.sram.items.SILVER_WING = 1;
+    gameState.sram.key_items.SILVER_WING = 1;
     runner.run("WhirlIslandLugiaChamberLugiaCallback");
     expect(overworld.appear_object).toHaveBeenCalledWith("WHIRLISLANDLUGIACHAMBER_LUGIA");
     expect(overworld.remove_object).not.toHaveBeenCalled();
@@ -118,7 +118,7 @@ describe("Lugia story flow", () => {
 
   it("starts Lugia as the ASM level 60 force-item wild battle and hides it afterward", () => {
     const { gameState, eventManager, overworld, runner } = createRunner();
-    gameState.sram.items.SILVER_WING = 1;
+    gameState.sram.key_items.SILVER_WING = 1;
     const startBattleSpy = jest.fn();
     eventManager.on("start_battle", startBattleSpy);
 
@@ -153,8 +153,10 @@ describe("Lugia story flow", () => {
     expect(callback).not.toBeNull();
     expect(argsFor(callback!, "checkevent")).toContainEqual(["EVENT_FOUGHT_LUGIA"]);
     expect(argsFor(callback!, "checkitem")).toContainEqual(["SILVER_WING"]);
-    expect(argsFor(callback!, "appear")).toContainEqual(["WHIRLISLANDLUGIACHAMBER_LUGIA"]);
-    expect(argsFor(callback!, "disappear")).toContainEqual(["WHIRLISLANDLUGIACHAMBER_LUGIA"]);
+    expect(argsFor(dataLoader.get_script(".Appear", "WhirlIslandLugiaChamberLugiaCallback")!, "appear"))
+      .toContainEqual(["WHIRLISLANDLUGIACHAMBER_LUGIA"]);
+    expect(argsFor(dataLoader.get_script(".NoAppear", "WhirlIslandLugiaChamberLugiaCallback")!, "disappear"))
+      .toContainEqual(["WHIRLISLANDLUGIACHAMBER_LUGIA"]);
 
     expect(lugia).not.toBeNull();
     expect(commands(lugia!)).toEqual(expect.arrayContaining([

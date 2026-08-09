@@ -67,9 +67,17 @@ fn visible_title_launch_starts_with_crystal_intro_before_title() {
 
     assert!(runtime_shell.intro_screen.is_some());
     let intro = runtime_shell.intro_screen.as_ref().expect("intro screen");
-    assert_eq!(intro.jumptable_index, 0);
-    assert_eq!(intro.scene_frame_counter, 0);
-    assert_eq!(intro.scene_name(), "unown_a");
+    assert_eq!(intro.jumptable_index, 1);
+    assert_eq!(intro.scene_frame_counter, 8);
+    assert_eq!(intro.scene_name(), "unown_fade");
+    assert_eq!(
+        intro.palette_effect,
+        VisibleIntroPaletteEffect::UnownFade {
+            palette_idx: 0,
+            timer: 8,
+        },
+        "packaged launch must begin with visible pixels, not an ambiguous black window"
+    );
     assert!(
         runtime_shell
             .title_menu
@@ -783,6 +791,21 @@ fn assert_main_camera_presents_one_logical_lcd(world: &mut World) {
         "the TypeScript renderer scales one logical LCD to the host target; a fixed physical-pixel projection can show only part of it on Retina displays: {:?}",
         projection.scaling_mode
     );
+    assert!(
+        projection.near <= -1000.0 && projection.far >= 1000.0,
+        "the main camera must retain Bevy's 2D depth range so positive-z LCD sprites are not culled: near={}, far={}",
+        projection.near,
+        projection.far
+    );
+}
+
+#[test]
+fn shell_camera_keeps_every_lcd_sprite_depth_visible() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_systems(Startup, setup_shell_view);
+    app.update();
+    assert_main_camera_presents_one_logical_lcd(app.world_mut());
 }
 
 fn assert_retained_fullscreen_surface(world: &mut World, expected: &RetainedFullscreenSurface) {
@@ -977,6 +1000,9 @@ fn native_rtc_source_for_test() -> NativeRtcSource {
 fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f64(f64::from(GAME_TICK_SECONDS)),
+        ))
         .insert_resource(ClearColor(Color::rgb(0.05, 0.07, 0.06)))
         .insert_resource(runtime_shell)
         .insert_resource(native_rtc_source_for_test())
@@ -1003,6 +1029,12 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .add_systems(
             Update,
             drain_unused_runtime_ticks.after(apply_runtime_hotkeys),
+        )
+        .add_systems(
+            Update,
+            tick_visible_screen_fade
+                .after(drain_unused_runtime_ticks)
+                .before(render_playfield),
         )
         .add_systems(
             Update,

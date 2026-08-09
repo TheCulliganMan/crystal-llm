@@ -30,6 +30,7 @@ export type ItemSystemDataLoader =
   | {
       itemData?: Map<string, Item> | Record<string, Item>;
       item_data?: Record<string, Item>;
+      get_item?: (name: string) => Item | null;
     };
 
 export const MAX_ITEM_STACK = 99;
@@ -238,13 +239,22 @@ export class ItemSystem {
 
   private resolveItemDefinition(canonical: string): Item | undefined {
     const itemData = this.getItemDataCollection();
-    if (!itemData) {
-      return this.resolveContentDefinition(canonical);
-    }
     if (itemData instanceof Map) {
-      return itemData.get(canonical);
+      const definition = itemData.get(canonical);
+      if (definition) {
+        return definition;
+      }
+    } else if (itemData?.[canonical]) {
+      return itemData[canonical];
     }
-    return itemData[canonical];
+    const loaded = this.dataLoader?.get_item?.(canonical) ?? null;
+    if (loaded) {
+      return loaded;
+    }
+    if (this.dataLoader) {
+      return undefined;
+    }
+    return this.resolveContentDefinition(canonical);
   }
 
   private resolveRequiredItemDefinition(canonical: string): Item {

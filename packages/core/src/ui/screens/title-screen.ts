@@ -101,10 +101,7 @@ export class TitleScreen {
   private static readonly VERSION_TEXT_START_COLUMN = 3;
   private static readonly VERSION_TEXT_ROW = 0;
   private static readonly VERSION_TEXT_COLUMNS = 13;
-  // Visual layout override: the ASM title screen anchors Suicune at `hlcoord 6, 12`,
-  // but this TypeScript title composition keeps the sprite slightly higher so it
-  // remains visually connected to the CRYSTAL VERSION wordmark in the current web layout.
-  private static readonly SUICUNE_START_Y_TILE = 11;
+  private static readonly SUICUNE_START_Y_TILE = 12;
   static readonly SCREEN_WIDTH_PX =
     TitleScreen.SCREEN_WIDTH_TILES * TitleScreen.TILE_SIZE;
   static readonly SCREEN_HEIGHT_PX =
@@ -527,6 +524,10 @@ export class TitleScreen {
     }
   }
 
+  private _backgroundScreenY(tileRow: number): number {
+    return tileRow * TitleScreen.TILE_SIZE - (this.registers.scy & 0xff);
+  }
+
   private _renderBackground(ctx: CanvasRenderingContext2D) {
     ctx.clearRect(0, 0, TitleScreen.SCREEN_WIDTH_PX, TitleScreen.SCREEN_HEIGHT_PX);
 
@@ -539,7 +540,7 @@ export class TitleScreen {
               ctx,
               tile,
               (6 + col) * TitleScreen.TILE_SIZE,
-              (TitleScreen.SUICUNE_START_Y_TILE + row) * TitleScreen.TILE_SIZE
+              this._backgroundScreenY(TitleScreen.SUICUNE_START_Y_TILE + row)
             );
         }
     }
@@ -554,7 +555,7 @@ export class TitleScreen {
               ctx,
               tile,
               col * TitleScreen.TILE_SIZE,
-              (3 + row) * TitleScreen.TILE_SIZE
+              this._backgroundScreenY(3 + row)
             );
         }
     }
@@ -699,7 +700,7 @@ export class TitleScreen {
         stampTile(
           this.graphics.getTileIndices("suicune", tileId),
           (6 + col) * TitleScreen.TILE_SIZE,
-          (TitleScreen.SUICUNE_START_Y_TILE + row) * TitleScreen.TILE_SIZE,
+          this._backgroundScreenY(TitleScreen.SUICUNE_START_Y_TILE + row),
           true
         );
       }
@@ -711,7 +712,7 @@ export class TitleScreen {
         stampTile(
           this.graphics.getTileIndices("logo", tileId),
           col * TitleScreen.TILE_SIZE,
-          (3 + row) * TitleScreen.TILE_SIZE,
+          this._backgroundScreenY(3 + row),
           true
         );
       }

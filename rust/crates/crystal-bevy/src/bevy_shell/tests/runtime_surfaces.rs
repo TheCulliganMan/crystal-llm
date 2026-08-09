@@ -982,6 +982,17 @@ fn new_game_name_choice_covers_the_complete_lcd_with_white() {
 
     app.update();
 
+    let world = app.world_mut();
+    let menu_sizes = world
+        .query_filtered::<&Sprite, With<SceneDialogMarker>>()
+        .iter(world)
+        .filter_map(|sprite| sprite.custom_size)
+        .collect::<Vec<_>>();
+    assert!(
+        menu_sizes.contains(&Vec2::new(12.0 * TILE_SIZE, 14.0 * TILE_SIZE)),
+        "preset-name menu must be wide enough for NEW NAME and no taller than its five choices; sizes={menu_sizes:?}"
+    );
+
     let retained = retained_fullscreen_surface(app.world_mut());
     let images = app.world().resource::<Assets<Image>>();
     let image = images

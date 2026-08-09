@@ -62,6 +62,17 @@ fn overworld_sprites_anchor_to_their_complete_oam_footprint() {
 }
 
 #[test]
+fn overworld_emotes_center_above_the_object_oam_footprint() {
+    let base = runtime_tile_playfield_position(TilePosition::new(0, 0), 0, 0)
+        .expect("visible origin tile");
+    assert_eq!(
+        overworld_emote_position_from_base(base.0, base.1, Vec2::splat(TILE_SIZE * 2.0)),
+        (base.0 + TILE_SIZE * 0.5, base.1 + TILE_SIZE * 1.5),
+        "a 16x16 emote must be centered immediately above the 16x16 object sprite"
+    );
+}
+
+#[test]
 fn finite_pcm_music_does_not_restart_when_its_playback_plan_requests_looping() {
     let pcm_music = BevyAudioCommand {
         audio_id: "MUSIC_CRYSTAL_OPENING".to_string(),

@@ -313,6 +313,15 @@ pub fn apply_script_control_action_to_state(
             source_script,
             command_index,
         } => {
+            if !callback {
+                // Crystal's ordinary `end` returns control to the overworld
+                // joypad. Coordinate and interaction scripts are entered
+                // with input locked even when their command stream contains
+                // no explicit `release` (for example MeetMomScript).
+                state.script_runtime.player_input_locked = false;
+                state.script_runtime.all_input_locked = false;
+                state.script_runtime.script_stop_requested = false;
+            }
             state.script_runtime.script_ended = Some(ScriptEndState {
                 callback: *callback,
                 just_battled_guard: *just_battled_guard,
@@ -1379,6 +1388,26 @@ mod tests {
                 .map(|event| event.kind),
             Some(ScriptControlRuntimeKind::Continue)
         );
+    }
+
+    #[test]
+    fn ordinary_end_returns_joypad_control_to_overworld() {
+        let mut state = GameState::default();
+        state.script_runtime.player_input_locked = true;
+        state.script_runtime.all_input_locked = true;
+        state.script_runtime.script_stop_requested = true;
+
+        apply_script_control_command(
+            &mut state,
+            "TestMap",
+            script_control_command("end", None, None),
+            &BTreeMap::new(),
+        )
+        .expect("end script");
+
+        assert!(!state.script_runtime.player_input_locked);
+        assert!(!state.script_runtime.all_input_locked);
+        assert!(!state.script_runtime.script_stop_requested);
     }
 
     #[test]

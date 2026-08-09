@@ -1440,6 +1440,17 @@
             }
         );
 
+        session
+            .apply_script_text_command(&runtime, "RuntimeMap", "RuntimeAcceptedScript", 0)
+            .expect("open a later independent text window");
+        assert_eq!(
+            runtime
+                .active_text_snapshot(&session.state)
+                .expect("later open window snapshot"),
+            None,
+            "a new opentext must delimit history and never redisplay an earlier interaction's text"
+        );
+
         let mut no_map_state = GameState::default();
         no_map_state.script_runtime.pending_text_label = Some("RuntimeGreetingText".to_string());
         let no_map_error = runtime

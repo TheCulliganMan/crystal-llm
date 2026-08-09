@@ -57,12 +57,12 @@ describe("Elite Four story flow", () => {
     }
   });
 
-  it("preserves Lance's right-side approach as ASM label fallthrough into the battle script", () => {
+  it("preserves Lance's right-side approach into the battle script", () => {
     const loader = new DataLoader();
     const script = loader.get_script("Script_ApproachLanceFromRight");
     expect(script).not.toBeNull();
-    expect(commands(script)).toEqual(["special", "applymovement"]);
-    expect(loader.get_script_successor("Script_ApproachLanceFromRight")).toEqual([null, "LancesRoomLanceScript"]);
+    expect(commands(script)).toEqual(["special", "applymovement", "sjump"]);
+    expect(script).toContainEqual({ command: "sjump", args: ["LancesRoomLanceScript"] });
   });
 
   it("keeps every Elite Four battle script wired to its trainer, event flag, and exit door", () => {

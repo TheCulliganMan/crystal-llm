@@ -166,7 +166,9 @@ const FIELD_TEXT_BOX_TEXT_TOP_TILE: f32 = FIELD_TEXT_BOX_TOP_TILE + 1.0;
 const FIELD_YES_NO_LEFT_TILE: f32 = 14.0;
 const FIELD_YES_NO_TOP_TILE: f32 = 7.0;
 const FIELD_YES_NO_WIDTH_TILES: f32 = 6.0;
-const FIELD_YES_NO_HEIGHT_TILES: f32 = 5.0;
+// ASM `_YesNoBox` passes a 4x2 interior to `Textbox`, producing a 6x4
+// outer window. TypeScript's YesNoPrompt records the same 6x4 region.
+const FIELD_YES_NO_HEIGHT_TILES: f32 = 4.0;
 const FIELD_TEXT_BOX_ROW_SPACING_TILES: f32 = 1.0;
 const FIELD_TEXT_BOX_VISIBLE_ROWS: usize = 4;
 const START_MENU_LEFT_TILE: f32 = 9.0;

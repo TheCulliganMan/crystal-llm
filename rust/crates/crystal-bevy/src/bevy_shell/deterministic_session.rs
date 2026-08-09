@@ -33,19 +33,13 @@ fn required_visible_deterministic_session_checkpoint(
 }
 
 fn setup_shell_view(mut commands: Commands) {
+    // Begin with Camera2dBundle's specialized projection. Constructing an
+    // OrthographicProjection from its generic Default loses Bevy's 2D depth
+    // range and culls every positive-z LCD sprite.
+    let mut camera = Camera2dBundle::default();
+    camera.projection.scaling_mode = bevy::render::camera::ScalingMode::WindowSize(1.0);
     commands.spawn((
-        Camera2dBundle {
-            projection: OrthographicProjection {
-                // WindowSize is expressed in logical points. On Retina, a
-                // fixed physical-pixel projection makes a 640x576 LCD cover
-                // only part of the 640x576 logical window (and can leave only
-                // ClearColor/black visible). This mirrors TypeScript canvas
-                // sizing: one logical LCD is scaled by the host surface.
-                scaling_mode: bevy::render::camera::ScalingMode::WindowSize(1.0),
-                ..default()
-            },
-            ..default()
-        },
+        camera,
         MainCameraMarker,
     ));
     commands.spawn((
@@ -927,6 +921,7 @@ fn apply_keyboard_input(
     // for an open textbox and false for normal standing-still frames. The
     // authoritative input transaction still owns its atomic staging clone.
     if runtime_shell.shell.has_pending_script_work()
+        || runtime_shell.field_text_reveal.is_some()
         || runtime_shell.field_notice.is_some()
         || runtime_shell.pc_notice.is_some()
     {
@@ -934,7 +929,7 @@ fn apply_keyboard_input(
             &mut runtime_shell,
             text_acceleration_requested,
         ) {
-            Ok(true) => mark_runtime_snapshot_dirty(&mut runtime_shell),
+            Ok(true) => mark_runtime_presentation_dirty(&mut runtime_shell),
             Ok(false) => {}
             Err(error) => {
                 record_visible_runtime_error(&mut runtime_shell, &error);
@@ -1043,8 +1038,49 @@ fn apply_keyboard_input(
         // `apply_runtime_hotkeys` still runs immediately after this system,
         // so A/Return can reveal and advance the current page normally.
         if runtime_shell.field_text_reveal.is_some() {
+            // `writetext` itself is not always a joypad boundary. Radio
+            // broadcasts use writetext -> pause -> writetext and must advance
+            // automatically once the printer finishes; only waitbutton,
+            // promptbutton and yesorno hand ownership to the player.
+            let field_snapshot = match runtime_shell.shell.snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(format!("{error:#}"));
+                    return;
+                }
+            };
+            let auto_continue = visible_field_dialogue_is_fully_revealed(
+                &runtime_shell,
+                &field_snapshot,
+            ) && field_snapshot.ui.pending_text_wait.is_none()
+                && field_snapshot.ui.pending_yes_no.is_none()
+                && runtime_shell.active_script_cursor.is_some();
+            if auto_continue {
+                match advance_visible_completed_field_text_page(&mut runtime_shell, &field_snapshot) {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(error) => {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(format!("{error:#}"));
+                        return;
+                    }
+                }
+                if let Err(error) = advance_visible_script_until_player_boundary(&mut runtime_shell)
+                {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(format!("{error:#}"));
+                }
+            }
             return;
         }
+    } else if runtime_shell.field_text_reveal.take().is_some() {
+        // The typewriter is presentation-only state. A script can close its
+        // final textbox while resuming several commands in the same A press
+        // (Mom's introductory script does exactly this), leaving no pending
+        // authoritative text for the next frame to tick. Do not let that
+        // stale cache retain exclusive joypad ownership forever.
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
 
     if runtime_shell.pending_overworld_step_boundary.is_some() {
@@ -3377,6 +3413,13 @@ fn mark_runtime_snapshot_dirty(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.cached_snapshot = None;
 }
 
+fn mark_runtime_presentation_dirty(runtime_shell: &mut BevyRuntimeShell) {
+    runtime_shell.snapshot_revision = runtime_shell.snapshot_revision.wrapping_add(1);
+    if let Some((revision, _)) = runtime_shell.cached_snapshot.as_mut() {
+        *revision = runtime_shell.snapshot_revision;
+    }
+}
+
 fn cached_runtime_snapshot(
     runtime_shell: &mut BevyRuntimeShell,
 ) -> Result<Arc<RuntimeShellSnapshot>> {
@@ -3505,7 +3548,6 @@ fn has_visible_pending_non_audio_script_events(snapshot: &RuntimeShellSnapshot) 
     !snapshot.script_events.graphics_events.is_empty()
         || !snapshot.script_events.money_events.is_empty()
         || !snapshot.script_events.map_events.is_empty()
-        || !snapshot.script_events.text_events.is_empty()
         || !snapshot.script_events.control_events.is_empty()
         || !snapshot.script_events.shop_events.is_empty()
         || !snapshot.script_events.item_use_events.is_empty()
@@ -3523,6 +3565,13 @@ fn visible_menu_has_selectable_options(snapshot: &RuntimeShellSnapshot) -> bool 
 fn close_visible_noninteractive_runtime_surface(
     runtime_shell: &mut BevyRuntimeShell,
 ) -> Result<bool> {
+    // Some core menus have no selectable rows because Bevy presents their
+    // interactive surface itself. In particular OverworldTownMap owns the
+    // Pokegear map screen. Auto-closing that core marker here erased the map
+    // in the same continuation pass that opened it.
+    if runtime_shell.pokegear_menu_open {
+        return Ok(false);
+    }
     let snapshot = runtime_shell.shell.snapshot()?;
     let Some(menu) = &snapshot.ui.menu else {
         return Ok(false);
@@ -4397,6 +4446,13 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
+    // A visible Player PC menu owns A even though the originating script's
+    // text/window bookkeeping remains open underneath it.  Handling the
+    // generic printer first made A silently close/advance that hidden layer
+    // instead of selecting WITHDRAW, exactly matching the live stuck-PC bug.
+    if runtime_shell.player_pc_action_cursor.is_some() {
+        return confirm_visible_player_pc_action(runtime_shell);
+    }
     // A/B accelerate the active printer to one character per frame;
     // they do not reveal a whole page atomically. Only a completed page may
     // advance the script, matching PrintLetterDelay and TypeScript main.
@@ -5097,6 +5153,18 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if snapshot.ui.pending_yes_no.is_some() {
         return decline_visible_pending_yes_no(runtime_shell);
     }
+    if runtime_shell.pokegear_menu_open {
+        record_visible_runtime_action(runtime_shell, "pokegear:close")?;
+        // OverworldTownMap retains its originating textbox and core menu
+        // beneath the modal. B belongs to the map UI first; closing it then
+        // resumes the script at `closetext`/`end`.
+        if snapshot.ui.menu.is_some() {
+            let _ = runtime_shell.shell.close_active_menu()?;
+        }
+        close_visible_pokegear_menu(runtime_shell);
+        continue_visible_script_after_prompt(runtime_shell)?;
+        return Ok(());
+    }
     if runtime_shell.field_text_reveal.is_some() {
         // JoyTextDelay, JoyWaitAorB, and PromptButton all accept PAD_A or
         // PAD_B. Higher-priority YES/NO, selection, and cancelable modal
@@ -5191,10 +5259,11 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         return close_visible_pc_surface(runtime_shell);
     }
-    if snapshot.ui.text_window_open
-        || snapshot.ui.window_open
-        || snapshot.ui.menu.is_some()
-        || snapshot.ui.active_pokemon_picture.is_some()
+    if !runtime_shell.pokegear_menu_open
+        && (snapshot.ui.text_window_open
+            || snapshot.ui.window_open
+            || snapshot.ui.menu.is_some()
+            || snapshot.ui.active_pokemon_picture.is_some())
     {
         if snapshot
             .ui
@@ -5370,12 +5439,6 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         record_visible_runtime_action(runtime_shell, "pokedex:close")?;
         close_visible_pokedex_menu(runtime_shell);
-        continue_visible_script_after_prompt(runtime_shell)?;
-        return Ok(());
-    }
-    if runtime_shell.pokegear_menu_open {
-        record_visible_runtime_action(runtime_shell, "pokegear:close")?;
-        close_visible_pokegear_menu(runtime_shell);
         continue_visible_script_after_prompt(runtime_shell)?;
         return Ok(());
     }

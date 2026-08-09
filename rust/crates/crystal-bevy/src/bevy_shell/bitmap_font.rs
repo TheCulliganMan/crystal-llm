@@ -2001,18 +2001,14 @@ fn blit_intro_source_tile(
                 (source_x + source_col) as u32,
                 (source_y + source_row) as u32,
             );
-            // Exported PNGs encode Game Boy color zero as alpha, but BG tiles
-            // are never transparent on hardware. Only OAM/OBJ rendering may
-            // discard color zero; intro backgrounds such as Suicune's
-            // close-up must paint their palette-zero pixels.
-            if source_pixel[3] == 0 && transparent_zero {
+            // Match the TypeScript intro compositor: exported alpha remains
+            // transparent when the recolored tile is blitted.  Forcing these
+            // pixels to palette color zero paints opaque 8x8 rectangles over
+            // Suicune's close-up.
+            if source_pixel[3] == 0 {
                 continue;
             }
-            let palette_index = if source_pixel[3] == 0 {
-                0
-            } else {
-                palette_index_from_gray(source_pixel[0])
-            };
+            let palette_index = palette_index_from_gray(source_pixel[0]);
             if transparent_zero && palette_index == 0 {
                 continue;
             }

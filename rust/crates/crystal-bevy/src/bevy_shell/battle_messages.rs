@@ -7785,6 +7785,8 @@ fn close_visible_player_pc(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         let _ = runtime_shell.shell.close_active_menu()?;
     } else if snapshot.ui.window_open {
         let _ = runtime_shell.shell.close_runtime_window()?;
+    } else if snapshot.ui.text_window_open {
+        let _ = runtime_shell.shell.close_text_window()?;
     }
     set_shell_action_status(runtime_shell, "LOGGED OFF");
     continue_visible_script_after_prompt(runtime_shell)

@@ -296,7 +296,13 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
     );
     assert!(
         dialogue_opened,
-        "Mom's dialogue must open after her walk finishes"
+        "Mom's dialogue must open after her walk finishes: action={:?} cursor={:?} movement={:?} emote={:?} text={:?} events={:?}",
+        runtime_shell.last_runtime_action,
+        runtime_shell.active_script_cursor,
+        runtime_shell.visible_script_movement,
+        runtime_shell.visible_overworld_emote,
+        runtime_shell.shell.snapshot().ok().and_then(|snapshot| snapshot.ui.text),
+        runtime_shell.last_audio_events
     );
 
     let snapshot = runtime_shell
@@ -316,6 +322,586 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
     assert!(rendered.contains("neighbor, PROF."));
     assert!(!rendered.contains("MeetMomScript"));
     assert!(!rendered.contains('"'));
+}
+
+#[test]
+fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = CrystalRuntime::load_from_compiled_pack(
+        &asset_root,
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load compiled pack");
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGame { spawn_identifier },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize new game");
+    complete_visible_smoke_player_name_if_needed(&mut runtime_shell, Some("AB"))
+        .expect("finish player naming");
+    settle_visible_shell_smoke_until_idle(&mut runtime_shell).expect("settle bedroom arrival");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    // Real joypad route from the bedroom spawn, through the stair warp, and
+    // onto Mom's authored coordinate event.
+    for key in [
+        KeyCode::ArrowRight, KeyCode::ArrowRight, KeyCode::ArrowRight,
+        KeyCode::ArrowRight, KeyCode::ArrowRight, KeyCode::ArrowRight,
+        KeyCode::ArrowUp, KeyCode::ArrowUp, KeyCode::ArrowUp, KeyCode::ArrowUp,
+    ] {
+        press_key_for_runtime_hotkey_app(&mut app, key);
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+    for _ in 0..64 {
+        app.update();
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        if shell.visible_walk_warp_phase.is_none()
+            && shell.shell.snapshot().unwrap().overworld.map_name == "PlayersHouse1F"
+        {
+            break;
+        }
+    }
+    for _ in 0..5 {
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+
+    let mut seen_labels = Vec::new();
+    let mut saw_rendered_mom_text = false;
+    let mut saw_rendered_yes_no = false;
+    let mut saw_canonical_day_selector = false;
+    let mut saw_dynamic_dst_confirmation = false;
+    let mut completed_mom = false;
+    let mut mom_frames = 0usize;
+    for frame in 0..1024 {
+        mom_frames = frame + 1;
+        app.update();
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(shell.last_error, None, "Mom lifecycle failed: {:?}", shell.last_audio_events);
+        let snapshot = shell.shell.snapshot().expect("Mom lifecycle snapshot");
+        let visible_label = snapshot.ui.text.as_ref().map(|text| text.label.clone());
+        let pending_yes_no = snapshot.ui.pending_yes_no.is_some();
+        if pending_yes_no
+            && matches!(
+                snapshot.script_events.last_special_routine.as_deref(),
+                Some("InitialSetDSTFlag" | "InitialClearDSTFlag")
+            )
+        {
+            let entries = visible_scene_dialog_entries(&snapshot, shell)
+                .expect("render Mom DST confirmation entries");
+            saw_dynamic_dst_confirmation |= entries.iter().any(|line| line.contains(':'))
+                && entries.iter().any(|line| line.contains("is that OK?"));
+        }
+        if let Some(label) = visible_label.clone()
+            && seen_labels.last() != Some(&label)
+        {
+            seen_labels.push(label);
+        }
+        let current_scene = shell
+            .shell
+            .current_scene_script()
+            .expect("current Player's House scene")
+            .map(|scene| scene.scene_id);
+        completed_mom = snapshot.overworld.map_name == "PlayersHouse1F"
+            && current_scene.as_deref() == Some("SCENE_PLAYERSHOUSE1F_NOOP")
+            && snapshot.progression.active_engine_flags.contains("ENGINE_POKEGEAR")
+            && snapshot.progression.active_engine_flags.contains("ENGINE_PHONE_CARD")
+            && shell.active_script_cursor.is_none()
+            && shell.visible_script_movement.is_none()
+            && shell.visible_overworld_emote.is_none()
+            && shell.player_walk_frame_ticks == 0
+            && shell.object_walk_frame_ticks == 0
+            && shell.object_walk_frame_ticks_by_id.is_empty()
+            && shell.special_boundary.is_none()
+            && shell.pending_day_of_week.is_none()
+            && !snapshot.ui.text_window_open;
+        if completed_mom {
+            break;
+        }
+        let pending_day_of_week = shell.pending_day_of_week.is_some();
+        let pending_day_confirming = shell
+            .pending_day_of_week
+            .as_ref()
+            .is_some_and(|prompt| prompt.confirming);
+        let _ = shell;
+        if visible_label.is_some() || pending_yes_no {
+            let world = app.world_mut();
+            let has_textbox = world
+                .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
+                .iter(world)
+                .next()
+                .is_some();
+            let has_glyphs = world
+                .query_filtered::<Entity, With<DialogGlyphMarker>>()
+                .iter(world)
+                .next()
+                .is_some();
+            saw_rendered_mom_text |= visible_label.is_some() && has_textbox && has_glyphs;
+            saw_rendered_yes_no |= pending_yes_no && has_textbox && has_glyphs;
+            if pending_day_of_week {
+                let custom_sizes = world
+                    .query_filtered::<&Sprite, With<SceneDialogTextBoxBackgroundMarker>>()
+                    .iter(world)
+                    .filter_map(|sprite| sprite.custom_size)
+                    .collect::<Vec<_>>();
+                saw_canonical_day_selector |= custom_sizes
+                    .contains(&Vec2::new(9.0 * TILE_SIZE, 2.0 * TILE_SIZE));
+                if pending_day_confirming {
+                    assert!(
+                        !custom_sizes.contains(&Vec2::new(9.0 * TILE_SIZE, 2.0 * TILE_SIZE)),
+                        "day confirmation must replace the selector instead of stacking both windows"
+                    );
+                }
+            }
+        }
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    }
+    let failed_shell = app.world().resource::<BevyRuntimeShell>();
+    let failed_snapshot = failed_shell.shell.snapshot().expect("failed Mom snapshot");
+    assert!(
+        completed_mom,
+        "Mom never completed; labels={seen_labels:?} map={} tile={:?} cursor={:?} action={:?} events={:?}",
+        failed_snapshot.overworld.map_name,
+        failed_snapshot.overworld.tile,
+        failed_shell.active_script_cursor,
+        failed_shell.last_runtime_action,
+        failed_shell.last_audio_events
+    );
+    assert!(
+        mom_frames < 1024,
+        "Mom's complete visible interaction exceeded the real-input frame budget"
+    );
+    let _ = failed_shell;
+    assert_eq!(
+        seen_labels.first().map(String::as_str),
+        Some("ElmsLookingForYouText"),
+        "Mom must begin with her canonical dialogue, not a script/pre-text label"
+    );
+    let canonical_mom_labels = [
+        "ElmsLookingForYouText",
+        "MomGivesPokegearText",
+        "IsItDSTText",
+        "ComeHomeForDSTText",
+        "KnowTheInstructionsText",
+        "InstructionsNextText",
+    ];
+    let mut next_expected = 0usize;
+    for label in &seen_labels {
+        if canonical_mom_labels.get(next_expected) == Some(&label.as_str()) {
+            next_expected += 1;
+        }
+    }
+    assert_eq!(
+        next_expected,
+        canonical_mom_labels.len(),
+        "Mom must render every ASM-authored dialogue label in order; saw {seen_labels:?}"
+    );
+    assert!(
+        saw_canonical_day_selector,
+        "SetDayOfWeek must render its separate canonical 11x4 selector window"
+    );
+    assert!(
+        saw_dynamic_dst_confirmation,
+        "DST setup must visibly render the live HH:MM confirmation before its yes/no"
+    );
+    assert!(saw_rendered_mom_text, "Mom executed text without rendering its textbox and bitmap glyphs");
+    assert!(saw_rendered_yes_no, "Mom's yes/no executed without rendering an interactive prompt");
+    let direction_still_captured = {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        has_visible_shell_direction_action(&mut shell)
+    };
+    assert!(
+        !direction_still_captured,
+        "Mom finished but a modal/script surface still captures directional input"
+    );
+    assert_overworld_control_returns_and_player_moves(&mut app, "MeetMomScript");
+
+    // Derive the front-door route from the compiled collision map, then
+    // replay every tile through the production Bevy keyboard path.
+    let exit_path = {
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        let start = shell.shell.session().overworld.clone();
+        let mut queue = std::collections::VecDeque::from([(start.clone(), Vec::new())]);
+        let mut visited = std::collections::BTreeSet::from([(
+            start.player.tile.x,
+            start.player.tile.y,
+        )]);
+        let mut found = None;
+        while let Some((session, path)) = queue.pop_front() {
+            for direction in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+                let mut next = session.clone();
+                let Ok(mut step) = next.step_and_check_warp_checked(
+                    direction,
+                    crate::core::world::movement::StepOptions::default(),
+                ) else {
+                    continue;
+                };
+                if matches!(step.outcome, crate::core::world::movement::StepOutcome::Turned { .. }) {
+                    let Ok(second) = next.step_and_check_warp_checked(
+                        direction,
+                        crate::core::world::movement::StepOptions::default(),
+                    ) else {
+                        continue;
+                    };
+                    step = second;
+                }
+                if !matches!(step.outcome, crate::core::world::movement::StepOutcome::Moved { .. }) {
+                    continue;
+                }
+                let mut next_path = path.clone();
+                next_path.push(direction);
+                if let Some(warp) = step.warp.as_ref() {
+                    if warp.warp.target_map == "NEW_BARK_TOWN"
+                        || warp.warp.target_map == "NewBarkTown"
+                    {
+                        found = Some(next_path);
+                        break;
+                    }
+                    continue;
+                }
+                if visited.insert((next.player.tile.x, next.player.tile.y)) {
+                    queue.push_back((next, next_path));
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found.expect("compiled Player's House collision must reach its front-door warp")
+    };
+    for direction in exit_path {
+        let key = match direction {
+            Direction::Up => KeyCode::ArrowUp,
+            Direction::Down => KeyCode::ArrowDown,
+            Direction::Left => KeyCode::ArrowLeft,
+            Direction::Right => KeyCode::ArrowRight,
+        };
+        let before = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap();
+        for _ in 0..2 {
+            press_key_for_runtime_hotkey_app(&mut app, key);
+            for _ in 0..9 {
+                app.update();
+            }
+            let after = app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .shell
+                .snapshot()
+                .unwrap();
+            if after.overworld.map_name != before.overworld.map_name
+                || after.overworld.tile != before.overworld.tile
+            {
+                break;
+            }
+        }
+    }
+    for _ in 0..256 {
+        app.update();
+        if app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .map_name
+            == "NewBarkTown"
+        {
+            break;
+        }
+    }
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = shell.shell.snapshot().expect("house-exit snapshot");
+    assert_eq!(shell.last_error, None);
+    assert_eq!(
+        snapshot.overworld.map_name,
+        "NewBarkTown",
+        "Mom completed but live movement still could not exit the house; tile={:?} pending_reason={:?} objects={:?} script_locks={:?} locks={:?} events={:?}",
+        snapshot.overworld.tile,
+        shell.shell.pending_script_work_reason(),
+        (&shell.shell.session().overworld.object_runtime_tiles, &shell.shell.session().overworld.object_last_runtime_tiles),
+        (shell.shell.session().state().script_runtime.player_input_locked, shell.shell.session().state().script_runtime.all_input_locked, shell.shell.session().state().script_runtime.script_stop_requested),
+        (&shell.field_text_reveal, shell.visible_script_delay_frames, &shell.visible_walk_warp_phase, &shell.pending_overworld_step_boundary, &shell.visible_script_movement, &shell.visible_overworld_emote),
+        (shell.last_runtime_action.clone(), shell.last_overworld_input.clone(), shell.recent_overworld_inputs.clone(), shell.last_audio_events.clone())
+    );
+    let _ = shell;
+
+    let mut saw_route_text = false;
+    for _ in 0..96 {
+        let current_map = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .map_name;
+        if current_map == "ElmsLab" {
+            break;
+        }
+        let path = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            collision_path_to_map_warp(&shell.shell.session().overworld, "ELMS_LAB")
+        };
+        press_visible_direction_until_tile_changes(&mut app, path[0]);
+        saw_route_text |= settle_visible_story_boundary(&mut app).0;
+    }
+    assert_eq!(
+        app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().overworld.map_name,
+        "ElmsLab",
+        "live keyboard route never reached Elm's lab"
+    );
+
+    for _ in 0..64 {
+        let tile = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .tile;
+        if tile == (TilePosition { x: 5, y: 3 }) {
+            break;
+        }
+        let path = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            collision_path_to_tile(
+                &shell.shell.session().overworld,
+                TilePosition { x: 5, y: 3 },
+            )
+        };
+        press_visible_direction_until_tile_changes(&mut app, path[0]);
+        saw_route_text |= settle_visible_story_boundary(&mut app).0;
+    }
+    assert_eq!(
+        app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().overworld.tile,
+        TilePosition { x: 5, y: 3 },
+        "live keyboard route never reached the Cyndaquil ball"
+    );
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    let (starter_text_rendered, starter_picture_rendered) = settle_visible_story_boundary(&mut app);
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = shell.shell.snapshot().expect("post-starter snapshot");
+    assert_eq!(shell.last_error, None);
+    assert!(saw_route_text, "the New Bark/Elm story executed without rendered dialogue");
+    assert!(starter_text_rendered, "the starter script executed without rendered text glyphs");
+    assert!(starter_picture_rendered, "the starter script executed without rendering Cyndaquil's picture");
+    assert_eq!(snapshot.party.slots.len(), 1);
+    assert_eq!(snapshot.party.slots[0].pokemon.species.id, "CYNDAQUIL");
+    assert!(snapshot.progression.active_event_flags.contains("EVENT_GOT_CYNDAQUIL_FROM_ELM"));
+    assert!(snapshot.progression.active_event_flags.contains("EVENT_GOT_A_POKEMON_FROM_ELM"));
+    assert_eq!(shell.active_script_cursor, None, "starter script did not finish");
+}
+
+fn collision_path_to_map_warp(
+    start: &crate::core::world::session::OverworldSession,
+    target_map: &str,
+) -> Vec<Direction> {
+    let mut queue = std::collections::VecDeque::from([(start.clone(), Vec::new())]);
+    let mut visited = std::collections::BTreeSet::from([(start.player.tile.x, start.player.tile.y)]);
+    while let Some((session, path)) = queue.pop_front() {
+        for direction in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            let mut next = session.clone();
+            let mut step = next
+                .step_and_check_warp_checked(
+                    direction,
+                    crate::core::world::movement::StepOptions::default(),
+                )
+                .expect("probe compiled collision");
+            if matches!(step.outcome, crate::core::world::movement::StepOutcome::Turned { .. }) {
+                step = next
+                    .step_and_check_warp_checked(
+                        direction,
+                        crate::core::world::movement::StepOptions::default(),
+                    )
+                    .expect("probe compiled collision after turn");
+            }
+            if !matches!(step.outcome, crate::core::world::movement::StepOutcome::Moved { .. }) {
+                continue;
+            }
+            let mut next_path = path.clone();
+            next_path.push(direction);
+            if let Some(warp) = step.warp {
+                if warp.warp.target_map == target_map
+                    || warp.warp.target_map_constant == target_map
+                {
+                    return next_path;
+                }
+                continue;
+            }
+            if visited.insert((next.player.tile.x, next.player.tile.y)) {
+                queue.push_back((next, next_path));
+            }
+        }
+    }
+    panic!("no collision path from {} to warp {target_map}", start.map.name)
+}
+
+fn collision_path_to_tile(
+    start: &crate::core::world::session::OverworldSession,
+    target: TilePosition,
+) -> Vec<Direction> {
+    let mut queue = std::collections::VecDeque::from([(start.clone(), Vec::new())]);
+    let mut visited = std::collections::BTreeSet::from([(start.player.tile.x, start.player.tile.y)]);
+    while let Some((session, path)) = queue.pop_front() {
+        if session.player.tile == target {
+            return path;
+        }
+        for direction in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            let mut next = session.clone();
+            let mut step = next
+                .step_and_check_warp_checked(direction, crate::core::world::movement::StepOptions::default())
+                .expect("probe compiled collision");
+            if matches!(step.outcome, crate::core::world::movement::StepOutcome::Turned { .. }) {
+                step = next
+                    .step_and_check_warp_checked(direction, crate::core::world::movement::StepOptions::default())
+                    .expect("probe compiled collision after turn");
+            }
+            if matches!(step.outcome, crate::core::world::movement::StepOutcome::Moved { .. })
+                && step.warp.is_none()
+                && visited.insert((next.player.tile.x, next.player.tile.y))
+            {
+                let mut next_path = path.clone();
+                next_path.push(direction);
+                queue.push_back((next, next_path));
+            }
+        }
+    }
+    panic!("no collision path from {} to {target:?}", start.map.name)
+}
+
+fn press_visible_direction_until_tile_changes(app: &mut App, direction: Direction) {
+    let key = match direction {
+        Direction::Up => KeyCode::ArrowUp,
+        Direction::Down => KeyCode::ArrowDown,
+        Direction::Left => KeyCode::ArrowLeft,
+        Direction::Right => KeyCode::ArrowRight,
+    };
+    let before = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .shell
+        .snapshot()
+        .expect("pre-step snapshot")
+        .overworld;
+    for _ in 0..3 {
+        press_key_for_runtime_hotkey_app(app, key);
+        for _ in 0..9 {
+            app.update();
+        }
+        let after = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .expect("post-step snapshot")
+            .overworld;
+        if after.map_name != before.map_name || after.tile != before.tile {
+            return;
+        }
+    }
+}
+
+fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
+    let mut rendered_text = false;
+    let mut rendered_picture = false;
+    // This is a budget for real 60 Hz frames, including typewriter frames,
+    // scripted walks, prompt release frames, and every multi-page Elm line.
+    // A small loop can time out while the game is still progressing and then
+    // falsely report a movement lock.
+    for _ in 0..2048 {
+        app.update();
+        let (busy, has_text, has_picture, party_nonempty) = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            let snapshot = shell.shell.snapshot().expect("story-boundary snapshot");
+            (
+                shell.active_script_cursor.is_some()
+                    || shell.visible_script_movement.is_some()
+                    || shell.visible_overworld_emote.is_some()
+                    || shell.shell.has_pending_script_work()
+                    || snapshot.ui.text_window_open
+                    || snapshot.ui.active_pokemon_picture.is_some(),
+                snapshot.ui.text_window_open,
+                snapshot.ui.active_pokemon_picture.is_some(),
+                !snapshot.party.slots.is_empty(),
+            )
+        };
+        if has_text {
+            let world = app.world_mut();
+            rendered_text |= world
+                .query_filtered::<Entity, With<DialogGlyphMarker>>()
+                .iter(world)
+                .next()
+                .is_some();
+        }
+        if has_picture {
+            let world = app.world_mut();
+            rendered_picture |= world
+                .query_filtered::<Entity, With<PokemonPictureMarker>>()
+                .iter(world)
+                .next()
+                .is_some();
+        }
+        if !busy {
+            return (rendered_text, rendered_picture);
+        }
+        let pending_yes_no = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .ui
+            .pending_yes_no
+            .is_some();
+        let key = if pending_yes_no && party_nonempty {
+            KeyCode::KeyX
+        } else {
+            KeyCode::KeyZ
+        };
+        press_key_for_runtime_hotkey_app(app, key);
+    }
+    let a_action = {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        has_visible_shell_a_action(&mut shell)
+    };
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = shell.shell.snapshot().expect("timed-out story snapshot");
+    panic!(
+        "visible story boundary did not return control; map={} tile={:?} pending={:?} a_action={:?} reveal={:?} movement={:?} player_walk={} object_walk={} cursor={:?} ui={:?} action={:?}",
+        snapshot.overworld.map_name,
+        snapshot.overworld.tile,
+        shell.shell.pending_script_work_reason(),
+        a_action,
+        shell.field_text_reveal,
+        shell.visible_script_movement,
+        shell.player_walk_frame_ticks,
+        shell.object_walk_frame_ticks,
+        shell.active_script_cursor,
+        snapshot.ui,
+        shell.last_runtime_action
+    )
 }
 
 #[test]

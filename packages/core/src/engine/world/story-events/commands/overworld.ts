@@ -1070,9 +1070,10 @@ const extractVerticalMenuOptions = (
       if (!dataLabel) {
         continue;
       }
+      const dataParent = label.startsWith(".") ? parentScript : label;
       const dataScript =
-        dataLoader?.get_script?.(dataLabel, parentScript ?? undefined)
-        ?? dataLoader?.getScript?.(dataLabel, parentScript ?? undefined)
+        dataLoader?.get_script?.(dataLabel, dataParent ?? undefined)
+        ?? dataLoader?.getScript?.(dataLabel, dataParent ?? undefined)
         ?? null;
       if (!Array.isArray(dataScript)) {
         continue;

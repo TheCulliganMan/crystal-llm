@@ -277,6 +277,19 @@ fn time_set_renders_real_boot_window_font_and_arrow_assets() {
 
     assert_eq!(image.texture_descriptor.size.width, 160);
     assert_eq!(image.texture_descriptor.size.height, 144);
+    assert_eq!(
+        &image.data[0..4],
+        &BOOT_UI_WHITE,
+        "time-set field must use canonical boot UI white"
+    );
+    let textbox_interior = ((TIME_SET_TEXTBOX_Y + 1) * SOURCE_TILE_SIZE * 160
+        + 18 * SOURCE_TILE_SIZE)
+        * 4;
+    assert_eq!(
+        &image.data[textbox_interior..textbox_interior + 4],
+        &BOOT_UI_WHITE,
+        "time-set field and textbox interior must be the exact same white"
+    );
     assert!(
         image
             .data
@@ -1208,8 +1221,19 @@ fn gender_selection_renders_real_boot_window_palette_and_options() {
     assert_opaque_nonblack_lcd_pixels(&image.data, "gender selection");
     assert_eq!(
         &image.data[0..4],
-        &[0x4a, 0xf7, 0xff, 0xff],
-        "gender screen background must be decoded from the ASM tile and palette"
+        &BOOT_UI_WHITE,
+        "gender screen field must use the same white as its menu and textbox interiors"
+    );
+    let menu_interior = ((GENDER_BOX_Y + 1) * SOURCE_TILE_SIZE * 160
+        + (GENDER_BOX_X + GENDER_BOX_WIDTH - 2) * SOURCE_TILE_SIZE)
+        * 4;
+    let textbox_interior = ((TIME_SET_TEXTBOX_Y + 1) * SOURCE_TILE_SIZE * 160
+        + 2 * SOURCE_TILE_SIZE)
+        * 4;
+    assert_eq!(&image.data[menu_interior..menu_interior + 4], &BOOT_UI_WHITE);
+    assert_eq!(
+        &image.data[textbox_interior..textbox_interior + 4],
+        &BOOT_UI_WHITE
     );
     assert!(
         image

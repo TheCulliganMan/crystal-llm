@@ -230,12 +230,12 @@ describe("title-screen crystal priority", () => {
 
     screen.registers.setScx(112);
     screen.lineScrollBuffer.setActive(true);
-    screen.lineScrollBuffer.setUniform(3 * 8, 8, 112);
+    screen.lineScrollBuffer.setUniform(3 * 8 - 8, 8, 112);
 
     const priorityMap = screen._buildBackgroundPriorityMap();
 
-    expect(priorityMap[3 * 8][0]).toBe(2);
-    expect(priorityMap[3 * 8][112]).toBe(0);
+    expect(priorityMap[3 * 8 - 8][0]).toBe(2);
+    expect(priorityMap[3 * 8 - 8][112]).toBe(0);
   });
 
   it("invalidates the crystal priority map when the entrance line scroll advances", () => {
@@ -279,10 +279,7 @@ describe("title-screen crystal priority", () => {
     expect(firstCall[3]).toBe(16);
   });
 
-  it("anchors running Suicune several tiles above the ASM row to sit closer to CRYSTAL VERSION", () => {
-    // The ROM uses `hlcoord 6, 12`, but our current title layout intentionally lifts
-    // the sprite to visible-screen row 11 so the running Suicune reads closer to the
-    // CRYSTAL VERSION wordmark without changing the surrounding screen-space math.
+  it("applies SCY=8 to the ASM logo and Suicune tilemap anchors", () => {
     const graphics = makeMockGraphics();
     const screen = new (TitleScreen as any)(graphics, makeMockAudio());
     const drawTileSpy = jest.spyOn(screen, "_drawTile");
@@ -298,16 +295,17 @@ describe("title-screen crystal priority", () => {
 
     const suicuneCall = drawTileSpy.mock.calls[0];
     expect(suicuneCall[2]).toBe(6 * 8);   // column 6 → pixel 48
-    expect(suicuneCall[3]).toBe(11 * 8);  // row 11 → pixel 88
+    expect(suicuneCall[3]).toBe(12 * 8 - 8); // hlcoord row 12 minus SCY
+
+    const firstLogoCall = drawTileSpy.mock.calls[6 * 8];
+    expect(firstLogoCall[2]).toBe(0);
+    expect(firstLogoCall[3]).toBe(3 * 8 - 8); // hlcoord row 3 minus SCY
   });
 
-  it("precomposites the background at sourceY=y (no SCY offset) because the background canvas is screen-space", () => {
-    // The background canvas is painted in screen-space coords — the ROM's DMA routine
-    // compensates for SCY so hlcoord row N always lands on screen row N.  We must NOT
-    // re-apply SCY when blitting the canvas to the screen; sourceY must equal y.
+  it("precomposites SCY into the screen-space background before line scrolling", () => {
     const graphics = makeMockGraphics();
     const screen = new (TitleScreen as any)(graphics, makeMockAudio());
-    screen.registers.setScy(8); // SCY is set but must NOT shift the blit sourceY
+    screen.registers.setScy(8);
 
     const scrolledDrawImage = jest.fn();
     screen.scrolledBackgroundContext = {
@@ -324,7 +322,7 @@ describe("title-screen crystal priority", () => {
     screen._ensureScrolledBackgroundLayerRendered();
 
     const firstBackgroundBlit = scrolledDrawImage.mock.calls[0];
-    // sourceY (argument index 2) must be 0 for the first scanline, not scy=8
+    // SCY was already applied when the BG tiles were placed into this screen-space layer.
     expect(firstBackgroundBlit[2]).toBe(0);
     expect(firstBackgroundBlit[6]).toBe(0);
   });

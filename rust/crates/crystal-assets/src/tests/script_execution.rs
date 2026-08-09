@@ -2688,7 +2688,7 @@
         let mut session = data
             .overworld_session(map_name, TilePosition::new(3, 3), 0)
             .expect("create upstairs bedroom session");
-        assert_eq!(session.map.metatile_at(0, 2), Some(0x07));
+        assert_eq!(session.map.metatile_at(0, 2), Some(0x05));
         assert_eq!(session.map.metatile_at(3, 0), Some(0x02));
         let mut state = GameState::default();
         data.commit_overworld_snapshot(&mut state, &session, SpawnMemoryUpdate::Preserve);

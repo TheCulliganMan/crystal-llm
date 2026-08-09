@@ -66,7 +66,17 @@ fn title_suicune_bg_tiles_keep_palette_color_zero_opaque() {
     let palette = [[11, 22, 33], [44, 55, 66], [77, 88, 99], [111, 122, 133]];
     let mut target = vec![0_u8; TITLE_SCREEN_WIDTH * TITLE_SCREEN_HEIGHT * 4];
 
-    blit_native_title_tile(&source, 0, &palette, false, 0, 0, 0, &mut target, None);
+    blit_native_title_tile(
+        &source,
+        0,
+        &palette,
+        false,
+        0,
+        0,
+        NativeTitleScroll::None,
+        &mut target,
+        None,
+    );
 
     assert_eq!(
         &target[..4],
@@ -76,7 +86,7 @@ fn title_suicune_bg_tiles_keep_palette_color_zero_opaque() {
 }
 
 #[test]
-fn intro_suicune_bg_tiles_keep_exported_alpha_as_palette_color_zero() {
+fn intro_suicune_bg_tiles_preserve_exported_alpha_like_typescript() {
     let source = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
     let palette = [[13, 24, 35], [44, 55, 66], [77, 88, 99], [111, 122, 133]];
     let mut target = vec![0_u8; 32 * SOURCE_TILE_SIZE * 32 * SOURCE_TILE_SIZE * 4];
@@ -96,8 +106,8 @@ fn intro_suicune_bg_tiles_keep_exported_alpha_as_palette_color_zero() {
 
     assert_eq!(
         &target[..4],
-        &[13, 24, 35, 255],
-        "ASM BG tiles render color zero opaquely, including Suicune's close-up"
+        &[0, 0, 0, 0],
+        "the TypeScript compositor leaves exported alpha transparent instead of painting a palette-zero tile rectangle"
     );
 }
 
@@ -138,6 +148,127 @@ fn native_title_screen_frame_uses_title_palettes_and_window_layer() {
         entrance_data, main_data,
         "main title frame must include the version window layer absent during entrance"
     );
+}
+
+#[test]
+fn native_title_layers_use_asm_scy_and_wy_coordinates() {
+    let entrance_scroll = NativeTitleScroll::EntranceInterlaced(112);
+    assert_eq!(entrance_scroll.at_scanline(0), 112);
+    assert_eq!(entrance_scroll.at_scanline(1), 144);
+    assert_eq!(entrance_scroll.at_scanline(80), 0);
+
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    let mut title = runtime_shell.title_menu.take().expect("title menu");
+    title.phase = VisibleTitlePhase::PressStart;
+    title.frame = 0;
+    title.scx = 0;
+
+    let logo = image::RgbaImage::from_pixel(160, 64, image::Rgba([0, 0, 0, 255]));
+    let suicune = image::RgbaImage::from_pixel(128, 128, image::Rgba([0, 0, 0, 255]));
+    let palette_bank = (0_u8..9)
+        .map(|palette| {
+            [
+                [palette, 0, 0],
+                [palette, 1, 0],
+                [palette, 2, 0],
+                [palette, 3, 0],
+            ]
+        })
+        .collect::<Vec<Palette>>();
+    let mut target = vec![0_u8; TITLE_SCREEN_WIDTH * TITLE_SCREEN_HEIGHT * 4];
+    let mut priority_map = vec![0_u8; TITLE_SCREEN_WIDTH * TITLE_SCREEN_HEIGHT];
+
+    draw_native_title_background(
+        &logo,
+        &suicune,
+        &palette_bank,
+        &title,
+        &mut target,
+        &mut priority_map,
+    )
+    .expect("draw title BG");
+
+    let logo_top =
+        (TITLE_LOGO_ASM_Y_TILE * SOURCE_TILE_SIZE - TITLE_BG_SCY) * TITLE_SCREEN_WIDTH * 4;
+    assert_eq!(
+        &target[logo_top..logo_top + 4],
+        &[2, 3, 0, 255],
+        "ASM hlcoord 0,3 must appear at y=16 after SCY=8"
+    );
+    let suicune_top = ((TITLE_SUICUNE_ASM_Y_TILE * SOURCE_TILE_SIZE - TITLE_BG_SCY)
+        * TITLE_SCREEN_WIDTH
+        + 6 * SOURCE_TILE_SIZE)
+        * 4;
+    assert_eq!(
+        &target[suicune_top..suicune_top + 4],
+        &[0, 3, 0, 255],
+        "ASM hlcoord 6,12 must place Suicune at visible y=88 after SCY=8"
+    );
+
+    target.fill(0);
+    priority_map.fill(0);
+    draw_native_title_version_window(&logo, &palette_bank, &mut target, &mut priority_map)
+        .expect("draw title window");
+    let copyright_top = TITLE_VERSION_WINDOW_Y * TITLE_SCREEN_WIDTH * 4
+        + TITLE_VERSION_TEXT_START_COLUMN * SOURCE_TILE_SIZE * 4;
+    assert_eq!(
+        &target[copyright_top..copyright_top + 4],
+        &[7, 3, 0, 255],
+        "ASM WY=$88 must place the copyright window on the bottom scanline row"
+    );
+    assert_eq!(
+        &target[TITLE_VERSION_TEXT_START_COLUMN * SOURCE_TILE_SIZE * 4
+            ..TITLE_VERSION_TEXT_START_COLUMN * SOURCE_TILE_SIZE * 4 + 4],
+        &[0, 0, 0, 0],
+        "copyright must not be drawn at the top of the title"
+    );
+}
+
+#[test]
+fn native_title_preserves_every_suicune_pixel_including_the_head() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    let mut title = runtime_shell.title_menu.take().expect("title menu");
+    title.phase = VisibleTitlePhase::PressStart;
+    title.frame = 0;
+    title.scx = 0;
+    let mut images = Assets::<Image>::default();
+    let source = image::open(
+        runtime_shell
+            .asset_root
+            .runtime_assets()
+            .join("gfx/title/suicune.png"),
+    )
+    .expect("load Suicune source")
+    .to_rgba8();
+    let palette =
+        load_title_palette_bank(&runtime_shell.asset_root).expect("load title palettes")[0];
+
+    let origin_x = 6 * SOURCE_TILE_SIZE;
+    let origin_y = TITLE_SUICUNE_ASM_Y_TILE * SOURCE_TILE_SIZE - TITLE_BG_SCY;
+    for (phase, scx, label) in [
+        (VisibleTitlePhase::PressStart, 0, "settled"),
+        (VisibleTitlePhase::Entrance, 112, "entrance"),
+    ] {
+        title.phase = phase;
+        title.scx = scx;
+        let frame = load_title_screen_frame(&runtime_shell.asset_root, &title, &mut images)
+            .expect("render title frame");
+        let actual = &images.get(&frame.handle).expect("title image").data;
+        for y in 0..6 * SOURCE_TILE_SIZE {
+            for x in 0..8 * SOURCE_TILE_SIZE {
+                let source_pixel = source.get_pixel(x as u32, y as u32);
+                let expected = palette[palette_index_from_gray(source_pixel[0])];
+                let offset = ((origin_y + y) * TITLE_SCREEN_WIDTH + origin_x + x) * 4;
+                assert_eq!(
+                    &actual[offset..offset + 4],
+                    &[expected[0], expected[1], expected[2], 255],
+                    "{label} Suicune frame-0 pixel ({x},{y}) changed during title composition"
+                );
+            }
+        }
+    }
 }
 
 // This is only a source-image invariant. Presentation tests below separately
@@ -606,8 +737,7 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
     let mut rendered_art = RenderedTilesetArt::default();
     let mut images = Assets::<Image>::default();
 
-    let mut base = VisibleIntroScreen::new();
-    base.jumptable_index = 0;
+    let base = VisibleIntroScreen::new_for_presentation();
     let base_frame = intro_scene_frame_for_art(&mut rendered_art, &asset_root, &base, &mut images)
         .expect("render base Unown intro frame");
     let base_data = images
@@ -615,6 +745,7 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
         .expect("base intro image")
         .data
         .clone();
+    assert_opaque_nonblack_lcd_pixels(&base_data, "initial packaged-game intro");
 
     let mut faded = base.clone();
     faded.jumptable_index = 1;

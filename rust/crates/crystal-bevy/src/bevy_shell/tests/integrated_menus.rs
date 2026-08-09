@@ -110,6 +110,7 @@ fn integrated_title_to_overworld_schedule_accepts_name_renders_music_and_movemen
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
@@ -400,6 +401,20 @@ fn integrated_players_house_pc_opens_its_menu_from_the_live_compiled_pack() {
     app.update();
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
 
+    // The boot message owns A until it is visibly printed and dismissed.
+    // Replaying actual presses here catches the live failure where the PC
+    // menu appeared underneath a retained text lock and ignored navigation.
+    for _ in 0..256 {
+        let boot_notice_open = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            shell.field_notice.is_some() || shell.pc_notice.is_some()
+        };
+        if !boot_notice_open {
+            break;
+        }
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    }
+
     let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     assert_eq!(runtime_shell.last_error, None);
     assert!(
@@ -409,21 +424,104 @@ fn integrated_players_house_pc_opens_its_menu_from_the_live_compiled_pack() {
         runtime_shell.last_action_status,
         runtime_shell.last_audio_events
     );
-    assert_eq!(
-        runtime_shell.field_notice.as_deref(),
-        Some("TEST turned on\nthe PC.")
-    );
+    let initial_pc_option = runtime_shell
+        .player_pc_action_cursor
+        .as_ref()
+        .expect("player PC cursor")
+        .option_index;
     drop(runtime_shell);
     app.update();
-    let world = app.world_mut();
-    assert!(
-        world
-            .query_filtered::<Entity, With<SceneDialogMarker>>()
+    let rendered_before = {
+        let world = app.world_mut();
+        let background = world
+            .query_filtered::<&Sprite, With<SceneDialogTextBoxBackgroundMarker>>()
             .iter(world)
             .next()
-            .is_some(),
-        "the PC boot notice/menu must be represented by rendered UI entities"
+            .expect("Player PC must render its canonical window paper");
+        assert_eq!(
+            background.custom_size,
+            Some(Vec2::new(14.0 * TILE_SIZE, 11.0 * TILE_SIZE)),
+            "TypeScript/ASM Player PC action window must be 16x13 tiles"
+        );
+        let mut glyphs = world
+            .query::<(&DialogGlyphMarker, &Handle<Image>)>()
+            .iter(world)
+            .map(|(marker, texture)| (marker.key, format!("{:?}", texture.id())))
+            .collect::<Vec<_>>();
+        glyphs.sort();
+        glyphs
+    };
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    app.update();
+    assert_ne!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_pc_action_cursor
+            .as_ref()
+            .expect("player PC cursor after navigation")
+            .option_index,
+        initial_pc_option,
+        "the rendered PC menu must accept navigation input"
     );
+    let rendered_after = {
+        let world = app.world_mut();
+        let mut glyphs = world
+            .query::<(&DialogGlyphMarker, &Handle<Image>)>()
+            .iter(world)
+            .map(|(marker, texture)| (marker.key, format!("{:?}", texture.id())))
+            .collect::<Vec<_>>();
+        glyphs.sort();
+        glyphs
+    };
+    assert_ne!(
+        rendered_after, rendered_before,
+        "Down must visibly move the Player PC arrow, not only mutate an internal cursor"
+    );
+
+    // Return to WITHDRAW, enter the real nested item surface, and back out.
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowUp);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    for _ in 0..256 {
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        if shell.pc_item_cursor.is_some() || shell.pc_notice.is_some() {
+            break;
+        }
+        let _ = shell;
+        app.update();
+    }
+    assert!(
+        app.world().resource::<BevyRuntimeShell>().pc_item_cursor.is_some()
+            || app.world().resource::<BevyRuntimeShell>().pc_notice.is_some(),
+        "WITHDRAW must visibly enter the item list or display the canonical empty notice"
+    );
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+    for _ in 0..8 {
+        app.update();
+    }
+    if app.world().resource::<BevyRuntimeShell>().pc_notice.is_some() {
+        for _ in 0..256 {
+            press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+            if app.world().resource::<BevyRuntimeShell>().pc_notice.is_none() {
+                break;
+            }
+        }
+    }
+    assert!(
+        app.world().resource::<BevyRuntimeShell>().player_pc_action_cursor.is_some(),
+        "B from a nested Player PC surface must return to the six-action menu"
+    );
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_pc_action_cursor
+            .is_none(),
+        "B must turn off the PC and close its action UI"
+    );
+    assert_overworld_control_returns_and_player_moves(&mut app, "PlayersHousePCScript");
 }
 
 #[test]
@@ -496,8 +594,23 @@ fn integrated_players_house_bookshelf_renders_dialogue_from_the_live_compiled_pa
             > 0,
         "bookshelf text must render glyph entities, not only mutate runtime state"
     );
+    for _ in 0..128 {
+        app.update();
+    }
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
-    app.update();
+    for _ in 0..3 {
+        app.update();
+    }
+    let close_diagnostic = {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        format!(
+            "snapshot={:?} action={:?} cursor={:?} events={:?}",
+            runtime_shell.shell.snapshot().ok().map(|snapshot| snapshot.ui),
+            runtime_shell.last_runtime_action,
+            runtime_shell.active_script_cursor,
+            runtime_shell.last_audio_events
+        )
+    };
     let world = app.world_mut();
     assert_eq!(
         world
@@ -505,33 +618,78 @@ fn integrated_players_house_bookshelf_renders_dialogue_from_the_live_compiled_pa
             .iter(world)
             .count(),
         0,
-        "acknowledging the bookshelf text must close its rendered textbox"
+        "acknowledging the bookshelf text must close its rendered textbox: {close_diagnostic}"
+    );
+    assert_overworld_control_returns_and_player_moves(&mut app, "PictureBookshelfScript");
+}
+
+fn assert_overworld_control_returns_and_player_moves(app: &mut App, script: &str) {
+    {
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        let snapshot = shell.shell.snapshot().expect("post-interaction snapshot");
+        assert_eq!(shell.last_error, None, "{script} left a runtime error");
+        assert_eq!(
+            shell.active_script_cursor,
+            None,
+            "{script} left its script cursor armed; ui={:?} action={:?} events={:?}",
+            snapshot.ui,
+            shell.last_runtime_action,
+            shell.last_audio_events
+        );
+        assert!(!snapshot.ui.text_window_open, "{script} left its textbox open");
+        assert!(snapshot.ui.pending_text_wait.is_none(), "{script} left a text wait pending");
+    }
+    let start = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .shell
+        .snapshot()
+        .unwrap()
+        .overworld
+        .tile;
+    for key in [KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp] {
+        // Crystal turns toward a newly pressed direction first. A second
+        // press performs the walk, exactly like the real joypad path.
+        for _ in 0..2 {
+            press_key_for_runtime_hotkey_app(app, key);
+            for _ in 0..6 {
+                app.update();
+            }
+        }
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(shell.last_error, None, "{script} errored when movement resumed");
+        if shell.shell.snapshot().unwrap().overworld.tile != start {
+            return;
+        }
+    }
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    panic!(
+        "{script} finished visually but never returned movement control from {start:?}; action={:?} input={:?} cursor={:?} events={:?}",
+        shell.last_runtime_action,
+        shell.last_overworld_input,
+        shell.active_script_cursor,
+        shell.last_audio_events
     );
 }
 
-fn place_player_facing_live_standard_script(
-    runtime_shell: &mut BevyRuntimeShell,
+fn find_live_standard_script_approach(
+    runtime: &CrystalRuntime,
     expected_script: &str,
-) {
-    let width = i16::try_from(runtime_shell.shell.session.overworld.map.width).unwrap() * 2;
-    let height = i16::try_from(runtime_shell.shell.session.overworld.map.height).unwrap() * 2;
+) -> (String, TilePosition, Direction) {
     let mut found_scripts = std::collections::BTreeSet::new();
-    for y in 0..height {
-        for x in 0..width {
-            let tile = TilePosition::new(x, y);
-            if runtime_shell
-                .shell
-                .runtime
-                .data
-                .overworld_session("PlayersHouse2F", tile, 0)
-                .is_err()
-            {
-                continue;
-            }
-            for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
-                let session = &mut runtime_shell.shell.session.overworld;
-                session.player.tile = tile;
-                session.player.facing = facing;
+    for map_name in ["PlayersHouse2F", "PlayersHouse1F", "ElmsLab"] {
+        if !runtime.data().maps.contains_key(map_name) {
+            continue;
+        }
+        let module = runtime.data().map_module(map_name).unwrap();
+        let width = i16::try_from(module.attributes.width).unwrap() * 2;
+        let height = i16::try_from(module.attributes.height).unwrap() * 2;
+        for y in 0..height {
+            for x in 0..width {
+                let tile = TilePosition::new(x, y);
+                let Ok(mut session) = runtime.data().overworld_session(map_name, tile, 0) else { continue };
+                for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+                    session.player.facing = facing;
                 if let Some(interaction) = session
                     .check_interaction_checked(1)
                     .expect("scan live collision interaction")
@@ -540,18 +698,13 @@ fn place_player_facing_live_standard_script(
                     if interaction.script != expected_script {
                         continue;
                     }
-                    crate::core::systems::map_context::commit_overworld_snapshot(
-                        &mut runtime_shell.shell.session.state,
-                        &runtime_shell.shell.session.overworld.snapshot(),
-                        crate::core::systems::map_context::SpawnMemoryUpdate::Preserve,
-                    );
-                    runtime_shell.shell.last_frame = None;
-                    return;
+                    return (map_name.to_string(), tile, facing);
                 }
             }
         }
     }
-    panic!("PlayersHouse2F has no live collision interaction for {expected_script}; found {found_scripts:?}");
+    }
+    panic!("live pack has no walkable collision interaction for {expected_script}; found {found_scripts:?}");
 }
 
 #[test]
@@ -559,7 +712,7 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
     for (script, initial_label, expected_page) in [
         ("TVScript", Some("TVText"), None),
         ("TownMapScript", Some("LookTownMapText"), Some(PokegearPage::Map)),
-        ("Radio1Script", None, Some(PokegearPage::Radio)),
+        ("PlayersHouseRadioScript", Some("PlayersRadioText1"), None),
     ] {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -568,27 +721,14 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
         let asset_root = AssetRoot::new(repo_root);
         let runtime = workspace_desktop_runtime(&asset_root);
         let spawn_identifier = runtime.title_new_game_spawn_identifier().expect("new-game spawn");
-        let mut runtime_shell = initialize_bevy_runtime_shell(
-            asset_root.clone(),
-            runtime.clone(),
-            BevyShellStart::NewGameAtRuntimeTile {
-                spawn_identifier,
-                map_name: "PlayersHouse2F".to_string(),
-                tile_x: 5,
-                tile_y: 2,
-            },
-            BevyShellConfig { smoke_player_name: Some("TEST".to_string()), ..Default::default() },
-        )
-        .expect("initialize live standard-interaction shell");
-        place_player_facing_live_standard_script(&mut runtime_shell, script);
-        let interaction_tile = runtime_shell.shell.session.overworld.player.tile;
-        let interaction_facing = runtime_shell.shell.session.overworld.player.facing;
+        let (map_name, interaction_tile, interaction_facing) =
+            find_live_standard_script_approach(&runtime, script);
         let mut runtime_shell = initialize_bevy_runtime_shell(
             asset_root,
             runtime,
             BevyShellStart::NewGameAtRuntimeTile {
                 spawn_identifier,
-                map_name: "PlayersHouse2F".to_string(),
+                map_name,
                 tile_x: interaction_tile.x,
                 tile_y: interaction_tile.y,
             },
@@ -612,33 +752,89 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             let world = app.world_mut();
             assert!(world.query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>().iter(world).next().is_some(), "{script} must render a textbox");
             assert!(world.query_filtered::<Entity, With<DialogGlyphMarker>>().iter(world).next().is_some(), "{script} must render glyphs");
-            for _ in 0..8 {
-                let finished = {
-                    let shell = app.world().resource::<BevyRuntimeShell>();
-                    expected_page.is_some_and(|page| {
-                        shell.pokegear_menu_open && shell.pokegear_page == page
-                    }) || (expected_page.is_none()
-                        && shell.shell.snapshot().unwrap().ui.text.is_none())
-                };
-                if finished {
-                    break;
+            if script == "PlayersHouseRadioScript" {
+                let mut labels = Vec::new();
+                for _ in 0..4096 {
+                    app.update();
+                    let snapshot = app
+                        .world()
+                        .resource::<BevyRuntimeShell>()
+                        .shell
+                        .snapshot()
+                        .unwrap();
+                    if let Some(label) = snapshot.ui.text.as_ref().map(|text| text.label.clone())
+                        && labels.last() != Some(&label)
+                    {
+                        labels.push(label);
+                    }
+                    if !snapshot.ui.text_window_open {
+                        break;
+                    }
                 }
-                press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
-                app.update();
+                assert_eq!(
+                    labels,
+                    ["PlayersRadioText1", "PlayersRadioText2", "PlayersRadioText3", "PlayersRadioText4"],
+                    "the initial radio broadcast must display Oak, Mary, and the closing segment in canonical order; cursor={:?} delay={:?} reveal={:?} ui={:?} events={:?}",
+                    app.world().resource::<BevyRuntimeShell>().active_script_cursor,
+                    app.world().resource::<BevyRuntimeShell>().visible_script_delay_frames,
+                    app.world().resource::<BevyRuntimeShell>().field_text_reveal,
+                    app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().ui,
+                    app.world().resource::<BevyRuntimeShell>().last_audio_events,
+                );
+            } else {
+                for _ in 0..512 {
+                    let finished = {
+                        let shell = app.world().resource::<BevyRuntimeShell>();
+                        expected_page.is_some_and(|page| {
+                            shell.pokegear_menu_open && shell.pokegear_page == page
+                        }) || (expected_page.is_none()
+                            && !shell.shell.snapshot().unwrap().ui.text_window_open)
+                    };
+                    if finished {
+                        break;
+                    }
+                    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+                    app.update();
+                }
             }
         }
 
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         assert_eq!(runtime_shell.last_error, None, "{script} progression failed");
         if let Some(page) = expected_page {
-            assert!(runtime_shell.pokegear_menu_open, "{script} must open its modal UI");
+            assert!(
+                runtime_shell.pokegear_menu_open,
+                "{script} must open its modal UI; ui={:?} action={:?} events={:?}",
+                runtime_shell.shell.snapshot().unwrap().ui,
+                runtime_shell.last_runtime_action,
+                runtime_shell.last_audio_events
+            );
             assert_eq!(runtime_shell.pokegear_page, page, "{script} opened the wrong UI page");
             drop(runtime_shell);
+            app.update();
+            assert_eq!(
+                app.world().resource::<BevyRuntimeShell>().last_error,
+                None,
+                "{script} modal render failed"
+            );
             let world = app.world_mut();
-            assert!(world.query_filtered::<Entity, With<DialogGlyphMarker>>().iter(world).next().is_some(), "{script} modal must render glyphs");
+            let glyph_sprites = world
+                .query::<(&Sprite, &Transform)>()
+                .iter(world)
+                .filter(|(sprite, transform)| {
+                    transform.translation.z >= 3.8 && sprite.custom_size.is_some()
+                })
+                .count();
+            assert!(glyph_sprites > 0, "{script} modal must render bitmap glyph sprites");
+            let _ = world;
+            press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+            for _ in 0..3 {
+                app.update();
+            }
         } else {
-            assert!(runtime_shell.shell.snapshot().unwrap().ui.text.is_none(), "TV dialogue must close after acknowledgement");
+            assert!(!runtime_shell.shell.snapshot().unwrap().ui.text_window_open, "{script} dialogue must close after acknowledgement");
         }
+        assert_overworld_control_returns_and_player_moves(&mut app, script);
     }
 }
 

@@ -2190,6 +2190,19 @@ const exportStoryEventScriptConstants = () => {
     }
     const mapName = entry.name.slice(0, -4);
     const constants = parseDefConstants(path.join(mapsDir, entry.name), global);
+    let sceneIndex = 0;
+    for (const rawLine of readLines(path.join(mapsDir, entry.name))) {
+      const line = rawLine.split(";", 1)[0].trim();
+      if (!line.startsWith("scene_script ")) {
+        continue;
+      }
+      const operands = line.slice("scene_script ".length).split(",").map((part) => part.trim());
+      const sceneConstant = operands[1] ?? "";
+      if (sceneConstant) {
+        constants[sceneConstant] = sceneIndex;
+      }
+      sceneIndex += 1;
+    }
     if (Object.keys(constants).length) {
       maps[mapName] = constants;
     }

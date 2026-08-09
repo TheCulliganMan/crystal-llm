@@ -4229,6 +4229,7 @@ fn render_playfield(
         && runtime_shell.pending_time_set.is_none()
         && runtime_shell.pending_oak_intro.is_none()
         && runtime_shell.pending_gender_selection.is_none()
+        && runtime_shell.pending_day_of_week.is_none()
         && runtime_shell.visible_balance_overlay.is_none()
         && runtime_shell.visible_mom_bank.is_none()
         && (snapshot.ui.text.is_some() || snapshot.ui.pending_yes_no.is_some());
@@ -5810,6 +5811,8 @@ fn render_playfield(
                     &mut images,
                 ) {
                     Some(frame) => {
+                        let (emote_x, emote_y) =
+                            overworld_emote_position_from_base(x, y, frame.size);
                         commands.spawn((
                             SpriteBundle {
                                 texture: frame.handle,
@@ -5817,7 +5820,7 @@ fn render_playfield(
                                     custom_size: Some(frame.size),
                                     ..default()
                                 },
-                                transform: Transform::from_xyz(x, y + TILE_SIZE * 1.35, 3.2),
+                                transform: Transform::from_xyz(emote_x, emote_y, 3.2),
                                 ..default()
                             },
                             ObjectMarker,

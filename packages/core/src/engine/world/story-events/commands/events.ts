@@ -139,6 +139,7 @@ type EventCommandRunner = ScriptRunner & {
   queue_phone_call?: (contact: string) => void;
   just_battled?: boolean;
   stop_execution?: boolean;
+  run_standard_script?: (scriptName: string) => void;
 };
 
 type OverworldObjectResolver = {
@@ -387,13 +388,15 @@ export class ConditionalEventCommand extends Command {
     if (!runner) {
       throw new Error("ConditionalEventCommand requires an active script runner.");
     }
-    const flagSet = isFlagSet(gameState, this.eventName);
-    runner.last_condition_result = flagSet;
-    runner.last_value = flagSet;
+    // conditional_event is attached to an object event whose event flag hides
+    // that object. Its script is active while the flag is clear.
+    const scriptActive = !isFlagSet(gameState, this.eventName);
+    runner.last_condition_result = scriptActive;
+    runner.last_value = scriptActive;
     LOGGER.debug(
       "ConditionalEventCommand %s -> %s (target %s)",
       this.eventName,
-      flagSet,
+      scriptActive,
       this.scriptName,
     );
 
@@ -402,7 +405,7 @@ export class ConditionalEventCommand extends Command {
       stack[stack.length - 1].allowFallthrough = false;
     }
 
-    if (!flagSet) {
+    if (!scriptActive) {
       return;
     }
     if (this.scriptName.startsWith(".")) {
@@ -856,7 +859,10 @@ export class JumpStandardCommand extends Command {
     if (!runner) {
       throw new Error("JumpStandardCommand requires an active script runner.");
     }
-    runner.run(this.scriptName);
+    if (typeof runner.run_standard_script !== "function") {
+      throw new Error("JumpStandardCommand requires standard-script dispatch support.");
+    }
+    runner.run_standard_script(this.scriptName);
     runner.stop_execution = true;
   }
 }

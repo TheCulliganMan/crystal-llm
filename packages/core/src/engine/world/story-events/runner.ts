@@ -164,6 +164,7 @@ export interface ScriptRunner {
     is_busy?: boolean;
     run_phone_script?: (scriptName: string) => void;
     standard_scripts?: Record<string, (runner: ScriptRunner) => void>;
+    run_standard_script?: (scriptName: string) => void;
     run(
         scriptName: string,
         options?: { allow_fallthrough?: boolean; allowFallthrough?: boolean },
@@ -557,6 +558,13 @@ export class ScriptRunnerImpl implements ScriptRunner {
         }
         this._sync_state();
         return true;
+    }
+
+    public run_standard_script(scriptName: string): void {
+        const normalized = normalizeScriptName(scriptName);
+        if (!this._run_standard_script(normalized)) {
+            throw new Error(`Unknown standard script '${normalized}'.`);
+        }
     }
 
     public _find_parent_script_name(): string | null {

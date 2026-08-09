@@ -2450,12 +2450,13 @@
             .script_item_checks
             .iter()
             .find(|access| {
-                access.source_script == "GoldenrodMagnetTrainStationOfficerScript"
+                access.source_script
+                    == ".MagnetTrainToSaffron@GoldenrodMagnetTrainStationOfficerScript"
                     && access.item_id == "PASS"
             })
             .expect("Magnet Train pass check");
 
-        assert_eq!(access.command_index, 11);
+        assert_eq!(access.command_index, 3);
 
         let mut state = GameState::default();
         let missing = check_script_item(&state, &data.items, access.clone()).expect("check pass");
@@ -2737,7 +2738,7 @@
             .script_scene_commands
             .iter()
             .find(|command| {
-                command.source_script == "Route43GateCheckIfRocketsCallback"
+                command.source_script == ".NoRockets@Route43GateCheckIfRocketsCallback"
                     && command.command == "setmapscene"
                     && command.map_id.as_deref() == Some("ROUTE_43")
                     && command.scene_id.as_deref() == Some("1")
@@ -2988,7 +2989,7 @@
             .script_variable_commands
             .iter()
             .find(|command| {
-                command.source_script == "TrainerBirdKeeperVance1"
+                command.source_script == ".Script@TrainerBirdKeeperVance1"
                     && command.command == "loadvar"
                     && command.target.as_deref() == Some("VAR_CALLERID")
             })
@@ -3375,7 +3376,7 @@
             .script_control_commands
             .iter()
             .find(|command| {
-                command.source_script == "TrainerBirdKeeperVance1"
+                command.source_script == ".Script@TrainerBirdKeeperVance1"
                     && command.command == "scall"
                     && command.target_label.as_deref() == Some("Route44AskNumber1M")
             })
@@ -3406,7 +3407,7 @@
         );
 
         assert!(route44.script_control_commands.iter().any(|command| {
-            command.source_script == "TrainerBirdKeeperVance1"
+            command.source_script == ".Script@TrainerBirdKeeperVance1"
                 && command.command == "endifjustbattled"
                 && command.target_label.is_none()
                 && command.compare_value.is_none()
@@ -4136,7 +4137,8 @@
             .script_runtime_commands
             .iter()
             .find(|command| {
-                command.command == "gettrainername" && command.source_script == "AzaleaGymStatue"
+                command.command == "gettrainername"
+                    && command.source_script == ".Beaten@AzaleaGymStatue"
             })
             .expect("gym statue trainer name command");
         assert_eq!(
@@ -4177,14 +4179,14 @@
         assert!(dragon_shrine.script_runtime_commands.iter().any(|command| {
             command.command == "specialphonecall"
                 && command.args == vec!["SPECIALCALL_MASTERBALL"]
-                && command.source_script == "DragonShrineTakeTestScript"
+                && command.source_script == ".PassedTheTest@DragonShrineTakeTestScript"
         }));
 
         let route39 = data.map_module("Route39").expect("assemble Route39");
         assert!(route39.script_runtime_commands.iter().any(|command| {
             command.command == "checkpoke"
                 && command.args == vec!["PIKACHU"]
-                && command.source_script == "TrainerPokefanmDerek"
+                && command.source_script == ".Script@TrainerPokefanmDerek"
         }));
 
         let elms_lab = data.map_module("ElmsLab").expect("assemble Elm's Lab");
@@ -4228,7 +4230,8 @@
                 .any(|command| {
                     command.command == "cmdqueue"
                         && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
-                        && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
+                        && command.source_script
+                            == ".CommandQueue@BlackthornGym2FSetUpStoneTableCallback"
                 })
         );
         assert!(
@@ -4272,7 +4275,7 @@
         assert!(route31.script_runtime_commands.iter().any(|command| {
             command.command == "checkpokemail"
                 && command.args == vec!["ReceivedSpearowMailText"]
-                && command.source_script == "Route31MailRecipientScript"
+                && command.source_script == ".TryGiveKenya@Route31MailRecipientScript"
         }));
         let route35_gate = data
             .map_module("Route35GoldenrodGate")
@@ -4294,12 +4297,14 @@
         assert!(hallway.script_runtime_commands.iter().any(|command| {
             command.command == "ldh"
                 && command.args == vec!["a", "[rWBK]"]
-                && command.source_script == "BattleTowerHallwayChooseBattleRoomScript"
+                && command.source_script
+                    == ".asm_load_battle_room@BattleTowerHallwayChooseBattleRoomScript"
         }));
         assert!(hallway.script_runtime_commands.iter().any(|command| {
             command.command == "ret"
                 && command.args.is_empty()
-                && command.source_script == "BattleTowerHallwayChooseBattleRoomScript"
+                && command.source_script
+                    == ".asm_load_battle_room@BattleTowerHallwayChooseBattleRoomScript"
         }));
 
         let academy = data
@@ -4313,7 +4318,7 @@
         assert!(academy.script_runtime_commands.iter().any(|command| {
             command.command == "dba"
                 && command.args == vec![".Text"]
-                && command.source_script == "AcademyBlackboard"
+                && command.source_script == ".MenuData@AcademyBlackboard"
         }));
 
         let radio_tower = data

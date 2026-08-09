@@ -9608,7 +9608,9 @@ impl GameDataSet {
             || runtime.pending_map_load.is_some()
             || runtime.pending_map_refresh.is_some()
             || runtime.warp_check_requested
-            || !runtime.text_events.is_empty()
+            // Completed text events are retained for rendering/history. The
+            // pending label/wait/window fields below are the authoritative
+            // input owners; archival lines must not freeze the overworld.
             || runtime.pending_text_label.is_some()
             || runtime.pending_text_wait.is_some()
             || runtime.pending_yes_no.is_some()

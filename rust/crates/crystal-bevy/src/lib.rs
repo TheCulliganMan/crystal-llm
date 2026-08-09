@@ -10266,40 +10266,48 @@ impl RuntimeGameShell {
     /// does not clone the semantic state or calculate a checksum, so an idle
     /// overworld frame can stay on the fast path.
     pub fn has_pending_script_work(&self) -> bool {
+        self.pending_script_work_reason().is_some()
+    }
+
+    /// Identify the first authoritative script condition that still owns a
+    /// frame. This is intentionally allocation-free so input diagnostics can
+    /// report a precise capture reason without cloning a runtime snapshot.
+    pub fn pending_script_work_reason(&self) -> Option<&'static str> {
         let script = &self.session.state.script_runtime;
-        script.pending_text_label.is_some()
-            || script.pending_text_wait.is_some()
-            || script.pending_yes_no.is_some()
-            || script.pending_shop.is_some()
-            || script.active_pokemon_picture.is_some()
-            || script.window_open
-            || script.text_window_open
-            || script.pending_map_load.is_some()
-            || script.pending_map_refresh.is_some()
-            || script.pending_music_fade.is_some()
-            || script.pending_screen_fade.is_some()
-            || !script.pending_delays.is_empty()
-            || !script.pending_earthquakes.is_empty()
-            || !script.pending_emotes.is_empty()
-            || script.pending_script_warp.is_some()
-            || !script.command_queue.is_empty()
-            || script.next_script.is_some()
-            || !script.deferred_scripts.is_empty()
-            || script.script_ended.is_some()
-            || !script.audio_events.is_empty()
-            || !script.graphics_events.is_empty()
-            || !script.money_events.is_empty()
-            || !script.map_events.is_empty()
-            || !script.text_events.is_empty()
-            || !script.control_events.is_empty()
-            || !script.shop_events.is_empty()
-            || !script.item_use_events.is_empty()
-            || script.active_menu.is_some()
-            || script.waiting_for_sound_effect
-            || script.player_input_locked
-            || script.all_input_locked
-            || script.script_stop_requested
-            || script.warp_check_requested
+        Some(if script.pending_text_label.is_some() { "pending_text_label" }
+        else if script.pending_text_wait.is_some() { "pending_text_wait" }
+        else if script.pending_yes_no.is_some() { "pending_yes_no" }
+        else if script.pending_shop.is_some() { "pending_shop" }
+        else if script.active_pokemon_picture.is_some() { "active_pokemon_picture" }
+        else if script.window_open { "window_open" }
+        else if script.text_window_open { "text_window_open" }
+        else if script.pending_map_load.is_some() { "pending_map_load" }
+        else if script.pending_map_refresh.is_some() { "pending_map_refresh" }
+        else if script.pending_music_fade.is_some() { "pending_music_fade" }
+        else if script.pending_screen_fade.is_some() { "pending_screen_fade" }
+        else if !script.pending_delays.is_empty() { "pending_delays" }
+        else if !script.pending_earthquakes.is_empty() { "pending_earthquakes" }
+        else if !script.pending_emotes.is_empty() { "pending_emotes" }
+        else if script.pending_script_warp.is_some() { "pending_script_warp" }
+        else if !script.command_queue.is_empty() { "command_queue" }
+        else if script.next_script.is_some() { "next_script" }
+        else if !script.deferred_scripts.is_empty() { "deferred_scripts" }
+        else if script.script_ended.is_some() { "script_ended" }
+        else if !script.audio_events.is_empty() { "audio_events" }
+        else if !script.graphics_events.is_empty() { "graphics_events" }
+        else if !script.money_events.is_empty() { "money_events" }
+        else if !script.map_events.is_empty() { "map_events" }
+        // Text events are retained execution history, not pending work.
+        else if !script.control_events.is_empty() { "control_events" }
+        else if !script.shop_events.is_empty() { "shop_events" }
+        else if !script.item_use_events.is_empty() { "item_use_events" }
+        else if script.active_menu.is_some() { "active_menu" }
+        else if script.waiting_for_sound_effect { "waiting_for_sound_effect" }
+        else if script.player_input_locked { "player_input_locked" }
+        else if script.all_input_locked { "all_input_locked" }
+        else if script.script_stop_requested { "script_stop_requested" }
+        else if script.warp_check_requested { "warp_check_requested" }
+        else { return None; })
     }
 
     /// Avoid entering the transactional audio-queue mutation path when the
@@ -16773,24 +16781,36 @@ impl CrystalRuntime {
     }
 
     fn active_text_snapshot(&self, state: &GameState) -> Result<Option<RuntimeTextSnapshot>> {
-        let label = state
-            .script_runtime
-            .pending_text_label
-            .as_deref()
-            .or_else(|| {
-                state
-                    .script_runtime
-                    .text_events
-                    .iter()
-                    .rev()
-                    .find_map(|event| event.text_label.as_deref())
-            });
-        let Some(label) = label else {
+        if let Some(label) = state.script_runtime.pending_text_label.as_deref() {
+            return self
+                .text_snapshot_for_label(state, label)
+                .map(Some)
+                .with_context(|| format!("resolve runtime text snapshot for '{label}'"));
+        }
+        if !state.script_runtime.text_window_open {
             return Ok(None);
-        };
-        self.text_snapshot_for_label(state, label)
-            .map(Some)
-            .with_context(|| format!("resolve runtime text snapshot for '{label}'"))
+        }
+        // Text events are retained as diagnostics, so the most recent Write
+        // in the entire history is not necessarily the text owned by this
+        // window. An Open after that Write starts an empty window; rendering
+        // past it is the source of the bogus pre-text seen between Mom's
+        // canonical lines (and after changing maps). Wait/YesNo retain the
+        // current Write, while Open/Close explicitly delimit it.
+        for event in state.script_runtime.text_events.iter().rev() {
+            match event.kind {
+                crate::core::state::ScriptTextRuntimeKind::Write => {
+                    let label = event.text_label.as_deref().with_context(|| {
+                        format!("runtime Write event {} has no text label", event.command)
+                    })?;
+                    return self.text_snapshot_for_label(state, label).map(Some);
+                }
+                crate::core::state::ScriptTextRuntimeKind::Open
+                | crate::core::state::ScriptTextRuntimeKind::Close => return Ok(None),
+                crate::core::state::ScriptTextRuntimeKind::WaitButton
+                | crate::core::state::ScriptTextRuntimeKind::YesNo => {}
+            }
+        }
+        Ok(None)
     }
 
     fn text_snapshot_for_label(

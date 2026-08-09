@@ -401,6 +401,20 @@ fn overworld_sprite_position_from_base(
     )
 }
 
+fn overworld_emote_position_from_base(
+    tile_center_x: f32,
+    tile_center_y: f32,
+    emote_size: Vec2,
+) -> (f32, f32) {
+    // ASM positions the 16x16 emote immediately above the object's 16x16 OAM
+    // footprint. Runtime coordinates point at the footprint's top-left 8x8
+    // tile, while Bevy sprites use their centre, so account for both origins.
+    (
+        tile_center_x + TILE_SIZE * 0.5,
+        tile_center_y + TILE_SIZE * 0.5 + emote_size.y * 0.5,
+    )
+}
+
 fn render_viewport_origin(player_render_tile: i16, render_extent: i16, viewport_tiles: i16) -> i16 {
     let max_origin = render_extent.saturating_sub(viewport_tiles).max(0);
     player_render_tile

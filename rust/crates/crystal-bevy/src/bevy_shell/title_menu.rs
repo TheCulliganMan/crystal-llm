@@ -80,6 +80,22 @@ impl VisibleIntroScreen {
         }
     }
 
+    /// Start native presentation at the first clearly visible point of the
+    /// opening Unown fade. The ASM prelude before this point is an opaque
+    /// black LCD; presenting it in a desktop window is indistinguishable from
+    /// a failed renderer or a hung pack load.
+    fn new_for_presentation() -> Self {
+        let mut intro = Self::new();
+        intro.jumptable_index = 1;
+        intro.scene_frame_counter = 8;
+        intro.scene_timer = 8;
+        intro.palette_effect = VisibleIntroPaletteEffect::UnownFade {
+            palette_idx: 0,
+            timer: 8,
+        };
+        intro
+    }
+
     fn scene_name(&self) -> &'static str {
         VISIBLE_INTRO_SCENE_NAMES
             .get(self.jumptable_index)

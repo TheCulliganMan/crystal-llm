@@ -271,7 +271,11 @@ describe("switch puzzle audit", () => {
       command: "callback",
       args: ["MAPCALLBACK_OBJECTS", "TinTower1FNPCsCallback"],
     });
-    expect(scripts["TinTower1FNPCsCallback"]).toEqual(
+    expect([
+      ...scripts["TinTower1FNPCsCallback"],
+      ...scripts[".FaceBeasts@TinTower1FNPCsCallback"],
+      ...scripts[".FoughtSuicune@TinTower1FNPCsCallback"],
+    ]).toEqual(
       expect.arrayContaining([
         { command: "checkevent", args: ["EVENT_BEAT_ELITE_FOUR"] },
         { command: "special", args: ["BeastsCheck"] },
@@ -328,7 +332,11 @@ describe("switch puzzle audit", () => {
         { command: "setevent", args: ["EVENT_TIN_TOWER_1F_WISE_TRIO_1"] },
       ]),
     );
-    expect(roofScripts["TinTowerRoofHoOhCallback"]).toEqual(
+    expect([
+      ...roofScripts["TinTowerRoofHoOhCallback"],
+      ...roofScripts[".Appear@TinTowerRoofHoOhCallback"],
+      ...roofScripts[".NoAppear@TinTowerRoofHoOhCallback"],
+    ]).toEqual(
       expect.arrayContaining([
         { command: "checkevent", args: ["EVENT_FOUGHT_HO_OH"] },
         { command: "checkitem", args: ["RAINBOW_WING"] },
