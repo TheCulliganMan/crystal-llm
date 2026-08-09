@@ -515,6 +515,7 @@ fn place_player_facing_live_standard_script(
 ) {
     let width = i16::try_from(runtime_shell.shell.session.overworld.map.width).unwrap() * 2;
     let height = i16::try_from(runtime_shell.shell.session.overworld.map.height).unwrap() * 2;
+    let mut found_scripts = std::collections::BTreeSet::new();
     for y in 0..height {
         for x in 0..width {
             let tile = TilePosition::new(x, y);
@@ -531,11 +532,14 @@ fn place_player_facing_live_standard_script(
                 let session = &mut runtime_shell.shell.session.overworld;
                 session.player.tile = tile;
                 session.player.facing = facing;
-                if session
+                if let Some(interaction) = session
                     .check_interaction_checked(1)
                     .expect("scan live collision interaction")
-                    .is_some_and(|interaction| interaction.script == expected_script)
                 {
+                    found_scripts.insert(interaction.script.clone());
+                    if interaction.script != expected_script {
+                        continue;
+                    }
                     crate::core::systems::map_context::commit_overworld_snapshot(
                         &mut runtime_shell.shell.session.state,
                         &runtime_shell.shell.session.overworld.snapshot(),
@@ -547,7 +551,7 @@ fn place_player_facing_live_standard_script(
             }
         }
     }
-    panic!("PlayersHouse2F has no live collision interaction for {expected_script}");
+    panic!("PlayersHouse2F has no live collision interaction for {expected_script}; found {found_scripts:?}");
 }
 
 #[test]
