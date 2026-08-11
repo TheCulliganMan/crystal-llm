@@ -231,11 +231,8 @@ pub fn process_overworld_step(
 
     let mut happiness_changed = Vec::new();
     if state.step_events.step_count == 0 {
-        happiness_changed = apply_happiness_step(
-            rules,
-            &mut state.step_events,
-            &mut state.storage.party,
-        );
+        happiness_changed =
+            apply_happiness_step(rules, &mut state.step_events, &mut state.storage.party);
     }
 
     if state.step_events.step_count == rules.egg_step_trigger {
@@ -253,11 +250,8 @@ pub fn process_overworld_step(
 
     crate::systems::special_routines::advance_day_care_step(state, growth_rates)
         .map_err(|error| StepEventError::DayCareExperience { error })?;
-    let poison_result = process_poison_step(
-        rules,
-        &mut state.step_events,
-        &mut state.storage.party,
-    );
+    let poison_result =
+        process_poison_step(rules, &mut state.step_events, &mut state.storage.party);
     let result = StepEventResult {
         repel_expired: None,
         egg_hatched: false,

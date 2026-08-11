@@ -1961,7 +1961,10 @@ mod tests {
                 .unwrap_or_else(|error| panic!("complete {battle_type} box catch: {error}"))
                 .expect("capture stores in current box");
             assert!(matches!(stored.location, CaptureStorageLocation::Pc { .. }));
-            assert_eq!(state.battle_result, expected, "{battle_type} box {box_before}");
+            assert_eq!(
+                state.battle_result, expected,
+                "{battle_type} box {box_before}"
+            );
         }
 
         let mut celebi_party = active_capture_state("BATTLETYPE_CELEBI", false, 0);
@@ -1983,7 +1986,10 @@ mod tests {
         let error = complete_active_wild_capture_result(&mut state, &outcome)
             .expect_err("party plus selected full box rejects the capture completion");
 
-        assert!(error.contains("party and current PC box 1 are full"), "{error}");
+        assert!(
+            error.contains("party and current PC box 1 are full"),
+            "{error}"
+        );
         assert_eq!(state, before);
     }
 

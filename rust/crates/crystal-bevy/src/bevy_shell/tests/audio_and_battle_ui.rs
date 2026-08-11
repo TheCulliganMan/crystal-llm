@@ -719,7 +719,7 @@ fn bug_contest_menu_accepts_only_the_canonical_battle_type() {
 
 #[test]
 fn battle_main_command_menu_uses_asm_header_tile_coordinates() {
-    assert_eq!(battle_main_menu_panel_center(), (96.0, -144.0));
+    assert_eq!(battle_main_menu_panel_center(), (128.0, -192.0));
     assert_eq!(battle_main_menu_entry_tile(0), (9.0, 13.0));
     assert_eq!(battle_main_menu_entry_tile(1), (15.0, 13.0));
     assert_eq!(battle_main_menu_entry_tile(2), (9.0, 15.0));
@@ -747,7 +747,7 @@ fn battle_move_menu_uses_asm_windows_and_cancel_row() {
             BATTLE_TEXT_BOX_WIDTH_TILES,
             BATTLE_TEXT_BOX_HEIGHT_TILES,
         ),
-        (0.0, -144.0)
+        (0.0, -192.0)
     );
     assert_eq!(battle_submenu_entry_tile(0, false), (1.0, 13.0));
     assert_eq!(battle_submenu_entry_tile(1, false), (1.0, 14.0));
@@ -761,7 +761,7 @@ fn battle_move_menu_uses_asm_windows_and_cancel_row() {
             BATTLE_MOVE_SELECTION_WIDTH_TILES,
             BATTLE_MOVE_SELECTION_HEIGHT_TILES,
         ),
-        (48.0, -144.0)
+        (64.0, -192.0)
     );
     assert_eq!(
         battle_window_center(
@@ -770,11 +770,11 @@ fn battle_move_menu_uses_asm_windows_and_cancel_row() {
             BATTLE_MOVE_INFO_WIDTH_TILES,
             BATTLE_MOVE_INFO_HEIGHT_TILES,
         ),
-        (-108.0, -36.0)
+        (-144.0, -48.0)
     );
-    assert_eq!(battle_move_menu_entry_tile(0), (6.0, 13.0));
-    assert_eq!(battle_move_menu_entry_tile(1), (6.0, 14.0));
-    assert_eq!(battle_move_menu_entry_tile(3), (6.0, 16.0));
+    assert_eq!(battle_move_menu_entry_tile(0), (5.0, 13.0));
+    assert_eq!(battle_move_menu_entry_tile(1), (5.0, 14.0));
+    assert_eq!(battle_move_menu_entry_tile(3), (5.0, 16.0));
     assert_eq!(battle_move_visible_rows(5), 4);
     assert_eq!(battle_window_frame_tile_count(12, 6), 32);
     assert_eq!(battle_window_frame_tile_count(16, 6), 40);
@@ -806,8 +806,8 @@ fn field_windows_share_the_overworld_glyph_origin_not_the_battle_origin() {
             FIELD_TEXT_BOX_WIDTH_TILES,
             FIELD_TEXT_BOX_HEIGHT_TILES,
         ),
-        (0.0, -144.0),
-        "battle coordinates are intentionally different and must not drive field UI"
+        (0.0, -192.0),
+        "field and battle windows share the native 20x18 LCD coordinate space"
     );
 }
 

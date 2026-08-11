@@ -6132,7 +6132,19 @@ fn update_overworld_sprite_positions(
     camera_offset: Vec2,
     start_x: i16,
     start_y: i16,
-    player_sprites: &mut Query<(&mut Transform, &Sprite), With<PlayerMarker>>,
+    player_sprites: &mut Query<
+        (
+            &mut Handle<Image>,
+            &mut Transform,
+            &mut Sprite,
+            &mut PlayerSpriteFrames,
+        ),
+        (
+            With<PlayerMarker>,
+            Without<DialogGlyphMarker>,
+            Without<VisibleIntroSurface>,
+        ),
+    >,
     ledge_shadows: &mut Query<
         (&mut Transform, &Sprite),
         (
@@ -6148,7 +6160,7 @@ fn update_overworld_sprite_positions(
         Without<PlayerMarker>,
     >,
 ) -> bool {
-    let Ok((mut player_transform, player_sprite)) = player_sprites.get_single_mut() else {
+    let Ok((_, mut player_transform, player_sprite, _)) = player_sprites.get_single_mut() else {
         return false;
     };
     let (movement_from, movement_remaining, movement_total) = visible_ledge_jump

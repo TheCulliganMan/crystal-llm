@@ -976,9 +976,8 @@ pub fn calculate_damage(
         / defense_value as u32)
         / 50;
     if context.held_type_boost_percent != 0 {
-        base_damage = base_damage
-            .saturating_mul(100 + u32::from(context.held_type_boost_percent))
-            / 100;
+        base_damage =
+            base_damage.saturating_mul(100 + u32::from(context.held_type_boost_percent)) / 100;
     }
     if context.is_critical {
         base_damage = base_damage.saturating_mul(2);
@@ -1066,10 +1065,7 @@ pub(crate) fn truncate_damage_stats(
     (attack, defense)
 }
 
-pub(crate) fn apply_metal_powder_damage_stats(
-    attack: u16,
-    defense: u16,
-) -> (u16, u16) {
+pub(crate) fn apply_metal_powder_damage_stats(attack: u16, defense: u16) -> (u16, u16) {
     let defense = defense.min(u16::from(u8::MAX));
     let sum = defense + defense / 2;
     if sum <= u16::from(u8::MAX) {

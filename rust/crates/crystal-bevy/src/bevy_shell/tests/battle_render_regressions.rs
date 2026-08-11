@@ -390,17 +390,40 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
     }
     app.update();
     assert_caught_capture_render_state(app.world_mut(), false);
+    assert!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .battle_messages
+            .is_empty(),
+        "opening the scripted Pokedex entry must consume the final capture text"
+    );
 
-    for _ in 0..8 {
+    for step in 0..8 {
         let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
         if !runtime_shell.pokedex_menu_open {
             break;
         }
+        let capture_pending_before = runtime_shell.pending_standard_capture.is_some();
         press_visible_a_button(&mut runtime_shell).expect("advance scripted Pokedex entry");
+        assert!(
+            runtime_shell.battle_messages.is_empty(),
+            "scripted Pokedex step {step} resumed the unfinished battle: capture_before={} capture_after={} name_choice={} {:?}",
+            capture_pending_before,
+            runtime_shell.pending_standard_capture.is_some(),
+            runtime_shell.pending_name_choice.is_some(),
+            runtime_shell.battle_messages,
+        );
     }
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
-        assert!(!runtime_shell.pokedex_menu_open);
+        assert!(
+            !runtime_shell.pokedex_menu_open,
+            "scripted Pokedex entry did not close: detail={} page={} battle_messages={:?} action={:?}",
+            runtime_shell.pokedex_detail_open,
+            runtime_shell.pokedex_detail_page,
+            runtime_shell.battle_messages,
+            runtime_shell.last_runtime_action
+        );
         assert!(runtime_shell.pending_name_choice.is_some());
         assert!(runtime_shell.visible_capture_animation.is_some());
     }

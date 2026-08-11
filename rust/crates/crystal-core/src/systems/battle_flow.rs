@@ -341,9 +341,13 @@ fn battle_flow_end_from_turn(turn: &BattleTurnOutcome) -> ActiveBattleFlowEnd {
 }
 
 pub fn force_end_active_battle_to_overworld(state: &mut GameState) -> ActiveBattleFlowEnd {
-    let player_has_usable_pokemon = state.storage.party.pokemon.iter().flatten().any(|pokemon| {
-        !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0
-    });
+    let player_has_usable_pokemon = state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .flatten()
+        .any(|pokemon| !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0);
     let end = match &state.battle {
         BattleMemory::Inactive => ActiveBattleFlowEnd::Ongoing,
         BattleMemory::Wild { enemy_pokemon, .. }

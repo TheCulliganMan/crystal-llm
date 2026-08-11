@@ -2490,9 +2490,22 @@ impl RuntimeGameShell {
         &mut self,
         buttons: impl IntoIterator<Item = GameButton>,
     ) -> Result<&RuntimeOverworldFrame> {
-        let recorded = self
-            .session
-            .stage_overworld_input(&self.runtime, buttons.into_iter().collect())?;
+        let buttons = buttons.into_iter().collect::<Vec<_>>();
+        if !self.retain_runtime_journal {
+            let frame = self
+                .session
+                .apply_overworld_input_live(&self.runtime, buttons)?;
+            self.last_frame = Some(frame);
+            return self
+                .last_frame
+                .as_ref()
+                .context("runtime shell did not store the live frame it just produced");
+        }
+        let recorded = self.session.stage_overworld_input(
+            &self.runtime,
+            buttons,
+            self.retain_runtime_journal,
+        )?;
         let mutation = self
             .apply_recorded_runtime_mutation(recorded)
             .context("advance runtime game shell")?;
@@ -3076,6 +3089,12 @@ impl RuntimeGameShell {
             .runtime
             .compiled_script_command_name(source_script, command_index)?;
         let command_ref = RuntimeScriptCommandRef::new(&map_name, source_script, command_index);
+        let is_gift_pokemon_command =
+            self.runtime
+                .has_gift_pokemon_command_at(&map_name, source_script, command_index);
+        if !is_gift_pokemon_command {
+            reject_unexpected_gift_pokemon_inputs(source_script, command_index, &command, &inputs)?;
+        }
         if self
             .runtime
             .data()
@@ -3099,12 +3118,6 @@ impl RuntimeGameShell {
                 .session
                 .stage_scripted_wild_battle_start(&self.runtime, command_ref)?;
             return self.apply_recorded_runtime_mutation(recorded);
-        }
-        let is_gift_pokemon_command =
-            self.runtime
-                .has_gift_pokemon_command_at(&map_name, source_script, command_index);
-        if !is_gift_pokemon_command {
-            reject_unexpected_gift_pokemon_inputs(source_script, command_index, &command, &inputs)?;
         }
         let mutation = if self.runtime.has_scripted_trainer_battle_start_command_at(
             &map_name,
@@ -3847,6 +3860,16 @@ impl RuntimeGameShell {
         inputs: ScriptRuntimeInputs,
         phone_inputs: ScriptPhoneInputs,
     ) -> Result<RuntimeScriptedTrainerBattleCompiledScriptRun> {
+        let trainer_callback =
+            self.snapshot()?
+                .battle
+                .as_ref()
+                .and_then(|battle| match &battle.kind {
+                    RuntimeBattleKind::Trainer { callback, .. } if !callback.is_empty() => {
+                        Some(callback.clone())
+                    }
+                    _ => None,
+                });
         let completion = self.complete_scripted_trainer_battle(
             map_name,
             source_script,
@@ -3855,13 +3878,20 @@ impl RuntimeGameShell {
             can_lose,
         )?;
         let run = if completion.continued_after_battle {
-            let command_index = startbattle_command_index
-                .checked_add(1)
-                .context("scripted trainer startbattle command index overflow")?;
+            let (resume_script, command_index) = if let Some(callback) = trainer_callback {
+                (callback, 0)
+            } else {
+                (
+                    source_script.to_string(),
+                    startbattle_command_index
+                        .checked_add(1)
+                        .context("scripted trainer startbattle command index overflow")?,
+                )
+            };
             self.run_compiled_script_until_boundary(
                 RuntimeCompiledScriptCursor {
                     origin_map_name: map_name.to_string(),
-                    source_script: source_script.to_string(),
+                    source_script: resume_script,
                     command_index,
                 },
                 max_steps,
@@ -10127,16 +10157,39 @@ impl RuntimeGameShell {
     }
 
     pub fn snapshot(&self) -> Result<RuntimeShellSnapshot> {
-        self.runtime
-            .validate_save_state_for_runtime_pack(&self.session.state)
-            .context("validate runtime game shell state before snapshot")?;
-        let state_checksum = game_state_checksum(&self.session.state)
-            .context("checksum runtime game shell state")?;
-        let mut visual_state = self.session.state.clone();
-        visual_state.frame_counter = 0;
-        let visual_state_hash = game_state_checksum(&visual_state)
-            .context("checksum render-relevant runtime game state")?
-            .hash();
+        self.snapshot_with_integrity(true)
+    }
+
+    /// Build the read-only shell view used by the real-time renderer.
+    ///
+    /// Save validation and deterministic whole-state checksums belong at
+    /// persistence, replay, and network boundaries. Running both for every
+    /// LCD update cloned and walked the complete game state twice and made a
+    /// presentation-only text change capable of missing multiple frames.
+    pub fn presentation_snapshot(&self) -> Result<RuntimeShellSnapshot> {
+        self.snapshot_with_integrity(false)
+    }
+
+    fn snapshot_with_integrity(&self, integrity: bool) -> Result<RuntimeShellSnapshot> {
+        let (state_checksum, visual_state_hash) = if integrity {
+            self.runtime
+                .validate_save_state_for_runtime_pack(&self.session.state)
+                .context("validate runtime game shell state before snapshot")?;
+            let state_checksum = game_state_checksum(&self.session.state)
+                .context("checksum runtime game shell state")?;
+            let mut visual_state = self.session.state.clone();
+            visual_state.frame_counter = 0;
+            let visual_state_hash = game_state_checksum(&visual_state)
+                .context("checksum render-relevant runtime game state")?
+                .hash();
+            (state_checksum, visual_state_hash)
+        } else {
+            // Presentation keys are maintained by BevyRuntimeShell's explicit
+            // revision and render-key fields. Keep only the authoritative
+            // frame number for UI animation code; no state checksum is
+            // computed on this path.
+            (StateChecksum::new(self.session.state.frame_counter, 0), 0)
+        };
         let menu = self.runtime.active_menu_snapshot(&self.session.state)?;
         let ui = self
             .runtime
@@ -10274,40 +10327,75 @@ impl RuntimeGameShell {
     /// report a precise capture reason without cloning a runtime snapshot.
     pub fn pending_script_work_reason(&self) -> Option<&'static str> {
         let script = &self.session.state.script_runtime;
-        Some(if script.pending_text_label.is_some() { "pending_text_label" }
-        else if script.pending_text_wait.is_some() { "pending_text_wait" }
-        else if script.pending_yes_no.is_some() { "pending_yes_no" }
-        else if script.pending_shop.is_some() { "pending_shop" }
-        else if script.active_pokemon_picture.is_some() { "active_pokemon_picture" }
-        else if script.window_open { "window_open" }
-        else if script.text_window_open { "text_window_open" }
-        else if script.pending_map_load.is_some() { "pending_map_load" }
-        else if script.pending_map_refresh.is_some() { "pending_map_refresh" }
-        else if script.pending_music_fade.is_some() { "pending_music_fade" }
-        else if script.pending_screen_fade.is_some() { "pending_screen_fade" }
-        else if !script.pending_delays.is_empty() { "pending_delays" }
-        else if !script.pending_earthquakes.is_empty() { "pending_earthquakes" }
-        else if !script.pending_emotes.is_empty() { "pending_emotes" }
-        else if script.pending_script_warp.is_some() { "pending_script_warp" }
-        else if !script.command_queue.is_empty() { "command_queue" }
-        else if script.next_script.is_some() { "next_script" }
-        else if !script.deferred_scripts.is_empty() { "deferred_scripts" }
-        else if script.script_ended.is_some() { "script_ended" }
-        else if !script.audio_events.is_empty() { "audio_events" }
-        else if !script.graphics_events.is_empty() { "graphics_events" }
-        else if !script.money_events.is_empty() { "money_events" }
-        else if !script.map_events.is_empty() { "map_events" }
+        Some(if script.pending_text_label.is_some() {
+            "pending_text_label"
+        } else if script.pending_text_wait.is_some() {
+            "pending_text_wait"
+        } else if script.pending_yes_no.is_some() {
+            "pending_yes_no"
+        } else if script.pending_shop.is_some() {
+            "pending_shop"
+        } else if script.active_pokemon_picture.is_some() {
+            "active_pokemon_picture"
+        } else if script.window_open {
+            "window_open"
+        } else if script.text_window_open {
+            "text_window_open"
+        } else if script.pending_map_load.is_some() {
+            "pending_map_load"
+        } else if script.pending_map_refresh.is_some() {
+            "pending_map_refresh"
+        } else if script.pending_music_fade.is_some() {
+            "pending_music_fade"
+        } else if script.pending_screen_fade.is_some() {
+            "pending_screen_fade"
+        } else if !script.pending_delays.is_empty() {
+            "pending_delays"
+        } else if !script.pending_earthquakes.is_empty() {
+            "pending_earthquakes"
+        } else if !script.pending_emotes.is_empty() {
+            "pending_emotes"
+        } else if script.pending_script_warp.is_some() {
+            "pending_script_warp"
+        } else if !script.command_queue.is_empty() {
+            "command_queue"
+        } else if script.next_script.is_some() {
+            "next_script"
+        } else if !script.deferred_scripts.is_empty() {
+            "deferred_scripts"
+        } else if script.script_ended.is_some() {
+            "script_ended"
+        } else if !script.audio_events.is_empty() {
+            "audio_events"
+        } else if !script.graphics_events.is_empty() {
+            "graphics_events"
+        } else if !script.money_events.is_empty() {
+            "money_events"
+        } else if !script.map_events.is_empty() {
+            "map_events"
+        }
         // Text events are retained execution history, not pending work.
-        else if !script.control_events.is_empty() { "control_events" }
-        else if !script.shop_events.is_empty() { "shop_events" }
-        else if !script.item_use_events.is_empty() { "item_use_events" }
-        else if script.active_menu.is_some() { "active_menu" }
-        else if script.waiting_for_sound_effect { "waiting_for_sound_effect" }
-        else if script.player_input_locked { "player_input_locked" }
-        else if script.all_input_locked { "all_input_locked" }
-        else if script.script_stop_requested { "script_stop_requested" }
-        else if script.warp_check_requested { "warp_check_requested" }
-        else { return None; })
+        else if !script.control_events.is_empty() {
+            "control_events"
+        } else if !script.shop_events.is_empty() {
+            "shop_events"
+        } else if !script.item_use_events.is_empty() {
+            "item_use_events"
+        } else if script.active_menu.is_some() {
+            "active_menu"
+        } else if script.waiting_for_sound_effect {
+            "waiting_for_sound_effect"
+        } else if script.player_input_locked {
+            "player_input_locked"
+        } else if script.all_input_locked {
+            "all_input_locked"
+        } else if script.script_stop_requested {
+            "script_stop_requested"
+        } else if script.warp_check_requested {
+            "warp_check_requested"
+        } else {
+            return None;
+        })
     }
 
     /// Avoid entering the transactional audio-queue mutation path when the
@@ -17458,6 +17546,7 @@ impl RuntimeOverworldSession {
         &mut self,
         runtime: &CrystalRuntime,
         buttons: Vec<GameButton>,
+        checksum: bool,
     ) -> Result<RecordedRuntimeMutation> {
         let mut state = self.state.clone();
         let mut overworld = self.overworld.clone();
@@ -17474,7 +17563,11 @@ impl RuntimeOverworldSession {
         drop(recording);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::OverworldInputApplied(frame),
-            state_checksum: game_state_checksum(&state)?,
+            state_checksum: if checksum {
+                game_state_checksum(&state)?
+            } else {
+                StateChecksum::new(state.frame_counter, 0)
+            },
         };
         Ok(RecordedRuntimeMutation {
             command: RuntimeMutationCommand::ApplyOverworldInput(RuntimeOverworldInputCommand {
@@ -17486,6 +17579,29 @@ impl RuntimeOverworldSession {
             outcome,
             divider_after: Some(divider_after),
         })
+    }
+
+    /// Apply a real-time host frame without constructing a second outer
+    /// transactional copy or a replay checksum. `GameDataSet` still owns the
+    /// single atomic gameplay transaction; the shell no longer duplicates
+    /// that already-staged state solely to serialize a disabled journal.
+    fn apply_overworld_input_live(
+        &mut self,
+        runtime: &CrystalRuntime,
+        buttons: Vec<GameButton>,
+    ) -> Result<RuntimeOverworldFrame> {
+        let frame = runtime.data.apply_overworld_input(
+            &mut self.state,
+            &mut self.overworld,
+            buttons,
+            &runtime.music_ids(),
+            &mut self.divider,
+        )?;
+        self.joypad = JoypadState::from_previous_mask(frame.input_mask);
+        Ok(RuntimeOverworldFrame::from_input_frame(
+            frame,
+            StateChecksum::new(self.state.frame_counter, 0),
+        ))
     }
 
     fn stage_sweet_scent_field_move(
@@ -18155,7 +18271,7 @@ impl RuntimeOverworldSession {
         _asset_root: &AssetRoot,
         buttons: impl IntoIterator<Item = GameButton>,
     ) -> Result<RuntimeOverworldFrame> {
-        let recorded = self.stage_overworld_input(runtime, buttons.into_iter().collect())?;
+        let recorded = self.stage_overworld_input(runtime, buttons.into_iter().collect(), true)?;
         let mutation = self.commit_recorded_mutation(recorded);
         let RuntimeMutationResult::OverworldInputApplied(frame) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-overworld-input result");

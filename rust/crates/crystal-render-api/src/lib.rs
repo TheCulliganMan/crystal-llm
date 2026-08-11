@@ -99,6 +99,10 @@ pub enum VisualEffectId {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualActor {
     pub id: VisualActorId,
+    /// Stable presentation-art identity (for example `player`, `rock`, or
+    /// `effect_grass_rustle`). Optional renderers may use this to choose
+    /// geometry; it carries no gameplay or collision semantics.
+    pub source_id: Arc<str>,
     pub texture: Handle<Image>,
     /// Actor center in the same world-pixel coordinate system as the map.
     pub center: Vec2,
@@ -212,6 +216,9 @@ impl VisualWorldFrame {
 
         let mut actor_ids = HashSet::with_capacity(self.actors.len());
         for actor in &self.actors {
+            if actor.source_id.is_empty() {
+                return Err(VisualWorldFrameError::EmptyActorSource(actor.id));
+            }
             if actor.texture == Handle::<Image>::default() {
                 return Err(VisualWorldFrameError::MissingActorTexture(actor.id));
             }
@@ -270,6 +277,7 @@ pub enum VisualWorldFrameError {
         subtile_column: u8,
         subtile_row: u8,
     },
+    EmptyActorSource(VisualActorId),
     MissingActorTexture(VisualActorId),
     NonFiniteActorCenter(VisualActorId),
     InvalidActorSize(VisualActorId),
@@ -317,6 +325,7 @@ mod tests {
             ],
             actors: vec![VisualActor {
                 id: VisualActorId::Player,
+                source_id: Arc::from("player"),
                 texture: Handle::weak_from_u128(2),
                 center: Vec2::new(8.0, 4.0),
                 size: Vec2::splat(16.0),
@@ -457,6 +466,7 @@ mod tests {
         let mut frame = active_frame();
         frame.actors.push(VisualActor {
             id: VisualActorId::Player,
+            source_id: Arc::from("player"),
             texture: Handle::weak_from_u128(3),
             center: Vec2::new(96.0, 72.0),
             size: Vec2::splat(16.0),
@@ -471,10 +481,24 @@ mod tests {
     }
 
     #[test]
+    fn active_frame_requires_actor_source_identity() {
+        let mut frame = active_frame();
+        frame.actors[0].source_id = Arc::from("");
+
+        assert_eq!(
+            frame.validate(),
+            Err(VisualWorldFrameError::EmptyActorSource(
+                VisualActorId::Player
+            ))
+        );
+    }
+
+    #[test]
     fn presentation_effect_identity_is_distinct_and_stable() {
         let mut frame = active_frame();
         let grass_rustle = VisualActor {
             id: VisualActorId::Effect(VisualEffectId::GrassRustle),
+            source_id: Arc::from("effect_grass_rustle"),
             texture: Handle::weak_from_u128(3),
             center: Vec2::new(8.0, 4.0),
             size: Vec2::splat(16.0),

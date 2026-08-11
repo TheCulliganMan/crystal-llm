@@ -20,19 +20,17 @@ use crystal_core::battle::damage::{
 use crystal_core::battle::start::require_active_battle_for_state_item;
 use crystal_core::battle::start::{
     BattleStatDropGuardOutcome, StaticWildBattleOrigin, StaticWildBattleRequest,
-    StaticWildBattleStart,
-    TrainerBattleAdvanceOutcome, TrainerBattleCompletion, TrainerBattleCompletionOutcome,
-    TrainerBattleRequest, TrainerBattleStartStatus, WildBattleStart,
-    activate_static_wild_battle_start, activate_trainer_battle_start_status,
+    StaticWildBattleStart, TrainerBattleAdvanceOutcome, TrainerBattleCompletion,
+    TrainerBattleCompletionOutcome, TrainerBattleRequest, TrainerBattleStartStatus,
+    WildBattleStart, activate_static_wild_battle_start, activate_trainer_battle_start_status,
     activate_wild_battle_start,
     advance_active_trainer_battle as core_advance_active_trainer_battle,
     apply_battle_stat_drop_guard_turns, complete_trainer_battle as core_complete_trainer_battle,
-    deactivate_battle_after_loss, first_available_battle_party_index, materialize_trainer_party,
-    materialize_non_roaming_wild_battle_with_rng,
-    materialize_roaming_wild_battle_with_rng, require_active_battle_enemy_party_index,
-    require_active_battle_party_index,
-    static_wild_battle_start, switch_active_battle_party_index, trainer_battle_start,
-    wild_battle_start_from_encounter,
+    deactivate_battle_after_loss, first_available_battle_party_index,
+    materialize_non_roaming_wild_battle_with_rng, materialize_roaming_wild_battle_with_rng,
+    materialize_trainer_party, require_active_battle_enemy_party_index,
+    require_active_battle_party_index, static_wild_battle_start, switch_active_battle_party_index,
+    trainer_battle_start, wild_battle_start_from_encounter,
 };
 use crystal_core::battle::stats::{
     BattleStatMultiplier, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
@@ -41,8 +39,8 @@ use crystal_core::battle::stats::{
 use crystal_core::battle::turn::{
     BattleAction, BattleCombatState, BattleEscapeTrapState, BattleEvent, BattleSide,
     BattleTurnInput, BattleTurnOutcome, MovePriorityTable, MovePriorityTableIssue,
-    battle_move_effect_is_supported,
-    commit_battle_turn_outcome, commit_wild_battle_escape_attempt, move_priority_table_issues,
+    battle_move_effect_is_supported, commit_battle_turn_outcome, commit_wild_battle_escape_attempt,
+    move_priority_table_issues,
     resolve_battle_enemy_action_with_items as core_resolve_battle_enemy_action_with_items,
     resolve_battle_turn_with_items as core_resolve_battle_turn_with_items,
     resolve_wild_battle_run as core_resolve_wild_battle_run,
@@ -63,18 +61,17 @@ use crystal_core::models::{
     Bag, BattleAnimationCatalogIssue, Dv, FrontpicAnimCatalogIssue, FrontpicAnimCommand,
     FrontpicAnimCommandIssue, FrontpicAnimProgram, ITEM_POCKET_BALL, ITEM_POCKET_ITEM,
     ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item, LearnedMove, MAX_BOX_MONS, MAX_PC_BOXES,
-    MenuIconCatalogIssue,
-    Move, MoveNameCatalogIssue, MovePayloadIssue, Party, PcBox, PcStringCatalogIssue,
-    PokedexEntryCatalogIssue, PokedexState, PokegearLandmarkIssue, PokegearTownMapPaletteIssue,
-    Pokemon, PokemonSpecies, PokemonStorage, RuntimeBundleIssue, SpritePaletteDefaultIssue,
-    Trainer, TrainerCatalog, TrainerCatalogIssue, battle_animation_catalog_issues,
-    calculate_stats, create_pokemon_from_known_dvs, frontpic_anim_catalog_issues,
-    frontpic_anim_command_issue,
-    menu_icon_catalog_issues, move_name_catalog_issues, move_payload_issues,
-    pc_string_catalog_issues, pokedex_entry_catalog_issues, pokegear_landmark_issues,
-    pokegear_town_map_palette_issues, pokemon_species_display_name, runtime_bundle_issues,
-    sprite_palette_default_issues, trainer_catalog_issues, trainer_key,
-    validate_saved_bag_pocket_references, validate_saved_pokedex_references,
+    MenuIconCatalogIssue, Move, MoveNameCatalogIssue, MovePayloadIssue, Party, PcBox,
+    PcStringCatalogIssue, PokedexEntryCatalogIssue, PokedexState, PokegearLandmarkIssue,
+    PokegearTownMapPaletteIssue, Pokemon, PokemonSpecies, PokemonStorage, RuntimeBundleIssue,
+    SpritePaletteDefaultIssue, Trainer, TrainerCatalog, TrainerCatalogIssue,
+    battle_animation_catalog_issues, calculate_stats, create_pokemon_from_known_dvs,
+    frontpic_anim_catalog_issues, frontpic_anim_command_issue, menu_icon_catalog_issues,
+    move_name_catalog_issues, move_payload_issues, pc_string_catalog_issues,
+    pokedex_entry_catalog_issues, pokegear_landmark_issues, pokegear_town_map_palette_issues,
+    pokemon_species_display_name, runtime_bundle_issues, sprite_palette_default_issues,
+    trainer_catalog_issues, trainer_key, validate_saved_bag_pocket_references,
+    validate_saved_pokedex_references,
 };
 pub use crystal_core::models::{PokegearLandmark, PokegearLandmarksPayload};
 use crystal_core::multiplayer::{
@@ -87,15 +84,14 @@ use crystal_core::save::SaveModpackIdentity;
 use crystal_core::state::{
     BattleMemory, BattleTowerState, BuenasPasswordState, BugContestState, DayCareState,
     EventFlagMemory, FishingMemory, GameState, ItemUseRuntimeEvent, LINK_MODE_COLOSSEUM,
-    LinkSerialConnectionStatus, LinkSessionState,
-    MagikarpRecordState, MysteryGiftState, Options, OverworldMemory, OverworldObjectMapMemory,
-    PendingMoveLearn, RoamingPokemonState, SavedTrainerBattleFields, SceneMemory,
-    ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, ScriptControlRuntimeEvent,
-    ScriptControlRuntimeKind, ScriptEndState, ScriptGraphicsRuntimeEvent, ScriptMapLoadRequest,
-    ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent,
-    ScriptLocation, ScriptMusicFade, ScriptReturnFrame, ScriptRuntimeAsmDirective,
-    ScriptRuntimeDecorationDescription, ScriptRuntimeDelay, ScriptRuntimeEarthquake,
-    ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
+    LinkSerialConnectionStatus, LinkSessionState, MagikarpRecordState, MysteryGiftState, Options,
+    OverworldMemory, OverworldObjectMapMemory, PendingMoveLearn, RoamingPokemonState,
+    SavedTrainerBattleFields, SceneMemory, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind,
+    ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
+    ScriptGraphicsRuntimeEvent, ScriptLocation, ScriptMapLoadRequest, ScriptMapRefreshRequest,
+    ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade, ScriptReturnFrame,
+    ScriptRuntimeAsmDirective, ScriptRuntimeDecorationDescription, ScriptRuntimeDelay,
+    ScriptRuntimeEarthquake, ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeEmote,
     ScriptRuntimeNumericBufferWrite, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
     ScriptRuntimeVariableWrite, ScriptScreenFade, ScriptShopRuntimeEvent, ScriptTextRuntimeEvent,
     ScriptTextWait, ScriptWarpRequest, ScriptYesNoPrompt, SwarmMemory,
@@ -143,8 +139,7 @@ use crystal_core::systems::battle_escape::{
 use crystal_core::systems::battle_items::{
     BattleItemOutcome, ItemPayloadIssue, ItemReferenceIssue, PartyItemOutcome,
     apply_active_battle_item_effect as core_apply_active_battle_item_effect,
-    apply_battle_escape_item_use,
-    apply_battle_pp_item_effect as core_apply_battle_pp_item_effect,
+    apply_battle_escape_item_use, apply_battle_pp_item_effect as core_apply_battle_pp_item_effect,
     apply_party_special_item_effect as core_apply_party_special_item_effect,
     apply_party_wide_item_effect as core_apply_party_wide_item_effect,
     clone_active_battle_party_pokemon, clone_field_party, clone_field_party_pokemon,
@@ -155,12 +150,10 @@ use crystal_core::systems::battle_items::{
 };
 use crystal_core::systems::battle_rewards::{
     BattleRewardError, BattleRewardOutcome, BattleRewardRules, BattleRewardRulesIssue,
-    PendingMoveLearnResolution,
-    battle_reward_rules_issues,
+    PendingMoveLearnResolution, battle_reward_rules_issues,
     claim_active_trainer_battle_rewards as core_claim_active_trainer_battle_rewards,
     claim_active_wild_battle_rewards as core_claim_active_wild_battle_rewards,
-    decline_pending_move_learn as core_decline_pending_move_learn,
-    promote_next_pending_move_learn,
+    decline_pending_move_learn as core_decline_pending_move_learn, promote_next_pending_move_learn,
     rebase_pending_move_learns_for_party,
     replace_pending_move_learn as core_replace_pending_move_learn,
     sync_active_combat_player_party_from_storage,
@@ -286,8 +279,7 @@ use crystal_core::systems::script_runtime::{
     InitializeEventsIssue, SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID, SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID,
     ScriptRuntimeCommand, ScriptRuntimeCommandError, ScriptRuntimeCommandIssue,
     ScriptRuntimeCpuCondition, ScriptRuntimeInputs, ScriptRuntimeOutcome,
-    ScriptRuntimeReferenceCatalog,
-    StoryEventScriptConstantIssue, apply_initialize_events,
+    ScriptRuntimeReferenceCatalog, StoryEventScriptConstantIssue, apply_initialize_events,
     apply_script_runtime_command_in_map as core_apply_script_runtime_command,
     commit_interaction_script_dispatch, initialize_events_issues, parse_menu_coord_token,
     parse_script_i32_token, script_runtime_command_arg_counts, script_runtime_command_issues,
@@ -344,10 +336,9 @@ use crystal_core::systems::special_routines::{
     MagikarpLengthEntry, MagikarpLengthTableIssue, OakRatingEntry, OakRatingTableIssue,
     OddEggDefinition, OddEggDefinitionIssue, RoamingMapLocation, RoamingPokemonCatalog,
     RoamingPokemonCatalogIssue, RoamingPokemonInitWrite, RoamingPokemonRoute,
-    RuntimeSpawnPointCatalogIssue,
-    ShuckieGiftDefinition, ShuckieGiftIssue, SpecialRoutineCatalogIssue, SpecialRoutineContext,
-    SpecialRoutineEffect, SpecialRoutineOutcome, apply_random_special_routine_with_context,
-    apply_special_routine_with_context,
+    RuntimeSpawnPointCatalogIssue, ShuckieGiftDefinition, ShuckieGiftIssue,
+    SpecialRoutineCatalogIssue, SpecialRoutineContext, SpecialRoutineEffect, SpecialRoutineOutcome,
+    apply_random_special_routine_with_context, apply_special_routine_with_context,
     battle_tower_rules_issues, buena_password_category_issues, buena_prize_definition_issues,
     bug_contest_config_issues, checked_runtime_spawn_expected_tile, dratini_move_set_issues,
     happiness_data_issues, is_known_special_routine, kurt_apricorn_recipe_issues,
@@ -371,17 +362,17 @@ use crystal_core::systems::tmhm::{
 use crystal_core::world::collision::{
     MetatileCollision, PlayerTraversalState, Terrain, TilesetCollision, can_enter_tile,
     describe_collision, is_permission_passable, permissions, sample_collision,
+    standard_interaction_script,
 };
 use crystal_core::world::encounters::{
     ENCOUNTER_TIME_KEYS, EncounterMusicModifierIssue, EncounterMusicModifiers, EncounterSlotChance,
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
-    FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter,
-    RockMonEncounterOutcome, TimeOfDay, WildEncounter, WildEncounterCatalogIssue,
-    WildEncounterData, WildEncounterTable,
+    FieldEncounterData, FieldEncounterKind, ResolvedWildEncounter, RockMonEncounterOutcome,
+    TimeOfDay, WildEncounter, WildEncounterCatalogIssue, WildEncounterData, WildEncounterTable,
     apply_surf_level_variance, encounter_music_modifier_issues, encounter_slot_table_issues,
-    field_encounter_catalog_issues, roll_headbutt_encounter as core_roll_headbutt_encounter,
-    resolve_rock_mon_encounter as core_resolve_rock_mon_encounter,
-    table_for_surface, select_wild_encounter, wild_encounter_catalog_issues,
+    field_encounter_catalog_issues, resolve_rock_mon_encounter as core_resolve_rock_mon_encounter,
+    roll_headbutt_encounter as core_roll_headbutt_encounter, select_wild_encounter,
+    table_for_surface, wild_encounter_catalog_issues,
 };
 use crystal_core::world::fishing::{
     FISHING_RODS, FishingCatalog, FishingCatalogIssue, FishingGroup, FishingRolledSession,
@@ -400,15 +391,14 @@ use crystal_core::world::movement::{
     StepOutcome, checked_move_by_stride,
 };
 use crystal_core::world::session::{
-    background_event_tile_position_checked, warp_tile_position_checked,
+    ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
+    EncounterCheckOptions, ExactEncounterContext, OverworldInteraction, OverworldInteractionTarget,
+    OverworldSession, OverworldSnapshot, WarpDestination, WarpTransition, WarpTrigger,
+    WildEncounterRoll, leading_usable_party_level, object_event_initial_facing,
+    raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
 };
 use crystal_core::world::session::{
-    ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
-    EncounterCheckOptions, ExactEncounterContext, OverworldInteraction,
-    OverworldInteractionTarget, OverworldSession,
-    OverworldSnapshot, WarpDestination, WarpTransition, WarpTrigger, WildEncounterRoll,
-    leading_usable_party_level, object_event_initial_facing,
-    raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
+    background_event_tile_position_checked, warp_tile_position_checked,
 };
 use flate2::{Compression, write::GzEncoder};
 use serde::de::DeserializeOwned;
@@ -470,8 +460,8 @@ pub mod modpack {
         ModpackAudioPlaybackMode, ModpackAudioPlaybackPlan, ModpackAudioSource,
         ModpackCompileOptions, ModpackCompileReport, ModpackCompiler, ModpackManifest,
         ModpackMetadata, ModpackPayload, PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart,
-        ProgressionGrants, ProgressionRequirements, ProgressionRule, VerificationError,
-        VerificationSeverity, REQUIRED_VENDOR_RUNTIME_FILE_KEYS,
+        ProgressionGrants, ProgressionRequirements, ProgressionRule,
+        REQUIRED_VENDOR_RUNTIME_FILE_KEYS, VerificationError, VerificationSeverity,
         read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
         validate_compiled_runtime_files,
     };
@@ -481,12 +471,10 @@ pub mod modpack {
         BuenaPasswordCategoryDefinition, BuenaPrizeDefinitions, BugContestConfig, DratiniMoveSets,
         HappinessChangeEntry, HappinessData, HappinessServiceOutcome, KurtApricornRecipes,
         MagikarpLengthEntry, OakRatingEntry, OddEggDefinition, RoamingMapLocation,
-        RoamingPokemonCatalog, RoamingPokemonInitWrite, RoamingPokemonRoute,
-        ShuckieGiftDefinition,
+        RoamingPokemonCatalog, RoamingPokemonInitWrite, RoamingPokemonRoute, ShuckieGiftDefinition,
     };
     pub use crystal_core::systems::step_events::StepEventRules;
 }
-
 
 include!("content_pack.rs");
 include!("map_modules.rs");

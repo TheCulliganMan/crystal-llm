@@ -6,8 +6,7 @@ fn press_key_for_runtime_hotkey_app(app: &mut App, key: KeyCode) {
     app.update();
     {
         let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-        keys.release(key);
-        keys.clear_just_pressed(key);
+        keys.reset(key);
     }
 }
 
@@ -981,7 +980,8 @@ fn inject_held_arrow_right_for_test(
     mut frames: ResMut<HeldArrowRightTestFrames>,
 ) {
     if frames.0 == 0 {
-        keys.release(KeyCode::ArrowRight);
+        // Ownership of release belongs to the caller. Mutating ArrowRight
+        // here erased genuine held/tapped player input in unrelated tests.
         return;
     }
     keys.press(KeyCode::ArrowRight);

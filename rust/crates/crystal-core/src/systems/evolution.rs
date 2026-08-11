@@ -520,9 +520,7 @@ pub enum EvolutionError {
     MissingMoveData { move_id: String },
     #[error("evolution cannot be cancelled")]
     NotCancellable,
-    #[error(
-        "cannot cancel evolution into {target_species}: current species is {current_species}"
-    )]
+    #[error("cannot cancel evolution into {target_species}: current species is {current_species}")]
     CancelTargetMismatch {
         target_species: String,
         current_species: String,
@@ -728,10 +726,9 @@ pub fn evolve_pokemon(
     })?;
     let move_learns =
         evolution_moves_for(&target_species.id, pokemon.level, &pokemon.moves, context)?;
-    let cancel_snapshot = (include_intro
-        && !context.force_evolution
-        && context.link_mode == LinkMode::None)
-        .then(|| Box::new(pokemon.clone()));
+    let cancel_snapshot =
+        (include_intro && !context.force_evolution && context.link_mode == LinkMode::None)
+            .then(|| Box::new(pokemon.clone()));
 
     let mut events = Vec::new();
     if include_intro {
@@ -802,9 +799,9 @@ pub fn cancel_evolution(
     *pokemon = *source;
     report.target_species = None;
     report.pending_move_learns.clear();
-    report.events.retain(|event| {
-        matches!(event, EvolutionEvent::Text(text) if *text == "EvolvingText")
-    });
+    report
+        .events
+        .retain(|event| matches!(event, EvolutionEvent::Text(text) if *text == "EvolvingText"));
     report
         .events
         .push(EvolutionEvent::Text("StoppedEvolvingText"));
@@ -1415,12 +1412,10 @@ mod tests {
 
     #[test]
     fn evolved_species_same_level_move_queues_replacement_when_moves_are_full() {
-        let species_map: BTreeMap<_, _> = [(
-            "DRAGONITE".to_string(),
-            species("DRAGONITE", 91, 134, 95),
-        )]
-        .into_iter()
-        .collect();
+        let species_map: BTreeMap<_, _> =
+            [("DRAGONITE".to_string(), species("DRAGONITE", 91, 134, 95))]
+                .into_iter()
+                .collect();
         let moves = [
             ("WRAP".to_string(), move_data("WRAP", 20)),
             ("LEER".to_string(), move_data("LEER", 30)),
@@ -1468,12 +1463,10 @@ mod tests {
 
     #[test]
     fn cancelling_animation_restores_exact_species_stats_item_and_moves() {
-        let species_map: BTreeMap<_, _> = [(
-            "DRAGONITE".to_string(),
-            species("DRAGONITE", 91, 134, 95),
-        )]
-        .into_iter()
-        .collect();
+        let species_map: BTreeMap<_, _> =
+            [("DRAGONITE".to_string(), species("DRAGONITE", 91, 134, 95))]
+                .into_iter()
+                .collect();
         let moves = [("WING_ATTACK".to_string(), move_data("WING_ATTACK", 35))]
             .into_iter()
             .collect();
@@ -1521,16 +1514,12 @@ mod tests {
 
     #[test]
     fn forced_evolution_cannot_be_cancelled() {
-        let species_map: BTreeMap<_, _> = [(
-            "VAPOREON".to_string(),
-            species("VAPOREON", 130, 65, 60),
-        )]
-        .into_iter()
-        .collect();
+        let species_map: BTreeMap<_, _> =
+            [("VAPOREON".to_string(), species("VAPOREON", 130, 65, 60))]
+                .into_iter()
+                .collect();
         let moves = BTreeMap::new();
-        let learnsets = [("VAPOREON".to_string(), Vec::new())]
-            .into_iter()
-            .collect();
+        let learnsets = [("VAPOREON".to_string(), Vec::new())].into_iter().collect();
         let entry = EvolutionEntry::item("VAPOREON", "WATER_STONE");
         let mut context = context(&species_map, &moves, &learnsets);
         context.force_evolution = true;

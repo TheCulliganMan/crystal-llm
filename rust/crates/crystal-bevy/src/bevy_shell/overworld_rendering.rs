@@ -2096,14 +2096,26 @@ fn spawn_field_pokegear_screen(
             );
         }
     }
-    commit_presented_fullscreen_solid(commands, rendered_art, [230, 209, 140, 255], 3.4, images)?;
+    if runtime_shell.pokegear_page == PokegearPage::Map {
+        let frame = visible_overworld_town_map_frame(asset_root, images)?;
+        commit_presented_fullscreen_frame(
+            commands,
+            rendered_art,
+            &frame,
+            PresentedFullscreenFrameSource::Transient,
+            3.4,
+            images,
+        )?;
+    } else {
+        commit_presented_fullscreen_solid(commands, rendered_art, [230, 209, 140, 255], 3.4, images)?;
+    }
     let cards = [
         (PokegearPage::Clock, "CLOCK"),
         (PokegearPage::Map, "MAP"),
         (PokegearPage::Phone, "PHONE"),
         (PokegearPage::Radio, "RADIO"),
     ];
-    for (index, (page, label)) in cards.iter().enumerate() {
+    for (index, (page, label)) in cards.iter().enumerate().filter(|_| runtime_shell.pokegear_page != PokegearPage::Map) {
         let unlocked = match page {
             PokegearPage::Clock => true,
             PokegearPage::Map => snapshot
@@ -2143,6 +2155,44 @@ fn spawn_field_pokegear_screen(
         );
     }
     if runtime_shell.pokegear_page == PokegearPage::Map {
+        let region = visible_pokegear_region(snapshot);
+        let tile_palettes = snapshot
+            .presentation
+            .pokegear_town_map_palette_map
+            .get("town_map")
+            .context("compiled pack has no Town Map palette assignment")?;
+        let frame = town_map_frame_for_art(
+            rendered_art,
+            asset_root,
+            region,
+            snapshot.trainer.player_gender,
+            tile_palettes,
+            images,
+        )
+        .with_context(|| {
+            let key = (region.to_ascii_lowercase(), snapshot.trainer.player_gender);
+            format!(
+                "render Town Map: {}",
+                rendered_art
+                    .town_map_errors
+                    .get(&key)
+                    .map(String::as_str)
+                    .unwrap_or("Town Map art is unavailable")
+            )
+        })?;
+        commands.spawn((
+            SpriteBundle {
+                texture: frame.handle,
+                sprite: Sprite { custom_size: Some(frame.size), ..default() },
+                transform: Transform::from_xyz(
+                    PLAYFIELD_LEFT + PLAYFIELD_WIDTH / 2.0,
+                    PLAYFIELD_TOP - PLAYFIELD_HEIGHT / 2.0,
+                    3.5,
+                ),
+                ..default()
+            },
+            FieldCommandMarker,
+        ));
         let landmarks = &snapshot.presentation.pokegear_landmarks.landmarks;
         let selected = runtime_shell.pokegear_cursor;
         let landmark = selected_pokegear_landmark(snapshot, runtime_shell.pokegear_cursor)?;
@@ -2188,26 +2238,128 @@ fn spawn_field_pokegear_screen(
             ));
         }
     }
-    let entries = visible_pokegear_menu_entries(snapshot, runtime_shell);
-    let start_row = if runtime_shell.pokegear_page == PokegearPage::Map {
-        13.0
-    } else {
-        4.0
-    };
-    for (index, line) in entries.iter().take(10).enumerate() {
-        let (x, y) = battle_hud_tile_origin(1.0, start_row + index as f32);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &compact_scene_label(line, 18),
-            x,
-            y,
-            3.8,
-        );
+    if runtime_shell.pokegear_page != PokegearPage::Map {
+        let entries = visible_pokegear_menu_entries(snapshot, runtime_shell);
+        for (index, line) in entries.iter().take(10).enumerate() {
+            let (x, y) = battle_hud_tile_origin(1.0, 4.0 + index as f32);
+            spawn_field_command_bitmap_text(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                &compact_scene_label(line, 18),
+                x,
+                y,
+                3.8,
+            );
+        }
     }
     Ok(())
+}
+
+/// Render the same 20x18 Johto tilemap and palette-selected town-map tiles
+/// used by `TownMapOverlay` and `_TownMap`. The furniture special is a bare
+/// town map, not a fabricated Pokégear card menu on a flat backdrop.
+fn visible_overworld_town_map_frame(
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let assets = asset_root.runtime_assets();
+    let gfx = assets.join("gfx/pokegear");
+    let sheet_path = gfx.join("town_map.png");
+    let sheet = image::open(&sheet_path)
+        .with_context(|| format!("decode town-map tiles {}", sheet_path.display()))?
+        .to_rgba8();
+    anyhow::ensure!(
+        sheet.width() % 8 == 0 && sheet.height() % 8 == 0,
+        "town-map tiles {} are not 8x8 aligned",
+        sheet_path.display()
+    );
+    let mut tilemap = std::fs::read(gfx.join("johto.bin"))
+        .context("read canonical Johto town-map tilemap")?;
+    if tilemap.last() == Some(&0xff) {
+        tilemap.pop();
+    }
+    anyhow::ensure!(tilemap.len() == 20 * 18, "Johto town-map tilemap must contain 360 tiles");
+    let palette_tokens: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(assets.join("data/pokegear_town_map_palette_map.json"))
+            .context("read town-map palette assignments")?,
+    )
+    .context("decode town-map palette assignments")?;
+    let tokens = palette_tokens["town_map"]
+        .as_array()
+        .context("town-map palette assignments lack town_map")?;
+    let palettes = parse_visible_pokegear_palette_bank(&gfx.join("pokegear.pal"))?;
+    let columns = sheet.width() / 8;
+    let mut pixels = vec![0_u8; 160 * 144 * 4];
+    for (map_index, tile_id) in tilemap.into_iter().enumerate() {
+        let tile_index = usize::from(tile_id);
+        let token = tokens
+            .get(tile_index)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("town-map tile {tile_index} lacks a palette token"))?;
+        let palette_key = match token {
+            "BORDER" => "border",
+            "EARTH" => "earth",
+            "MOUNTAIN" => "mountain",
+            "CITY" => "city",
+            "POI" => "point_of_interest",
+            "POI_MTN" => "mountain_point_of_interest",
+            other => anyhow::bail!("unknown town-map palette token {other}"),
+        };
+        let palette = palettes
+            .get(palette_key)
+            .with_context(|| format!("Pokégear palette {palette_key} is missing"))?;
+        let source_x = u32::from(tile_id) % columns * 8;
+        let source_y = u32::from(tile_id) / columns * 8;
+        anyhow::ensure!(source_y + 8 <= sheet.height(), "town-map tile {tile_id} is outside its sheet");
+        let target_x = map_index % 20 * 8;
+        let target_y = map_index / 20 * 8;
+        for row in 0..8_usize {
+            for col in 0..8_usize {
+                let gray = sheet.get_pixel(source_x + col as u32, source_y + row as u32)[0];
+                // Match TypeScript's PNG -> Game Boy level inversion before
+                // applying the four-color CGB palette.
+                let level = if gray >= 192 { 0 } else if gray >= 128 { 1 } else if gray >= 64 { 2 } else { 3 };
+                let target = ((target_y + row) * 160 + target_x + col) * 4;
+                pixels[target..target + 3].copy_from_slice(&palette[level]);
+                pixels[target + 3] = 255;
+            }
+        }
+    }
+    let mut image = Image::new(
+        Extent3d { width: 160, height: 144, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame { handle: images.add(image), size: Vec2::new(160.0, 144.0) })
+}
+
+fn parse_visible_pokegear_palette_bank(path: &std::path::Path) -> Result<HashMap<String, [[u8; 3]; 4]>> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("read Pokégear palette {}", path.display()))?;
+    let mut palettes = HashMap::new();
+    let mut label = None;
+    let mut colors = Vec::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        if let Some(comment) = line.strip_prefix(';') {
+            label = Some(comment.trim().to_ascii_lowercase().replace(" (boy)", "").replace(' ', "_"));
+            colors.clear();
+        } else if let Some(rgb) = line.strip_prefix("RGB") {
+            let values = rgb.split(',').map(|value| value.trim().parse::<u8>()).collect::<std::result::Result<Vec<_>, _>>()?;
+            anyhow::ensure!(values.len() == 3, "malformed Pokégear RGB line {line}");
+            colors.push([values[0] << 3 | values[0] >> 2, values[1] << 3 | values[1] >> 2, values[2] << 3 | values[2] >> 2]);
+            if colors.len() == 4 {
+                let key = label.take().context("Pokégear RGB values have no palette label")?;
+                palettes.insert(key, [colors[0], colors[1], colors[2], colors[3]]);
+            }
+        }
+    }
+    Ok(palettes)
 }
 
 fn spawn_field_fly_map_screen(
@@ -5873,9 +6025,8 @@ fn spawn_visible_yes_no_prompt_box(
     images: &mut Assets<Image>,
 ) {
     // `YesNoBox` in home/menu.asm sets b=SCREEN_WIDTH-6 and c=7, then
-    // `_YesNoBox` produces border coordinates (14,7)..(19,11).  It is a
-    // five-tile menu above the field textbox, not a four-tile subwindow
-    // inside it.
+    // `_YesNoBox` anchors at (14,7), and the TypeScript reference renders a
+    // 6x4-tile surface with YES/NO on consecutive interior rows 8 and 9.
     let (center_x, center_y) = field_window_center(
         FIELD_YES_NO_LEFT_TILE,
         FIELD_YES_NO_TOP_TILE,
@@ -5896,6 +6047,7 @@ fn spawn_visible_yes_no_prompt_box(
             ..default()
         },
         SceneDialogMarker,
+        YesNoPromptMarker,
     ));
     if let Some(frame) = battle_window_frame_art(rendered_art, asset_root, images) {
         spawn_scene_dialog_window_frame_tiles(
@@ -5913,7 +6065,7 @@ fn spawn_visible_yes_no_prompt_box(
         let marker = if index == selected { ">" } else { " " };
         let (x, y) = battle_hud_tile_origin(
             FIELD_YES_NO_LEFT_TILE,
-            FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+            FIELD_YES_NO_TOP_TILE + 1.0 + index as f32,
         );
         spawn_scene_dialog_bitmap_text(
             commands,
@@ -6079,7 +6231,7 @@ fn spawn_visible_name_choice_screen(
         for (index, label) in choice.options.iter().take(2).enumerate() {
             let (x, y) = battle_hud_tile_origin(
                 FIELD_YES_NO_LEFT_TILE,
-                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32,
             );
             spawn_scene_dialog_bitmap_text(
                 commands,
@@ -6266,7 +6418,7 @@ fn update_scene_dialog_text_content_in_place<F: QueryFilter>(
             let marker = if index == selected { ">" } else { " " };
             let (x, y) = battle_hud_tile_origin(
                 FIELD_YES_NO_LEFT_TILE,
-                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32,
             );
             let text = format!("{marker}{label}");
             for (glyph_index, frame) in bitmap_text_frames(rendered_art, asset_root, images, &text)
@@ -7058,6 +7210,25 @@ fn visible_field_dialog_pages(
     if let Some(notice) = runtime_shell.pc_notice.as_ref() {
         return Some(vec![notice.clone()]);
     }
+    if snapshot.ui.pending_yes_no.is_some() {
+        match snapshot.script_events.last_special_routine.as_deref() {
+            Some("InitialSetDSTFlag") => {
+                return Some(vec![format!(
+                    "{:02}:{:02} DST,\nis that OK?",
+                    snapshot.progression.time.game_time_hours % 24,
+                    snapshot.progression.time.game_time_minutes.min(59)
+                )]);
+            }
+            Some("InitialClearDSTFlag") => {
+                return Some(vec![format!(
+                    "{:02}:{:02},\nis that OK?",
+                    snapshot.progression.time.game_time_hours % 24,
+                    snapshot.progression.time.game_time_minutes.min(59)
+                )]);
+            }
+            _ => {}
+        }
+    }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
             return Some(vec!["Welcome! How may I\nhelp you?".to_string()]);
@@ -7136,12 +7307,17 @@ fn visible_field_dialogue_is_fully_revealed(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
-    let Some(full_text) = visible_field_dialog_text(snapshot, runtime_shell) else {
+    let Some(pages) = visible_field_dialog_pages(snapshot, runtime_shell) else {
         return true;
     };
     let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
         return true;
     };
+    let text_identity = pages.join("\u{1e}");
+    if reveal.text != text_identity {
+        return false;
+    }
+    let full_text = &pages[reveal.page_index.min(pages.len().saturating_sub(1))];
     visible_field_text_reveal_is_complete(reveal, &full_text)
 }
 
@@ -7168,7 +7344,7 @@ fn tick_visible_field_text_reveal(
     runtime_shell: &mut BevyRuntimeShell,
     acceleration_requested: bool,
 ) -> Result<bool> {
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let Some(pages) = visible_field_dialog_pages(&snapshot, runtime_shell) else {
         let changed = runtime_shell.field_text_reveal.take().is_some();
         return Ok(changed);
@@ -7458,26 +7634,8 @@ fn visible_scene_dialog_entries(
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
-    let dst_confirmation_text = snapshot
-        .ui
-        .pending_yes_no
-        .as_ref()
-        .and_then(|_| snapshot.script_events.last_special_routine.as_deref())
-        .and_then(|routine| match routine {
-            "InitialSetDSTFlag" => Some(format!(
-                "{:02}:{:02} DST,\nis that OK?",
-                snapshot.progression.time.game_time_hours % 24,
-                snapshot.progression.time.game_time_minutes.min(59)
-            )),
-            "InitialClearDSTFlag" => Some(format!(
-                "{:02}:{:02},\nis that OK?",
-                snapshot.progression.time.game_time_hours % 24,
-                snapshot.progression.time.game_time_minutes.min(59)
-            )),
-            _ => None,
-        });
     let field_dialog_text = visible_field_dialog_text(snapshot, runtime_shell);
-    if let Some(full_text) = dst_confirmation_text.as_deref().or(field_dialog_text.as_deref()) {
+    if let Some(full_text) = field_dialog_text.as_deref() {
         push_wrapped_scene_dialog_lines(
             &mut entries,
             &visible_revealed_field_dialog_text(runtime_shell, &full_text),
@@ -7496,7 +7654,7 @@ fn visible_scene_dialog_entries(
         );
     }
 
-    if dst_confirmation_text.is_some() || field_dialog_text.is_some() {
+    if field_dialog_text.is_some() {
         // The field box has four interior rows. A `promptbutton` indicator is
         // an arrow in its bottom-right tile, never a fifth textual row (and
         // never the debug word "NEXT").

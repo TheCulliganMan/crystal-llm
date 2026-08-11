@@ -44,6 +44,10 @@ location-tester = ["voxel-view", "crystal-assets/test-fixtures"]
 name = "render_at_location"
 required-features = ["location-tester"]
 
+[[example]]
+name = "audit_voxel_coverage"
+required-features = ["location-tester"]
+
 [dev-dependencies]
 crystal-assets = { path = "../crystal-assets", features = ["test-fixtures"] }
 crystal-core = { path = "../crystal-core", features = ["test-fixtures"] }

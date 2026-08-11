@@ -56,6 +56,8 @@ const PRIORITY_COLLISIONS = new Set(
   PRIORITY_COLLISION_TOKENS.map((token) => resolveCollisionValue(token))
 );
 const WALL_COLLISION = resolveCollisionValue("WALL");
+const BATTLE_TOWER_OUTSIDE_TILESET = "battle_tower_outside";
+const MAP_GROUP_ROOF_FIRST_TILE = 0x0a;
 
 const paletteMapCache = new Map<string, number[]>();
 const paletteBankCache = new Map<string, Palette[]>();
@@ -430,6 +432,9 @@ const loadTilesetSurface = async (tilesetName: string): Promise<InstanceType<typ
   return gameEngine.image.load(tilesetPath);
 };
 
+const loadBattleTowerOutsideRoofSurface = async (): Promise<InstanceType<typeof gameEngine.Surface>> =>
+  gameEngine.image.load(getAssetPath("gfx", "tilesets", "roofs", "olivine.png"));
+
 const sliceTileset = (source: InstanceType<typeof gameEngine.Surface>): InstanceType<typeof gameEngine.Surface>[] => {
   const width = source.get_width();
   const height = source.get_height();
@@ -719,12 +724,16 @@ export class OverworldTileset {
     });
     const collisionPromise = loadTilesetCollisionMap(this.tilesetName);
     const surfacePromise = loadTilesetSurface(this.tilesetName);
+    const roofSurfacePromise = this.tilesetName === BATTLE_TOWER_OUTSIDE_TILESET
+      ? loadBattleTowerOutsideRoofSurface()
+      : Promise.resolve(null);
     const paletteMapPromise = loadTilesetPaletteMap(this.tilesetName);
     const paletteBankPromise = loadTilesetPaletteBank(this.tilesetName, this._timeOfDay);
-    const [layoutResult, collisionMap, surface, paletteMap, paletteBank] = await Promise.all([
+    const [layoutResult, collisionMap, surface, roofSurface, paletteMap, paletteBank] = await Promise.all([
       layoutPromise,
       collisionPromise,
       surfacePromise,
+      roofSurfacePromise,
       paletteMapPromise,
       paletteBankPromise,
     ]);
@@ -743,6 +752,12 @@ export class OverworldTileset {
     }
     applyPriorityFlags(metatiles);
     const tiles = sliceTileset(surface);
+    if (roofSurface) {
+      const roofTiles = sliceTileset(roofSurface);
+      for (let index = 0; index < roofTiles.length; index += 1) {
+        tiles[MAP_GROUP_ROOF_FIRST_TILE + index] = roofTiles[index];
+      }
+    }
     let finalTiles = tiles;
     let priorityTiles = tiles;
     if (paletteMap && paletteBank && paletteBank.length) {

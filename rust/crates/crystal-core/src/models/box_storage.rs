@@ -86,12 +86,7 @@ impl PcBox {
     }
 
     pub fn compact(&mut self) {
-        let pokemon = self
-            .pokemon
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
+        let pokemon = self.pokemon.iter().flatten().cloned().collect::<Vec<_>>();
         for index in 0..MAX_BOX_MONS {
             self.set_slot(index, pokemon.get(index).cloned());
         }
@@ -409,7 +404,11 @@ mod tests {
         }
 
         assert_eq!(storage.has_capture_space_in_box(0), Ok(false));
-        assert!(storage.register_capture_in_box(0, pokemon("EXTRA", 999)).is_err());
+        assert!(
+            storage
+                .register_capture_in_box(0, pokemon("EXTRA", 999))
+                .is_err()
+        );
     }
 
     #[test]

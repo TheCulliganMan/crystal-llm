@@ -8843,6 +8843,22 @@ impl GameDataSet {
         state.bag.tm_hm = initial_tmhm_flags(&self.items);
         apply_initialize_events(&mut state, &self.initialize_events)
             .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        // The location tester may enter any map before ordinary story scripts
+        // have first written that map's WRAM bytes. A real new game reaches
+        // callbacks with cleared WRAM, so seed every exact readmem target used
+        // by this map to zero in this test-fixture-only boot path. Production
+        // sessions and save loading retain their strict memory behavior.
+        for command in &self.map_module(map_name)?.script_variable_commands {
+            if command.command == "readmem"
+                && let Some(memory) = command.target.as_ref()
+            {
+                state
+                    .script_runtime
+                    .memory
+                    .entry(memory.clone())
+                    .or_insert_with(|| "0".to_string());
+            }
+        }
         self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
         let map_name = overworld.map.name.clone();
         overworld.player.mode =
@@ -9460,11 +9476,45 @@ impl GameDataSet {
                 .with_context(|| {
                     format!("check overworld interaction on {}", staged_session.map.name)
                 })?;
-            interaction = candidate
-                .as_ref()
-                .map(|candidate| self.resolve_overworld_interaction(&staged_state, candidate))
-                .transpose()?
-                .flatten();
+            interaction = if let Some(candidate) = candidate {
+                match self.resolve_overworld_interaction(&staged_state, &candidate)? {
+                    Some(interaction) => Some(interaction),
+                    None
+                        if matches!(
+                            candidate.target,
+                            OverworldInteractionTarget::Background { .. }
+                        ) =>
+                    {
+                        // TryBGEvent returning carry-clear does not consume
+                        // the A press. ASM continues into the facing tile's
+                        // collision handler, which is how the default Town
+                        // Map remains usable beneath the conditional custom
+                        // poster event in the player's room.
+                        sample_collision(
+                            &staged_session.map,
+                            &staged_session.tileset,
+                            candidate.target_tile,
+                        )
+                        .and_then(|sample| {
+                            standard_interaction_script(sample.permission).map(|script| {
+                                OverworldInteraction {
+                                    map_name: candidate.map_name,
+                                    player_tile: candidate.player_tile,
+                                    facing: candidate.facing,
+                                    target_tile: candidate.target_tile,
+                                    script: script.to_string(),
+                                    target: OverworldInteractionTarget::Collision {
+                                        permission: sample.permission,
+                                    },
+                                }
+                            })
+                        })
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
         }
 
         if !overworld_input_locked
@@ -9617,7 +9667,10 @@ impl GameDataSet {
             || !runtime.control_events.is_empty()
             || runtime.next_script.is_some()
             || !runtime.deferred_scripts.is_empty()
-            || runtime.script_ended.is_some()
+            // `script_ended` is a retained completion/history record. The
+            // executable cursor, queues, and authored wait fields above own
+            // input locking; an archived callback end must not permanently
+            // disable the next overworld A press.
             || !runtime.shop_events.is_empty()
             || runtime.pending_shop.is_some()
             || !runtime.item_use_events.is_empty()

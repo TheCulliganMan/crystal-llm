@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{
-    GameState, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
-    ScriptLocation, ScriptReturnFrame,
+    GameState, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState, ScriptLocation,
+    ScriptReturnFrame,
 };
 
 const RUNNING_TRAINER_BATTLE_SCRIPT_MEMORY: &str = "wRunningTrainerBattleScript";
@@ -265,13 +265,10 @@ pub fn apply_script_control_action_to_state(
             command_index,
         } => {
             let kind = if *deferred {
-                state
-                    .script_runtime
-                    .deferred_scripts
-                    .push(ScriptLocation {
-                        origin_map_name: origin_map_name.to_string(),
-                        script: target_script.clone(),
-                    });
+                state.script_runtime.deferred_scripts.push(ScriptLocation {
+                    origin_map_name: origin_map_name.to_string(),
+                    script: target_script.clone(),
+                });
                 ScriptControlRuntimeKind::Defer
             } else if *call {
                 state.script_runtime.call_stack.push(ScriptReturnFrame {
@@ -360,8 +357,7 @@ pub fn validate_script_control_command(
             require_target(command)?;
             require_resolved_target(command)?;
         }
-        "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall" | "farscall"
-        | "sdefer" => {
+        "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall" | "farscall" | "sdefer" => {
             reject_compare_value(command)?;
             require_target(command)?;
             require_resolved_target(command)?;
@@ -1265,7 +1261,11 @@ mod tests {
         )
         .expect("jump");
         assert_eq!(
-            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
+            state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
             Some(".Yes@Script")
         );
         assert_eq!(
@@ -1289,7 +1289,11 @@ mod tests {
             }]
         );
         assert_eq!(
-            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
+            state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
             Some(".Call@Script")
         );
 
@@ -1313,7 +1317,11 @@ mod tests {
         apply_script_control_command(&mut state, "TestMap", jumpstd, &BTreeMap::new())
             .expect("jumpstd");
         assert_eq!(
-            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
+            state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
             Some("PokecenterSignScript")
         );
         assert_eq!(
@@ -1482,7 +1490,11 @@ mod tests {
 
         assert!(state.script_runtime.control_events.is_empty());
         assert_eq!(
-            state.script_runtime.next_script.as_ref().map(|location| location.script.as_str()),
+            state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
             Some("PendingScript")
         );
         assert!(state.script_runtime.call_stack.is_empty());

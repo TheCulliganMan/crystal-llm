@@ -7,9 +7,9 @@ use crate::map::{BackgroundEvent, CoordEvent, MapConnection, MapEvents, ObjectEv
 use crate::multiplayer::{
     MultiplayerMessageError, OverworldPresence, PlayerInputFrame, PresenceEntityType, fnv1a32,
 };
-use crate::random::{CrystalRandom, DividerSource, Random};
 #[cfg(test)]
 use crate::random::CrystalRandomState;
+use crate::random::{CrystalRandom, DividerSource, Random};
 use crate::state::{EventFlagMemory, GameState, RoamingPokemonState};
 use crate::systems::special_routines::BugContestEncounterEntry;
 
@@ -20,9 +20,8 @@ use super::collision::{
 };
 use super::encounters::{
     EncounterError, EncounterMusicModifiers, EncounterSlotTables, EncounterSurface,
-    ResolvedWildEncounter, TimeOfDay, WildEncounter, WildEncounterData,
-    apply_cleanse_tag_effect, apply_encounter_music_effect,
-    passes_encounter_roll, percent_to_byte, select_wild_encounter,
+    ResolvedWildEncounter, TimeOfDay, WildEncounter, WildEncounterData, apply_cleanse_tag_effect,
+    apply_encounter_music_effect, passes_encounter_roll, percent_to_byte, select_wild_encounter,
 };
 use super::map::{Direction, METATILE_WIDTH, OverworldMapData, TilePosition};
 use super::movement::{
@@ -201,15 +200,14 @@ impl<E: std::fmt::Display> std::fmt::Display for AutonomousObjectAdvanceError<E>
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Coordinate(error) => error.fmt(formatter),
-            Self::Divider(error) => write!(formatter, "autonomous movement divider source: {error}"),
+            Self::Divider(error) => {
+                write!(formatter, "autonomous movement divider source: {error}")
+            }
         }
     }
 }
 
-impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error
-    for AutonomousObjectAdvanceError<E>
-{
-}
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for AutonomousObjectAdvanceError<E> {}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverworldEventCoordinateError {
@@ -912,11 +910,9 @@ impl OverworldSession {
         direction: Direction,
         options: StepOptions,
     ) -> Result<Option<String>, OverworldObjectCoordinateError> {
-        let Some(facing_tile) = checked_move_by_stride(
-            self.player.tile,
-            direction,
-            options.stride_tiles,
-        ) else {
+        let Some(facing_tile) =
+            checked_move_by_stride(self.player.tile, direction, options.stride_tiles)
+        else {
             return Ok(None);
         };
         let Some((object_slot, object)) = self.visible_object_at_checked(facing_tile)? else {
@@ -1045,13 +1041,11 @@ impl OverworldSession {
         &mut self,
         mut rng: Option<&mut Random>,
     ) -> Result<(), OverworldObjectCoordinateError> {
-        self.advance_autonomous_objects_with_random_add(
-            rng.as_mut().map(|rng| {
-                move |_carry: bool| -> Result<u8, std::convert::Infallible> {
-                    Ok(rng.crystal_random_add_sub().0)
-                }
-            }),
-        )
+        self.advance_autonomous_objects_with_random_add(rng.as_mut().map(|rng| {
+            move |_carry: bool| -> Result<u8, std::convert::Infallible> {
+                Ok(rng.crystal_random_add_sub().0)
+            }
+        }))
         .map_err(|error| match error {
             AutonomousObjectAdvanceError::Coordinate(error) => error,
             AutonomousObjectAdvanceError::Divider(never) => match never {},
@@ -1119,12 +1113,11 @@ impl OverworldSession {
                     let Some(random_add) = random_add.as_mut() else {
                         self.object_pending_random_wait
                             .insert(object_id.to_string());
-                        self.object_step_durations
-                            .insert(object_id.to_string(), 1);
+                        self.object_step_durations.insert(object_id.to_string(), 1);
                         continue;
                     };
-                    let duration_roll = random_add(false)
-                        .map_err(AutonomousObjectAdvanceError::Divider)?;
+                    let duration_roll =
+                        random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
                     self.object_step_durations
                         .insert(object_id.to_string(), duration_roll & 0x7f);
                 }
@@ -1157,8 +1150,7 @@ impl OverworldSession {
                     .initialized_fixed_spin_objects
                     .insert(object_id.to_string())
                 {
-                    self.object_step_durations
-                        .insert(object_id.to_string(), 16);
+                    self.object_step_durations.insert(object_id.to_string(), 16);
                     continue;
                 }
                 direction = match (movement, direction) {
@@ -1173,8 +1165,7 @@ impl OverworldSession {
                     _ => Direction::Up,
                 };
                 self.object_facings.insert(object_id.to_string(), direction);
-                self.object_step_durations
-                    .insert(object_id.to_string(), 16);
+                self.object_step_durations.insert(object_id.to_string(), 16);
                 continue;
             } else if movement == "SPRITEMOVEDATA_SPINRANDOM_SLOW"
                 || movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
@@ -1182,8 +1173,8 @@ impl OverworldSession {
                 let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let direction_roll = random_add(false)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let direction_roll =
+                    random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
                 let previous_direction = direction;
                 direction = match (direction_roll >> 2) & 3 {
                     0 => Direction::Down,
@@ -1216,8 +1207,8 @@ impl OverworldSession {
                 let duration_carry = movement == "SPRITEMOVEDATA_SPINRANDOM_FAST"
                     && sampled_direction_byte != previous_direction_byte
                     && sampled_direction_byte < previous_direction_byte;
-                let duration_roll = random_add(duration_carry)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let duration_roll =
+                    random_add(duration_carry).map_err(AutonomousObjectAdvanceError::Divider)?;
                 let mask = if movement == "SPRITEMOVEDATA_SPINRANDOM_FAST" {
                     0x1f
                 } else {
@@ -1230,8 +1221,7 @@ impl OverworldSession {
                 let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let roll = random_add(false)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let roll = random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = if roll & 1 == 0 {
                     Direction::Left
                 } else {
@@ -1241,8 +1231,7 @@ impl OverworldSession {
                 let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let roll = random_add(false)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let roll = random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = if roll & 1 == 0 {
                     Direction::Down
                 } else {
@@ -1252,8 +1241,7 @@ impl OverworldSession {
                 let Some(random_add) = random_add.as_mut() else {
                     continue;
                 };
-                let roll = random_add(false)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
+                let roll = random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
                 direction = match roll & 3 {
                     0 => Direction::Down,
                     1 => Direction::Up,
@@ -1279,18 +1267,21 @@ impl OverworldSession {
                     self.object_runtime_tile_checked(other_index, other).ok()
                 })
                 .any(|tile| tile == target)
-                || self.object_last_runtime_tiles.iter().any(|(other_id, tile)| {
-                    other_id != object_id
-                        && *tile == target
-                        && self
-                            .object_last_tiles_occupied_until_frame
-                            .get(other_id)
-                            .is_some_and(|until_frame| self.frame < *until_frame)
-                        && self.objects.iter().any(|other| {
-                            other.object_identifier.as_deref() == Some(other_id.as_str())
-                                && self.is_object_visible(other)
-                        })
-                })
+                || self
+                    .object_last_runtime_tiles
+                    .iter()
+                    .any(|(other_id, tile)| {
+                        other_id != object_id
+                            && *tile == target
+                            && self
+                                .object_last_tiles_occupied_until_frame
+                                .get(other_id)
+                                .is_some_and(|until_frame| self.frame < *until_frame)
+                            && self.objects.iter().any(|other| {
+                                other.object_identifier.as_deref() == Some(other_id.as_str())
+                                    && self.is_object_visible(other)
+                            })
+                    })
                 || vacated_tiles.contains(&target);
             self.object_facings.insert(object_id.to_string(), direction);
             let blocked_leaving = sample_collision(&self.map, &self.tileset, current)
@@ -1308,11 +1299,8 @@ impl OverworldSession {
                     }
                 })
                 .unwrap_or(false);
-            let moved = !outside_range
-                && !player_occupied
-                && !occupied
-                && !blocked_leaving
-                && walkable;
+            let moved =
+                !outside_range && !player_occupied && !occupied && !blocked_leaving && walkable;
             if moved {
                 self.object_runtime_tiles
                     .insert(object_id.to_string(), target);
@@ -1323,17 +1311,14 @@ impl OverworldSession {
                 vacated_tiles.push(current);
             }
             if moved {
-                self.object_step_durations
-                    .insert(object_id.to_string(), 8);
+                self.object_step_durations.insert(object_id.to_string(), 8);
                 self.object_pending_random_wait
                     .insert(object_id.to_string());
             } else if let Some(random_add) = random_add.as_mut() {
-                let duration_roll = random_add(false)
-                    .map_err(AutonomousObjectAdvanceError::Divider)?;
-                self.object_step_durations.insert(
-                    object_id.to_string(),
-                    duration_roll & 0x7f,
-                );
+                let duration_roll =
+                    random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
+                self.object_step_durations
+                    .insert(object_id.to_string(), duration_roll & 0x7f);
             }
         }
         Ok(())
@@ -1356,11 +1341,12 @@ impl OverworldSession {
             return Ok(None);
         }
 
-        if let Some((object_index, object)) = self
-            .visible_object_at_checked(facing_tile)?
-            .filter(|(_, object)| {
-                object_has_dispatchable_script(object) && !self.object_is_visibly_walking(object)
-            })
+        if let Some((object_index, object)) =
+            self.visible_object_at_checked(facing_tile)?
+                .filter(|(_, object)| {
+                    object_has_dispatchable_script(object)
+                        && !self.object_is_visibly_walking(object)
+                })
         {
             return Ok(Some(self.object_interaction(
                 object_index,
@@ -1828,21 +1814,22 @@ impl OverworldSession {
     where
         S: DividerSource + ?Sized,
     {
-        let Some(surface) = encounter_surface_for_player_tile_checked(
-            self,
-            options.land_encounters_on_any_land,
-        )? else {
+        let Some(surface) =
+            encounter_surface_for_player_tile_checked(self, options.land_encounters_on_any_land)?
+        else {
             return Ok(None);
         };
         let contest_encounter = context.bug_contest_encounters.is_some();
         let normal_encounters = if contest_encounter {
             None
         } else {
-            Some(encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
-                map_name: self.map.name.clone(),
-                surface,
-                time: options.time,
-            })?)
+            Some(
+                encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
+                    map_name: self.map.name.clone(),
+                    surface,
+                    time: options.time,
+                })?,
+            )
         };
         let uncleaned_threshold = if contest_encounter {
             let permission = sample_collision(&self.map, &self.tileset, self.player.tile)
@@ -1857,11 +1844,7 @@ impl OverworldSession {
             } else {
                 20.0
             });
-            apply_encounter_music_effect(
-                base,
-                options.music_token.as_deref(),
-                music_modifiers,
-            )?
+            apply_encounter_music_effect(base, options.music_token.as_deref(), music_modifiers)?
         } else {
             let base = crate::world::encounters::base_encounter_rate(
                 normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
@@ -1869,21 +1852,16 @@ impl OverworldSession {
                 options.time,
             )?;
             let base = percent_to_byte(f64::from(base));
-            apply_encounter_music_effect(
-                base,
-                options.music_token.as_deref(),
-                music_modifiers,
-            )?
+            apply_encounter_music_effect(base, options.music_token.as_deref(), music_modifiers)?
         };
-        let threshold = apply_cleanse_tag_effect(
-            uncleaned_threshold,
-            options.has_cleanse_tag,
-        );
+        let threshold = apply_cleanse_tag_effect(uncleaned_threshold, options.has_cleanse_tag);
         // With no Cleanse Tag, the final failed party scan executes
         // `add hl,de`, whose canonical WRAM range cannot overflow. With a
         // Cleanse Tag, `srl b` supplies bit 0 of the pre-halved rate.
         let rate_carry = options.has_cleanse_tag && uncleaned_threshold & 1 != 0;
-        let rate_output = rng.random(rate_carry).map_err(ExactEncounterError::Divider)?;
+        let rate_output = rng
+            .random(rate_carry)
+            .map_err(ExactEncounterError::Divider)?;
         let encounter_roll = if contest_encounter {
             rng.state().add
         } else {
@@ -1909,9 +1887,7 @@ impl OverworldSession {
             // `TryWildEncounter_BugContest` returns with carry set on success.
             let mut first = true;
             let mut weighted_roll = loop {
-                let output = rng
-                    .random(first)
-                    .map_err(ExactEncounterError::Divider)?;
+                let output = rng.random(first).map_err(ExactEncounterError::Divider)?;
                 first = false;
                 if output.value < 200 {
                     break i16::from(output.value >> 1);
@@ -1924,8 +1900,7 @@ impl OverworldSession {
                     let level = if range == 1 {
                         entry.min_level
                     } else {
-                        rng.random(false)
-                            .map_err(ExactEncounterError::Divider)?;
+                        rng.random(false).map_err(ExactEncounterError::Divider)?;
                         entry.min_level + rng.state().add % range
                     };
                     let resolved = ResolvedWildEncounter {
@@ -1979,10 +1954,7 @@ impl OverworldSession {
                         let level = roaming.level;
                         let resolved = ResolvedWildEncounter {
                             level,
-                            encounter: WildEncounter {
-                                species,
-                                level,
-                            },
+                            encounter: WildEncounter { species, level },
                             slot: raw_slot - 1,
                         };
                         let (resolved, repelled_by) =
@@ -2071,21 +2043,22 @@ impl OverworldSession {
     where
         S: DividerSource + ?Sized,
     {
-        let Some(surface) = encounter_surface_for_player_tile_checked(
-            self,
-            options.land_encounters_on_any_land,
-        )? else {
+        let Some(surface) =
+            encounter_surface_for_player_tile_checked(self, options.land_encounters_on_any_land)?
+        else {
             return Ok(None);
         };
         let contest_encounter = context.bug_contest_encounters.is_some();
         let normal_encounters = if contest_encounter {
             None
         } else {
-            Some(encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
-                map_name: self.map.name.clone(),
-                surface,
-                time: options.time,
-            })?)
+            Some(
+                encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
+                    map_name: self.map.name.clone(),
+                    surface,
+                    time: options.time,
+                })?,
+            )
         };
         let threshold = if contest_encounter {
             u8::MAX
@@ -2107,9 +2080,7 @@ impl OverworldSession {
             // CanEncounterWildMon returned SCF and the intervening BIT keeps C.
             let mut first = true;
             let mut weighted_roll = loop {
-                let output = rng
-                    .random(first)
-                    .map_err(ExactEncounterError::Divider)?;
+                let output = rng.random(first).map_err(ExactEncounterError::Divider)?;
                 first = false;
                 if output.value < 200 {
                     break i16::from(output.value >> 1);
@@ -2122,8 +2093,7 @@ impl OverworldSession {
                     let level = if range == 1 {
                         entry.min_level
                     } else {
-                        rng.random(false)
-                            .map_err(ExactEncounterError::Divider)?;
+                        rng.random(false).map_err(ExactEncounterError::Divider)?;
                         entry.min_level + rng.state().add % range
                     };
                     let resolved = Some(ResolvedWildEncounter {
@@ -2183,10 +2153,7 @@ impl OverworldSession {
                             roaming_slot: Some((raw_slot - 1) as u8),
                             resolved: Some(ResolvedWildEncounter {
                                 level,
-                                encounter: WildEncounter {
-                                    species,
-                                    level,
-                                },
+                                encounter: WildEncounter { species, level },
                                 slot: raw_slot - 1,
                             }),
                             repelled_by: None,
@@ -2761,16 +2728,16 @@ mod tests {
             .object_facings
             .insert("SPINNER".to_string(), Direction::Right);
         let mut divider = crate::random::ReplayDivider::new([0, 0, 247, 0]);
-        let mut rng = CrystalRandom::new(
-            CrystalRandomState { add: 8, sub: 0 },
-            &mut divider,
-        );
+        let mut rng = CrystalRandom::new(CrystalRandomState { add: 8, sub: 0 }, &mut divider);
 
         session
             .advance_autonomous_objects_exact(&mut rng)
             .expect("exact autonomous random spin");
 
-        assert_eq!(session.object_facings.get("SPINNER"), Some(&Direction::Left));
+        assert_eq!(
+            session.object_facings.get("SPINNER"),
+            Some(&Direction::Left)
+        );
         assert_eq!(session.object_step_durations.get("SPINNER"), Some(&0));
         assert_eq!(rng.state(), CrystalRandomState { add: 0, sub: 0xff });
         assert_eq!(divider.remaining(), 0);
@@ -4304,10 +4271,8 @@ mod tests {
             *rate = 0;
         }
         let mut clear_divider = crate::random::ReplayDivider::new([0, 0]);
-        let mut clear_rng = CrystalRandom::new(
-            CrystalRandomState { add: 0xff, sub: 0 },
-            &mut clear_divider,
-        );
+        let mut clear_rng =
+            CrystalRandom::new(CrystalRandomState { add: 0xff, sub: 0 }, &mut clear_divider);
         let clear = session
             .check_wild_encounter_exact(
                 Some(&zero_rate),

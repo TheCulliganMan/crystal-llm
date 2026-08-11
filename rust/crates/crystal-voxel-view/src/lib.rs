@@ -2,10 +2,41 @@
 
 //! Optional, presentation-only voxel view for Crystal's Bevy shell.
 
+mod azalea_gym;
+mod battle_tower;
+mod building_catalog;
+mod building_style;
 mod camera;
+mod casino;
+mod cave;
+mod celadon_gym;
+mod cerulean_gym;
+mod cut_tree;
+mod elevation;
+mod elite_four_room;
+mod flower;
 mod footing;
+mod forest;
+mod grass;
+mod hall_of_fame;
+mod ice_path;
+mod interior;
+mod kanto_cliff;
+mod kanto_post;
 mod mesh;
+mod modern_route;
+mod olivine_gym;
+mod park;
+mod port;
 mod profile;
+mod rock_platform;
+mod saffron_gym;
+mod sign;
+mod tower;
+mod vermilion;
+mod violet_gym;
+mod viridian_gym;
+mod waterfall;
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,9 +59,13 @@ use bevy::{
 use crystal_render_api::{VisualActor, VisualActorId, VisualWorldFrame, WorldRenderSet};
 
 pub use camera::{CAMERA_PITCH_DEGREES, VoxelCameraPose, camera_pose};
-pub use footing::{actor_foot, footing_height, tile_at_visual_point, visual_point_to_voxel};
+pub use footing::{
+    actor_foot, footing_height, resolved_footing_height, tile_at_visual_point,
+    visual_point_to_voxel,
+};
 pub use mesh::{
-    SurfaceMeshData, TerrainImageSamples, TerrainMeshData, TerrainMeshError, build_terrain_mesh,
+    CellCoverageKind, SurfaceMeshData, TerrainImageSamples, TerrainMeshData, TerrainMeshError,
+    audit_cell_coverage, audit_cell_coverage_on_map, build_terrain_mesh,
     build_terrain_mesh_with_images, build_terrain_mesh_with_samples,
 };
 pub use profile::{
@@ -76,6 +111,12 @@ impl Plugin for VoxelViewPlugin {
             .add_systems(Update, sync_voxel_view.in_set(WorldRenderSet::RenderSync))
             .add_systems(
                 Update,
+                sync_classic_fallback_camera
+                    .after(sync_voxel_view)
+                    .in_set(WorldRenderSet::RenderSync),
+            )
+            .add_systems(
+                Update,
                 sync_player_silhouette_system
                     .after(sync_voxel_view)
                     .in_set(WorldRenderSet::RenderSync),
@@ -115,6 +156,18 @@ fn toggle_voxel_view(keyboard: Res<ButtonInput<KeyCode>>, mut settings: ResMut<V
     }
 }
 
+fn sync_classic_fallback_camera(
+    status: Res<VoxelViewStatus>,
+    mut cameras: Query<&mut Camera, With<VoxelClassicFallbackCamera>>,
+) {
+    for mut camera in &mut cameras {
+        // This camera exists only to cover disabled, pending, and failed mod
+        // frames. Once authored terrain is active it would redraw vacated
+        // source cells behind folded walls and create duplicate 2D scenery.
+        camera.is_active = !status.active;
+    }
+}
+
 #[derive(Component)]
 struct VoxelWorldCamera;
 
@@ -146,7 +199,6 @@ struct VoxelScene {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TerrainCacheKey {
     revision: u64,
-    texture: AssetId<Image>,
     viewport_bits: [u32; 2],
     tile_bits: [u32; 2],
     grid_size: UVec2,
@@ -156,7 +208,6 @@ impl TerrainCacheKey {
     fn from_frame(frame: &VisualWorldFrame) -> Self {
         Self {
             revision: frame.terrain_revision,
-            texture: frame.map_texture.id(),
             viewport_bits: [
                 frame.viewport_size.x.to_bits(),
                 frame.viewport_size.y.to_bits(),
@@ -176,6 +227,7 @@ struct TerrainRevisionCache {
     solid_mesh: Option<Handle<Mesh>>,
     textured_material: Option<Handle<StandardMaterial>>,
     solid_material: Option<Handle<StandardMaterial>>,
+    footing_heights: Vec<f32>,
 }
 
 #[derive(Resource, Default)]
@@ -194,6 +246,10 @@ struct TerrainBuildResult {
 enum TerrainSyncState {
     Ready,
     Pending,
+}
+
+fn must_wait_for_initial_terrain(state: TerrainSyncState, cache: &TerrainRevisionCache) -> bool {
+    state == TerrainSyncState::Pending && cache.key.is_none()
 }
 
 struct ActorTextureAssets {
@@ -258,6 +314,15 @@ fn setup_voxel_view(
     mut meshes: ResMut<Assets<Mesh>>,
     mut scene: ResMut<VoxelScene>,
 ) {
+    // The reference renderer assigns every face a readable base shade and
+    // layers directional light/AO over it. Bevy's fully shadowed PBR faces
+    // otherwise fall almost to black, erasing the mapped building courses
+    // on the side opposite the sun. This resource exists only when the
+    // optional voxel plugin is installed; faithful 2D sprites are unlit.
+    commands.insert_resource(AmbientLight {
+        color: Color::srgb(0.92, 0.96, 1.0),
+        brightness: 220.0,
+    });
     let initial_viewport = Vec2::new(160.0, 144.0);
     let pose = camera_pose(initial_viewport);
     commands.spawn((
@@ -311,13 +376,19 @@ fn setup_voxel_view(
             directional_light: DirectionalLight {
                 color: Color::srgb(1.0, 0.93, 0.82),
                 illuminance: 3_000.0,
-                shadows_enabled: true,
+                shadows_enabled: false,
                 shadow_depth_bias: 0.01,
                 shadow_normal_bias: 0.8,
             },
             // A southeast light gives the small world readable northwest cast
             // shadows while keeping the source sprites' front faces bright.
-            transform: Transform::from_xyz(-180.0, 320.0, -220.0).looking_at(Vec3::ZERO, Vec3::Y),
+            // Voxel world coordinates are +X east and +Z south. Put the sun
+            // in that actual quadrant so the camera-facing facade receives
+            // direct light, matching the reference renderer's south/east
+            // face model. The previous negative X/Z position lit every
+            // house from behind and made its mapped windows and door nearly
+            // black even though their source pixels were correct.
+            transform: Transform::from_xyz(180.0, 320.0, 220.0).looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         },
         RenderLayers::layer(VOXEL_RENDER_LAYER),
@@ -347,6 +418,7 @@ fn sync_voxel_view(
         (
             &mut Transform,
             &mut Visibility,
+            &mut Handle<Mesh>,
             &mut Handle<StandardMaterial>,
         ),
         (
@@ -410,7 +482,12 @@ fn sync_voxel_view(
             return;
         }
     };
-    if terrain_state == TerrainSyncState::Pending {
+    if must_wait_for_initial_terrain(terrain_state, &terrain_cache) {
+        // Initial activation has no authored mesh to present yet, so the
+        // faithful layer remains visible until the first build completes.
+        // Subsequent revisions deliberately keep the last complete terrain
+        // alive while its replacement builds. Retiring the output here made
+        // every scrolling step flash back to 2D for an intermediate frame.
         status.active = false;
         status.active_frames = 0;
         status.fallback_reason = Some("building authored terrain".to_owned());
@@ -428,6 +505,7 @@ fn sync_voxel_view(
     };
     if let Err(error) = sync_actor_cards(
         &frame,
+        &terrain_cache.footing_heights,
         actor_quad,
         &mut commands,
         &mut actor_cache,
@@ -473,6 +551,7 @@ fn set_output_active(
         // frame; otherwise the untouched classic layer remains authoritative.
         camera.is_active = active;
         if active {
+            camera.clear_color = ClearColorConfig::Custom(voxel_clear_color(frame));
             let pose = camera_pose(frame.viewport_size);
             *transform = pose.transform();
             *projection = Projection::Perspective(PerspectiveProjection {
@@ -484,6 +563,20 @@ fn set_output_active(
         }
     }
     camera_ready
+}
+
+fn voxel_clear_color(frame: &VisualWorldFrame) -> Color {
+    if frame
+        .tiles
+        .first()
+        .is_some_and(|tile| tile.source.tileset_id.as_ref() == "game_corner")
+    {
+        // The casino wall backs onto unlit interior void, not an outdoor
+        // horizon. This also matches the black source course above the wall.
+        Color::srgb(0.10, 0.09, 0.08)
+    } else {
+        Color::srgb(0.72, 0.83, 0.78)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -536,6 +629,14 @@ fn sync_terrain(
 
     let ready = cache.key.as_ref() == Some(&next_key);
     if ready {
+        if let Some(handle) = cache.textured_material.as_ref() {
+            let Some(material) = materials.get_mut(handle) else {
+                return Err(TerrainSyncError::CachedTexturedMaterialUnavailable);
+            };
+            if material.base_color_texture.as_ref() != Some(&frame.map_texture) {
+                material.base_color_texture = Some(frame.map_texture.clone());
+            }
+        }
         for entity in [cache.textured_entity, cache.solid_entity]
             .into_iter()
             .flatten()
@@ -563,60 +664,61 @@ fn apply_built_terrain(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> Result<(), TerrainSyncError> {
-        let (textured_mesh, solid_mesh) = terrain.into_meshes();
+    cache.footing_heights = terrain.footing_heights.clone();
+    let (textured_mesh, solid_mesh) = terrain.into_meshes();
 
-        let textured_mesh_handle = update_mesh_asset(
-            meshes,
-            &mut cache.textured_mesh,
-            textured_mesh,
-            TerrainSyncError::CachedTexturedMeshUnavailable,
-        )?;
-        let solid_mesh_handle = update_mesh_asset(
-            meshes,
-            &mut cache.solid_mesh,
-            solid_mesh,
-            TerrainSyncError::CachedSolidMeshUnavailable,
-        )?;
-        let textured_material_handle = if let Some(handle) = cache.textured_material.as_ref() {
-            let Some(material) = materials.get_mut(handle) else {
-                return Err(TerrainSyncError::CachedTexturedMaterialUnavailable);
-            };
-            material.base_color_texture = Some(frame.map_texture.clone());
-            handle.clone()
-        } else {
-            let handle = materials.add(textured_terrain_material(frame.map_texture.clone()));
-            cache.textured_material = Some(handle.clone());
-            handle
+    let textured_mesh_handle = update_mesh_asset(
+        meshes,
+        &mut cache.textured_mesh,
+        textured_mesh,
+        TerrainSyncError::CachedTexturedMeshUnavailable,
+    )?;
+    let solid_mesh_handle = update_mesh_asset(
+        meshes,
+        &mut cache.solid_mesh,
+        solid_mesh,
+        TerrainSyncError::CachedSolidMeshUnavailable,
+    )?;
+    let textured_material_handle = if let Some(handle) = cache.textured_material.as_ref() {
+        let Some(material) = materials.get_mut(handle) else {
+            return Err(TerrainSyncError::CachedTexturedMaterialUnavailable);
         };
-        let solid_material_handle = if let Some(handle) = cache.solid_material.as_ref() {
-            if materials.get(handle).is_none() {
-                return Err(TerrainSyncError::CachedSolidMaterialUnavailable);
-            }
-            handle.clone()
-        } else {
-            let handle = materials.add(solid_terrain_material());
-            cache.solid_material = Some(handle.clone());
-            handle
-        };
-
-        if cache.textured_entity.is_none() {
-            cache.textured_entity = Some(spawn_terrain_entity(
-                commands,
-                textured_mesh_handle,
-                textured_material_handle,
-                frame,
-            ));
+        material.base_color_texture = Some(frame.map_texture.clone());
+        handle.clone()
+    } else {
+        let handle = materials.add(textured_terrain_material(frame.map_texture.clone()));
+        cache.textured_material = Some(handle.clone());
+        handle
+    };
+    let solid_material_handle = if let Some(handle) = cache.solid_material.as_ref() {
+        if materials.get(handle).is_none() {
+            return Err(TerrainSyncError::CachedSolidMaterialUnavailable);
         }
-        if cache.solid_entity.is_none() {
-            cache.solid_entity = Some(spawn_terrain_entity(
-                commands,
-                solid_mesh_handle,
-                solid_material_handle,
-                frame,
-            ));
-        }
+        handle.clone()
+    } else {
+        let handle = materials.add(solid_terrain_material());
+        cache.solid_material = Some(handle.clone());
+        handle
+    };
 
-        cache.key = Some(key);
+    if cache.textured_entity.is_none() {
+        cache.textured_entity = Some(spawn_terrain_entity(
+            commands,
+            textured_mesh_handle,
+            textured_material_handle,
+            frame,
+        ));
+    }
+    if cache.solid_entity.is_none() {
+        cache.solid_entity = Some(spawn_terrain_entity(
+            commands,
+            solid_mesh_handle,
+            solid_material_handle,
+            frame,
+        ));
+    }
+
+    cache.key = Some(key);
     Ok(())
 }
 
@@ -688,6 +790,7 @@ fn solid_terrain_material() -> StandardMaterial {
 #[allow(clippy::too_many_arguments)]
 fn sync_actor_cards(
     frame: &VisualWorldFrame,
+    footing_heights: &[f32],
     actor_quad: &Handle<Mesh>,
     commands: &mut Commands,
     cache: &mut ActorIdCache,
@@ -697,6 +800,7 @@ fn sync_actor_cards(
         (
             &mut Transform,
             &mut Visibility,
+            &mut Handle<Mesh>,
             &mut Handle<StandardMaterial>,
         ),
         (
@@ -707,19 +811,25 @@ fn sync_actor_cards(
         ),
     >,
 ) -> Result<(), ActorSyncError> {
-    // A published frame is atomic. If any visible actor cannot be rendered,
-    // hide the entire optional output so the complete stock view remains.
+    // The player is mandatory. An NPC whose foot lies outside the published
+    // terrain halo is simply clipped, exactly like the classic sprite pass;
+    // retiring the whole optional world here caused a 2D flash while walking.
     let mut prepared = Vec::with_capacity(frame.actors.len());
     for actor in &frame.actors {
         if !images.contains(&actor.texture) {
             return Err(ActorSyncError::TextureUnavailable(actor.id));
         }
-        let transform =
-            actor_transform(frame, actor).ok_or(ActorSyncError::FootingUnavailable(actor.id))?;
-        prepared.push((actor, transform));
+        let Some(transform) = actor_transform(frame, actor, footing_heights) else {
+            if actor.id == VisualActorId::Player {
+                return Err(ActorSyncError::FootingUnavailable(actor.id));
+            }
+            continue;
+        };
+        let mesh = actor_quad.clone();
+        prepared.push((actor, transform, mesh));
     }
 
-    let visible_ids: HashSet<_> = frame.actors.iter().map(|actor| actor.id).collect();
+    let visible_ids: HashSet<_> = prepared.iter().map(|(actor, _, _)| actor.id).collect();
     let stale_ids: Vec<_> = cache
         .entities
         .keys()
@@ -733,18 +843,23 @@ fn sync_actor_cards(
     }
 
     let mut used_textures = HashSet::with_capacity(frame.actors.len());
-    for (actor, transform) in prepared {
+    for (actor, transform, mesh) in prepared {
         let texture_id = actor.texture.id();
         used_textures.insert(texture_id);
         let material = actor_material(actor, cache, materials);
 
         let existing = cache.entities.get(&actor.id).copied();
         if let Some(entity) = existing
-            && let Ok((mut current_transform, mut visibility, mut current_material)) =
-                actor_entities.get_mut(entity)
+            && let Ok((
+                mut current_transform,
+                mut visibility,
+                mut current_mesh,
+                mut current_material,
+            )) = actor_entities.get_mut(entity)
         {
             *current_transform = transform;
             *visibility = Visibility::Visible;
+            *current_mesh = mesh;
             *current_material = material;
             continue;
         }
@@ -752,7 +867,7 @@ fn sync_actor_cards(
         let entity = commands
             .spawn((
                 PbrBundle {
-                    mesh: actor_quad.clone(),
+                    mesh,
                     material,
                     transform,
                     ..default()
@@ -783,6 +898,7 @@ fn sync_player_silhouette_system(
     frame: Res<VisualWorldFrame>,
     status: Res<VoxelViewStatus>,
     scene: Res<VoxelScene>,
+    terrain_cache: Res<TerrainRevisionCache>,
     mut commands: Commands,
     mut cache: ResMut<PlayerSilhouetteCache>,
     mut materials: ResMut<Assets<OcclusionSilhouetteMaterial>>,
@@ -813,6 +929,7 @@ fn sync_player_silhouette_system(
     }
     sync_player_silhouette(
         &frame,
+        &terrain_cache.footing_heights,
         actor_quad,
         &mut commands,
         &mut cache,
@@ -823,6 +940,7 @@ fn sync_player_silhouette_system(
 
 fn sync_player_silhouette(
     frame: &VisualWorldFrame,
+    footing_heights: &[f32],
     actor_quad: &Handle<Mesh>,
     commands: &mut Commands,
     cache: &mut PlayerSilhouetteCache,
@@ -855,7 +973,7 @@ fn sync_player_silhouette(
         cache.texture = None;
         return;
     };
-    let Some(transform) = actor_transform(frame, player) else {
+    let Some(transform) = actor_transform(frame, player, footing_heights) else {
         return;
     };
     let texture_id = player.texture.id();
@@ -929,17 +1047,21 @@ fn actor_material(
     material
 }
 
-fn actor_transform(frame: &VisualWorldFrame, actor: &VisualActor) -> Option<Transform> {
+fn actor_transform(
+    frame: &VisualWorldFrame,
+    actor: &VisualActor,
+    footing_heights: &[f32],
+) -> Option<Transform> {
     let foot = actor_foot(actor);
-    let height = footing_height(frame, foot)?;
+    let height = resolved_footing_height(frame, foot, footing_heights)?;
     let mut position = visual_point_to_voxel(foot, height + 0.05);
-    let pose = camera_pose(frame.viewport_size);
     let profile_scale = frame.tile_size.y / SOURCE_TILE_HEIGHT;
-    let camera_pull = if actor.above_priority {
-        ABOVE_PRIORITY_CAMERA_PULL
-    } else {
-        NORMAL_ACTOR_CAMERA_PULL
-    } * profile_scale;
+    let pose = camera_pose(frame.viewport_size);
+    let camera_pull = actor_camera_pull(actor) * profile_scale;
+    // Keep only a sub-pixel tie break. A full-card pull made the player draw
+    // in front of a Cut tree occupying the next south cell, defeating real
+    // terrain depth. The dedicated silhouette pass already preserves a
+    // readable player outline where terrain legitimately occludes the card.
     position += (pose.eye - pose.target).normalize_or_zero() * camera_pull;
     let mut transform = Transform::from_translation(position)
         .with_rotation(camera::card_rotation_toward_camera(pose));
@@ -953,6 +1075,14 @@ fn actor_transform(frame: &VisualWorldFrame, actor: &VisualActor) -> Option<Tran
         1.0,
     );
     Some(transform)
+}
+
+fn actor_camera_pull(actor: &VisualActor) -> f32 {
+    if actor.above_priority {
+        ABOVE_PRIORITY_CAMERA_PULL
+    } else {
+        NORMAL_ACTOR_CAMERA_PULL
+    }
 }
 
 fn terrain_transform(frame: &VisualWorldFrame) -> Transform {
@@ -1026,5 +1156,57 @@ mod renderer_tests {
     #[test]
     fn optional_view_remains_disabled_by_default() {
         assert!(!VoxelViewSettings::default().enabled);
+    }
+
+    #[test]
+    fn terrain_rebuild_keeps_the_last_complete_voxel_frame_visible() {
+        let mut cache = TerrainRevisionCache::default();
+        assert!(must_wait_for_initial_terrain(
+            TerrainSyncState::Pending,
+            &cache
+        ));
+        cache.key = Some(TerrainCacheKey {
+            revision: 1,
+            viewport_bits: [160.0_f32.to_bits(), 144.0_f32.to_bits()],
+            tile_bits: [8.0_f32.to_bits(), 8.0_f32.to_bits()],
+            grid_size: UVec2::new(20, 18),
+        });
+        assert!(!must_wait_for_initial_terrain(
+            TerrainSyncState::Pending,
+            &cache
+        ));
+        assert!(!must_wait_for_initial_terrain(
+            TerrainSyncState::Ready,
+            &cache
+        ));
+    }
+
+    #[test]
+    fn player_has_only_the_normal_tie_break_and_can_be_occluded_by_south_props() {
+        let player = VisualActor {
+            id: VisualActorId::Player,
+            source_id: "player".into(),
+            texture: Handle::weak_from_u128(1),
+            center: Vec2::ZERO,
+            size: Vec2::splat(16.0),
+            flip_x: false,
+            above_priority: false,
+        };
+        assert_eq!(actor_camera_pull(&player), NORMAL_ACTOR_CAMERA_PULL);
+    }
+
+    #[test]
+    fn live_animation_texture_does_not_invalidate_terrain_geometry() {
+        let mut first = VisualWorldFrame {
+            terrain_revision: 42,
+            map_texture: Handle::weak_from_u128(1),
+            viewport_size: Vec2::new(160.0, 144.0),
+            tile_size: Vec2::splat(8.0),
+            grid_size: UVec2::new(20, 18),
+            ..default()
+        };
+        let first_key = TerrainCacheKey::from_frame(&first);
+        first.map_texture = Handle::weak_from_u128(2);
+        assert_eq!(first_key, TerrainCacheKey::from_frame(&first));
     }
 }

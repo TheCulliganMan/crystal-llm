@@ -2399,7 +2399,7 @@
         let error = error_debug(error);
         assert!(
             error.contains(
-                "saved battle.static_wild RuntimeWildScript request BATTLETYPE_NORMAL:CHIKORITA:5 is missing from compiled scripted wild battles"
+                "saved battle.static_wild RuntimeMap/RuntimeWildScript:4->5 request BATTLETYPE_NORMAL:CHIKORITA:5 is missing from compiled wild battle origins"
             ),
             "{error}"
         );
@@ -2824,6 +2824,12 @@
         let mut state = GameState::default();
         state.link_session.link_mode = 1;
         state.link_session.active_room = Some("TradeCenter".to_string());
+        state.link_session.serial_connection_status =
+            crystal_core::state::LinkSerialConnectionStatus::UsingExternalClock;
+        state.link_session.battle_random = Some(crystal_core::random::LinkBattleRandomState {
+            seeds: [0; 10],
+            count: 0,
+        });
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("active link room must exist in pack special routines");
@@ -2844,6 +2850,12 @@
         let mut state = GameState::default();
         state.link_session.link_mode = 1;
         state.link_session.active_room = Some("TradeCenter".to_string());
+        state.link_session.serial_connection_status =
+            crystal_core::state::LinkSerialConnectionStatus::UsingExternalClock;
+        state.link_session.battle_random = Some(crystal_core::random::LinkBattleRandomState {
+            seeds: [0; 10],
+            count: 0,
+        });
         runtime
             .save_game(&save_path, state)
             .expect("active link room is backed by compiled pack special routine");
@@ -4167,8 +4179,8 @@
             .expect_err("conditional_event data cannot be persisted as a queued command");
         let error = format!("{error:#}");
         assert!(error.contains(
-            "command_queue[0].command conditional_event is not a saved queued command"
-        ));
+            r#"saved script_runtime.command_queue[0].source_script RuntimePayloadScript:22 args ["EVENT_STALE", "RuntimeScript"] do not match compiled args ["EVENT_RUNTIME", "RuntimeScript"]"#
+        ), "{error}");
 
         let mut state = GameState::default();
         state

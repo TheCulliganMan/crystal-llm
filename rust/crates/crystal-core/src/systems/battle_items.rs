@@ -1299,10 +1299,7 @@ fn apply_full_restore(
     restore_hp(pokemon, item)?;
     clear_status(pokemon);
     pokemon.confusion_turns = 0;
-    if pokemon.hp == hp_before
-        && pokemon.status == status_before
-        && confusion_turns_before == 0
-    {
+    if pokemon.hp == hp_before && pokemon.status == status_before && confusion_turns_before == 0 {
         return Err(BattleItemError::NoTargetChange {
             item_id: item.script_name.clone(),
         });

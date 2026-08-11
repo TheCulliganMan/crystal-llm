@@ -1599,7 +1599,13 @@ pub(super) fn render_visible_script_text_pages(
             _ => render_script_text_args(&command.args),
         };
         match command.command.as_str() {
-            "text" | "text_start" | "text_today" | "text_block" | "text_far" => {
+            "text"
+            | "text_start"
+            | "text_today"
+            | "text_block"
+            | "text_far"
+            | "text_ram"
+            | "text_decimal" => {
                 flush_line(&mut lines, &mut current);
                 current.push_str(&rendered);
             }

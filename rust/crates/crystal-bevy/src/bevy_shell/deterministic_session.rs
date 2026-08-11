@@ -175,6 +175,7 @@ fn apply_keyboard_input(
         }
     }
     let rtc_sample = (*rtc_source).sample();
+    let mut rtc_changed = runtime_shell.latest_rtc_sample != Some(rtc_sample);
     runtime_shell.latest_rtc_sample = Some(rtc_sample);
     runtime_shell.lcd_animation_frame = runtime_shell.lcd_animation_frame.wrapping_add(1);
     let text_acceleration_requested =
@@ -631,7 +632,7 @@ fn apply_keyboard_input(
             .front()
             .is_some_and(|animation| animation.started)
     {
-        match runtime_shell.shell.snapshot() {
+        match runtime_shell.shell.presentation_snapshot() {
             Ok(snapshot) => {
                 if advance_visible_battle_text_reveal(
                     &mut runtime_shell,
@@ -937,13 +938,47 @@ fn apply_keyboard_input(
                 return;
             }
         }
+        // `writetext` prints its complete text and then continues. Only the
+        // source `waitbutton`/`promptbutton` commands require a player press.
+        // Treating every writetext boundary as an acknowledgement trapped
+        // radio broadcasts on Oak's first line and let repeated A presses
+        // race subsequent pause/text commands.
+        let auto_continue_writetext = runtime_shell
+            .shell
+            .snapshot()
+            .ok()
+            .filter(|snapshot| {
+                snapshot.ui.text_window_open
+                    && snapshot.ui.text.is_some()
+                    && snapshot.ui.pending_yes_no.is_none()
+                    && visible_field_dialogue_is_fully_revealed(&runtime_shell, snapshot)
+            })
+            .and_then(|_| runtime_shell.active_script_cursor.as_ref())
+            .and_then(|cursor| {
+                runtime_shell
+                    .shell
+                    .runtime()
+                    .compiled_script_command_name(
+                        &cursor.source_script,
+                        cursor.next_command_index,
+                    )
+                    .ok()
+            })
+            .is_some_and(|command| !matches!(command.as_str(), "waitbutton" | "promptbutton"));
+        if auto_continue_writetext {
+            if let Err(error) = continue_visible_script_after_prompt(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+            }
+            return;
+        }
         // UseFlashTextScript is text_asm rather than the ordinary
         // field-move text script: once the line has printed it immediately
         // plays SFX_FLASH and runs BlindingFlash, with no button wait.
         if runtime_shell.visible_flash_animation.is_some()
             && runtime_shell.field_notice.is_some()
         {
-            match runtime_shell.shell.snapshot() {
+            match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
                     if visible_field_dialogue_is_fully_revealed(
                         &runtime_shell,
@@ -975,7 +1010,7 @@ fn apply_keyboard_input(
                 || runtime_shell.visible_whirlpool_animation.is_some()
                 || runtime_shell.visible_headbutt_animation.is_some());
         if automatic_field_effect_ready {
-            match runtime_shell.shell.snapshot() {
+            match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
                     if visible_field_dialogue_is_fully_revealed(
                         &runtime_shell,
@@ -1004,7 +1039,7 @@ fn apply_keyboard_input(
             == Some(VisibleStrengthNoticePhase::UseText)
             && runtime_shell.field_notice.is_some()
         {
-            match runtime_shell.shell.snapshot() {
+            match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
                     if visible_field_dialogue_is_fully_revealed(
                         &runtime_shell,
@@ -1042,7 +1077,7 @@ fn apply_keyboard_input(
             // broadcasts use writetext -> pause -> writetext and must advance
             // automatically once the printer finishes; only waitbutton,
             // promptbutton and yesorno hand ownership to the player.
-            let field_snapshot = match runtime_shell.shell.snapshot() {
+            let field_snapshot = match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     record_visible_runtime_error(&mut runtime_shell, &error);
@@ -1161,22 +1196,46 @@ fn apply_keyboard_input(
         return;
     }
 
-    let shell_consumes_a = match has_visible_shell_a_action(&mut runtime_shell) {
-        Ok(consumes) => consumes,
-        Err(error) => {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-            return;
-        }
-    };
-    let shell_consumes_b = has_visible_shell_b_action(&mut runtime_shell);
-    let shell_consumes_start = has_visible_shell_start_action(&mut runtime_shell);
-    let shell_consumes_select = has_visible_shell_select_action(&mut runtime_shell);
-    let shell_consumes_direction = has_visible_shell_direction_action(&mut runtime_shell);
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let plain_input = !shift_pressed && !alt_pressed && !ctrl_pressed;
+    // Input ownership queries inspect the semantic snapshot and several
+    // catalogs. Do not run all five on every idle LCD frame: only the
+    // physically requested control needs routing.
+    let shell_consumes_a = if plain_input && keys.pressed(KeyCode::KeyZ) {
+        match has_visible_shell_a_action(&mut runtime_shell) {
+            Ok(consumes) => consumes,
+            Err(error) => {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
+        }
+    } else {
+        false
+    };
+    let shell_consumes_b = plain_input
+        && keys.pressed(KeyCode::KeyX)
+        && has_visible_shell_b_action(&mut runtime_shell);
+    let shell_consumes_start = plain_input
+        && keys.pressed(KeyCode::Enter)
+        && has_visible_shell_start_action(&mut runtime_shell);
+    let shell_consumes_select = !alt_pressed
+        && !ctrl_pressed
+        && keys.pressed(KeyCode::ShiftRight)
+        && has_visible_shell_select_action(&mut runtime_shell);
+    let direction_requested = plain_input
+        && [
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+        ]
+        .into_iter()
+        .any(|key| keys.pressed(key));
+    let shell_consumes_direction = direction_requested
+        && has_visible_shell_direction_action(&mut runtime_shell);
     let visible_shell_pressed = (plain_input
         && ((keys.just_pressed(KeyCode::KeyZ) && shell_consumes_a)
             || (keys.just_pressed(KeyCode::KeyX) && shell_consumes_b)
@@ -1354,6 +1413,7 @@ fn apply_keyboard_input(
     let mut final_frame = None;
     let mut movement_scene_before_final_tick = None;
     let mut tick_error = None;
+    let mut player_facing_changed = false;
     for _ in 0..elapsed_ticks {
         let movement_scene_before_tick = if buttons
             .iter()
@@ -1366,7 +1426,7 @@ fn apply_keyboard_input(
                 .forced_movement_direction()
                 .is_some()
         {
-            match runtime_shell.shell.snapshot() {
+            match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
                     tick_error = Some(error);
@@ -1409,12 +1469,19 @@ fn apply_keyboard_input(
             .overworld
             .object_facings
             .clone();
-        match runtime_shell
-            .shell
-            .tick_with_rtc_after_vblank(buttons.clone(), rtc_sample)
-            .map(Clone::clone)
-        {
+        let player_facing_before_tick = runtime_shell.shell.session().overworld.player.facing;
+        let tick = if rtc_changed {
+            rtc_changed = false;
+            runtime_shell
+                .shell
+                .tick_with_rtc_after_vblank(buttons.clone(), rtc_sample)
+        } else {
+            runtime_shell.shell.tick_after_vblank(buttons.clone())
+        };
+        match tick.map(Clone::clone) {
             Ok(frame) => {
+                player_facing_changed |= runtime_shell.shell.session().overworld.player.facing
+                    != player_facing_before_tick;
                 let step_event_boundary = frame.step_events.as_ref().is_some_and(|events| {
                     events.repel_expired.is_some()
                         || events.egg_hatched
@@ -1597,6 +1664,8 @@ fn apply_keyboard_input(
             // produced a visible/gameplay mutation; script handlers below
             // invalidate their own mutations through `run_bevy_action`.
             if frame.movement.is_some()
+                || player_facing_changed
+                || direction_held
                 || frame.autonomous_objects_changed
                 || frame.step_events.is_some()
                 || frame.coord_event.is_some()
@@ -1860,6 +1929,7 @@ fn apply_keyboard_input(
     } else if execute_trainer_sight_script {
         run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
     } else if execute_interaction_script {
+        runtime_shell.overworld_interaction_consumed_a = true;
         run_bevy_action(&mut runtime_shell, execute_last_interaction_script);
     } else if execute_wild_battle_boundary {
         if let Err(error) = prepare_visible_battle_entry(&mut runtime_shell) {
@@ -1890,8 +1960,7 @@ fn apply_keyboard_input(
             }
         }
     } else if runtime_shell.pending_overworld_step_boundary.is_none()
-        && (input_active
-            || runtime_shell.active_script_cursor.is_some()
+        && (runtime_shell.active_script_cursor.is_some()
             || runtime_shell.shell.has_pending_script_work())
     {
         // Do not take an additional snapshot/scan solely to discover pending
@@ -2835,11 +2904,12 @@ fn apply_runtime_hotkeys(
         if held.len() == 1 {
             let (key, direction) = held[0];
             let newly_pressed = keys.just_pressed(key);
+            let changed_direction = runtime_shell.ui_held_direction != Some(direction);
             let repeated = !newly_pressed
                 && runtime_shell.ui_held_direction == Some(direction)
                 && elapsed_input_ticks > 0
                 && runtime_shell.ui_direction_repeat_ticks == 0;
-            if newly_pressed || repeated {
+            if newly_pressed || changed_direction || repeated {
                 dispatch_visible_options_direction(&mut runtime_shell, direction);
                 runtime_shell.ui_held_direction = Some(direction);
                 runtime_shell.ui_direction_repeat_ticks = if newly_pressed { 15 } else { 4 };
@@ -3216,7 +3286,12 @@ fn apply_visible_runtime_controls(
         runtime_shell.ui_held_direction = None;
         runtime_shell.ui_direction_repeat_ticks = 0;
     }
-    if keys.just_pressed(KeyCode::KeyZ) && plain_input {
+    let overworld_interaction_consumed_this_press =
+        std::mem::take(&mut runtime_shell.overworld_interaction_consumed_a);
+    if keys.just_pressed(KeyCode::KeyZ)
+        && plain_input
+        && !overworld_interaction_consumed_this_press
+    {
         match has_visible_shell_a_action(runtime_shell) {
             Ok(true) => run_bevy_action(runtime_shell, press_visible_a_button),
             Ok(false) => {}
@@ -3428,7 +3503,7 @@ fn cached_runtime_snapshot(
             return Ok(Arc::clone(snapshot));
         }
     }
-    let snapshot = Arc::new(runtime_shell.shell.snapshot()?);
+    let snapshot = Arc::new(runtime_shell.shell.presentation_snapshot()?);
     runtime_shell.cached_snapshot = Some((runtime_shell.snapshot_revision, Arc::clone(&snapshot)));
     Ok(snapshot)
 }
@@ -3442,7 +3517,7 @@ fn advance_visible_script_until_player_boundary(
         if close_visible_noninteractive_runtime_surface(runtime_shell)? {
             continue;
         }
-        let snapshot = runtime_shell.shell.snapshot()?;
+        let snapshot = runtime_shell.shell.presentation_snapshot()?;
         if visible_player_boundary(runtime_shell, &snapshot)
             || !has_visible_auto_script_action(runtime_shell, &snapshot)
         {
@@ -3463,7 +3538,8 @@ fn visible_player_boundary(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
-    runtime_shell.visible_script_delay_frames.is_some_and(|frames| frames > 0)
+    runtime_shell.field_text_reveal.is_some()
+        || runtime_shell.visible_script_delay_frames.is_some_and(|frames| frames > 0)
         || runtime_shell
             .visible_earthquake
             .as_ref()
@@ -3572,7 +3648,7 @@ fn close_visible_noninteractive_runtime_surface(
     if runtime_shell.pokegear_menu_open {
         return Ok(false);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let Some(menu) = &snapshot.ui.menu else {
         return Ok(false);
     };
@@ -3613,7 +3689,7 @@ fn finish_visible_empty_battle_reward_presentation(
     {
         return Ok(false);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if snapshot.battle.is_none() {
         runtime_shell.battle_message_scene = None;
         runtime_shell.battle_hp_tween = None;
@@ -3783,7 +3859,7 @@ fn cancel_visible_field_evolution(runtime_shell: &mut BevyRuntimeShell) -> Resul
     if runtime_shell.field_notice.as_deref() != Some(cancellation.trigger_message.as_str()) {
         return Ok(false);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot) {
         return Ok(false);
     }
@@ -4050,7 +4126,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             queue_visible_shell_sound_effect(runtime_shell, "SFX_THROW_BALL")?;
         }
         if starts_capture_pokedex_entry {
-            let snapshot = runtime_shell.shell.snapshot()?;
+            let snapshot = runtime_shell.shell.presentation_snapshot()?;
             let species_id = snapshot
                 .battle
                 .as_ref()
@@ -4234,7 +4310,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             {
                 runtime_shell.visible_capture_animation = None;
             }
-            if runtime_shell.shell.snapshot()?.pending_move_learn.is_some() {
+            if runtime_shell.shell.presentation_snapshot()?.pending_move_learn.is_some() {
                 // Move learning is a retained battle-result surface. Do not
                 // expose the overworld between its announcement and the
                 // delete/stop decision.
@@ -4258,7 +4334,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 return resolve_visible_battle_move(runtime_shell, slot);
             }
             let terminal_scene = runtime_shell.battle_message_scene.is_some()
-                && runtime_shell.shell.snapshot()?.battle.is_none();
+                && runtime_shell.shell.presentation_snapshot()?.battle.is_none();
             runtime_shell.battle_message_scene = None;
             let resume_trainer_settlement = runtime_shell.battle_shift_prompt_cursor.is_none()
                 && runtime_shell.battle_switch_cursor.is_none()
@@ -4320,7 +4396,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.pending_gender_selection.is_some() {
         return confirm_visible_gender_selection(runtime_shell);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if runtime_shell.pack_toss.is_some() {
         return confirm_visible_pack_toss(runtime_shell);
     }
@@ -4359,6 +4435,16 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         )
         .context("held-item swap prompt requires a valid cursor")?;
         return resolve_visible_held_item_swap_prompt(runtime_shell, selected == 0);
+    }
+    // YesNoBox is a modal window layered over the field textbox. It owns A
+    // before the underlying text printer/page. Handling the printer first
+    // consumed the player's confirmation by advancing stale Mom text, then
+    // re-entered the same DST question on the next press.
+    if snapshot.ui.pending_yes_no.is_some() {
+        if !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot) {
+            return Ok(());
+        }
+        return confirm_visible_pending_yes_no(runtime_shell);
     }
     if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
         && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
@@ -4475,9 +4561,6 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.pending_pc_release.is_some() {
         return confirm_visible_pc_release_prompt(runtime_shell);
     }
-    if snapshot.ui.pending_yes_no.is_some() {
-        return confirm_visible_pending_yes_no(runtime_shell);
-    }
     if snapshot.ui.pending_text_wait.is_some() {
         return advance_visible_pending_text_wait(runtime_shell);
     }
@@ -4541,6 +4624,12 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if snapshot.pending_move_learn.is_some() {
         return confirm_visible_pending_move_learn(runtime_shell);
     }
+    // Full-screen menus retain input ownership even when their originating
+    // battle is still authoritative underneath them. NewPokedexEntry is the
+    // canonical case: its internal pages must finish before battle can resume.
+    if runtime_shell.pokedex_menu_open {
+        return press_visible_pokedex_a_button(runtime_shell);
+    }
     if snapshot.battle.is_some() {
         if runtime_shell.battle_shift_prompt_cursor.is_some() {
             return confirm_visible_trainer_shift_prompt(runtime_shell);
@@ -4601,44 +4690,6 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         return open_visible_field_pack_action_menu(runtime_shell);
     }
-    if runtime_shell.pokedex_menu_open {
-        if runtime_shell.pokedex_detail_open {
-            let snapshot = runtime_shell.shell.snapshot()?;
-            let species = selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
-            let page_count = snapshot
-                .presentation
-                .pokedex_entries
-                .get(&species.species_id)
-                .map(|entry| entry.pages.len().max(1))
-                .unwrap_or(1);
-            if runtime_shell.pokedex_scripted_entry
-                && runtime_shell.pokedex_detail_page + 1 >= page_count
-            {
-                record_visible_runtime_action(runtime_shell, "pokedex:scripted_entry:close")?;
-                close_visible_pokedex_menu(runtime_shell);
-                if runtime_shell.pending_standard_capture.is_some() {
-                    runtime_shell.pending_name_choice = Some(VisibleNameChoice {
-                        options: vec!["YES".to_string(), "NO".to_string()],
-                        selected: 0,
-                    });
-                    set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
-                    mark_runtime_snapshot_dirty(runtime_shell);
-                    return Ok(());
-                }
-                continue_visible_script_after_prompt(runtime_shell)?;
-                return Ok(());
-            }
-            runtime_shell.pokedex_detail_page =
-                (runtime_shell.pokedex_detail_page + 1) % page_count;
-            let page_number = runtime_shell.pokedex_detail_page + 1;
-            record_visible_runtime_action(
-                runtime_shell,
-                format!("pokedex:detail:page:{page_number}"),
-            )?;
-            return Ok(());
-        }
-        return inspect_visible_pokedex_selection(runtime_shell);
-    }
     if runtime_shell.pokegear_menu_open {
         if runtime_shell.pokegear_page == PokegearPage::Radio {
             let Some(station) = runtime_shell.pokegear_radio_station.as_deref() else {
@@ -4679,7 +4730,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             return attach_visible_mailbox_mail(runtime_shell);
         }
         if runtime_shell.pending_script_party_selection.is_some() {
-            let snapshot = runtime_shell.shell.snapshot()?;
+            let snapshot = runtime_shell.shell.presentation_snapshot()?;
             let party_index = snapshot
                 .party
                 .slots
@@ -4697,7 +4748,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             return confirm_visible_party_give_take(runtime_shell);
         }
         if runtime_shell.party_summary_open {
-            let snapshot = runtime_shell.shell.snapshot()?;
+            let snapshot = runtime_shell.shell.presentation_snapshot()?;
             let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
             if slot.pokemon.is_egg || runtime_shell.party_summary_page >= 3 {
                 record_visible_runtime_action(runtime_shell, "party:summary:close")?;
@@ -4863,7 +4914,12 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
     if runtime_shell.pending_gender_selection.is_some() {
         return Ok(true);
     }
-    let snapshot = cached_runtime_snapshot(runtime_shell)?;
+    // Input ownership must never be decided from the presentation cache. A
+    // room callback can drain its script events after the last rendered
+    // snapshot; treating that stale snapshot as modal steals the player's
+    // next A press from the authoritative overworld interaction transaction.
+    // This path is evaluated for physical input routing, not bitmap rendering.
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if snapshot.ui.pending_yes_no.is_some()
         || runtime_shell.pending_phone_prompt.is_some()
         || snapshot.ui.pending_text_wait.is_some()
@@ -4909,18 +4965,53 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
         || runtime_shell.start_menu_cursor.is_some()
         || visible_menu_has_selectable_options(&snapshot)
         || snapshot.battle.is_some()
-        || runtime_shell
-            .shell
-            .last_frame()
-            .and_then(|frame| frame.interaction.as_ref())
-            .is_some()
     {
         return Ok(true);
     }
-    Ok(runtime_shell
-        .shell
-        .current_overworld_interaction_checked()?
-        .is_some())
+    // Ordinary map/NPC collisions belong to the authoritative overworld
+    // joypad transaction. Claiming them as Bevy-shell A actions prevents the
+    // same frame from ever reaching `execute_interaction_script`, producing a
+    // sound/no-dialogue no-op after walking. Only modal surfaces above own A.
+    Ok(false)
+}
+
+fn press_visible_pokedex_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.pokedex_detail_open {
+        let snapshot = runtime_shell.shell.presentation_snapshot()?;
+        let species = selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
+        let page_count = snapshot
+            .presentation
+            .pokedex_entries
+            .get(&species.species_id)
+            .map(|entry| entry.pages.len().max(1))
+            .unwrap_or(1);
+        if runtime_shell.pokedex_scripted_entry
+            && runtime_shell.pokedex_detail_page + 1 >= page_count
+        {
+            record_visible_runtime_action(runtime_shell, "pokedex:scripted_entry:close")?;
+            close_visible_pokedex_menu(runtime_shell);
+            if runtime_shell.pending_standard_capture.is_some() {
+                runtime_shell.pending_name_choice = Some(VisibleNameChoice {
+                    options: vec!["YES".to_string(), "NO".to_string()],
+                    selected: 0,
+                });
+                set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
+            continue_visible_script_after_prompt(runtime_shell)?;
+            return Ok(());
+        }
+        runtime_shell.pokedex_detail_page =
+            (runtime_shell.pokedex_detail_page + 1) % page_count;
+        let page_number = runtime_shell.pokedex_detail_page + 1;
+        record_visible_runtime_action(
+            runtime_shell,
+            format!("pokedex:detail:page:{page_number}"),
+        )?;
+        return Ok(());
+    }
+    inspect_visible_pokedex_selection(runtime_shell)
 }
 
 fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -5051,7 +5142,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.held_item_swap_prompt {
         return resolve_visible_held_item_swap_prompt(runtime_shell, false);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
         && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
     {
@@ -5130,7 +5221,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if snapshot.pending_move_learn.is_some() {
         return cancel_visible_pending_move_learn(runtime_shell);
     }
@@ -5401,7 +5492,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell.pokedex_detail_open {
             record_visible_runtime_action(runtime_shell, "pokedex:detail:close")?;
             if runtime_shell.pokedex_scripted_entry {
-                let snapshot = runtime_shell.shell.snapshot()?;
+                let snapshot = runtime_shell.shell.presentation_snapshot()?;
                 let species =
                     selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
                 let page_count = snapshot
@@ -5940,7 +6031,7 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    if runtime_shell.shell.snapshot()?.battle.is_some() {
+    if runtime_shell.shell.presentation_snapshot()?.battle.is_some() {
         if runtime_shell.battle_move_cursor.is_some() {
             return select_visible_battle_move_swap(runtime_shell);
         }
@@ -5971,7 +6062,7 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     if runtime_shell.tmhm_cursor.is_some() {
         return open_visible_tmhm_teach_prompt(runtime_shell);
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let Some(item_id) = snapshot.progression.registered_key_item.clone() else {
         record_visible_runtime_action(runtime_shell, "pack:key_item:select:none_registered")?;
         runtime_shell
@@ -6977,7 +7068,7 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
         if close_visible_noninteractive_runtime_surface(runtime_shell)? {
             continue;
         }
-        let snapshot = runtime_shell.shell.snapshot()?;
+        let snapshot = runtime_shell.shell.presentation_snapshot()?;
         if advance_visible_next_pending_script_request(runtime_shell, &snapshot)? {
             return Ok(());
         }
@@ -7108,7 +7199,7 @@ fn toggle_visible_start_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         close_visible_start_menu(runtime_shell);
         return Ok(());
     }
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if runtime_shell.storage_cursor.is_some()
         && snapshot.battle.is_none()
         && snapshot.pending_shop.is_none()

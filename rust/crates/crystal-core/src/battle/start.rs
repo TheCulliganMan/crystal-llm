@@ -2,22 +2,20 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::battle::turn::{BattleSide, switch_battle_combat_pokemon};
 use crate::models::{
     Dv, Move, Pokemon, PokemonBuildError, PokemonSpecies, Trainer, TrainerCatalog,
     TrainerPartyPokemon, calculate_stats, create_pokemon_from_known_dvs,
 };
-use crate::battle::turn::{BattleSide, switch_battle_combat_pokemon};
 use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, Random};
 use crate::state::{
-    BattleMemory, EventFlagError, GameState, PendingStaticWildBattleTerminal,
-    RoamingPokemonState,
+    BattleMemory, EventFlagError, GameState, PendingStaticWildBattleTerminal, RoamingPokemonState,
 };
 use crate::systems::economy::CurrencyCatalog;
 use crate::systems::experience::GrowthRateCatalog;
 use crate::systems::learnsets::SpeciesLearnsets;
 use crate::systems::special_routines::{
-    MagikarpLengthEntry, calculate_magikarp_length_from_dv_bytes,
-    magikarp_length_table_issues,
+    MagikarpLengthEntry, calculate_magikarp_length_from_dv_bytes, magikarp_length_table_issues,
 };
 use crate::world::session::WildEncounterRoll;
 
@@ -404,11 +402,7 @@ pub enum RoamingWildBattleMaterializationError {
         metadata: String,
     },
     #[error("roaming slot {slot} level {saved} does not match encounter level {encounter}")]
-    LevelMismatch {
-        slot: u8,
-        saved: u8,
-        encounter: u8,
-    },
+    LevelMismatch { slot: u8, saved: u8, encounter: u8 },
     #[error("roaming Pokemon build error: {0}")]
     PokemonBuild(#[from] PokemonBuildError),
     #[error("roaming battle divider source failed: {error}")]
@@ -425,7 +419,9 @@ pub enum WildBattleMaterializationError {
     UnresolvedEncounter,
     #[error("Unown encounters require at least one unlocked letter set")]
     NoUnlockedUnownLetters,
-    #[error("wild encounter species {encounter} does not match supplied species metadata {metadata}")]
+    #[error(
+        "wild encounter species {encounter} does not match supplied species metadata {metadata}"
+    )]
     MetadataSpeciesMismatch { encounter: String, metadata: String },
     #[error("wild encounter divider source: {error}")]
     Divider { error: String },
@@ -603,19 +599,19 @@ where
     let item = if battle_type == "BATTLETYPE_FORCEITEM" {
         species.item1.clone()
     } else {
-        let roll = rng
-            .battle_random()
-            .map_err(|error| WildBattleMaterializationError::Divider {
-                error: error.to_string(),
-            })?;
-        if roll < WILD_NO_ITEM_THRESHOLD {
-            None
-        } else {
-            let rare = rng
-                .battle_random()
+        let roll =
+            rng.battle_random()
                 .map_err(|error| WildBattleMaterializationError::Divider {
                     error: error.to_string(),
                 })?;
+        if roll < WILD_NO_ITEM_THRESHOLD {
+            None
+        } else {
+            let rare =
+                rng.battle_random()
+                    .map_err(|error| WildBattleMaterializationError::Divider {
+                        error: error.to_string(),
+                    })?;
             if rare < WILD_RARE_ITEM_THRESHOLD {
                 species.item2.clone()
             } else {
@@ -625,16 +621,16 @@ where
     };
 
     let dvs = loop {
-        let attack_defense = rng
-            .battle_random()
-            .map_err(|error| WildBattleMaterializationError::Divider {
-                error: error.to_string(),
-            })?;
-        let speed_special = rng
-            .battle_random()
-            .map_err(|error| WildBattleMaterializationError::Divider {
-                error: error.to_string(),
-            })?;
+        let attack_defense =
+            rng.battle_random()
+                .map_err(|error| WildBattleMaterializationError::Divider {
+                    error: error.to_string(),
+                })?;
+        let speed_special =
+            rng.battle_random()
+                .map_err(|error| WildBattleMaterializationError::Divider {
+                    error: error.to_string(),
+                })?;
         let dvs = Dv::from_non_hp(
             attack_defense >> 4,
             attack_defense & 0x0f,
@@ -642,10 +638,7 @@ where
             speed_special & 0x0f,
         );
         if resolved.encounter.species == "UNOWN"
-            && !unown_letter_is_unlocked(
-                unown_letter_from_dvs(dvs),
-                unlocked_unown_sets,
-            )
+            && !unown_letter_is_unlocked(unown_letter_from_dvs(dvs), unlocked_unown_sets)
         {
             continue;
         }
@@ -744,9 +737,10 @@ where
             expected_slot: roaming_slot,
         });
     }
-    let saved_species = roaming.species.as_deref().ok_or(
-        RoamingWildBattleMaterializationError::InactiveSlot { slot: roaming_slot },
-    )?;
+    let saved_species = roaming
+        .species
+        .as_deref()
+        .ok_or(RoamingWildBattleMaterializationError::InactiveSlot { slot: roaming_slot })?;
     if saved_species != resolved.encounter.species {
         return Err(RoamingWildBattleMaterializationError::SpeciesMismatch {
             slot: roaming_slot,
@@ -805,19 +799,19 @@ where
         }
     }
 
-    let item_roll = rng
-        .battle_random()
-        .map_err(|error| RoamingWildBattleMaterializationError::Divider {
-            error: error.to_string(),
-        })?;
-    let item = if item_roll < WILD_NO_ITEM_THRESHOLD {
-        None
-    } else {
-        let rare_roll = rng
-            .battle_random()
+    let item_roll =
+        rng.battle_random()
             .map_err(|error| RoamingWildBattleMaterializationError::Divider {
                 error: error.to_string(),
             })?;
+    let item = if item_roll < WILD_NO_ITEM_THRESHOLD {
+        None
+    } else {
+        let rare_roll = rng.battle_random().map_err(|error| {
+            RoamingWildBattleMaterializationError::Divider {
+                error: error.to_string(),
+            }
+        })?;
         if rare_roll < WILD_RARE_ITEM_THRESHOLD {
             species.item2.clone()
         } else {
@@ -827,16 +821,16 @@ where
 
     let mut roaming_after = roaming.clone();
     let dvs = if roaming.hp == 0 {
-        let speed_special = rng
-            .battle_random()
-            .map_err(|error| RoamingWildBattleMaterializationError::Divider {
+        let speed_special = rng.battle_random().map_err(|error| {
+            RoamingWildBattleMaterializationError::Divider {
                 error: error.to_string(),
-            })?;
-        let attack_defense = rng
-            .battle_random()
-            .map_err(|error| RoamingWildBattleMaterializationError::Divider {
+            }
+        })?;
+        let attack_defense = rng.battle_random().map_err(|error| {
+            RoamingWildBattleMaterializationError::Divider {
                 error: error.to_string(),
-            })?;
+            }
+        })?;
         roaming_after.dvs_be = [attack_defense, speed_special];
         Dv::from_non_hp(
             attack_defense >> 4,
@@ -847,22 +841,14 @@ where
     } else {
         saved_dvs
     };
-    let mut enemy = create_pokemon_from_known_dvs(
-        species,
-        roaming.level,
-        dvs,
-        learnsets,
-        moves,
-        growth_rates,
-    )?;
+    let mut enemy =
+        create_pokemon_from_known_dvs(species, roaming.level, dvs, learnsets, moves, growth_rates)?;
     enemy.original_trainer_name = "WILD".to_string();
     enemy.original_trainer_id = 0;
     enemy.item = item;
     if roaming.hp == 0 {
         roaming_after.hp = u8::try_from(enemy.hp).map_err(|_| {
-            RoamingWildBattleMaterializationError::FreshHpByteOverflow {
-                max_hp: enemy.hp,
-            }
+            RoamingWildBattleMaterializationError::FreshHpByteOverflow { max_hp: enemy.hp }
         })?;
     } else {
         enemy.hp = u16::from(roaming.hp);
@@ -1428,20 +1414,15 @@ pub fn advance_active_trainer_battle(
         });
     }
     enemy_party[current_enemy_index] = enemy_pokemon.clone();
-    let next = enemy_party
-        .iter()
-        .enumerate()
-        .find_map(|(index, pokemon)| {
-            (index != current_enemy_index && pokemon.hp > 0)
-                .then_some((index, pokemon.clone()))
-        });
+    let next = enemy_party.iter().enumerate().find_map(|(index, pokemon)| {
+        (index != current_enemy_index && pokemon.hp > 0).then_some((index, pokemon.clone()))
+    });
     if let Some((index, pokemon)) = next {
         *enemy_pokemon = pokemon.clone();
         state.battle_active_enemy_party_index = Some(index);
         if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
-            switch_battle_combat_pokemon(combat, BattleSide::Enemy, index).map_err(|_| {
-                ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index }
-            })?;
+            switch_battle_combat_pokemon(combat, BattleSide::Enemy, index)
+                .map_err(|_| ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
         }
         state.pokedex.record_seen_pokemon(&pokemon);
         Ok(TrainerBattleAdvanceOutcome {
@@ -1650,7 +1631,8 @@ pub fn clear_active_battle_slots(state: &mut GameState) {
 const ASM_MAX_BATTLE_MONEY: u32 = 0x00ff_ffff;
 
 fn double_asm_battle_money(amount: u32) -> u32 {
-    amount.min(ASM_MAX_BATTLE_MONEY)
+    amount
+        .min(ASM_MAX_BATTLE_MONEY)
         .saturating_mul(2)
         .min(ASM_MAX_BATTLE_MONEY)
 }
@@ -1938,9 +1920,8 @@ mod tests {
 
         // Item roll: none. First DVs form A (locked); second DVs form M
         // (unlocked by bit 1). Only the two DV bytes repeat.
-        let mut divider = ReplayDivider::new(divider_trace_for_sub_values([
-            0, 0x00, 0x00, 0x40, 0x00,
-        ]));
+        let mut divider =
+            ReplayDivider::new(divider_trace_for_sub_values([0, 0x00, 0x00, 0x40, 0x00]));
         let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
         let enemy = materialize_non_roaming_wild_battle_with_rng(
             &encounter,
@@ -1968,11 +1949,7 @@ mod tests {
         let species = species_with_items();
         for (values, expected_item, expected_calls) in [
             (vec![0, 0x34, 0xab], None, 3_usize),
-            (
-                vec![200, 10, 0x34, 0xab],
-                Some("GOLD_BERRY"),
-                4_usize,
-            ),
+            (vec![200, 10, 0x34, 0xab], Some("GOLD_BERRY"), 4_usize),
         ] {
             let trace = divider_trace_for_sub_values(values);
             assert_eq!(trace.len(), expected_calls * 2);
@@ -1985,10 +1962,7 @@ mod tests {
             );
             let materialized = materialized.expect("fresh roaming LoadEnemyMon materialization");
             assert_eq!(remaining, 0);
-            assert_eq!(
-                materialized.enemy_pokemon.item.as_deref(),
-                expected_item
-            );
+            assert_eq!(materialized.enemy_pokemon.item.as_deref(), expected_item);
             assert_eq!(
                 materialized.enemy_pokemon.dvs,
                 Dv::from_non_hp(0x0a, 0x0b, 0x03, 0x04)
@@ -2021,10 +1995,7 @@ mod tests {
                 materialized.expect("initialized roaming LoadEnemyMon materialization");
             assert_eq!(remaining, 0);
             assert_eq!(materialized.enemy_pokemon.hp, 10);
-            assert_eq!(
-                materialized.enemy_pokemon.item.as_deref(),
-                expected_item
-            );
+            assert_eq!(materialized.enemy_pokemon.item.as_deref(), expected_item);
             assert_eq!(
                 materialized.enemy_pokemon.dvs,
                 Dv::from_non_hp(0x0a, 0x0b, 0x03, 0x04)
@@ -2038,12 +2009,12 @@ mod tests {
         let roaming = roaming_state(0);
         let species = species_with_items();
         let (short, short_remaining) = materialize_roaming_with_trace(
-                &roaming_encounter(),
-                0,
-                &roaming,
-                &species,
-                &[0, 0, 0, 0, 0],
-            );
+            &roaming_encounter(),
+            0,
+            &roaming,
+            &species,
+            &[0, 0, 0, 0, 0],
+        );
         assert!(matches!(
             short,
             Err(RoamingWildBattleMaterializationError::Divider { .. })
@@ -2053,13 +2024,8 @@ mod tests {
 
         let mut trace = divider_trace_for_sub_values([0, 0x34, 0xab]);
         trace.push(99);
-        let (materialized, remaining) = materialize_roaming_with_trace(
-                &roaming_encounter(),
-                0,
-                &roaming,
-                &species,
-                &trace,
-            );
+        let (materialized, remaining) =
+            materialize_roaming_with_trace(&roaming_encounter(), 0, &roaming, &species, &trace);
         assert!(materialized.is_ok());
         assert_eq!(remaining, 1);
         assert_eq!(roaming, roaming_state(0));
@@ -2075,14 +2041,7 @@ mod tests {
              roaming_slot: u8,
              roaming: &RoamingPokemonState,
              species: &PokemonSpecies| {
-                materialize_roaming_with_trace(
-                    encounter,
-                    roaming_slot,
-                    roaming,
-                    species,
-                    &[],
-                )
-                .0
+                materialize_roaming_with_trace(encounter, roaming_slot, roaming, species, &[]).0
             };
 
         assert!(matches!(
@@ -2122,12 +2081,7 @@ mod tests {
         impossible_hp.hp = u8::MAX;
         assert!(matches!(
             assert_empty_trace_error(&encounter, 0, &impossible_hp, &species),
-            Err(
-                RoamingWildBattleMaterializationError::SavedHpExceedsMaximum {
-                    hp: u8::MAX,
-                    ..
-                }
-            )
+            Err(RoamingWildBattleMaterializationError::SavedHpExceedsMaximum { hp: u8::MAX, .. })
         ));
         assert_eq!(roaming, roaming_state(10));
     }
@@ -2294,11 +2248,10 @@ mod tests {
             .expect("store fainted lead");
         state
             .storage
-            .register_capture_in_box(0, Pokemon::new_for_tests(
-                species(),
-                3,
-                Dv::from_non_hp(1, 1, 1, 1),
-            ))
+            .register_capture_in_box(
+                0,
+                Pokemon::new_for_tests(species(), 3, Dv::from_non_hp(1, 1, 1, 1)),
+            )
             .expect("store active party mon");
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
@@ -2335,11 +2288,10 @@ mod tests {
         let mut state = GameState::default();
         state
             .storage
-            .register_capture_in_box(0, Pokemon::new_for_tests(
-                species(),
-                5,
-                Dv::from_non_hp(1, 1, 1, 1),
-            ))
+            .register_capture_in_box(
+                0,
+                Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(1, 1, 1, 1)),
+            )
             .expect("store active party mon");
         let mut rng = Random::new(1);
         let start = wild_battle_start_from_encounter(
@@ -2417,16 +2369,22 @@ mod tests {
     fn every_battle_exit_preserves_surviving_sleep_and_normalizes_toxic_status() {
         for (name, exit, expected_result) in [
             ("win", deactivate_battle_after_win as fn(&mut GameState), 0),
-            ("draw", deactivate_battle_after_draw as fn(&mut GameState), 2),
-            ("loss", deactivate_battle_after_loss as fn(&mut GameState), 1),
+            (
+                "draw",
+                deactivate_battle_after_draw as fn(&mut GameState),
+                2,
+            ),
+            (
+                "loss",
+                deactivate_battle_after_loss as fn(&mut GameState),
+                1,
+            ),
         ] {
             let mut state = GameState::default();
-            let mut sleeping =
-                Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(1, 1, 1, 1));
+            let mut sleeping = Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(1, 1, 1, 1));
             sleeping.status = Some("SLEEP".to_string());
             sleeping.sleep_turns = 3;
-            let mut toxic =
-                Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(2, 2, 2, 2));
+            let mut toxic = Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(2, 2, 2, 2));
             toxic.status = Some("BAD_POISON".to_string());
             state.storage.party.pokemon[0] = Some(sleeping);
             state.storage.party.pokemon[1] = Some(toxic);
@@ -2437,20 +2395,20 @@ mod tests {
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
                 map_name: "ROUTE_29".to_string(),
                 roaming_slot: None,
-                enemy_pokemon: Pokemon::new_for_tests(
-                    species(),
-                    5,
-                    Dv::from_non_hp(3, 3, 3, 3),
-                ),
+                enemy_pokemon: Pokemon::new_for_tests(species(), 5, Dv::from_non_hp(3, 3, 3, 3)),
                 enemy_party: Vec::new(),
             };
 
             exit(&mut state);
 
-            let sleeping = state.storage.party.pokemon[0].as_ref().expect("sleeping survivor");
+            let sleeping = state.storage.party.pokemon[0]
+                .as_ref()
+                .expect("sleeping survivor");
             assert_eq!(sleeping.status.as_deref(), Some("SLEEP"), "{name}");
             assert_eq!(sleeping.sleep_turns, 3, "{name}");
-            let toxic = state.storage.party.pokemon[1].as_ref().expect("toxic survivor");
+            let toxic = state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("toxic survivor");
             assert_eq!(toxic.status.as_deref(), Some("POISON"), "{name}");
             assert_eq!(state.battle_result, expected_result, "{name}");
         }
@@ -2460,7 +2418,10 @@ mod tests {
     fn active_battle_party_switch_validates_target_before_mutation() {
         let mut state = GameState::default();
         let first = Pokemon::new_for_tests(species(), 2, Dv::from_non_hp(0, 0, 0, 0));
-        state.storage.register_capture_in_box(0, first).expect("store first");
+        state
+            .storage
+            .register_capture_in_box(0, first)
+            .expect("store first");
         let mut fainted = Pokemon::new_for_tests(species(), 3, Dv::from_non_hp(1, 1, 1, 1));
         fainted.hp = 0;
         state
@@ -2482,11 +2443,10 @@ mod tests {
 
         state
             .storage
-            .register_capture_in_box(0, Pokemon::new_for_tests(
-                species(),
-                4,
-                Dv::from_non_hp(2, 2, 2, 2),
-            ))
+            .register_capture_in_box(
+                0,
+                Pokemon::new_for_tests(species(), 4, Dv::from_non_hp(2, 2, 2, 2)),
+            )
             .expect("store third");
 
         assert_eq!(switch_active_battle_party_index(&mut state, 2), Ok(2));
@@ -2498,8 +2458,7 @@ mod tests {
         let mut state = GameState::default();
         let mut fainted = Pokemon::new_for_tests(species(), 2, Dv::from_non_hp(0, 0, 0, 0));
         fainted.hp = 0;
-        let replacement =
-            Pokemon::new_for_tests(species(), 4, Dv::from_non_hp(2, 2, 2, 2));
+        let replacement = Pokemon::new_for_tests(species(), 4, Dv::from_non_hp(2, 2, 2, 2));
         state
             .storage
             .register_capture_in_box(0, fainted.clone())
@@ -2617,8 +2576,8 @@ mod tests {
                 first.clone(),
                 state.rng_seed,
             )
-                .with_parties(vec![player], vec![first.clone(), second.clone()])
-                .with_party_indices(0, 0),
+            .with_parties(vec![player], vec![first.clone(), second.clone()])
+            .with_party_indices(0, 0),
         );
 
         assert_eq!(
@@ -2962,7 +2921,10 @@ mod tests {
         assert_eq!(start.enemy_pokemon.item.as_deref(), Some("GOLD_BERRY"));
         assert_eq!(start.enemy_pokemon.dvs, Dv::from_non_hp(1, 0, 10, 11));
         assert_eq!(divider.consumed(), 8);
-        assert_eq!(start.random_state_after, CrystalRandomState { add: 0, sub: 0xab });
+        assert_eq!(
+            start.random_state_after,
+            CrystalRandomState { add: 0, sub: 0xab }
+        );
     }
 
     #[test]
@@ -3330,12 +3292,9 @@ mod tests {
         let max_money = 999_999;
         let currency_constants = currency_constants(max_money);
         state.money = max_money - 100;
-        let outcome = complete_trainer_battle_with_empty_trace(
-            &mut state,
-            &currency_constants,
-            &completion,
-        )
-            .expect("completion resolves");
+        let outcome =
+            complete_trainer_battle_with_empty_trace(&mut state, &currency_constants, &completion)
+                .expect("completion resolves");
         assert!(outcome.continued_after_battle);
         assert_eq!(outcome.prize_money, 1400);
         assert_eq!(outcome.money_after, max_money);

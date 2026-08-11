@@ -1847,7 +1847,7 @@
         assert_eq!(request.seen_text, "CooltrainermCodySeenText");
         assert_eq!(request.win_text, "CooltrainermCodyBeatenText");
         assert_eq!(request.loss_text, "");
-        assert_eq!(request.callback, ".Script");
+        assert_eq!(request.callback, ".Script@TrainerCooltrainermCody");
         assert_eq!(request.source_script, "TrainerCooltrainermCody");
 
         let start = data

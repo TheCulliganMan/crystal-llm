@@ -2560,10 +2560,7 @@ mod tests {
             5
         );
         assert_eq!(apply_surf_level_variance(5, EncounterSurface::Water, 0), 5);
-        assert_eq!(
-            apply_surf_level_variance(5, EncounterSurface::Water, 90),
-            6
-        );
+        assert_eq!(apply_surf_level_variance(5, EncounterSurface::Water, 90), 6);
         assert_eq!(
             apply_surf_level_variance(5, EncounterSurface::Water, 166),
             7
@@ -2892,7 +2889,6 @@ mod tests {
 
         assert_eq!(helper, explicit);
         assert_eq!(helper_rng.seed(), explicit_rng.seed());
-
     }
 
     #[test]
@@ -2914,7 +2910,6 @@ mod tests {
             roll_headbutt_encounter(&data, 1, 0, 0, &mut rng).expect("odd headbutt roll");
         assert_eq!(headbutt_roll.target_tile_x, 1);
         assert_ne!(rng.seed(), 0x1234_5678);
-
     }
 
     #[test]

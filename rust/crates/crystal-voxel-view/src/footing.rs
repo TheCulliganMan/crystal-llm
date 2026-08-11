@@ -61,6 +61,26 @@ pub fn footing_height(frame: &VisualWorldFrame, foot: Vec2) -> Option<f32> {
     )
 }
 
+pub fn resolved_footing_height(
+    frame: &VisualWorldFrame,
+    foot: Vec2,
+    resolved_heights: &[f32],
+) -> Option<f32> {
+    if !foot.is_finite() {
+        return None;
+    }
+    let Some(coordinate) = tile_at_visual_point(frame, foot + Vec2::Y * FOOTING_SAMPLE_EPSILON)
+    else {
+        return Some(0.0);
+    };
+    let width = usize::try_from(frame.grid_size.x).ok()?;
+    let index = usize::try_from(coordinate.y)
+        .ok()?
+        .checked_mul(width)?
+        .checked_add(usize::try_from(coordinate.x).ok()?)?;
+    resolved_heights.get(index).copied()
+}
+
 pub fn visual_point_to_voxel(point: Vec2, height: f32) -> Vec3 {
     Vec3::new(point.x, height, -point.y)
 }
@@ -118,6 +138,7 @@ mod tests {
     fn actor_card_is_anchored_at_the_bottom_center() {
         let actor = VisualActor {
             id: VisualActorId::Player,
+            source_id: Arc::from("player"),
             texture: Handle::weak_from_u128(2),
             center: Vec2::new(10.0, 20.0),
             size: Vec2::new(8.0, 16.0),

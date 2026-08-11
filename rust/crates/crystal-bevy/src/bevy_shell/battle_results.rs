@@ -781,6 +781,10 @@ fn activate_visible_script_boundary_after_outcome(
 ) -> Result<bool> {
     match &outcome.result {
         RuntimeMutationResult::ScriptShopOpened(_) => Ok(true),
+        RuntimeMutationResult::ScriptTextApplied(
+            crate::core::systems::script_text::ScriptTextAction::WaitButton { .. }
+            | crate::core::systems::script_text::ScriptTextAction::YesNo { .. },
+        ) => Ok(true),
         RuntimeMutationResult::ScriptedWildBattleStarted(_)
         | RuntimeMutationResult::ScriptedTrainerBattleStarted(_) => {
             prepare_visible_battle_entry(runtime_shell)?;
@@ -798,7 +802,8 @@ fn integrate_visible_compiled_script_run(
     steps: &[crate::RuntimeCompiledScriptStep],
 ) -> Result<bool> {
     let mut reached_boundary = false;
-    for step in steps {
+    let mut blocking_movement_precedes_visible_text = false;
+    for (index, step) in steps.iter().enumerate() {
         runtime_shell.last_audio_events.push(format!(
             "script resume step={} command={} result={} checksum={:?}",
             step.source_script,
@@ -807,9 +812,49 @@ fn integrate_visible_compiled_script_run(
             step.mutation.state_checksum
         ));
         integrate_visible_script_mutation_outcome(runtime_shell, &step.mutation)?;
+        if matches!(
+            &step.mutation.result,
+            RuntimeMutationResult::ScriptMovementApplied(_)
+        ) && steps[index + 1..].iter().any(|later| {
+            matches!(
+                &later.mutation.result,
+                RuntimeMutationResult::ScriptTextApplied(
+                    crate::core::systems::script_text::ScriptTextAction::Open { .. }
+                        | crate::core::systems::script_text::ScriptTextAction::Write { .. }
+                )
+            )
+        }) {
+            blocking_movement_precedes_visible_text = true;
+        }
         if activate_visible_script_boundary_after_outcome(runtime_shell, &step.mutation)? {
             reached_boundary = true;
         }
+    }
+    if blocking_movement_precedes_visible_text {
+        // ASM `applymovement` is blocking. Core can evaluate the following
+        // `opentext`/`writetext` in the same compiled transaction, but the
+        // retained movement scene must represent the earlier LCD state.
+        // Reveal the terminal text only after the movement animation ends.
+        if let Some(scene) = runtime_shell.visible_script_movement_scene.as_mut() {
+            let scene = Arc::make_mut(scene);
+            scene.ui.text = None;
+            scene.ui.window_open = false;
+            scene.ui.text_window_open = false;
+            scene.ui.coords = None;
+            scene.ui.pending_yes_no = None;
+            scene.ui.pending_text_wait = None;
+            scene.script_events.text_window_open = false;
+            scene.script_events.pending_text_label = None;
+            scene.script_events.pending_text_wait = None;
+            scene.script_events.pending_yes_no = None;
+        }
+    }
+    // A compiled run mutates the authoritative runtime before Bevy presents
+    // the result. Invalidate once per run so presentation-only boundaries
+    // such as `pokepic` cannot remain hidden behind a cached pre-command
+    // snapshot. Per-step invalidation would add redundant render work.
+    if !steps.is_empty() {
+        mark_runtime_snapshot_dirty(runtime_shell);
     }
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(reached_boundary)
@@ -2362,36 +2407,11 @@ fn open_visible_script_runtime_boundary_if_needed(
             set_shell_action_status(runtime_shell, "TRADE COMPLETE");
             Ok(true)
         }
-        "describedecoration" => {
-            let descriptor = command
-                .args
-                .first()
-                .map(String::as_str)
-                .with_context(|| "describedecoration runtime command has no descriptor")?;
-            if descriptor != "DECODESC_POSTER" {
-                return Ok(false);
-            }
-
-            let active_map = runtime_shell.shell.session.overworld.map.name.clone();
-            let poster_block = runtime_shell
-                .shell
-                .session
-                .state
-                .map_block_overrides
-                .get(&active_map)
-                .and_then(|overrides| overrides.get(&(3, 0)))
-                .copied();
-            if poster_block == Some(0x1f) {
-                // ASM DescribeDecoration dispatches the default poster through
-                // TownMapScript: LookTownMapText, an input wait, then the
-                // OverworldTownMap special. Re-enter that authored standard
-                // script so the ordinary field-text and modal boundaries own
-                // progression exactly as they do for any other script.
-                start_visible_script_entry(runtime_shell, "TownMapScript")?;
-                return Ok(true);
-            }
-            Ok(false)
-        }
+        // Decoration selection is resolved by the compiled collision/event
+        // transaction before script dispatch. Do not re-route a descriptor
+        // through a Rust label switch: the standard collision script and the
+        // exported decoration data are the authoritative ASM control flow.
+        "describedecoration" => Ok(false),
         _ => Ok(false),
     }
 }
@@ -3623,7 +3643,11 @@ fn dispatch_visible_overworld_interaction(
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     take_visible_next_script(runtime_shell)?;
-    advance_visible_script_until_player_boundary(runtime_shell)
+    // `take_visible_next_script` already runs the compiled entry through its
+    // first authored boundary and integrates that boundary's presentation.
+    // Advancing again here races the renderer that creates the typewriter
+    // state and consumes `waitbutton`/`closetext` in the same A press.
+    Ok(())
 }
 
 fn execute_last_trainer_sight_script(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -3838,6 +3862,13 @@ fn execute_visible_pending_script_warp(runtime_shell: &mut BevyRuntimeShell) -> 
 }
 
 fn settle_visible_overworld_frame_arrival(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    // Arrival is a single-consumer boundary. The real keyboard schedule takes
+    // it before calling here, but direct smoke/replay drivers enter this same
+    // function after an authoritative tick. Consume both retained boundary
+    // records here as well so a later script boundary cannot replay the old
+    // warp and replace the currently running destination script.
+    runtime_shell.pending_overworld_step_boundary = None;
+    runtime_shell.pending_overworld_warp_scene = None;
     let Some(frame) = runtime_shell.shell.last_frame().cloned() else {
         record_visible_runtime_action(runtime_shell, "overworld:arrival:no_frame")?;
         runtime_shell

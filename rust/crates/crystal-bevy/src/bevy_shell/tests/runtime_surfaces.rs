@@ -519,6 +519,10 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
     }
     app.update();
     assert_retained_fullscreen_surface(app.world_mut(), &retained);
+    for _ in 0..VISIBLE_GENDER_FADE_IN_FRAMES {
+        app.update();
+        assert_retained_fullscreen_surface(app.world_mut(), &retained);
+    }
     for delta in [1, -1] {
         {
             let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
@@ -550,6 +554,8 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
             .expect("open time-set screen");
         let time_set = runtime_shell.pending_time_set.as_mut().expect("time set");
         time_set.phase = VisibleTimeSetPhase::HourConfirm;
+        time_set.visible_chars = visible_time_set_dialog_text(time_set).chars().count();
+        time_set.text_timer = 0;
     }
     app.update();
     assert_retained_fullscreen_surface(app.world_mut(), &retained);
@@ -673,18 +679,11 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
     app.update();
     {
         let world = app.world_mut();
-        assert_retained_fullscreen_surface(world, &retained);
-        let surfaces = retained_map_surface_pair(world);
-        assert_base_map_surface_is_fully_opaque(world, &surfaces);
-    }
-    app.update();
-    {
-        let world = app.world_mut();
         let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
         assert_eq!(
             presenters.iter(world).count(),
             0,
-            "the retained presenter may leave only after both map layers were query-visible"
+            "a field overlay releases immediately when both retained map layers were already staged"
         );
         let surfaces = retained_map_surface_pair(world);
         assert_base_map_surface_is_fully_opaque(world, &surfaces);

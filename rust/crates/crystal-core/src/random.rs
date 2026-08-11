@@ -60,12 +60,7 @@ impl DividerSource for LiveDivider {
     fn next_divider(&mut self) -> Result<u8, Self::Error> {
         const DIVIDER_HZ: u128 = 16_384;
         const NANOS_PER_SECOND: u128 = 1_000_000_000;
-        let ticks = self
-            .epoch
-            .elapsed()
-            .as_nanos()
-            .saturating_mul(DIVIDER_HZ)
-            / NANOS_PER_SECOND;
+        let ticks = self.epoch.elapsed().as_nanos().saturating_mul(DIVIDER_HZ) / NANOS_PER_SECOND;
         Ok(ticks as u8)
     }
 }
@@ -690,7 +685,8 @@ mod tests {
         assert_eq!(rng.source().samples(), &[0x12, 0x34]);
 
         assert_eq!(
-            rng.random(false).expect_err("underlying source is exhausted"),
+            rng.random(false)
+                .expect_err("underlying source is exhausted"),
             ReplayDividerExhausted { consumed: 2 }
         );
         assert_eq!(rng.source().samples(), &[0x12, 0x34]);
@@ -750,9 +746,7 @@ mod tests {
                     source[..*index]
                         .chars()
                         .next_back()
-                        .is_none_or(|previous| {
-                            !previous.is_ascii_alphanumeric() && previous != '_'
-                        })
+                        .is_none_or(|previous| !previous.is_ascii_alphanumeric() && previous != '_')
                 })
                 .count()
         }

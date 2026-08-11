@@ -1050,19 +1050,18 @@ mod tests {
             facing: crate::world::map::Direction::Down,
             mode: crate::world::movement::MovementMode::Normal,
         };
-        state.pending_static_wild_terminal =
-            Some(crate::state::PendingStaticWildBattleTerminal {
-                origin_map_name: "ROUTE_40".to_string(),
-                source_script: "RockSmashScript".to_string(),
-                startbattle_command_index: 12,
-                resume_command_index: 13,
-                battle_type: "BATTLETYPE_NORMAL".to_string(),
-                species: "SHUCKLE".to_string(),
-                level: 15,
-                pay_day_payout: 1_234,
-                battle_result: 0,
-                win_cleanup_applied: false,
-            });
+        state.pending_static_wild_terminal = Some(crate::state::PendingStaticWildBattleTerminal {
+            origin_map_name: "ROUTE_40".to_string(),
+            source_script: "RockSmashScript".to_string(),
+            startbattle_command_index: 12,
+            resume_command_index: 13,
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            species: "SHUCKLE".to_string(),
+            level: 15,
+            pay_day_payout: 1_234,
+            battle_result: 0,
+            win_cleanup_applied: false,
+        });
         let modpack = SaveModpackIdentity::new(
             "core-modular",
             "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
@@ -1122,17 +1121,15 @@ mod tests {
         let mut state = GameState::default();
         state.options.no_text_scroll = true;
 
-        write_save_game_for_modpack(
-            &path,
-            state.clone(),
-            &modpack,
-            pack_content_hash(),
-        )
-        .expect("write save");
-        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
-            .expect("read save");
+        write_save_game_for_modpack(&path, state.clone(), &modpack, pack_content_hash())
+            .expect("write save");
+        let loaded =
+            read_save_game_for_modpack(&path, &modpack, pack_content_hash()).expect("read save");
 
-        assert!(state.options.no_text_scroll, "save must not mutate live WRAM");
+        assert!(
+            state.options.no_text_scroll,
+            "save must not mutate live WRAM"
+        );
         assert!(
             !loaded.state().options.no_text_scroll,
             "SaveOptions clears NO_TEXT_SCROLL before writing primary SRAM"
@@ -1152,15 +1149,10 @@ mod tests {
         state.set_game_timer_counting(true);
         state.set_game_logic_paused(true);
 
-        write_save_game_for_modpack(
-            &path,
-            state.clone(),
-            &modpack,
-            pack_content_hash(),
-        )
-        .expect("write save");
-        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
-            .expect("read save");
+        write_save_game_for_modpack(&path, state.clone(), &modpack, pack_content_hash())
+            .expect("write save");
+        let loaded =
+            read_save_game_for_modpack(&path, &modpack, pack_content_hash()).expect("read save");
 
         assert!(state.game_timer_counting, "save must not mutate live WRAM");
         assert!(state.game_logic_paused, "save must not mutate live WRAM");
@@ -1171,9 +1163,7 @@ mod tests {
 
     #[test]
     fn save_rtc_normalization_clears_only_the_persisted_status_and_carry() {
-        use crate::systems::time::{
-            B_RAMB_RTC_DH_CARRY, GameDate, RTC_DAYS_EXCEED_255, RTC_RESET,
-        };
+        use crate::systems::time::{B_RAMB_RTC_DH_CARRY, GameDate, RTC_DAYS_EXCEED_255, RTC_RESET};
 
         let path = temp_save_path("rtc-normalization.crystalsave");
         let modpack = SaveModpackIdentity::new(
@@ -1190,8 +1180,8 @@ mod tests {
 
         write_save_game_for_modpack(&path, state, &modpack, pack_content_hash())
             .expect("write save");
-        let loaded = read_save_game_for_modpack(&path, &modpack, pack_content_hash())
-            .expect("read save");
+        let loaded =
+            read_save_game_for_modpack(&path, &modpack, pack_content_hash()).expect("read save");
 
         assert_eq!(
             live_state.time.rtc_status_flags,
@@ -1612,16 +1602,12 @@ mod tests {
         );
         let mut prior_payload = bincode::serde::encode_to_vec(&prior_save, save_binary_config())
             .expect("encode current save payload");
-        let current_roaming = bincode::serde::encode_to_vec(
-            &prior_state.roaming_pokemon,
-            save_binary_config(),
-        )
-        .expect("encode current roaming array");
-        let history = bincode::serde::encode_to_vec(
-            &prior_state.roaming_map_history,
-            save_binary_config(),
-        )
-        .expect("encode current roaming history");
+        let current_roaming =
+            bincode::serde::encode_to_vec(&prior_state.roaming_pokemon, save_binary_config())
+                .expect("encode current roaming array");
+        let history =
+            bincode::serde::encode_to_vec(&prior_state.roaming_map_history, save_binary_config())
+                .expect("encode current roaming history");
         let positions = prior_payload
             .windows(current_roaming.len())
             .enumerate()
@@ -1657,10 +1643,7 @@ mod tests {
             save_binary_config(),
         )
         .expect("encode prior v8 roaming vector shape");
-        prior_payload.splice(
-            roaming_start..history_start + history.len(),
-            legacy_roaming,
-        );
+        prior_payload.splice(roaming_start..history_start + history.len(), legacy_roaming);
         let mut prior_under_v9 = SAVE_MAGIC.to_vec();
         prior_under_v9.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
         prior_under_v9.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
@@ -1890,8 +1873,7 @@ mod tests {
         );
 
         state.frame_counter = 12;
-        write_save_game(&path, &test_save(state.clone(), modpack))
-            .expect("write second save");
+        write_save_game(&path, &test_save(state.clone(), modpack)).expect("write second save");
         assert_eq!(
             std::fs::read(&path).expect("read current primary bytes"),
             std::fs::read(&backup).expect("read current backup bytes"),
@@ -1931,7 +1913,10 @@ mod tests {
             .expect("recover first save from current-generation backup");
 
         assert_eq!(recovered.state, state);
-        assert_eq!(read_save_game(&path).expect("repaired primary").state, state);
+        assert_eq!(
+            read_save_game(&path).expect("repaired primary").state,
+            state
+        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup);
     }

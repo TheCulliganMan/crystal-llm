@@ -190,6 +190,45 @@ fn johto_tileset_art_loads_real_runtime_assets() {
 }
 
 #[test]
+fn battle_tower_outside_applies_the_cianwood_olivine_roof_tiles() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let runtime_assets = repo_root.join("vendor/pokecrystal");
+    let mut source = image::open(runtime_assets.join("gfx/tilesets/battle_tower_outside.png"))
+        .expect("Battle Tower outside tileset")
+        .to_rgba8();
+    let before = source.clone();
+    let roof = image::open(runtime_assets.join("gfx/tilesets/roofs/olivine.png"))
+        .expect("Olivine roof")
+        .to_rgba8();
+
+    apply_battle_tower_outside_roof(&runtime_assets, &mut source)
+        .expect("apply Battle Tower map-group roof");
+
+    for tile in 0..9_u32 {
+        let source_tile = 0x0a + tile;
+        let source_x = (source_tile % 16) * SOURCE_TILE_SIZE as u32;
+        let source_y = (source_tile / 16) * SOURCE_TILE_SIZE as u32;
+        let roof_x = (tile % 3) * SOURCE_TILE_SIZE as u32;
+        let roof_y = (tile / 3) * SOURCE_TILE_SIZE as u32;
+        for y in 0..SOURCE_TILE_SIZE as u32 {
+            for x in 0..SOURCE_TILE_SIZE as u32 {
+                assert_eq!(
+                    source.get_pixel(source_x + x, source_y + y),
+                    roof.get_pixel(roof_x + x, roof_y + y)
+                );
+            }
+        }
+    }
+    assert_ne!(
+        source, before,
+        "the runtime roof overwrite must change the shared base graphics"
+    );
+}
+
+#[test]
 fn viewport_tile_composite_preserves_scaled_tile_grid() {
     let mut images = Assets::<Image>::default();
     let tile = images.add(Image::new(
@@ -546,6 +585,31 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         player_moves || base_map_moves,
         "each LCD walk must visibly advance the player or retained camera: player={player_x_positions:?}, map={base_map_positions:?}"
     );
+
+    // Repeated press/release steps used to alternate between one player and
+    // no player: the full-render boundary despawned the retained sprite and
+    // the replacement was not visible to the voxel/classic cameras until a
+    // later input. Assert the entity invariant after every presented frame,
+    // not merely while the first interpolation is active.
+    for step in 0..4 {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::ArrowRight);
+        app.update();
+        app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 12;
+        for frame in 0..12 {
+            app.update();
+            let world = app.world_mut();
+            let player_count = world
+                .query_filtered::<Entity, With<PlayerMarker>>()
+                .iter(world)
+                .count();
+            assert_eq!(
+                player_count, 1,
+                "step {step} frame {frame} must retain exactly one player sprite"
+            );
+        }
+    }
 }
 
 #[test]
@@ -574,8 +638,13 @@ fn positive_and_negative_full_tile_camera_scroll_never_expose_clear_color() {
 
     let mut most_positive = 0.0_f32;
     let mut most_negative = 0.0_f32;
-    for key in [KeyCode::ArrowRight, KeyCode::ArrowLeft] {
-        press_key_for_runtime_hotkey_app(&mut app, key);
+    // Move one tile right, return to the origin, then move one tile left so
+    // the retained camera is genuinely exercised on both sides of its
+    // starting position.
+    for key in [KeyCode::ArrowRight, KeyCode::ArrowLeft, KeyCode::ArrowLeft] {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(key);
         let mut saw_walk = false;
         for _ in 0..=usize::from(WALK_FRAME_HOLD_TICKS) + 2 {
             let (camera_offset, walk_frames) = {
@@ -597,7 +666,17 @@ fn positive_and_negative_full_tile_camera_scroll_never_expose_clear_color() {
             }
             app.update();
         }
-        assert!(saw_walk, "{key:?} must execute a visible walking step");
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset(key);
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        assert!(
+            saw_walk,
+            "{key:?} must execute a visible walking step: snapshot={:?} error={:?} events={:?}",
+            shell.shell.snapshot(),
+            shell.last_error,
+            shell.last_audio_events
+        );
     }
     assert!(
         most_positive >= TILE_SIZE && most_negative <= -TILE_SIZE,
@@ -606,7 +685,7 @@ fn positive_and_negative_full_tile_camera_scroll_never_expose_clear_color() {
 }
 
 #[test]
-fn reversing_during_a_walk_refreshes_facing_without_replacing_the_lcd() {
+fn buffered_reversal_refreshes_facing_on_the_next_step_without_replacing_the_lcd() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -650,9 +729,9 @@ fn reversing_during_a_walk_refreshes_facing_without_replacing_the_lcd() {
             .clone()
     };
 
-    // Reverse before the prior eight LCD walking frames end. This is the
-    // old moonwalking path: the semantic facing changed but the retained
-    // sprite kept the right-facing texture.
+    // Reverse before the prior eight LCD walking frames end. TypeScript and
+    // the Game Boy queue that direction until the tile-atomic step lands;
+    // the next visible step must begin with matching facing/art.
     app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 0;
     {
         let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
@@ -660,17 +739,17 @@ fn reversing_during_a_walk_refreshes_facing_without_replacing_the_lcd() {
         keys.clear_just_pressed(KeyCode::ArrowRight);
         keys.press(KeyCode::ArrowLeft);
     }
-    for _ in 0..2 {
+    for _ in 0..=usize::from(WALK_FRAME_HOLD_TICKS) + 4 {
         app.update();
-        if app
-            .world()
-            .resource::<BevyRuntimeShell>()
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        if shell
             .shell
             .snapshot()
             .expect("snapshot while reversing")
             .overworld
             .facing
             == Direction::Left
+            && shell.player_walk_frame_ticks > 0
         {
             break;
         }
@@ -681,7 +760,7 @@ fn reversing_during_a_walk_refreshes_facing_without_replacing_the_lcd() {
     assert_eq!(snapshot.overworld.facing, Direction::Left);
     assert!(
         shell.player_walk_frame_ticks > 0,
-        "the reversal must happen inside the retained walking interval"
+        "the buffered reversal must start a new retained walking interval"
     );
     let _ = shell;
     let (viewport_after_turn, left_texture) = {
@@ -728,7 +807,9 @@ fn map_name_transition_retains_base_and_priority_surfaces() {
         BevyShellStart::NewGameAtRuntimeTile {
             spawn_identifier,
             map_name: "PlayersHouse2F".to_string(),
-            tile_x: 9,
+            // ASM PlayersHouse2F_MapEvents: warp_event 7, 0,
+            // PLAYERS_HOUSE_1F, 3.
+            tile_x: 7,
             tile_y: 1,
         },
         BevyShellConfig::default(),

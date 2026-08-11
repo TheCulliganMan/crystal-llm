@@ -68,6 +68,9 @@ clean-room shape profile is keyed by stable tileset/metatile artwork identity,
 never gameplay collision. Unsupported maps, incomplete frames, and renderer
 errors leave the normal 2D world visible.
 
+For repeatable map screenshots and side-by-side 2D/2.5D inspection, see
+[RENDER_AT_LOCATION.md](RENDER_AT_LOCATION.md).
+
 ## Verification
 
 Verify the pinned ASM checkout and reference ROM before exporting:

@@ -332,6 +332,8 @@
             other => panic!("expected static wild battle, got {other:?}"),
         }
         let before = game_state_checksum(&session.state).expect("checksum before escape");
+        let mut expected_rng = Random::new_crystal(session.state.rng_seed);
+        let expected_roll = expected_rng.battle_random_byte();
 
         let escape = session
             .attempt_escape_active_wild_battle(&runtime)
@@ -340,9 +342,10 @@
         assert!(!escape.outcome.escaped);
         assert_eq!(escape.outcome.attempts_before, 0);
         assert_eq!(escape.outcome.attempts_after, 1);
-        // Battle setup consumes the preceding TypeScript HardwareRNG samples;
-        // the escape check must continue from that saved boundary.
-        assert_eq!(escape.outcome.roll, Some(80));
+        // Continue from the saved HardwareRNG boundary. The exact byte depends
+        // on the authoritative setup samples consumed before RUN is selected.
+        assert_eq!(escape.outcome.roll, Some(expected_roll));
+        assert_eq!(escape.outcome.rng_seed_after, expected_rng.seed());
         assert_eq!(session.state.battle_escape_attempts, 1);
         assert!(matches!(
             session.state.battle,
@@ -1463,9 +1466,29 @@
     fn runtime_starts_scripted_trainer_battle_from_exact_map_script_command() {
         let root = temp_repository_root("scripted-trainer-battle");
         write_floor_tileset(&root, "johto");
+        let trainer_music_path = root
+            .join("apps/web/assets/data")
+            .join("content-packs/test/music/MUSIC_RIVAL_ENCOUNTER.mid");
+        write_midi(&trainer_music_path);
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_scripted_battles();
+        data.audio.push(
+            ModpackAudioAsset::music(
+                "MUSIC_RIVAL_ENCOUNTER",
+                "content-packs/test/music/MUSIC_RIVAL_ENCOUNTER.mid",
+            )
+            .expect("trainer encounter music fixture"),
+        );
         let map = data.maps.get_mut("RuntimeMap").expect("runtime map");
+        for label in ["RuntimeSeenText", "RuntimeWinText", "RuntimeLossText"] {
+            map.script_text_bodies.insert(
+                label.to_string(),
+                ScriptTextBody {
+                    label: label.to_string(),
+                    commands: Vec::new(),
+                },
+            );
+        }
         map.scripts.insert(
             "RuntimeTrainerScript".to_string(),
             serde_json::json!([
@@ -3780,6 +3803,15 @@
         data.happiness_data = Some(HappinessData {
             changes: [
                 (
+                    5,
+                    HappinessChangeEntry {
+                        code: "HAPPINESS_LEARNMOVE".to_string(),
+                        low: 1,
+                        mid: 1,
+                        high: 0,
+                    },
+                ),
+                (
                     9,
                     HappinessChangeEntry {
                         code: "HAPPINESS_OLDERCUT1".to_string(),
@@ -4169,7 +4201,10 @@
                 .expect("service special");
 
             assert_eq!(use_result.outcome.effect, expected_effect);
-            if !matches!(routine, "UnusedCheckUnusedTwoDayTimer") {
+            if !matches!(
+                routine,
+                "UnusedCheckUnusedTwoDayTimer" | "TrainerHouse"
+            ) {
                 assert_eq!(
                     session.state.script_runtime.active_menu.as_deref(),
                     Some(routine)

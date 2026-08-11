@@ -324,10 +324,9 @@ impl TimeState {
         self.registers.rtc_minutes = minute % 60;
         self.registers.rtc_hours = hour % 24;
         self.registers.rtc_day_lo = (day_count & 0xff) as u8;
-        let control = self.registers.rtc_day_hi
-            & ((1 << B_RAMB_RTC_DH_HALT) | (1 << B_RAMB_RTC_DH_CARRY));
-        self.registers.rtc_day_hi =
-            control | (((day_count >> 8) & 1) as u8) << B_RAMB_RTC_DH_HIGH;
+        let control =
+            self.registers.rtc_day_hi & ((1 << B_RAMB_RTC_DH_HALT) | (1 << B_RAMB_RTC_DH_CARRY));
+        self.registers.rtc_day_hi = control | (((day_count >> 8) & 1) as u8) << B_RAMB_RTC_DH_HIGH;
         if day_count > 0x1ff {
             self.registers.rtc_day_hi |= 1 << B_RAMB_RTC_DH_CARRY;
             self.rtc_status_flags |= RTC_RESET;
@@ -438,9 +437,7 @@ impl TimeState {
     /// sample does not reconstruct the carry that the save boundary cleared.
     pub fn normalize_rtc_for_save(&mut self) {
         let day_count = u16::from(self.registers.rtc_day_lo)
-            | (u16::from(
-                (self.registers.rtc_day_hi >> B_RAMB_RTC_DH_HIGH) & 1,
-            ) << 8);
+            | (u16::from((self.registers.rtc_day_hi >> B_RAMB_RTC_DH_HIGH) & 1) << 8);
         self.rtc_anchor = game_date_from_days(
             days_from_civil(
                 self.current_date.year,
@@ -554,8 +551,7 @@ fn game_date_from_days(days: i64) -> GameDate {
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let day_of_era = days - era * 146_097;
     let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
-            / 365;
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -770,8 +766,7 @@ mod tests {
             (280, 0, RTC_DAYS_EXCEED_255),
         ] {
             state.registers.rtc_day_lo = day_count as u8;
-            state.registers.rtc_day_hi =
-                ((day_count >> 8) as u8) << B_RAMB_RTC_DH_HIGH;
+            state.registers.rtc_day_hi = ((day_count >> 8) as u8) << B_RAMB_RTC_DH_HIGH;
             state.rtc_status_flags = 0;
 
             state.fix_days();

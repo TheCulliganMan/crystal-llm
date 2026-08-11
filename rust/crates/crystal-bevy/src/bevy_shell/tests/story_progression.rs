@@ -189,41 +189,55 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
         .expect("complete player name");
     settle_visible_shell_smoke_until_idle(&mut runtime_shell).expect("settle new-game scripts");
 
-    let inputs = [
-        GameButton::Right,
-        GameButton::Right,
-        GameButton::Right,
-        GameButton::Right,
-        GameButton::Right,
-        GameButton::Right,
-        GameButton::Up,
-        GameButton::Up,
-        GameButton::Up,
-        GameButton::Up,
-        GameButton::Down,
-        GameButton::Down,
-        GameButton::Down,
-        GameButton::Down,
-        GameButton::Down,
-    ];
-    'walk_to_mom: for button in inputs {
-        let outcome = apply_visible_shell_smoke_frame(&mut runtime_shell, &[button])
-            .expect("advance Player's House input");
-        if let Some(frame) = outcome.frame {
-            if frame.coord_event.is_some() {
-                execute_last_coord_event_script(&mut runtime_shell)
-                    .expect("run Mom coord-event script");
-                break 'walk_to_mom;
-            }
-            if frame.warp.is_some() {
-                settle_visible_overworld_frame_arrival(&mut runtime_shell)
-                    .expect("settle bedroom warp");
-            }
-        }
-        settle_visible_shell_smoke_until_idle(&mut runtime_shell)
-            .expect("settle Player's House scripts");
-    }
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
 
+    // Follow the same keyboard/update path available to a player and let the
+    // authored stair fade finish before stepping onto Mom's coordinate event.
+    for key in [
+        KeyCode::ArrowRight, KeyCode::ArrowRight, KeyCode::ArrowRight,
+        KeyCode::ArrowRight, KeyCode::ArrowRight, KeyCode::ArrowRight,
+        KeyCode::ArrowUp, KeyCode::ArrowUp, KeyCode::ArrowUp, KeyCode::ArrowUp,
+    ] {
+        press_key_for_runtime_hotkey_app(&mut app, key);
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+    for _ in 0..64 {
+        app.update();
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        if shell.visible_walk_warp_phase.is_none()
+            && shell.shell.snapshot().unwrap().overworld.map_name == "PlayersHouse1F"
+        {
+            break;
+        }
+    }
+    for _ in 0..4 {
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ArrowDown);
+    for _ in 0..16 {
+        app.update();
+        if app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .visible_overworld_emote
+            .is_some()
+        {
+            break;
+        }
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset(KeyCode::ArrowDown);
+
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     let initial_snapshot = runtime_shell.shell.snapshot().expect("Mom emote snapshot");
     assert_ne!(
         initial_snapshot.ui.text.as_ref().map(|text| text.label.as_str()),
@@ -236,17 +250,17 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
         runtime_shell.last_audio_events
     );
     assert!(runtime_shell.visible_script_movement.is_none());
+    let emote_frames = runtime_shell
+        .visible_overworld_emote
+        .as_ref()
+        .map(|emote| emote.frames_remaining)
+        .expect("the real input path must trigger Mom's emote");
     assert_eq!(
-        runtime_shell
-            .visible_overworld_emote
-            .as_ref()
-            .map(|emote| emote.frames_remaining),
-        Some(15),
-        "showemote must hold MeetMomRightScript for its authored duration"
+        emote_frames, 14,
+        "the first rendered frame consumes one of showemote's 15 authored frames"
     );
 
-    let mut app = integrated_shell_test_app(runtime_shell);
-    for frame in 0..14 {
+    for frame in 0..emote_frames.saturating_sub(1) {
         app.update();
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         let snapshot = runtime_shell.shell.snapshot().expect("Mom emote frame");
@@ -385,16 +399,124 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     let mut saw_rendered_yes_no = false;
     let mut saw_canonical_day_selector = false;
     let mut saw_dynamic_dst_confirmation = false;
+    let mut longest_dst_confirmation = Vec::new();
     let mut completed_mom = false;
     let mut mom_frames = 0usize;
+    let mut dialogue_mom_tile = None;
+    let mut dialogue_mom_render_position = None;
+    let mut yes_no_boundaries = Vec::new();
+    let mut yes_no_render_trace = Vec::new();
+    let mut was_pending_yes_no = false;
+    let mut saw_yes_no_prompt_cleared = false;
+    let mut saw_yes_no_frame_cleared = false;
+    let baseline_live_entities = app.world().entities().len();
+    let mut peak_live_entities = baseline_live_entities;
+    let mut previous_progress_signature = None;
+    let mut stationary_script_frames = 0usize;
     for frame in 0..1024 {
         mom_frames = frame + 1;
         app.update();
+        peak_live_entities = peak_live_entities.max(app.world().entities().len());
         let shell = app.world().resource::<BevyRuntimeShell>();
         assert_eq!(shell.last_error, None, "Mom lifecycle failed: {:?}", shell.last_audio_events);
         let snapshot = shell.shell.snapshot().expect("Mom lifecycle snapshot");
+        let progress_signature = format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            shell.active_script_cursor,
+            snapshot.ui.text.as_ref().map(|text| text.label.as_str()),
+            shell.field_text_reveal.as_ref().map(|reveal| (
+                reveal.page_index,
+                reveal.visible_chars,
+                reveal.frames_until_next_char,
+            )),
+            snapshot
+                .ui
+                .pending_yes_no
+                .as_ref()
+                .and_then(|_| shell.yes_no_cursor.as_ref().map(|cursor| cursor.option_index)),
+            shell.visible_script_delay_frames,
+            shell.visible_script_movement,
+            shell.pending_day_of_week,
+        );
+        if previous_progress_signature.as_ref() == Some(&progress_signature) {
+            stationary_script_frames += 1;
+        } else {
+            previous_progress_signature = Some(progress_signature.clone());
+            stationary_script_frames = 0;
+        }
+        assert!(
+            stationary_script_frames < 120,
+            "Mom script stopped making progress for {stationary_script_frames} frames: {progress_signature}"
+        );
         let visible_label = snapshot.ui.text.as_ref().map(|text| text.label.clone());
         let pending_yes_no = snapshot.ui.pending_yes_no.is_some();
+        if was_pending_yes_no && !pending_yes_no {
+            saw_yes_no_prompt_cleared = !app
+                .world()
+                .iter_entities()
+                .any(|entity| entity.contains::<YesNoPromptMarker>());
+            let (prompt_left_x, prompt_top_y) = battle_hud_tile_origin(
+                FIELD_YES_NO_LEFT_TILE,
+                FIELD_YES_NO_TOP_TILE,
+            );
+            saw_yes_no_frame_cleared = !app.world().iter_entities().any(|entity| {
+                entity.contains::<SceneDialogWindowFrameMarker>()
+                    && entity.get::<Transform>().is_some_and(|transform| {
+                        (transform.translation.x - prompt_left_x).abs() < f32::EPSILON
+                            && (transform.translation.y - prompt_top_y).abs() < f32::EPSILON
+                    })
+            });
+        }
+        was_pending_yes_no = pending_yes_no;
+        if pending_yes_no {
+            let boundary = format!("{:?}", shell.active_script_cursor);
+            if yes_no_boundaries.last() != Some(&boundary) {
+                yes_no_boundaries.push(boundary);
+                yes_no_render_trace.push((
+                    snapshot.script_events.last_special_routine.clone(),
+                    visible_scene_dialog_entries(&snapshot, shell)
+                        .expect("render Mom yes/no trace"),
+                ));
+            }
+        }
+        if snapshot.ui.text_window_open
+            || pending_yes_no
+            || shell.pending_day_of_week.is_some()
+        {
+            let mom_tile = snapshot
+                .visible_object_runtime_tiles
+                .get("PLAYERSHOUSE1F_MOM1")
+                .copied()
+                .expect("Mom must have a live runtime tile during her dialogue");
+            let expected = *dialogue_mom_tile.get_or_insert(mom_tile);
+            assert_eq!(
+                mom_tile, expected,
+                "Mom moved while dialogue still owned the scene; label={visible_label:?} cursor={:?}",
+                shell.active_script_cursor
+            );
+            let rendered_dialog_visible = shell
+                .visible_script_movement_scene
+                .as_ref()
+                .map_or(snapshot.ui.text_window_open, |scene| scene.ui.text_window_open);
+            if rendered_dialog_visible
+                && let Some(render_position) = app.world().iter_entities().find_map(|entity| {
+                    entity
+                        .get::<VisibleObjectSprite>()
+                        .filter(|sprite| {
+                            sprite.object_identifier.as_deref() == Some("PLAYERSHOUSE1F_MOM1")
+                        })
+                        .and_then(|_| entity.get::<Transform>())
+                        .map(|transform| transform.translation.truncate())
+                })
+            {
+                let expected = *dialogue_mom_render_position.get_or_insert(render_position);
+                assert_eq!(
+                    render_position, expected,
+                    "Mom's rendered sprite moved while dialogue was visible; label={visible_label:?} cursor={:?}",
+                    shell.active_script_cursor
+                );
+            }
+        }
         if pending_yes_no
             && matches!(
                 snapshot.script_events.last_special_routine.as_deref(),
@@ -403,8 +525,13 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         {
             let entries = visible_scene_dialog_entries(&snapshot, shell)
                 .expect("render Mom DST confirmation entries");
+            if entries.iter().map(String::len).sum::<usize>()
+                > longest_dst_confirmation.iter().map(String::len).sum::<usize>()
+            {
+                longest_dst_confirmation = entries.clone();
+            }
             saw_dynamic_dst_confirmation |= entries.iter().any(|line| line.contains(':'))
-                && entries.iter().any(|line| line.contains("is that OK?"));
+                && entries.iter().any(|line| line.contains("is that OK"));
         }
         if let Some(label) = visible_label.clone()
             && seen_labels.last() != Some(&label)
@@ -499,16 +626,20 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         "KnowTheInstructionsText",
         "InstructionsNextText",
     ];
-    let mut next_expected = 0usize;
-    for label in &seen_labels {
-        if canonical_mom_labels.get(next_expected) == Some(&label.as_str()) {
-            next_expected += 1;
-        }
-    }
     assert_eq!(
-        next_expected,
-        canonical_mom_labels.len(),
-        "Mom must render every ASM-authored dialogue label in order; saw {seen_labels:?}"
+        seen_labels.iter().map(String::as_str).collect::<Vec<_>>(),
+        canonical_mom_labels,
+        "Mom must render every ASM-authored dialogue label exactly once and in order"
+    );
+    assert_eq!(
+        yes_no_boundaries.len(),
+        3,
+        "Mom's ASM path has exactly three YesNoBox boundaries; saw {yes_no_boundaries:?}"
+    );
+    let final_live_entities = app.world().entities().len();
+    assert!(
+        peak_live_entities < 1024 && final_live_entities <= baseline_live_entities + 32,
+        "Mom dialogue leaked live render entities; baseline={baseline_live_entities} peak={peak_live_entities} final={final_live_entities}"
     );
     assert!(
         saw_canonical_day_selector,
@@ -516,10 +647,24 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     );
     assert!(
         saw_dynamic_dst_confirmation,
-        "DST setup must visibly render the live HH:MM confirmation before its yes/no"
+        "DST setup must visibly render the live HH:MM confirmation before its yes/no; last_special={:?} reveal={:?}",
+        failed_snapshot.script_events.last_special_routine,
+        (
+            failed_shell.field_text_reveal.as_ref(),
+            yes_no_render_trace,
+            longest_dst_confirmation
+        )
     );
     assert!(saw_rendered_mom_text, "Mom executed text without rendering its textbox and bitmap glyphs");
     assert!(saw_rendered_yes_no, "Mom's yes/no executed without rendering an interactive prompt");
+    assert!(
+        saw_yes_no_prompt_cleared,
+        "Mom's resolved YesNoBox survived into the following script frame"
+    );
+    assert!(
+        saw_yes_no_frame_cleared,
+        "Mom's resolved YesNoBox left its window frame rendered over the overworld"
+    );
     let direction_still_captured = {
         let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
         has_visible_shell_direction_action(&mut shell)
@@ -855,13 +1000,18 @@ fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
                 .next()
                 .is_some();
         }
-        if has_picture {
+        if has_picture && !rendered_picture {
+            // The script snapshot becomes authoritative before Bevy's render
+            // systems consume it. Give the newly opened picture a real
+            // display frame before a player A press can dismiss it.
+            app.update();
             let world = app.world_mut();
             rendered_picture |= world
                 .query_filtered::<Entity, With<PokemonPictureMarker>>()
                 .iter(world)
                 .next()
                 .is_some();
+            continue;
         }
         if !busy {
             return (rendered_text, rendered_picture);
@@ -962,10 +1112,6 @@ fn visible_overworld_normal_inputs_exit_house_and_trigger_new_bark_teacher_stop(
             vec![GameButton::Left],
             vec![GameButton::Down],
             vec![GameButton::Down],
-            vec![GameButton::Left],
-            vec![GameButton::Left],
-            vec![GameButton::Left],
-            vec![GameButton::Left],
             vec![GameButton::Left],
             vec![GameButton::Left],
             vec![GameButton::Left],
@@ -1186,13 +1332,15 @@ fn visible_overworld_normal_inputs_enter_elms_lab_and_choose_cyndaquil() {
     push_frames(&mut input_frames, GameButton::Left, 5);
     push_frames(&mut input_frames, GameButton::Down, 2);
     push_frames(&mut input_frames, GameButton::Left, 9);
-    push_frames(&mut input_frames, GameButton::Left, 4);
     push_frames(&mut input_frames, GameButton::Up, 5);
     push_frames(&mut input_frames, GameButton::Right, 2);
     push_frames(&mut input_frames, GameButton::Up, 2);
-    push_frames(&mut input_frames, GameButton::Right, 2);
+    // NewBarkTown.asm places the Elm's Lab warp at (6, 3). The preceding
+    // turn-and-step inputs leave the player at (6, 4), directly below it.
     push_frames(&mut input_frames, GameButton::Up, 9);
-    push_frames(&mut input_frames, GameButton::Right, 1);
+    // ElmsLab.asm places the Cyndaquil ball at (6, 3). From (4, 3), the
+    // first Right turns, the second steps to (5, 3), and the third faces it.
+    push_frames(&mut input_frames, GameButton::Right, 3);
     push_frames(&mut input_frames, GameButton::A, 1);
 
     let smoke = smoke_visible_shell_overworld(
@@ -1210,7 +1358,11 @@ fn visible_overworld_normal_inputs_enter_elms_lab_and_choose_cyndaquil() {
 
     assert_eq!(smoke.start_map, "PlayersHouse2F");
     assert_eq!((smoke.start_tile_x, smoke.start_tile_y), (3, 3));
-    assert_eq!(smoke.final_map, "ElmsLab");
+    assert_eq!(
+        smoke.final_map, "ElmsLab",
+        "starter route stopped at ({}, {}) with events {:?}",
+        smoke.final_tile_x, smoke.final_tile_y, smoke.frame_events
+    );
     assert_eq!(
         (smoke.final_tile_x, smoke.final_tile_y),
         (5, 3),
@@ -1226,7 +1378,7 @@ fn visible_overworld_normal_inputs_enter_elms_lab_and_choose_cyndaquil() {
     );
     assert_eq!(smoke.warps, 3);
     assert_eq!(smoke.coord_events, 2);
-    assert_eq!(smoke.interactions, 1);
+    assert_eq!(smoke.interactions, 2);
     assert_eq!(smoke.active_music.as_deref(), Some("MUSIC_PROF_ELM"));
     assert!(smoke.pending_audio > 0);
     assert_eq!(smoke.final_party_species, vec!["CYNDAQUIL"]);
@@ -1309,7 +1461,6 @@ fn visible_overworld_normal_inputs_get_aide_potion_and_exit_elms_lab() {
     push_frames(&mut input_frames, GameButton::Left, 5);
     push_frames(&mut input_frames, GameButton::Down, 2);
     push_frames(&mut input_frames, GameButton::Left, 9);
-    push_frames(&mut input_frames, GameButton::Left, 4);
     push_frames(&mut input_frames, GameButton::Up, 5);
     push_frames(&mut input_frames, GameButton::Right, 2);
     push_frames(&mut input_frames, GameButton::Up, 2);
@@ -1351,7 +1502,7 @@ fn visible_overworld_normal_inputs_get_aide_potion_and_exit_elms_lab() {
     );
     assert_eq!(smoke.warps, 4);
     assert_eq!(smoke.coord_events, 3);
-    assert_eq!(smoke.interactions, 1);
+    assert_eq!(smoke.interactions, 2);
     assert_eq!(smoke.active_music.as_deref(), Some("MUSIC_NEW_BARK_TOWN"));
     assert!(smoke.pending_audio > 0);
     assert_eq!(smoke.final_party_species, vec!["CYNDAQUIL"]);

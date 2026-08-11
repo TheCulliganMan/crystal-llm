@@ -2154,7 +2154,35 @@ fn visible_battle_action_ids(
 }
 
 fn sync_visible_battle_action_cursor(runtime_shell: &mut BevyRuntimeShell) {
-    let snapshot = match runtime_shell.shell.snapshot() {
+    // The overworld calls this after every input frame. Avoid constructing a
+    // whole shell snapshot (and, historically, two integrity checksums) just
+    // to discover that no battle exists.
+    if matches!(
+        runtime_shell.shell.session().state().battle,
+        crystal_core::state::BattleMemory::Inactive
+    ) {
+        runtime_shell.battle_action_cursor = None;
+        runtime_shell.battle_move_cursor = None;
+        runtime_shell.battle_move_swap_origin = None;
+        runtime_shell.battle_switch_cursor = None;
+        runtime_shell.battle_party_action_cursor = None;
+        runtime_shell.battle_party_summary_open = false;
+        runtime_shell.pending_battle_move_switch_slot = None;
+        runtime_shell.party_move_cursor = None;
+        runtime_shell.battle_pack_target_mode = None;
+        if runtime_shell
+            .bag_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.surface_id == "battle:bag-items")
+        {
+            runtime_shell.bag_cursor = None;
+        }
+        if runtime_shell.ball_cursor.is_some() && runtime_shell.field_pack_pocket.is_none() {
+            runtime_shell.ball_cursor = None;
+        }
+        return;
+    }
+    let snapshot = match runtime_shell.shell.presentation_snapshot() {
         Ok(snapshot) => snapshot,
         Err(error) => {
             runtime_shell.last_error = Some(error.to_string());

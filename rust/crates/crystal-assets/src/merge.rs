@@ -2862,15 +2862,62 @@ fn parse_trainer_scripts(
             };
             let mut request = TrainerBattleRequest::new(arg(0)?, arg(1)?, "");
             request.event_flag = trainer_command_optional_arg(arg(2)?);
-            request.seen_text = trainer_command_optional_arg(arg(3)?);
-            request.win_text = trainer_command_optional_arg(arg(4)?);
-            request.loss_text = trainer_command_optional_arg(arg(5)?);
-            request.callback = trainer_command_optional_arg(arg(6)?);
+            request.seen_text = resolve_trainer_command_reference(
+                scripts,
+                script_name,
+                arg(3)?,
+                "seen text",
+            )?;
+            request.win_text = resolve_trainer_command_reference(
+                scripts,
+                script_name,
+                arg(4)?,
+                "win text",
+            )?;
+            request.loss_text = resolve_trainer_command_reference(
+                scripts,
+                script_name,
+                arg(5)?,
+                "loss text",
+            )?;
+            request.callback = resolve_trainer_command_reference(
+                scripts,
+                script_name,
+                arg(6)?,
+                "callback",
+            )?;
             request.source_script = script_name.clone();
             trainer_scripts.insert(script_name.clone(), request);
         }
     }
     Ok(trainer_scripts)
+}
+
+fn resolve_trainer_command_reference(
+    scripts: &BTreeMap<String, Value>,
+    source_script: &str,
+    raw_label: &str,
+    field: &str,
+) -> Result<String> {
+    let label = trainer_command_optional_arg(raw_label);
+    if label.is_empty() || !label.starts_with('.') {
+        return Ok(label);
+    }
+    let parent = source_script
+        .rsplit_once('@')
+        .map(|(_, parent)| parent)
+        .unwrap_or(source_script);
+    let scoped = format!("{label}@{parent}");
+    match (scripts.contains_key(&label), scripts.contains_key(&scoped)) {
+        (false, true) => Ok(scoped),
+        (true, false) => Ok(label),
+        (false, false) => anyhow::bail!(
+            "trainer command {field} {label} from {source_script} resolves to neither {label} nor {scoped}"
+        ),
+        (true, true) => anyhow::bail!(
+            "trainer command {field} {label} from {source_script} is ambiguous between {label} and {scoped}"
+        ),
+    }
 }
 
 fn parse_script_item_grants(

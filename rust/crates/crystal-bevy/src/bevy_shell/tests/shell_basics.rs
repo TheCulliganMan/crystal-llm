@@ -147,7 +147,9 @@ fn real_pack_trainer_battle_starts_and_resolves_from_route_30() {
         VisibleShellBattleSmokeRef {
             map_name: "Route30".to_string(),
             source_script: "TrainerYoungsterJoey".to_string(),
-            command_index: 39,
+            // ASM Route30 TrainerYoungsterJoey begins with the trainer
+            // command that declares YOUNGSTER JOEY1.
+            command_index: 0,
         },
         &party,
     )
@@ -308,8 +310,8 @@ fn yes_no_prompt_owns_all_yes_no_text_variants() {
             FIELD_YES_NO_WIDTH_TILES,
             FIELD_YES_NO_HEIGHT_TILES,
         ),
-        (14.0, 7.0, 6.0, 5.0),
-        "ASM YesNoBox uses menu_coords 14, 7, 19, 11"
+        (14.0, 7.0, 6.0, 4.0),
+        "ASM/TypeScript YesNoBox uses the 6x4 outer window at tile (14, 7)"
     );
     assert!(is_visible_yes_no_prompt_entry("YES"));
     assert!(is_visible_yes_no_prompt_entry(">NO"));
@@ -452,9 +454,102 @@ fn runtime_snapshot_performance_benchmark() {
 #[test]
 #[ignore = "interactive Bevy schedule probe; run explicitly with --ignored --nocapture"]
 fn interactive_bevy_schedule_performance_benchmark() {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     const SAMPLES: usize = 120;
+    const FRAME_BUDGET: Duration = Duration::from_nanos(16_742_706);
+
+    #[derive(Resource, Default)]
+    struct ScheduleProfileProbe {
+        frame_started: Option<Instant>,
+        input_finished: Option<Instant>,
+        render_started: Option<Instant>,
+        render_finished: Option<Instant>,
+        phases: Vec<[Duration; 4]>,
+    }
+
+    fn profile_frame_start(mut probe: ResMut<ScheduleProfileProbe>) {
+        probe.frame_started = Some(Instant::now());
+    }
+
+    fn profile_input_finished(mut probe: ResMut<ScheduleProfileProbe>) {
+        probe.input_finished = Some(Instant::now());
+    }
+
+    fn profile_render_started(mut probe: ResMut<ScheduleProfileProbe>) {
+        probe.render_started = Some(Instant::now());
+    }
+
+    fn profile_render_finished(mut probe: ResMut<ScheduleProfileProbe>) {
+        probe.render_finished = Some(Instant::now());
+    }
+
+    fn profile_frame_finished(mut probe: ResMut<ScheduleProfileProbe>) {
+        let (Some(frame), Some(input), Some(render_start), Some(render_end)) = (
+            probe.frame_started,
+            probe.input_finished,
+            probe.render_started,
+            probe.render_finished,
+        ) else {
+            return;
+        };
+        let finished = Instant::now();
+        probe.phases.push([
+            input.duration_since(frame),
+            render_start.duration_since(input),
+            render_end.duration_since(render_start),
+            finished.duration_since(render_end),
+        ]);
+    }
+
+    fn measure(app: &mut App, samples: usize) -> Vec<Duration> {
+        (0..samples)
+            .map(|_| {
+                let started = Instant::now();
+                app.update();
+                started.elapsed()
+            })
+            .collect()
+    }
+
+    fn report(label: &str, mut samples: Vec<Duration>, phases: Vec<[Duration; 4]>) {
+        samples.sort_unstable();
+        let percentile = |numerator: usize, denominator: usize| {
+            let index = ((samples.len() - 1) * numerator) / denominator;
+            samples[index].as_secs_f64() * 1_000_000.0
+        };
+        let total = samples.iter().copied().sum::<Duration>();
+        let average_us = total.as_secs_f64() * 1_000_000.0 / samples.len() as f64;
+        let missed = samples
+            .iter()
+            .filter(|duration| **duration > FRAME_BUDGET)
+            .count();
+        eprintln!(
+            "interactive_bevy_profile phase={label} frames={} avg_us={average_us:.2} p50_us={:.2} p95_us={:.2} p99_us={:.2} max_us={:.2} effective_fps={:.2} missed_59_7275hz={missed}",
+            samples.len(),
+            percentile(50, 100),
+            percentile(95, 100),
+            percentile(99, 100),
+            samples.last().unwrap().as_secs_f64() * 1_000_000.0,
+            samples.len() as f64 / total.as_secs_f64(),
+        );
+        let phase_names = ["input", "pre_render", "render_playfield", "post_render_ui"];
+        for (index, phase_name) in phase_names.into_iter().enumerate() {
+            let mut values = phases.iter().map(|sample| sample[index]).collect::<Vec<_>>();
+            values.sort_unstable();
+            let total = values.iter().copied().sum::<Duration>();
+            eprintln!(
+                "interactive_bevy_profile_detail phase={label} system={phase_name} avg_us={:.2} p95_us={:.2} max_us={:.2}",
+                total.as_secs_f64() * 1_000_000.0 / values.len() as f64,
+                values[(values.len() - 1) * 95 / 100].as_secs_f64() * 1_000_000.0,
+                values.last().unwrap().as_secs_f64() * 1_000_000.0,
+            );
+        }
+    }
+
+    fn take_phases(app: &mut App) -> Vec<[Duration; 4]> {
+        std::mem::take(&mut app.world_mut().resource_mut::<ScheduleProfileProbe>().phases)
+    }
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -475,29 +570,53 @@ fn interactive_bevy_schedule_performance_benchmark() {
     .expect("initialize interactive benchmark shell");
     runtime_shell.shell.set_runtime_journal_enabled(false);
     let mut app = integrated_shell_test_app(runtime_shell);
+    app.init_resource::<ScheduleProfileProbe>()
+        .add_systems(First, profile_frame_start)
+        .add_systems(
+            Update,
+            profile_input_finished.after(drain_unused_runtime_ticks),
+        )
+        .add_systems(
+            Update,
+            profile_render_started
+                .after(play_pending_audio)
+                .before(render_playfield),
+        )
+        .add_systems(
+            Update,
+            profile_render_finished
+                .after(render_playfield)
+                .before(refresh_status_text),
+        )
+        .add_systems(Update, profile_frame_finished.after(refresh_shell_panels));
     app.update();
+    take_phases(&mut app);
 
-    let idle_start = Instant::now();
-    for _ in 0..SAMPLES {
-        app.update();
-    }
-    let idle_elapsed = idle_start.elapsed();
+    let idle = measure(&mut app, SAMPLES);
+    report("idle", idle, take_phases(&mut app));
 
     let mut keys = ButtonInput::<KeyCode>::default();
     keys.press(KeyCode::ArrowRight);
     app.insert_resource(keys);
-    let movement_start = Instant::now();
-    for _ in 0..SAMPLES {
-        app.update();
+    let held_right = measure(&mut app, SAMPLES);
+    report("held_right", held_right, take_phases(&mut app));
+
+    let mut traversal = Vec::with_capacity(SAMPLES);
+    let directions = [
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowRight,
+    ];
+    for frame in 0..SAMPLES {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        if frame % 2 == 0 {
+            keys.press(directions[(frame / 30) % directions.len()]);
+        }
+        app.insert_resource(keys);
+        traversal.extend(measure(&mut app, 1));
     }
-    let movement_elapsed = movement_start.elapsed();
-    eprintln!(
-        "interactive_bevy_perf samples={SAMPLES} idle_us={} idle_per_update_us={:.2} movement_us={} movement_per_update_us={:.2}",
-        idle_elapsed.as_micros(),
-        idle_elapsed.as_secs_f64() * 1_000_000.0 / SAMPLES as f64,
-        movement_elapsed.as_micros(),
-        movement_elapsed.as_secs_f64() * 1_000_000.0 / SAMPLES as f64,
-    );
+    report("walk_and_turn", traversal, take_phases(&mut app));
 }
 
 #[test]

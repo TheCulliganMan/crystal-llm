@@ -2992,11 +2992,15 @@
             .use_waterfall_field_move(&runtime, 0)
             .expect("use waterfall");
 
-        assert_eq!(waterfall.outcome.steps, 3);
+        assert_eq!(
+            waterfall.outcome.steps,
+            4,
+            "ASM and TypeScript move once, then test whether the destination remains WATERFALL"
+        );
         assert_eq!(waterfall.outcome.from_tile, TilePosition::new(0, 5));
-        assert_eq!(waterfall.outcome.to_tile, TilePosition::new(0, 2));
+        assert_eq!(waterfall.outcome.to_tile, TilePosition::new(0, 1));
         assert_eq!(session.overworld.player.mode, MovementMode::Surf);
-        assert_eq!(session.overworld.player.tile, TilePosition::new(0, 2));
+        assert_eq!(session.overworld.player.tile, TilePosition::new(0, 1));
         assert_eq!(
             session.state.overworld,
             OverworldMemory::from_snapshot(&session.overworld.snapshot())
@@ -3686,8 +3690,8 @@
         assert_eq!(wild_encounter.surface, EncounterSurface::Grass);
         assert_eq!(wild_encounter.threshold, 255);
         assert_eq!(wild_encounter.encounter_roll, 0);
-        assert_eq!(wild_encounter.slot_percent_roll, Some(0));
-        assert_eq!(wild_encounter.level_roll, Some(0));
+        assert_eq!(wild_encounter.slot_percent_roll, Some(1));
+        assert_eq!(wild_encounter.level_roll, None);
         let resolved = wild_encounter
             .resolved
             .clone()

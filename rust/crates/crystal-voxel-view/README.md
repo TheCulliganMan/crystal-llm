@@ -51,6 +51,10 @@ with missing art evidence stays flat instead of guessing or disabling 2.5D.
 The cave tileset's exact two-row rock drawings likewise fold into masked
 upright props while ambiguous wall contours remain flat pending a connected
 profile; cave collision is never treated as visual height.
+Compact interior fixtures use the same conservative source-art approach:
+authored PCs, TVs, radios, bookcases, counters, shelves, displays, and
+domestic furniture receive only shallow pixel relief, while unprofiled room
+art remains flat.
 Building facade rows fold onto one shared front plane while their vacated cells
 remain walkable ground. Profile metadata is mod-owned presentation data; it is
 neither inferred from collision nor fed back into movement, scripts, saves,

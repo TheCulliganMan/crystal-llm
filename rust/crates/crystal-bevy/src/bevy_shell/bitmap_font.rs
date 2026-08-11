@@ -500,9 +500,12 @@ fn load_tileset_art(
             METATILE_TILE_COUNT
         );
     }
-    let source = image::open(&image_path)
+    let mut source = image::open(&image_path)
         .with_context(|| format!("decode tileset PNG {}", image_path.display()))?
         .to_rgba8();
+    if tileset_id == "battle_tower_outside" {
+        apply_battle_tower_outside_roof(&runtime_assets, &mut source)?;
+    }
     let (width, height) = source.dimensions();
     if width % SOURCE_TILE_SIZE as u32 != 0 || height % SOURCE_TILE_SIZE as u32 != 0 {
         anyhow::bail!(
@@ -583,6 +586,48 @@ fn load_tileset_art(
         priority_tile_handles,
         animated_tiles,
     })
+}
+
+fn apply_battle_tower_outside_roof(
+    runtime_assets: &std::path::Path,
+    source: &mut image::RgbaImage,
+) -> Result<()> {
+    const FIRST_ROOF_TILE: u32 = 0x0a;
+    const ROOF_TILE_COUNT: u32 = 9;
+    let roof_path = runtime_assets.join("gfx/tilesets/roofs/olivine.png");
+    let roof = image::open(&roof_path)
+        .with_context(|| format!("decode Battle Tower map-group roof {}", roof_path.display()))?
+        .to_rgba8();
+    if roof.width() * roof.height()
+        != ROOF_TILE_COUNT * SOURCE_TILE_SIZE as u32 * SOURCE_TILE_SIZE as u32
+        || roof.width() % SOURCE_TILE_SIZE as u32 != 0
+        || roof.height() % SOURCE_TILE_SIZE as u32 != 0
+    {
+        anyhow::bail!(
+            "Battle Tower map-group roof {} must contain exactly {} aligned tiles",
+            roof_path.display(),
+            ROOF_TILE_COUNT,
+        );
+    }
+    let source_tiles_wide = source.width() / SOURCE_TILE_SIZE as u32;
+    let roof_tiles_wide = roof.width() / SOURCE_TILE_SIZE as u32;
+    for tile in 0..ROOF_TILE_COUNT {
+        let source_tile = FIRST_ROOF_TILE + tile;
+        let source_x = (source_tile % source_tiles_wide) * SOURCE_TILE_SIZE as u32;
+        let source_y = (source_tile / source_tiles_wide) * SOURCE_TILE_SIZE as u32;
+        let roof_x = (tile % roof_tiles_wide) * SOURCE_TILE_SIZE as u32;
+        let roof_y = (tile / roof_tiles_wide) * SOURCE_TILE_SIZE as u32;
+        for y in 0..SOURCE_TILE_SIZE as u32 {
+            for x in 0..SOURCE_TILE_SIZE as u32 {
+                source.put_pixel(
+                    source_x + x,
+                    source_y + y,
+                    *roof.get_pixel(roof_x + x, roof_y + y),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_common_tileset_animations(
@@ -3009,6 +3054,127 @@ fn copy_source_image_rgba(
             target[offset + 3] = 255;
         }
     }
+}
+
+fn town_map_frame_for_art(
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    region: &str,
+    player_gender: u8,
+    tile_palettes: &[String],
+    images: &mut Assets<Image>,
+) -> Option<SpriteFrame> {
+    let region = if region.eq_ignore_ascii_case("KANTO") { "kanto" } else { "johto" };
+    let key = (region.to_string(), player_gender);
+    if !rendered_art.town_map_cache.contains_key(&key)
+        && !rendered_art.town_map_errors.contains_key(&key)
+    {
+        match load_town_map_frame(asset_root, region, player_gender, tile_palettes, images) {
+            Ok(frame) => {
+                rendered_art.town_map_cache.insert(key.clone(), frame);
+            }
+            Err(error) => {
+                rendered_art.town_map_errors.insert(key.clone(), format!("{error:#}"));
+            }
+        }
+    }
+    rendered_art.town_map_cache.get(&key).cloned()
+}
+
+fn load_town_map_frame(
+    asset_root: &AssetRoot,
+    region: &str,
+    player_gender: u8,
+    tile_palettes: &[String],
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    const WIDTH_TILES: usize = 20;
+    const HEIGHT_TILES: usize = 18;
+    const TILE_PIXELS: usize = 8;
+    let root = asset_root.runtime_assets().join("gfx/pokegear");
+    let source_path = root.join("town_map.png");
+    let source = image::open(&source_path)
+        .with_context(|| format!("decode Town Map tiles {}", source_path.display()))?
+        .to_rgba8();
+    anyhow::ensure!(
+        source.width() == 128 && source.height() == 24,
+        "Town Map tiles {} have dimensions {}x{}, expected 128x24",
+        source_path.display(),
+        source.width(),
+        source.height()
+    );
+    anyhow::ensure!(
+        tile_palettes.len() >= 48,
+        "Town Map palette map has {} entries, expected at least 48",
+        tile_palettes.len()
+    );
+    let palette_path = root.join(if player_gender == 0 {
+        "pokegear.pal"
+    } else {
+        "pokegear_f.pal"
+    });
+    let palette_source = std::fs::read_to_string(&palette_path)
+        .with_context(|| format!("read Town Map palette {}", palette_path.display()))?;
+    let palettes = parse_palette_file(&palette_source, None)?;
+    anyhow::ensure!(palettes.len() >= 6, "Town Map palette bank is incomplete");
+    let tilemap_path = root.join(format!("{region}.bin"));
+    let mut tilemap = std::fs::read(&tilemap_path)
+        .with_context(|| format!("read Town Map tilemap {}", tilemap_path.display()))?;
+    if tilemap.last() == Some(&0xff) {
+        tilemap.pop();
+    }
+    anyhow::ensure!(
+        tilemap.len() == WIDTH_TILES * HEIGHT_TILES,
+        "Town Map tilemap {} has {} tiles, expected {}",
+        tilemap_path.display(),
+        tilemap.len(),
+        WIDTH_TILES * HEIGHT_TILES
+    );
+    let width = WIDTH_TILES * TILE_PIXELS;
+    let height = HEIGHT_TILES * TILE_PIXELS;
+    let mut data = vec![0_u8; width * height * 4];
+    for (map_index, tile_id) in tilemap.into_iter().enumerate() {
+        let tile = usize::from(tile_id);
+        anyhow::ensure!(tile < 48, "Town Map tile id {tile} is outside the 48-tile atlas");
+        let palette_index = match tile_palettes[tile].as_str() {
+            "BORDER" => 0,
+            "EARTH" => 1,
+            "MOUNTAIN" => 2,
+            "CITY" => 3,
+            "POI" => 4,
+            "POI_MTN" => 5,
+            token => anyhow::bail!("unknown Town Map palette token {token}"),
+        };
+        let source_x = (tile % 16) * TILE_PIXELS;
+        let source_y = (tile / 16) * TILE_PIXELS;
+        let target_x = (map_index % WIDTH_TILES) * TILE_PIXELS;
+        let target_y = (map_index / WIDTH_TILES) * TILE_PIXELS;
+        for row in 0..TILE_PIXELS {
+            for col in 0..TILE_PIXELS {
+                let pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
+                let colour = palettes[palette_index][palette_index_from_gray(pixel[0])];
+                let offset = ((target_y + row) * width + target_x + col) * 4;
+                data[offset..offset + 3].copy_from_slice(&colour);
+                data[offset + 3] = 255;
+            }
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    })
 }
 
 fn sprite_frame_for_art(

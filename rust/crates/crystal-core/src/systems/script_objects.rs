@@ -1229,20 +1229,35 @@ pub fn apply_script_movement(
         .transpose()?;
     let mut follower_tile = previous_follower.as_ref().map(|follower| follower.tile);
     let mut follower_facing = previous_follower.as_ref().map(|follower| follower.facing);
-    let mut queued_follower_step = previous_follower.as_ref().and_then(|follower| follower.queued_step.map(|step| (step.direction, step.stride, step.duration, step.jump, step.standing_frame))).or_else(|| previous_follower.as_ref().and_then(|follower| {
-        let direction = if previous_tile.x > follower.tile.x {
-            Direction::Right
-        } else if previous_tile.x < follower.tile.x {
-            Direction::Left
-        } else if previous_tile.y > follower.tile.y {
-            Direction::Down
-        } else if previous_tile.y < follower.tile.y {
-            Direction::Up
-        } else {
-            return None;
-        };
-        Some((direction, 1_i16, 8_u8, false, false))
-    }));
+    let mut queued_follower_step = previous_follower
+        .as_ref()
+        .and_then(|follower| {
+            follower.queued_step.map(|step| {
+                (
+                    step.direction,
+                    step.stride,
+                    step.duration,
+                    step.jump,
+                    step.standing_frame,
+                )
+            })
+        })
+        .or_else(|| {
+            previous_follower.as_ref().and_then(|follower| {
+                let direction = if previous_tile.x > follower.tile.x {
+                    Direction::Right
+                } else if previous_tile.x < follower.tile.x {
+                    Direction::Left
+                } else if previous_tile.y > follower.tile.y {
+                    Direction::Down
+                } else if previous_tile.y < follower.tile.y {
+                    Direction::Up
+                } else {
+                    return None;
+                };
+                Some((direction, 1_i16, 8_u8, false, false))
+            })
+        });
     let mut steps_applied = 0;
     let mut fixed_facing = false;
     let mut sliding = false;
@@ -1302,8 +1317,10 @@ pub fn apply_script_movement(
                     facing = direction;
                 }
                 let stride = movement_step_stride(movement, step)?;
-                if let (Some(current_follower_tile), Some((queued_direction, queued_stride, _, _, _))) =
-                    (follower_tile, queued_follower_step)
+                if let (
+                    Some(current_follower_tile),
+                    Some((queued_direction, queued_stride, _, _, _)),
+                ) = (follower_tile, queued_follower_step)
                 {
                     follower_tile = Some(
                         checked_move_by_stride(
@@ -1311,12 +1328,14 @@ pub fn apply_script_movement(
                             queued_direction,
                             queued_stride,
                         )
-                        .ok_or_else(|| ScriptObjectCommandError::MovementRuntimeTileOverflow {
-                            movement: movement.label.clone(),
-                            command: step.command.clone(),
-                            index: step.index,
-                            x: current_follower_tile.x,
-                            y: current_follower_tile.y,
+                        .ok_or_else(|| {
+                            ScriptObjectCommandError::MovementRuntimeTileOverflow {
+                                movement: movement.label.clone(),
+                                command: step.command.clone(),
+                                index: step.index,
+                                x: current_follower_tile.x,
+                                y: current_follower_tile.y,
+                            }
                         })?,
                     );
                     follower_facing = Some(queued_direction);
@@ -1327,8 +1346,7 @@ pub fn apply_script_movement(
                         stride,
                         follower_step_visible_duration(step.command.as_str()),
                         step.command.contains("jump_step"),
-                        step.command.contains("jump_step")
-                            || step.command.contains("slide_step"),
+                        step.command.contains("jump_step") || step.command.contains("slide_step"),
                     ));
                 }
                 let from_tile = tile;
@@ -1388,9 +1406,16 @@ pub fn apply_script_movement(
     {
         set_object_tile(session, &follower.object_id, tile)?;
         set_object_facing(session, &follower.object_id, facing)?;
-        session.following_queued_step = queued_follower_step.map(|(direction, stride, duration, jump, standing_frame)| {
-            FollowQueuedStep { direction, stride, duration, jump, standing_frame }
-        });
+        session.following_queued_step =
+            queued_follower_step.map(|(direction, stride, duration, jump, standing_frame)| {
+                FollowQueuedStep {
+                    direction,
+                    stride,
+                    duration,
+                    jump,
+                    standing_frame,
+                }
+            });
     } else if let Some((from, to)) = last_movement_step {
         session.update_follow_after_entity_move(&object_id, from, to);
     }

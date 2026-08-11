@@ -429,7 +429,7 @@ fn integrated_players_house_pc_opens_its_menu_from_the_live_compiled_pack() {
         .as_ref()
         .expect("player PC cursor")
         .option_index;
-    drop(runtime_shell);
+    let _ = runtime_shell;
     app.update();
     let rendered_before = {
         let world = app.world_mut();
@@ -677,7 +677,7 @@ fn find_live_standard_script_approach(
     expected_script: &str,
 ) -> (String, TilePosition, Direction) {
     let mut found_scripts = std::collections::BTreeSet::new();
-    for map_name in ["PlayersHouse2F", "PlayersHouse1F", "ElmsLab"] {
+    for map_name in ["PlayersHouse2F", "PlayersHouse1F", "ElmsLab", "PewterCity"] {
         if !runtime.data().maps.contains_key(map_name) {
             continue;
         }
@@ -707,16 +707,92 @@ fn find_live_standard_script_approach(
     panic!("live pack has no walkable collision interaction for {expected_script}; found {found_scripts:?}");
 }
 
+fn settled_keyboard_path_to_script(
+    runtime_shell: &BevyRuntimeShell,
+    expected_script: &str,
+) -> (Vec<Direction>, TilePosition, Direction) {
+    let start = runtime_shell.shell.session.overworld.clone();
+    let mut queue = std::collections::VecDeque::from([(start.clone(), Vec::new())]);
+    let mut visited = std::collections::BTreeSet::from([(start.player.tile.x, start.player.tile.y)]);
+    while let Some((session, path)) = queue.pop_front() {
+        for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            let mut candidate = session.clone();
+            candidate.player.facing = facing;
+            if candidate
+                .check_interaction_checked(1)
+                .expect("check reachable settled interaction")
+                .as_ref()
+                .is_some_and(|interaction| interaction.script == expected_script)
+            {
+                return (path, session.player.tile, facing);
+            }
+        }
+        for direction in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            let mut next = session.clone();
+            let Ok(mut step) = next.step_and_check_warp_checked(
+                direction,
+                crate::core::world::movement::StepOptions::default(),
+            ) else {
+                continue;
+            };
+            if matches!(step.outcome, crate::core::world::movement::StepOutcome::Turned { .. }) {
+                let Ok(second) = next.step_and_check_warp_checked(
+                    direction,
+                    crate::core::world::movement::StepOptions::default(),
+                ) else {
+                    continue;
+                };
+                step = second;
+            }
+            if step.warp.is_some()
+                || !matches!(step.outcome, crate::core::world::movement::StepOutcome::Moved { .. })
+            {
+                continue;
+            }
+            let mut next_path = path.clone();
+            next_path.push(direction);
+            if visited.insert((next.player.tile.x, next.player.tile.y)) {
+                queue.push_back((next, next_path));
+            }
+        }
+    }
+    let width = i16::try_from(start.map.width).unwrap() * 2;
+    let height = i16::try_from(start.map.height).unwrap() * 2;
+    let mut found = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+                let mut candidate = start.clone();
+                candidate.player.tile = TilePosition::new(x, y);
+                candidate.player.facing = facing;
+                if let Some(interaction) = candidate
+                    .check_interaction_checked(1)
+                    .expect("scan settled collision diagnostics")
+                {
+                    found.push((x, y, facing, interaction.script));
+                }
+            }
+        }
+    }
+    panic!("settled collision has no reachable keyboard path to {expected_script}; all interactions={found:?}");
+}
+
 #[test]
 fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scripts() {
-    for (script, initial_label, expected_page) in [
-        ("TVScript", Some("TVText"), None),
+    for (bootstrap_script, script, initial_label, expected_page) in [
+        ("TVScript", "TVScript", Some("TVText"), None),
         (
+            "PlayersHousePosterScript",
             "PlayersHousePosterScript",
             Some("LookTownMapText"),
             Some(PokegearPage::Map),
         ),
-        ("PlayersHouseRadioScript", Some("PlayersRadioText1"), None),
+        (
+            "PlayersHouseRadioScript",
+            "PlayersHouseRadioScript",
+            Some("PlayersRadioText1"),
+            None,
+        ),
     ] {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -726,23 +802,120 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
         let runtime = workspace_desktop_runtime(&asset_root);
         let spawn_identifier = runtime.title_new_game_spawn_identifier().expect("new-game spawn");
         let (map_name, interaction_tile, interaction_facing) =
-            find_live_standard_script_approach(&runtime, script);
-        let mut runtime_shell = initialize_bevy_runtime_shell(
-            asset_root,
-            runtime,
+            find_live_standard_script_approach(&runtime, bootstrap_script);
+        let runtime_shell = initialize_bevy_runtime_shell(
+            asset_root.clone(),
+            runtime.clone(),
             BevyShellStart::NewGameAtRuntimeTile {
                 spawn_identifier,
-                map_name,
+                map_name: map_name.clone(),
                 tile_x: interaction_tile.x,
                 tile_y: interaction_tile.y,
             },
             BevyShellConfig { smoke_player_name: Some("TEST".to_string()), ..Default::default() },
         )
         .expect("standard interaction must be reachable from a walkable live tile");
-        runtime_shell.shell.session.overworld.player.facing = interaction_facing;
         let mut app = integrated_shell_test_app(runtime_shell);
-        app.update();
-        app.update();
+        for _ in 0..256 {
+            app.update();
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            if !shell.shell.has_pending_script_work()
+                && shell.active_script_cursor.is_none()
+                && shell.player_walk_frame_ticks == 0
+            {
+                break;
+            }
+        }
+        let (path, settled_tile, settled_facing) = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            settled_keyboard_path_to_script(shell, script)
+        };
+        for direction in path {
+            let key = match direction {
+                Direction::Up => KeyCode::ArrowUp,
+                Direction::Down => KeyCode::ArrowDown,
+                Direction::Left => KeyCode::ArrowLeft,
+                Direction::Right => KeyCode::ArrowRight,
+            };
+            let before = app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap();
+            for _ in 0..2 {
+                press_key_for_runtime_hotkey_app(&mut app, key);
+                for _ in 0..9 {
+                    app.update();
+                }
+                if app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().overworld.tile
+                    != before.overworld.tile
+                {
+                    break;
+                }
+            }
+        }
+        for _ in 0..32 {
+            if app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .player_walk_frame_ticks
+                == 0
+            {
+                break;
+            }
+            app.update();
+        }
+        let current_facing = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .facing;
+        if current_facing != settled_facing {
+            let key = match settled_facing {
+                Direction::Up => KeyCode::ArrowUp,
+                Direction::Down => KeyCode::ArrowDown,
+                Direction::Left => KeyCode::ArrowLeft,
+                Direction::Right => KeyCode::ArrowRight,
+            };
+            press_key_for_runtime_hotkey_app(&mut app, key);
+            for _ in 0..9 {
+                app.update();
+            }
+        }
+        for _ in 0..32 {
+            if app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .player_walk_frame_ticks
+                == 0
+            {
+                break;
+            }
+            app.update();
+        }
+        {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            assert_eq!(
+                shell
+                    .shell
+                    .session
+                    .overworld
+                    .check_interaction_checked(1)
+                    .expect("check settled collision interaction")
+                    .as_ref()
+                    .map(|interaction| interaction.script.as_str()),
+                Some(script),
+                "fresh settled fixture must face {script} at {settled_tile:?} toward {settled_facing:?}; immutable approach was {interaction_tile:?} toward {interaction_facing:?}"
+            );
+        }
+        {
+            let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+            assert!(
+                !super::has_visible_shell_a_action(&mut shell)
+                    .expect("resolve settled A-button ownership"),
+                "ordinary {script} collision must remain owned by the overworld; snapshot={:?}",
+                shell.shell.snapshot().unwrap().ui,
+            );
+        }
         press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
 
         if let Some(label) = initial_label {
@@ -751,8 +924,15 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             assert_eq!(
                 runtime_shell.shell.snapshot().unwrap().ui.text.as_ref().map(|text| text.label.as_str()),
                 Some(label),
-                "{script} must expose its canonical text; cursor={:?} overrides={:?} blocks={:?} events={:?}",
+                "{script} must expose its canonical text; input={:?} action={:?} frame_interaction={:?} script_runtime={:?} cursor={:?} reveal={:?} notice={:?} special={:?} overrides={:?} blocks={:?} events={:?}",
+                runtime_shell.last_overworld_input,
+                runtime_shell.last_runtime_action,
+                runtime_shell.shell.last_frame().and_then(|frame| frame.interaction.as_ref()),
+                runtime_shell.shell.session.state.script_runtime,
                 runtime_shell.active_script_cursor,
+                runtime_shell.field_text_reveal,
+                runtime_shell.field_notice,
+                runtime_shell.special_boundary,
                 runtime_shell.shell.session.state.map_block_overrides.get("PlayersHouse2F"),
                 &runtime_shell.shell.session.overworld.map.metatile_ids[..4],
                 runtime_shell.last_audio_events,
@@ -762,8 +942,7 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             assert!(world.query_filtered::<Entity, With<DialogGlyphMarker>>().iter(world).next().is_some(), "{script} must render glyphs");
             if script == "PlayersHouseRadioScript" {
                 let mut labels = Vec::new();
-                for _ in 0..4096 {
-                    app.update();
+                for _ in 0..2048 {
                     let snapshot = app
                         .world()
                         .resource::<BevyRuntimeShell>()
@@ -778,6 +957,11 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                     if !snapshot.ui.text_window_open {
                         break;
                     }
+                    // PlayersHouse2F.asm has no waitbutton between these
+                    // pages: writetext -> pause 45 -> writetext. After the
+                    // initial furniture interaction the broadcast must run
+                    // and close using rendered frames alone.
+                    app.update();
                 }
                 assert_eq!(
                     labels,
@@ -818,13 +1002,34 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 runtime_shell.last_audio_events
             );
             assert_eq!(runtime_shell.pokegear_page, page, "{script} opened the wrong UI page");
-            drop(runtime_shell);
+            let _ = runtime_shell;
             app.update();
             assert_eq!(
                 app.world().resource::<BevyRuntimeShell>().last_error,
                 None,
                 "{script} modal render failed"
             );
+            if page == PokegearPage::Map {
+                let rendered_map = {
+                    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                    visible_overworld_town_map_frame(&asset_root, &mut images)
+                        .expect("render the same town-map frame used by the live modal")
+                };
+                let image = app
+                    .world()
+                    .resource::<Assets<Image>>()
+                    .get(&rendered_map.handle)
+                    .expect("town-map presented image");
+                let distinct_colors = image
+                    .data
+                    .chunks_exact(4)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(
+                    distinct_colors.len() >= 8,
+                    "TownMapScript rendered a flat/blank substitute instead of the ASM/TypeScript tilemap; colors={distinct_colors:?}"
+                );
+            }
             let world = app.world_mut();
             let glyph_sprites = world
                 .query::<(&Sprite, &Transform)>()
@@ -889,7 +1094,7 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
         assert_eq!(runtime_shell.last_error, None);
         assert_eq!(
             visible_start_menu_entries(runtime_shell).expect("start menu entries"),
-            vec![">PACK", " AB", " OPTION", " EXIT"]
+            vec![">PACK", " AB", " SAVE", " OPTION", " EXIT"]
         );
         assert_eq!(
             runtime_shell.last_action_status.as_deref(),
@@ -909,7 +1114,7 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
             field_command_frame_tiles.iter(world).count(),
             battle_window_frame_tile_count(
                 (START_MENU_RIGHT_TILE - START_MENU_LEFT_TILE + 1.0) as usize,
-                START_MENU_MIN_HEIGHT_TILES.max(4.0 + 2.0) as usize,
+                START_MENU_MIN_HEIGHT_TILES.max(5.0 + 2.0) as usize,
             ),
             "live Start key should render the TypeScript/ASM start menu frame"
         );
@@ -926,7 +1131,7 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
         assert_eq!(runtime_shell.last_error, None);
         assert_eq!(
             visible_start_menu_entries(runtime_shell).expect("moved start menu entries"),
-            vec![" PACK", ">AB", " OPTION", " EXIT"]
+            vec![" PACK", ">AB", " SAVE", " OPTION", " EXIT"]
         );
     }
 
@@ -954,8 +1159,8 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
             .join(" | ");
         let trainer_card_cache_len = rendered_art.trainer_card_cache.len();
         assert_eq!(
-            field_command_count, 1,
-            "live menu selection should render the composited Trainer Card screen; cache={trainer_card_cache_len} errors={trainer_card_error_report}"
+            field_command_count, 0,
+            "the composited Trainer Card must not retain a Rust-only field-command/debug panel; cache={trainer_card_cache_len} errors={trainer_card_error_report}"
         );
         assert_eq!(rendered_art.trainer_card_errors.len(), 0);
         assert_eq!(rendered_art.trainer_card_cache.len(), 1);
@@ -1097,6 +1302,9 @@ fn integrated_title_option_entry_opens_options_before_new_game() {
     }
 
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    // Process the released direction before pressing a different one, just
+    // like a real joypad's neutral frame between Down and Right.
+    app.update();
     let before = app
         .world()
         .resource::<BevyRuntimeShell>()
@@ -1115,7 +1323,13 @@ fn integrated_title_option_entry_opens_options_before_new_game() {
             .shell
             .snapshot()
             .expect("snapshot after title Options change");
-        assert_ne!(snapshot.trainer.options.battle_scene, before);
+        assert_ne!(
+            snapshot.trainer.options.battle_scene,
+            before,
+            "cursor={} events={:?}",
+            runtime_shell.options_cursor,
+            runtime_shell.last_audio_events
+        );
         assert!(
             visible_options_menu_entries(&snapshot, runtime_shell)
                 .iter()
@@ -1374,6 +1588,7 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
@@ -1405,10 +1620,10 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
                 })
                 .collect::<Vec<_>>(),
             vec![
-                "TEXT SPEED: FAST".to_string(),
+                "TEXT SPEED: MID".to_string(),
                 "BATTLE SCENE: ON".to_string(),
                 "BATTLE STYLE: SHIFT".to_string(),
-                "SOUND: STEREO".to_string(),
+                "SOUND: MONO".to_string(),
                 "PRINT: NORMAL".to_string(),
                 "MENU ACCOUNT: ON".to_string(),
                 "FRAME: 1".to_string(),

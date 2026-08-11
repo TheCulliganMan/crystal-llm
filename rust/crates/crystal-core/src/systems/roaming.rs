@@ -155,9 +155,11 @@ where
     if slot.map_group == catalog.inactive_map.map_group {
         return Ok(());
     }
-    let Some(route) = catalog.routes.iter().find(|route| {
-        route.map_group == slot.map_group && route.map_number == slot.map_number
-    }) else {
+    let Some(route) = catalog
+        .routes
+        .iter()
+        .find(|route| route.map_group == slot.map_group && route.map_number == slot.map_number)
+    else {
         return Ok(());
     };
 
@@ -273,8 +275,7 @@ pub fn check_encounter_roam_mon_replay(
     divider_trace: &[u8],
 ) -> Result<RoamingEncounterSelection, RoamingEngineError> {
     let mut divider = crate::random::ReplayDivider::new(divider_trace.iter().copied());
-    let selection =
-        check_encounter_roam_mon(slots, current_map, random_state, &mut divider)?;
+    let selection = check_encounter_roam_mon(slots, current_map, random_state, &mut divider)?;
     if divider.remaining() != 0 {
         return Err(RoamingEngineError::UnusedDividerSamples {
             remaining: divider.remaining(),
@@ -632,12 +633,7 @@ mod tests {
             map_number: 1,
         };
         assert!(matches!(
-            check_encounter_roam_mon_replay(
-                &state.slots,
-                current_map,
-                state.random_state,
-                &[0]
-            ),
+            check_encounter_roam_mon_replay(&state.slots, current_map, state.random_state, &[0]),
             Err(RoamingEngineError::Divider { .. })
         ));
         assert_eq!(
@@ -722,12 +718,7 @@ mod tests {
         assert_eq!(next.slots[0].map_number, 2);
 
         assert!(matches!(
-            jump_roam_mons_replay(
-                &catalog(),
-                &state,
-                RoamingMapLocation::default(),
-                &[0]
-            ),
+            jump_roam_mons_replay(&catalog(), &state, RoamingMapLocation::default(), &[0]),
             Err(RoamingEngineError::Divider { .. })
         ));
         assert_eq!(state, {
@@ -869,7 +860,10 @@ mod tests {
                 &catalog(),
                 &state,
                 input,
-                &trace_for_sub_values([1]).into_iter().chain([99]).collect::<Vec<_>>(),
+                &trace_for_sub_values([1])
+                    .into_iter()
+                    .chain([99])
+                    .collect::<Vec<_>>(),
             ),
             Err(RoamingEngineError::UnusedDividerSamples { remaining: 1 })
         );

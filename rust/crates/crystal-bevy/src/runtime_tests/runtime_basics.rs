@@ -104,7 +104,10 @@
             current_pp: 0,
             pp_ups: 0,
         }];
-        assert_eq!(available_move_slots(&pokemon), vec![0]);
+        assert!(
+            available_move_slots(&pokemon).is_empty(),
+            "a zero-PP move is not selectable; RuntimeBattleOptions exposes STRUGGLE separately"
+        );
     }
     use crystal_core::world::movement::MovementMode;
 
@@ -831,6 +834,9 @@
                 ]
             }
         })];
+        data.asm_text
+            .entry("PokecenterSignText".to_string())
+            .or_insert_with(|| "A POKéMON CENTER heals tired POKéMON.".to_string());
         data.learnsets.insert(
             "CHIKORITA".to_string(),
             vec![crystal_core::systems::learnsets::LearnsetEntry(
@@ -2016,6 +2022,12 @@
                 source_script: "RuntimeScript".to_string(),
                 command_index: 3,
             },
+            ScriptTextCommand {
+                command: "opentext".to_string(),
+                text_label: None,
+                source_script: "RuntimeAcceptedScript".to_string(),
+                command_index: 0,
+            },
         ];
         map.script_variable_commands = vec![
             ScriptVariableCommand {
@@ -2073,6 +2085,11 @@
                 command_index: 2,
             },
         ];
+        // Standard scripts are global ASM labels. Production pack loading
+        // materializes them into every map before script lookup, so this
+        // focused fixture must exercise that same exported-data path.
+        data.materialize_global_scripts()
+            .expect("materialize standard scripts");
         data
     }
 
@@ -2394,6 +2411,8 @@
         map.blocks = vec![1, 0];
         map.events.warps.clear();
         map.map_event_section_commands.clear();
+        data.map_blocks
+            .insert("RuntimeMap_Blocks".to_string(), "01 00".to_string());
         data.tilesets.insert(
             "johto".to_string(),
             test_tileset(&[
@@ -2440,6 +2459,10 @@
 
     fn minimal_runtime_data_with_fishing() -> GameDataSet {
         let mut data = minimal_runtime_data();
+        data.tilesets.insert(
+            "johto".to_string(),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "WATER", "FLOOR"])]),
+        );
         data.maps
             .get_mut("RuntimeMap")
             .expect("runtime map")
@@ -4792,10 +4815,10 @@
                 .require_odd_egg_species("chikorita")
                 .is_err()
         );
-        assert!(shell.runtime().has_magikarp_length_threshold(1));
+        assert!(shell.runtime().has_magikarp_length_threshold(110));
         assert!(!shell.runtime().has_magikarp_length_threshold(2));
-        assert!(shell.runtime().magikarp_length_thresholds().contains(&1));
-        assert!(shell.runtime().require_magikarp_length_threshold(1).is_ok());
+        assert!(shell.runtime().magikarp_length_thresholds().contains(&110));
+        assert!(shell.runtime().require_magikarp_length_threshold(110).is_ok());
         assert!(
             shell
                 .runtime()
@@ -6374,9 +6397,9 @@
         assert!(shell.has_odd_egg_species("CHIKORITA"));
         assert!(shell.odd_egg_species_ids().contains("CHIKORITA"));
         assert!(shell.require_odd_egg_species("CHIKORITA").is_ok());
-        assert!(shell.has_magikarp_length_threshold(1));
-        assert!(shell.magikarp_length_thresholds().contains(&1));
-        assert!(shell.require_magikarp_length_threshold(1).is_ok());
+        assert!(shell.has_magikarp_length_threshold(110));
+        assert!(shell.magikarp_length_thresholds().contains(&110));
+        assert!(shell.require_magikarp_length_threshold(110).is_ok());
         assert!(shell.has_happiness_change(9));
         assert!(!shell.has_happiness_change(1));
         assert!(shell.happiness_change_ids().contains(&9));
@@ -7388,7 +7411,7 @@
         );
         assert_eq!(initial.special.oak_ratings[0].text_label, "OakRating01");
         assert_eq!(initial.special.odd_egg_definitions[0].species, "CHIKORITA");
-        assert_eq!(initial.special.magikarp_lengths[0].threshold, 1);
+        assert_eq!(initial.special.magikarp_lengths[0].threshold, 110);
         assert!(initial.special.happiness_data.is_some());
         assert!(
             initial
@@ -7803,10 +7826,14 @@
         let after_tick = shell.snapshot().expect("after tick snapshot");
         assert_eq!(after_tick.overworld.frame, frame.snapshot.frame);
         assert_eq!(after_tick.state_checksum, frame.state_checksum);
+        let framed_sequence = shell
+            .runtime_command_sequence
+            .checked_add(1)
+            .expect("runtime command sequence");
         let framed_command = shell
             .runtime_command_frame(
                 1,
-                12,
+                framed_sequence,
                 RuntimeMutationCommand::ApplyOverworldInput(RuntimeOverworldInputCommand {
                     buttons: vec![GameButton::Down],
                     divider_trace: RuntimeDividerTrace::new([]),
@@ -7833,7 +7860,7 @@
         let result_frame = shell
             .runtime_mutation_result_frame(framed_command, &framed_outcome)
             .expect("runtime result frame");
-        assert_eq!(result_frame.request().sequence(), 12);
+        assert_eq!(result_frame.request().sequence(), framed_sequence);
         let after_frame = shell.snapshot().expect("after frame snapshot");
         assert_eq!(after_frame.state_checksum, framed_outcome.state_checksum);
 

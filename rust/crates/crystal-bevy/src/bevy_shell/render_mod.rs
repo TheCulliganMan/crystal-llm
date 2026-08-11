@@ -97,6 +97,7 @@ fn publish_visual_world_frame(
         }
         let Some(actor) = visual_actor(
             crystal_render_api::VisualActorId::Player,
+            Arc::from("player"),
             texture,
             sprite,
             transform,
@@ -124,6 +125,7 @@ fn publish_visual_world_frame(
         };
         let Some(actor) = visual_actor(
             crystal_render_api::VisualActorId::Object(object_index),
+            object.source_id.clone(),
             texture,
             sprite,
             transform,
@@ -131,7 +133,9 @@ fn publish_visual_world_frame(
         ) else {
             return;
         };
-        actors.push(actor);
+        if visual_actor_intersects_grid(&actor, center, published_grid_size) {
+            actors.push(actor);
+        }
     }
 
     let mut rustle_iter = grass_rustles.iter();
@@ -143,6 +147,7 @@ fn publish_visual_world_frame(
             crystal_render_api::VisualActorId::Effect(
                 crystal_render_api::VisualEffectId::GrassRustle,
             ),
+            Arc::from("effect_grass_rustle"),
             texture,
             sprite,
             transform,
@@ -150,7 +155,9 @@ fn publish_visual_world_frame(
         ) else {
             return;
         };
-        actors.push(effect);
+        if visual_actor_intersects_grid(&effect, center, published_grid_size) {
+            actors.push(effect);
+        }
     }
 
     let next = crystal_render_api::VisualWorldFrame {
@@ -200,6 +207,7 @@ fn voxel_spatial_effects_supported(runtime_shell: &BevyRuntimeShell) -> bool {
 
 fn visual_actor(
     id: crystal_render_api::VisualActorId,
+    source_id: Arc<str>,
     texture: &Handle<Image>,
     sprite: &Sprite,
     transform: &Transform,
@@ -212,12 +220,24 @@ fn visual_actor(
     }
     Some(crystal_render_api::VisualActor {
         id,
+        source_id,
         texture: texture.clone(),
         center,
         size,
         flip_x: sprite.flip_x,
         above_priority,
     })
+}
+
+fn visual_actor_intersects_grid(
+    actor: &crystal_render_api::VisualActor,
+    center: Vec2,
+    grid_size: UVec2,
+) -> bool {
+    let half_grid = grid_size.as_vec2() * TILE_SIZE * 0.5;
+    let half_actor = actor.size * 0.5;
+    let delta = actor.center - center;
+    delta.x.abs() <= half_grid.x + half_actor.x && delta.y.abs() <= half_grid.y + half_actor.y
 }
 
 fn visual_tile_grid_is_complete(tiles: &[crystal_render_api::VisualTile]) -> bool {
@@ -294,6 +314,34 @@ mod render_mod_tests {
         let mut tiles = complete_visual_grid();
         tiles.swap(0, 1);
         assert!(!visual_tile_grid_is_complete(&tiles));
+    }
+
+    #[test]
+    fn fully_clipped_actor_is_not_published_to_renderer_mod() {
+        let actor = crystal_render_api::VisualActor {
+            id: crystal_render_api::VisualActorId::Object(1),
+            source_id: Arc::from("edge_npc"),
+            texture: Handle::weak_from_u128(7),
+            center: Vec2::new(500.0, 0.0),
+            size: Vec2::splat(16.0),
+            flip_x: false,
+            above_priority: false,
+        };
+        assert!(!visual_actor_intersects_grid(
+            &actor,
+            Vec2::ZERO,
+            UVec2::new(40, 36)
+        ));
+
+        let touching = crystal_render_api::VisualActor {
+            center: Vec2::new(168.0, 0.0),
+            ..actor
+        };
+        assert!(visual_actor_intersects_grid(
+            &touching,
+            Vec2::ZERO,
+            UVec2::new(40, 36)
+        ));
     }
 
     #[test]

@@ -11,9 +11,6 @@ use crate::models::{
 use crate::random::{
     CrystalRandom, CrystalRandomState, DividerSource, LinkBattleRandom, LinkBattleRandomState,
 };
-use crate::systems::special_routines::{
-    ROAMING_POKEMON_SLOT_COUNT, RoamingMapLocation, RoamingPokemonCatalog,
-};
 use crate::systems::script_audio::{
     SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
     SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS, SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS,
@@ -24,6 +21,9 @@ use crate::systems::script_runtime::{
 use crate::systems::script_text::SCRIPT_TEXT_LABEL_COMMANDS;
 use crate::systems::script_warps::{SCRIPT_MAP_LOAD_COMMANDS, SCRIPT_MAP_REFRESH_COMMANDS};
 use crate::systems::shop::{SCRIPT_SHOP_ZERO_MART_TYPES, is_known_script_mart_type};
+use crate::systems::special_routines::{
+    ROAMING_POKEMON_SLOT_COUNT, RoamingMapLocation, RoamingPokemonCatalog,
+};
 use crate::systems::step_events::StepEventCounters;
 use crate::systems::time::{ClockTime, TimeState};
 use crate::timing::Frame;
@@ -482,10 +482,7 @@ impl GameState {
     /// The original scans one side of the party after a one-third chance,
     /// copying the source strain to the first uninfected neighbor. The same
     /// boundary also performs Crystal's rare Shuckle Berry conversion.
-    pub fn spread_pokerus_after_battle<S>(
-        &mut self,
-        divider: &mut S,
-    ) -> Result<bool, S::Error>
+    pub fn spread_pokerus_after_battle<S>(&mut self, divider: &mut S) -> Result<bool, S::Error>
     where
         S: DividerSource + ?Sized,
     {
@@ -501,12 +498,10 @@ impl GameState {
             // nonzero, so the farcall enters GivePokerus... with carry clear.
             // BIT in ConvertBerriesToBerryJuice preserves that clear carry.
             if reached_goldenrod && rng.random(false)?.value < 16 {
-                if let Some(shuckle) = storage
-                .party
-                .pokemon
-                .iter_mut()
-                .flatten()
-                .find(|mon| mon.species.id == "SHUCKLE" && mon.item.as_deref() == Some("BERRY"))
+                if let Some(shuckle) =
+                    storage.party.pokemon.iter_mut().flatten().find(|mon| {
+                        mon.species.id == "SHUCKLE" && mon.item.as_deref() == Some("BERRY")
+                    })
                 {
                     shuckle.item = Some("BERRY_JUICE".to_string());
                     party_changed = true;
@@ -514,15 +509,11 @@ impl GameState {
             }
             let party_count = storage.party.filled_slots();
             let source = storage
-            .party
-            .pokemon
-            .iter()
+                .party
+                .pokemon
+                .iter()
                 .take(party_count)
-                .position(|pokemon| {
-                    pokemon
-                        .as_ref()
-                        .is_some_and(|mon| mon.pokerus & 0x0f != 0)
-                });
+                .position(|pokemon| pokemon.as_ref().is_some_and(|mon| mon.pokerus & 0x0f != 0));
             let Some(source_index) = source else {
                 if reached_goldenrod {
                     // The final AND in the party scan clears carry.
@@ -775,10 +766,7 @@ pub enum LinkSerialConnectionStatus {
 
 impl LinkSerialConnectionStatus {
     pub const fn is_established(self) -> bool {
-        matches!(
-            self,
-            Self::UsingExternalClock | Self::UsingInternalClock
-        )
+        matches!(self, Self::UsingExternalClock | Self::UsingInternalClock)
     }
 }
 
@@ -2021,10 +2009,7 @@ impl<'de> Deserialize<'de> for RoamingPokemonState {
 impl RoamingPokemonState {
     fn validate_saved_state(&self, index: usize) -> Result<(), String> {
         if let Some(species) = &self.species {
-            validate_script_runtime_token(
-                &format!("roaming_pokemon[{index}].species"),
-                species,
-            )?;
+            validate_script_runtime_token(&format!("roaming_pokemon[{index}].species"), species)?;
             if self.level == 0 {
                 return Err(format!("roaming_pokemon[{index}].level must be nonzero"));
             }
@@ -2044,9 +2029,7 @@ impl RoamingPokemonState {
                     "roaming_pokemon[{index}] inactive map bytes must be both zero or both nonzero"
                 ));
             }
-            if self.map_group == 0
-                && (self.level != 0 || self.dvs_be != [0, 0])
-            {
+            if self.map_group == 0 && (self.level != 0 || self.dvs_be != [0, 0]) {
                 return Err(format!(
                     "roaming_pokemon[{index}] pre-init 0/0 slot must have zero level, hp, and DVs"
                 ));
@@ -2093,11 +2076,7 @@ impl<'de> Deserialize<'de> for RoamingMapHistory {
 impl RoamingMapHistory {
     fn validate_saved_state(&self) -> Result<(), String> {
         for (name, group, number) in [
-            (
-                "current",
-                self.current_map_group,
-                self.current_map_number,
-            ),
+            ("current", self.current_map_group, self.current_map_number),
             ("last", self.last_map_group, self.last_map_number),
         ] {
             if (group == 0) != (number == 0) {
@@ -2117,7 +2096,9 @@ pub enum RoamingSaveError {
         "saved roaming_pokemon[{index}].species {species} is missing from compiled pack pokemon"
     )]
     MissingSpecies { index: usize, species: String },
-    #[error("saved roaming_pokemon[{index}] {species} level {level} does not match catalog init slot")]
+    #[error(
+        "saved roaming_pokemon[{index}] {species} level {level} does not match catalog init slot"
+    )]
     InitSlotMismatch {
         index: usize,
         species: String,
@@ -2235,9 +2216,10 @@ where
                 species: species.to_string(),
             });
         }
-        if !catalog.init_write(index).is_some_and(|write| {
-            write.species == species && write.level == roaming.level
-        }) {
+        if !catalog
+            .init_write(index)
+            .is_some_and(|write| write.species == species && write.level == roaming.level)
+        {
             return Err(RoamingSaveError::InitSlotMismatch {
                 index,
                 species: species.to_string(),
@@ -2475,10 +2457,7 @@ impl PendingStaticWildBattleTerminal {
             "pending_static_wild_terminal.battle_type",
             &self.battle_type,
         )?;
-        validate_script_runtime_token(
-            "pending_static_wild_terminal.species",
-            &self.species,
-        )?;
+        validate_script_runtime_token("pending_static_wild_terminal.species", &self.species)?;
         if self.level == 0 {
             return Err("pending static wild terminal level cannot be zero".to_string());
         }
@@ -2763,10 +2742,11 @@ impl BattleMemory {
                     ));
                 }
                 validate_script_runtime_label("battle.static_wild.source_script", source_script)?;
-                let expected_resume = startbattle_command_index.checked_add(1).ok_or_else(|| {
-                    "battle.static_wild.startbattle_command_index cannot be usize::MAX"
-                        .to_string()
-                })?;
+                let expected_resume =
+                    startbattle_command_index.checked_add(1).ok_or_else(|| {
+                        "battle.static_wild.startbattle_command_index cannot be usize::MAX"
+                            .to_string()
+                    })?;
                 if *resume_command_index != expected_resume {
                     return Err(format!(
                         "battle.static_wild.resume_command_index {resume_command_index} must immediately follow startbattle_command_index {startbattle_command_index}"
@@ -2803,7 +2783,7 @@ impl BattleMemory {
                 validate_empty_or_script_runtime_token("battle.trainer.seen_text", seen_text)?;
                 validate_empty_or_exact_text("battle.trainer.win_text", win_text)?;
                 validate_empty_or_exact_text("battle.trainer.loss_text", loss_text)?;
-                validate_empty_or_script_runtime_token("battle.trainer.callback", callback)?;
+                validate_empty_or_script_runtime_label("battle.trainer.callback", callback)?;
                 validate_script_runtime_label("battle.trainer.source_script", source_script)?;
                 validate_script_runtime_token("battle.trainer.encounter_music", encounter_music)?;
                 for (index, ai_layer) in ai_layers.iter().enumerate() {
@@ -3210,7 +3190,10 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
 impl ScriptRuntimeMemory {
     pub fn validate(&self) -> Result<(), String> {
         if let Some(next_script) = &self.next_script {
-            validate_script_runtime_token("next_script.origin_map_name", &next_script.origin_map_name)?;
+            validate_script_runtime_token(
+                "next_script.origin_map_name",
+                &next_script.origin_map_name,
+            )?;
             validate_script_runtime_label("next_script.script", &next_script.script)?;
         }
         validate_optional_script_runtime_label(
@@ -3277,10 +3260,7 @@ impl ScriptRuntimeMemory {
             let Some(contact_id) = contact_id else {
                 continue;
             };
-            validate_script_runtime_token(
-                &format!("phone_number_order[{index}]"),
-                contact_id,
-            )?;
+            validate_script_runtime_token(&format!("phone_number_order[{index}]"), contact_id)?;
             if !ordered_phone_numbers.insert(contact_id.clone()) {
                 return Err(format!(
                     "phone_number_order contains duplicate contact {contact_id}"
@@ -7511,6 +7491,14 @@ fn validate_empty_or_script_runtime_token(field: &str, value: &str) -> Result<()
     }
 }
 
+fn validate_empty_or_script_runtime_label(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Ok(())
+    } else {
+        validate_script_runtime_label(field, value)
+    }
+}
+
 fn validate_empty_or_exact_text(field: &str, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Ok(());
@@ -8195,14 +8183,31 @@ impl GameState {
             .pokemon
             .iter()
             .enumerate()
-            .filter_map(|(index, pokemon)| pokemon.as_ref().map(|pokemon| (format!("party[{index}]"), pokemon)))
-            .chain(self.storage.pc_boxes.iter().enumerate().flat_map(|(box_index, pc_box)| {
-                pc_box.pokemon.iter().enumerate().filter_map(move |(slot_index, pokemon)| {
-                    pokemon.as_ref().map(|pokemon| (format!("pc_boxes[{box_index}][{slot_index}]"), pokemon))
-                })
-            }))
+            .filter_map(|(index, pokemon)| {
+                pokemon
+                    .as_ref()
+                    .map(|pokemon| (format!("party[{index}]"), pokemon))
+            })
+            .chain(
+                self.storage
+                    .pc_boxes
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(box_index, pc_box)| {
+                        pc_box.pokemon.iter().enumerate().filter_map(
+                            move |(slot_index, pokemon)| {
+                                pokemon.as_ref().map(|pokemon| {
+                                    (format!("pc_boxes[{box_index}][{slot_index}]"), pokemon)
+                                })
+                            },
+                        )
+                    }),
+            )
         {
-            let holds_mail_item = pokemon.item.as_deref().is_some_and(crate::models::item::is_mail_item_id);
+            let holds_mail_item = pokemon
+                .item
+                .as_deref()
+                .is_some_and(crate::models::item::is_mail_item_id);
             if holds_mail_item != pokemon.mail.is_some() {
                 return Err(format!(
                     "saved {location} must have both a Mail item and Mail data or neither"
@@ -8216,10 +8221,7 @@ impl GameState {
             ));
         }
         for (index, entry) in self.mailbox.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("mailbox[{index}].item_id"),
-                &entry.item_id,
-            )?;
+            validate_script_runtime_token(&format!("mailbox[{index}].item_id"), &entry.item_id)?;
             if !crate::models::item::is_mail_item_id(&entry.item_id) {
                 return Err(format!(
                     "mailbox[{index}].item_id '{}' is not an ASM Mail item",
@@ -8453,10 +8455,10 @@ impl GameState {
                 self.battle_result, battle_result_code
             ));
         }
-        let bug_contest_engine_active = self
-            .flags
-            .is_engine_flag_set("ENGINE_BUG_CONTEST_TIMER")
-            .map_err(|error| format!("read saved Bug Contest engine flag: {error}"))?;
+        let bug_contest_engine_active =
+            self.flags
+                .is_engine_flag_set("ENGINE_BUG_CONTEST_TIMER")
+                .map_err(|error| format!("read saved Bug Contest engine flag: {error}"))?;
         if self.bug_contest.timer_active && !bug_contest_engine_active {
             return Err(format!(
                 "active bug_contest.timer_active requires ENGINE_BUG_CONTEST_TIMER, found {}",
@@ -8641,13 +8643,10 @@ impl GameState {
                 );
             }
         }
-        let active_link_battle = self.link_session.link_mode != 0
-            && !matches!(self.battle, BattleMemory::Inactive);
+        let active_link_battle =
+            self.link_session.link_mode != 0 && !matches!(self.battle, BattleMemory::Inactive);
         if (saved_combat_is_link || active_link_battle)
-            && !self
-                .link_session
-                .serial_connection_status
-                .is_established()
+            && !self.link_session.serial_connection_status.is_established()
         {
             return Err(
                 "active link battle requires an established serial clock owner".to_string(),
@@ -9907,14 +9906,16 @@ mod tests {
 
     fn roaming_catalog_for_tests() -> RoamingPokemonCatalog {
         let routes = (0_u8..16)
-            .map(|index| crate::systems::special_routines::RoamingPokemonRoute {
-                map_group: 1,
-                map_number: index + 1,
-                connections: vec![RoamingMapLocation {
+            .map(
+                |index| crate::systems::special_routines::RoamingPokemonRoute {
                     map_group: 1,
-                    map_number: (index + 1) % 16 + 1,
-                }],
-            })
+                    map_number: index + 1,
+                    connections: vec![RoamingMapLocation {
+                        map_group: 1,
+                        map_number: (index + 1) % 16 + 1,
+                    }],
+                },
+            )
             .collect();
         RoamingPokemonCatalog {
             slot_count: 3,
@@ -10069,10 +10070,7 @@ mod tests {
         assert_eq!(state.kenji_break_timer, 3);
         assert_eq!(
             state.random_state,
-            CrystalRandomState {
-                add: 0xff,
-                sub: 56,
-            }
+            CrystalRandomState { add: 0xff, sub: 56 }
         );
         assert_eq!(divider.consumed(), 2);
         assert_eq!(divider.remaining(), 0);
@@ -10171,11 +10169,8 @@ mod tests {
         let species =
             PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
         let mut state = GameState::default();
-        state.storage.party.pokemon[0] = Some(Pokemon::new_for_tests(
-            species.clone(),
-            5,
-            Dv::default(),
-        ));
+        state.storage.party.pokemon[0] =
+            Some(Pokemon::new_for_tests(species.clone(), 5, Dv::default()));
         let mut infected = Pokemon::new_for_tests(species, 5, Dv::default());
         infected.pokerus = 0xb3;
         state.storage.party.pokemon[1] = Some(infected);
@@ -10196,8 +10191,7 @@ mod tests {
         let species =
             PokemonSpecies::new_for_tests("TOGEPI", BaseStats::new(35, 20, 65, 20, 40, 65));
         let mut state = GameState::default();
-        state.storage.party.pokemon[0] =
-            Some(Pokemon::new_for_tests(species, 5, Dv::default()));
+        state.storage.party.pokemon[0] = Some(Pokemon::new_for_tests(species, 5, Dv::default()));
         state
             .flags
             .set_engine_flag("ENGINE_REACHED_GOLDENROD", true)
@@ -10311,7 +10305,10 @@ mod tests {
             let error = serde_json::from_value::<GameState>(invalid)
                 .expect_err("invalid six-bit battle result rejects without a pending terminal")
                 .to_string();
-            assert!(error.contains("invalid base result"), "{invalid_result:#04x}: {error}");
+            assert!(
+                error.contains("invalid base result"),
+                "{invalid_result:#04x}: {error}"
+            );
         }
 
         let mut missing_random_state =
@@ -11213,10 +11210,7 @@ mod tests {
         };
         assert_eq!(
             state.validate_saved_state(),
-            Err(
-                "roaming_pokemon[0] active species RAIKOU requires a nonzero map pair"
-                    .to_string()
-            )
+            Err("roaming_pokemon[0] active species RAIKOU requires a nonzero map pair".to_string())
         );
 
         state = GameState::default();
@@ -11254,9 +11248,7 @@ mod tests {
         state.roaming_map_history.last_map_group = 1;
         assert_eq!(
             state.validate_saved_state(),
-            Err(
-                "roaming_map_history last map bytes must be both zero or both nonzero".to_string()
-            )
+            Err("roaming_map_history last map bytes must be both zero or both nonzero".to_string())
         );
 
         state = GameState {
@@ -12778,7 +12770,10 @@ mod tests {
         runtime = ScriptRuntimeMemory::default();
         runtime.effects.push(ScriptRuntimeEffect {
             command: "conditional_event".to_string(),
-            args: vec!["EVENT_OPENED_LOCKED_DOOR".to_string(), ".Script".to_string()],
+            args: vec![
+                "EVENT_OPENED_LOCKED_DOOR".to_string(),
+                ".Script".to_string(),
+            ],
             source_script: "LockedDoorData".to_string(),
             command_index: 0,
         });
@@ -14728,8 +14723,7 @@ mod tests {
     #[test]
     fn saved_link_serial_clock_owner_requires_a_live_handshake_or_active_room() {
         let mut idle = GameState::default();
-        idle.link_session.serial_connection_status =
-            LinkSerialConnectionStatus::UsingInternalClock;
+        idle.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingInternalClock;
         let idle_error = serde_json::from_value::<GameState>(
             serde_json::to_value(&idle).expect("serialize contradictory idle link state"),
         )
@@ -14758,8 +14752,7 @@ mod tests {
         .to_string();
         assert!(room_error.contains("requires an established serial clock owner"));
 
-        room.link_session.serial_connection_status =
-            LinkSerialConnectionStatus::UsingExternalClock;
+        room.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingExternalClock;
         let missing_stream_error = serde_json::from_value::<GameState>(
             serde_json::to_value(&room).expect("serialize active room without battle RNG stream"),
         )
@@ -15820,9 +15813,7 @@ mod tests {
                 "NationalParkBugContest",
                 &enemy,
                 |map_name, species, level| {
-                    map_name == "NationalParkBugContest"
-                        && species == "SCYTHER"
-                        && level == 14
+                    map_name == "NationalParkBugContest" && species == "SCYTHER" && level == 14
                 },
             ),
             Ok(())

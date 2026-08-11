@@ -91,7 +91,12 @@ const GAME_TICK_SECONDS: f32 = GB_FRAME_DURATION_SECONDS as f32;
 const VIEWPORT_TILES_X: i16 = 20;
 const VIEWPORT_TILES_Y: i16 = 18;
 #[cfg(feature = "voxel-view")]
-const VISUAL_WORLD_HALO_TILES: i16 = 16;
+// The pitched camera only needs a small guard band around the 20x18 LCD.
+// A 32-tile halo expanded every walking refresh to 84x82 (6,888 tiles),
+// forcing the classic compositor, validation, hashing, cloning, and voxel
+// extraction paths to process mostly invisible terrain. Four tiles cover the
+// camera fringe while the classic fallback camera owns anything beyond it.
+const VISUAL_WORLD_HALO_TILES: i16 = 4;
 #[cfg(not(feature = "voxel-view"))]
 const VISUAL_WORLD_HALO_TILES: i16 = 0;
 const VISUAL_WORLD_TILES_X: i16 = VIEWPORT_TILES_X + VISUAL_WORLD_HALO_TILES * 2;
@@ -591,6 +596,7 @@ struct BevyRuntimeShell {
     pending_enemy_response_after_capture: Option<(String, String)>,
     pending_plain_battle_map_reload: bool,
     last_overworld_input: Option<VisibleOverworldInputRecord>,
+    overworld_interaction_consumed_a: bool,
     // Authoritative movement commits at a tile boundary. Retain its previous
     // tile so presentation can cross that boundary over real LCD frames.
     player_walk_from: Option<TilePosition>,
@@ -1114,6 +1120,15 @@ fn record_visible_overworld_input(
         )
     })?;
     runtime_shell.last_overworld_input = Some(input.clone());
+    bevy::log::debug!(
+        target: "crystal_bevy::script_trace",
+        frame = input.frame,
+        input_mask = input.input_mask,
+        pressed_mask = input.pressed_mask,
+        player_moved = input.player_moved,
+        state_hash = input.state_checksum.hash(),
+        "visible overworld input"
+    );
     runtime_shell.recent_overworld_inputs.push_back(input);
     while runtime_shell.recent_overworld_inputs.len() > RECENT_OVERWORLD_INPUT_LIMIT {
         runtime_shell.recent_overworld_inputs.pop_front();
@@ -1129,8 +1144,16 @@ fn record_visible_runtime_action(
     action: impl Into<String>,
 ) -> Result<()> {
     let state_checksum = runtime_shell.shell.state_checksum()?;
+    let action = action.into();
+    bevy::log::debug!(
+        target: "crystal_bevy::script_trace",
+        frame = state_checksum.frame(),
+        state_hash = state_checksum.hash(),
+        action = %action,
+        "visible runtime action"
+    );
     runtime_shell.last_runtime_action = Some(VisibleRuntimeActionRecord {
-        action: action.into(),
+        action,
         frame: state_checksum.frame(),
         state_hash: state_checksum.hash(),
     });
@@ -1142,14 +1165,23 @@ fn set_visible_runtime_action_from_checksum(
     action: impl Into<String>,
     state_checksum: &StateChecksum,
 ) {
+    let action = action.into();
+    bevy::log::debug!(
+        target: "crystal_bevy::script_trace",
+        frame = state_checksum.frame(),
+        state_hash = state_checksum.hash(),
+        action = %action,
+        "visible runtime action"
+    );
     runtime_shell.last_runtime_action = Some(VisibleRuntimeActionRecord {
-        action: action.into(),
+        action,
         frame: state_checksum.frame(),
         state_hash: state_checksum.hash(),
     });
 }
 
 fn record_visible_runtime_error(runtime_shell: &mut BevyRuntimeShell, error: &anyhow::Error) {
+    bevy::log::error!(target: "crystal_bevy::script_trace", error = %error, "visible runtime error");
     let action = format!("runtime:error:{error}");
     if let Ok(snapshot) = runtime_shell.shell.snapshot() {
         set_visible_runtime_action_from_checksum(runtime_shell, action, &snapshot.state_checksum);
@@ -2540,6 +2572,8 @@ struct RenderedTilesetArt {
     battle_minimize_error: Option<String>,
     title_cache: HashMap<TitleArtKey, SpriteFrame>,
     title_errors: HashMap<TitleArtKey, String>,
+    town_map_cache: HashMap<(String, u8), SpriteFrame>,
+    town_map_errors: HashMap<(String, u8), String>,
     // The title menu is redrawn as its cursor/clock changes, but its source
     // font and frame PNGs never change. Keep the decoded sources resident so
     // an animated title does not hit the filesystem and PNG decoder every
@@ -3259,6 +3293,7 @@ struct VisibleObjectSprite {
     /// cannot be the renderer's identity because anonymous objects are valid.
     object_index: usize,
     object_identifier: Option<String>,
+    source_id: Arc<str>,
     above_priority: bool,
     standing: Handle<Image>,
     walking: Option<Handle<Image>>,
@@ -3280,6 +3315,9 @@ struct FieldCommandWindowFrameMarker;
 
 #[derive(Component)]
 struct SceneDialogMarker;
+
+#[derive(Component)]
+struct YesNoPromptMarker;
 
 /// Stable identity for a bitmap glyph in the retained dialog layer.  Dialog
 /// text advances one character at a time; retaining these entities avoids a
@@ -3894,6 +3932,11 @@ pub fn smoke_visible_shell_title_name_input(
         })?;
     select_visible_title_menu_option(&mut runtime_shell)?;
     complete_visible_smoke_gender_if_needed(&mut runtime_shell)?;
+    // A normal Bevy update samples the host RTC before the clock-setting UI
+    // accepts input. This direct smoke driver intentionally bypasses the App,
+    // so supply the same native source rather than granting a test-only clock
+    // mutation path.
+    runtime_shell.latest_rtc_sample = Some(NativeRtcSource::system_local().sample());
     complete_visible_smoke_time_set_if_needed(&mut runtime_shell)?;
     complete_visible_smoke_oak_intro_if_needed(&mut runtime_shell)?;
     if runtime_shell.pending_name_choice.is_some() {
@@ -4582,6 +4625,18 @@ fn apply_visible_shell_smoke_frame(
     } else {
         Some(runtime_shell.shell.tick(overworld_buttons)?.clone())
     };
+    if frame
+        .as_ref()
+        .and_then(|frame| frame.interaction.as_ref())
+        .is_some()
+    {
+        // Match the real Bevy input transaction: ordinary A interactions are
+        // discovered by the authoritative overworld tick, then their compiled
+        // script is dispatched after that tick. The smoke driver must not
+        // route them through modal UI ownership merely to make tests pass.
+        interaction = true;
+        execute_last_interaction_script(runtime_shell)?;
+    }
     Ok(VisibleShellSmokeFrameOutcome { frame, interaction })
 }
 
@@ -4896,6 +4951,7 @@ fn initialize_bevy_runtime_shell(
         pending_enemy_response_after_capture: None,
         pending_plain_battle_map_reload: false,
         last_overworld_input: None,
+        overworld_interaction_consumed_a: false,
         player_walk_from: None,
         player_walk_frame_ticks: 0,
         player_walk_total_ticks: WALK_FRAME_HOLD_TICKS,

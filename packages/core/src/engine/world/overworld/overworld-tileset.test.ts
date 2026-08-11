@@ -17,6 +17,21 @@ const surfaceTiles = (count: number): Array<InstanceType<typeof gameEngine.Surfa
   Array.from({ length: count }, () => new gameEngine.Surface(TILE_SIZE, TILE_SIZE));
 
 describe("OverworldTileset", () => {
+  it("applies Cianwood's Olivine map-group roof to Battle Tower Outside", async () => {
+    const battleTower = new OverworldTileset("battle_tower_outside", "day");
+    const johtoModern = new OverworldTileset("johto_modern", "day");
+    await Promise.all([battleTower.ready, johtoModern.ready]);
+
+    const pixels = (tile: InstanceType<typeof gameEngine.Surface>) =>
+      Array.from({ length: TILE_SIZE * TILE_SIZE }, (_, index) =>
+        tile.get_at([index % TILE_SIZE, Math.floor(index / TILE_SIZE)])
+      );
+
+    expect(pixels(battleTower.tiles[0x0a])).not.toEqual(pixels(johtoModern.tiles[0x0a]));
+    expect(pixels(battleTower.tiles[0x12])).not.toEqual(pixels(johtoModern.tiles[0x12]));
+    expect(pixels(battleTower.tiles[0x13])).toEqual(pixels(johtoModern.tiles[0x13]));
+  });
+
   it("builds metatile layouts from raw bytes", () => {
     const bytes = new Uint8Array(METATILE_WIDTH * METATILE_WIDTH);
     bytes.forEach((_, index) => {

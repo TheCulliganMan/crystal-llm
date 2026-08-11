@@ -2,16 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::models::Dv;
-use crate::systems::economy::{EconomyError, MoneyAccount};
-use crate::systems::phone::insert_phone_number_in_first_open_slot;
 use crate::state::{
     GameState, HALL_OF_FAME_ENTRY_LIMIT, HALL_OF_FAME_MASTER_COUNT, HALL_OF_FAME_TEAM_SIZE,
-    HallOfFameEntry, HallOfFamePokemon, ScriptRuntimeAsmDirective,
+    HallOfFameEntry, HallOfFamePokemon, ScriptLocation, ScriptRuntimeAsmDirective,
     ScriptRuntimeDecorationDescription, ScriptRuntimeDelay, ScriptRuntimeEarthquake,
     ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeNumericBufferWrite,
-    ScriptLocation, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
-    ScriptRuntimeVariableWrite,
+    ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry, ScriptRuntimeVariableWrite,
 };
+use crate::systems::economy::{EconomyError, MoneyAccount};
+use crate::systems::phone::insert_phone_number_in_first_open_slot;
 
 pub const SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE: &str = "SPECIALCALL_NONE";
 
@@ -606,10 +605,7 @@ fn validate_runtime_pack_id_set(field: &str, values: &BTreeSet<String>) -> Resul
     Ok(())
 }
 
-fn validate_runtime_landmark_id_set(
-    field: &str,
-    values: &BTreeSet<String>,
-) -> Result<(), String> {
+fn validate_runtime_landmark_id_set(field: &str, values: &BTreeSet<String>) -> Result<(), String> {
     validate_runtime_pack_id_set(field, values)?;
     for value in values {
         if !value.starts_with("LANDMARK_") {
@@ -709,12 +705,7 @@ pub fn script_runtime_command_issues(
         "winlosstext" => {
             for target_label in &command.args {
                 if target_label != "0" && target_label != "-1" {
-                    push_unknown_runtime_target_issue(
-                        command,
-                        target_label,
-                        catalog,
-                        &mut issues,
-                    );
+                    push_unknown_runtime_target_issue(command, target_label, catalog, &mut issues);
                 }
             }
         }
@@ -1064,9 +1055,7 @@ fn require_script_string_buffer(
     }
 }
 
-fn parse_script_money_account(
-    account: &str,
-) -> Result<MoneyAccount, ScriptRuntimeCommandError> {
+fn parse_script_money_account(account: &str) -> Result<MoneyAccount, ScriptRuntimeCommandError> {
     MoneyAccount::from_script_id(account).map_err(|error| match error {
         EconomyError::InvalidMoneyAccount { account } => {
             ScriptRuntimeCommandError::InvalidMoneyAccount { account }
@@ -1220,37 +1209,37 @@ fn apply_runtime_effect(
                     .special_phone_calls
                     .push(command.args[0].clone());
             }
-            state.script_runtime.variables.insert(
-                "VAR_SPECIALPHONECALL".to_string(),
-                command.args[0].clone(),
-            );
+            state
+                .script_runtime
+                .variables
+                .insert("VAR_SPECIALPHONECALL".to_string(), command.args[0].clone());
         }
         "pokepic" => state.script_runtime.active_pokemon_picture = Some(command.args[0].clone()),
         "closepokepic" => state.script_runtime.active_pokemon_picture = None,
         "trade" => {}
         "winlosstext" => {
-            state.script_runtime.memory.insert(
-                "wWinTextPointer".to_string(),
-                command.args[0].clone(),
-            );
-            state.script_runtime.memory.insert(
-                "wLossTextPointer".to_string(),
-                command.args[1].clone(),
-            );
+            state
+                .script_runtime
+                .memory
+                .insert("wWinTextPointer".to_string(), command.args[0].clone());
+            state
+                .script_runtime
+                .memory
+                .insert("wLossTextPointer".to_string(), command.args[1].clone());
         }
         "loadtrainer" => {
             state
                 .script_runtime
                 .memory
                 .insert("wBattleScriptFlags".to_string(), "129".to_string());
-            state.script_runtime.memory.insert(
-                "wOtherTrainerClass".to_string(),
-                command.args[0].clone(),
-            );
-            state.script_runtime.memory.insert(
-                "wOtherTrainerID".to_string(),
-                command.args[1].clone(),
-            );
+            state
+                .script_runtime
+                .memory
+                .insert("wOtherTrainerClass".to_string(), command.args[0].clone());
+            state
+                .script_runtime
+                .memory
+                .insert("wOtherTrainerID".to_string(), command.args[1].clone());
         }
         "randomwildmon" => {
             state
@@ -1904,17 +1893,11 @@ mod tests {
     #[test]
     fn trainer_battle_setup_commands_validate_and_write_exact_wram_symbols() {
         let catalog = ScriptRuntimeReferenceCatalog {
-            trainer_classes: BTreeMap::from([(
-                "VANCE3".to_string(),
-                "BIRD_KEEPER".to_string(),
-            )]),
+            trainer_classes: BTreeMap::from([("VANCE3".to_string(), "BIRD_KEEPER".to_string())]),
             script_labels: BTreeSet::from(["BirdKeeperVance1BeatenText".to_string()]),
             ..ScriptRuntimeReferenceCatalog::default()
         };
-        let win_loss = command(
-            "winlosstext",
-            &["BirdKeeperVance1BeatenText", "0"],
-        );
+        let win_loss = command("winlosstext", &["BirdKeeperVance1BeatenText", "0"]);
         let load_trainer = command("loadtrainer", &["BIRD_KEEPER", "VANCE3"]);
 
         assert_eq!(script_runtime_command_issues(&win_loss, &catalog), []);
@@ -1927,23 +1910,43 @@ mod tests {
             .expect("loadtrainer writes the canonical battle setup");
 
         assert_eq!(
-            state.script_runtime.memory.get("wWinTextPointer").map(String::as_str),
+            state
+                .script_runtime
+                .memory
+                .get("wWinTextPointer")
+                .map(String::as_str),
             Some("BirdKeeperVance1BeatenText")
         );
         assert_eq!(
-            state.script_runtime.memory.get("wLossTextPointer").map(String::as_str),
+            state
+                .script_runtime
+                .memory
+                .get("wLossTextPointer")
+                .map(String::as_str),
             Some("0")
         );
         assert_eq!(
-            state.script_runtime.memory.get("wBattleScriptFlags").map(String::as_str),
+            state
+                .script_runtime
+                .memory
+                .get("wBattleScriptFlags")
+                .map(String::as_str),
             Some("129")
         );
         assert_eq!(
-            state.script_runtime.memory.get("wOtherTrainerClass").map(String::as_str),
+            state
+                .script_runtime
+                .memory
+                .get("wOtherTrainerClass")
+                .map(String::as_str),
             Some("BIRD_KEEPER")
         );
         assert_eq!(
-            state.script_runtime.memory.get("wOtherTrainerID").map(String::as_str),
+            state
+                .script_runtime
+                .memory
+                .get("wOtherTrainerID")
+                .map(String::as_str),
             Some("VANCE3")
         );
     }
@@ -1990,20 +1993,14 @@ mod tests {
             landmarks: BTreeSet::from(["LANDMARK_ROUTE_32".to_string()]),
             ..ScriptRuntimeReferenceCatalog::default()
         };
-        let landmark = command(
-            "getlandmarkname",
-            &["STRING_BUFFER_5", "LANDMARK_ROUTE_32"],
-        );
+        let landmark = command("getlandmarkname", &["STRING_BUFFER_5", "LANDMARK_ROUTE_32"]);
         let money = command("getmoney", &["STRING_BUFFER_3", "MOMS_MONEY"]);
 
         assert_eq!(script_runtime_command_issues(&landmark, &catalog), []);
         assert_eq!(script_runtime_command_issues(&money, &catalog), []);
         assert_eq!(
             script_runtime_command_issues(
-                &command(
-                    "getlandmarkname",
-                    &["STRING_BUFFER_5", "LANDMARK_ROUTE_99"],
-                ),
+                &command("getlandmarkname", &["STRING_BUFFER_5", "LANDMARK_ROUTE_99"],),
                 &catalog,
             ),
             vec![ScriptRuntimeCommandIssue::UnknownLandmark {
@@ -2058,18 +2055,15 @@ mod tests {
     #[test]
     fn trainer_class_name_command_uses_exact_class_catalog_and_named_buffer() {
         let catalog = ScriptRuntimeReferenceCatalog {
-            trainer_class_names: BTreeSet::from([
-                "BEAUTY".to_string(),
-                "COOLTRAINERM".to_string(),
-            ]),
+            trainer_class_names: BTreeSet::from(["BEAUTY".to_string(), "COOLTRAINERM".to_string()]),
             ..ScriptRuntimeReferenceCatalog::default()
         };
-        let runtime_command = command(
-            "gettrainerclassname",
-            &["STRING_BUFFER_4", "COOLTRAINERM"],
-        );
+        let runtime_command = command("gettrainerclassname", &["STRING_BUFFER_4", "COOLTRAINERM"]);
 
-        assert_eq!(script_runtime_command_issues(&runtime_command, &catalog), []);
+        assert_eq!(
+            script_runtime_command_issues(&runtime_command, &catalog),
+            []
+        );
         assert_eq!(
             script_runtime_command_issues(
                 &command("gettrainerclassname", &["STRING_BUFFER_4", "FISHER"]),
@@ -2081,10 +2075,7 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command(
-                    "gettrainerclassname",
-                    &["STRING_BUFFER_4", "cooltrainerm"],
-                ),
+                &command("gettrainerclassname", &["STRING_BUFFER_4", "cooltrainerm"],),
                 &catalog,
             ),
             vec![ScriptRuntimeCommandIssue::UnknownTrainerClassName {
@@ -2187,7 +2178,10 @@ mod tests {
                 Ok(())
             );
         }
-        assert_eq!(validate_script_runtime_command(&command("ret", &[])), Ok(()));
+        assert_eq!(
+            validate_script_runtime_command(&command("ret", &[])),
+            Ok(())
+        );
         assert_eq!(
             validate_script_runtime_command(&command("ret", &["NZ"])),
             Err(ScriptRuntimeCommandError::InvalidCpuCondition {

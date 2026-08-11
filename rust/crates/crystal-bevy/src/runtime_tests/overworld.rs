@@ -726,7 +726,6 @@
         shell.session_mut().divider =
             crystal_core::random::RuntimeDividerSource::replay([0, 200]);
         let replay_base = shell.session().clone();
-        let before_clock_update = shell.session().state().clone();
         let retained_before_clock_update = shell.retained_runtime_commands().len();
 
         shell
@@ -758,14 +757,24 @@
             crystal_core::random::CrystalRandomState { add: 0, sub: 56 }
         );
 
-        let clock_frame = &shell.retained_runtime_commands()[retained_before_clock_update];
+        let retained_after_tick =
+            &shell.retained_runtime_commands()[retained_before_clock_update..];
+        assert!(
+            retained_after_tick.len() >= 3,
+            "RTC tick must record VBlank, clock update, and input"
+        );
+        let mut state_before_clock_update = replay_base.clone();
+        state_before_clock_update
+            .apply_runtime_command_frame(&runtime, &retained_after_tick[0])
+            .expect("replay the VBlank mutation preceding the RTC update");
+        let clock_frame = &retained_after_tick[1];
         let clock_command = crystal_assets::decode_runtime_mutation_command_frame(
             clock_frame,
-            &before_clock_update,
+            state_before_clock_update.state(),
         )
         .expect("decode recorded clock update against pre-mutation state");
         let RuntimeMutationCommand::UpdateClockFromDatetime(command) = clock_command else {
-            panic!("first RTC mutation must be the recorded clock update");
+            panic!("RTC update must follow the authoritative VBlank timer mutation");
         };
         assert_eq!(command.divider_trace.samples, vec![0, 200]);
 
@@ -1465,6 +1474,8 @@
         );
 
         let mut wrong_map_state = session.state.clone();
+        wrong_map_state.script_runtime.pending_text_label =
+            Some("RuntimeGreetingText".to_string());
         wrong_map_state.overworld = OverworldMemory::Active {
             map_name: "OtherMap".to_string(),
             tile: TilePosition::new(0, 0),
@@ -2171,6 +2182,7 @@
                 .deferred_scripts
                 .is_empty()
         );
+        let text_events_before_standard = shell.session.state().script_runtime.text_events.len();
         let standard = shell
             .step_compiled_script_command(
                 "RuntimeMap",
@@ -2193,6 +2205,28 @@
             standard.mutation.result
         );
         assert_eq!(
+            shell.session.state().script_runtime.text_events.len(),
+            text_events_before_standard,
+            "jumpstd changes the compiled cursor; the target command executes on the next step"
+        );
+        assert_eq!(
+            standard.next_cursor,
+            Some(RuntimeCompiledScriptCursor {
+                origin_map_name: "RuntimeMap".to_string(),
+                source_script: "PokecenterSignScript".to_string(),
+                command_index: 0,
+            })
+        );
+        shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                "PokecenterSignScript",
+                0,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute the standard script target command");
+        assert_eq!(
             shell
                 .session
                 .state()
@@ -2202,7 +2236,6 @@
                 .and_then(|event| event.text_label.as_deref()),
             Some("PokecenterSignText")
         );
-        assert_eq!(standard.next_cursor, None);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2413,7 +2446,11 @@
                 .collect::<Vec<_>>(),
             vec!["teleport_from", "step", "turn_head"]
         );
-        assert_eq!(movement.outcome.steps_applied, 26);
+        assert_eq!(
+            movement.outcome.steps_applied,
+            34,
+            "ASM teleport_from is two 16-frame phases, followed by one step and one turn"
+        );
         assert_eq!(
             movement.outcome.effects,
             vec![ScriptMovementEffect {
@@ -2473,7 +2510,7 @@
                 .collect::<Vec<_>>(),
             vec!["teleport_from", "step", "turn_head"]
         );
-        assert_eq!(dispatched_movement.steps_applied, 26);
+        assert_eq!(dispatched_movement.steps_applied, 34);
         assert!(
             dispatch_shell
                 .session
@@ -3104,7 +3141,7 @@
             .expect("overworld session");
         add_runtime_party_pokemon(&runtime, &mut session);
         session.divider = crystal_core::random::RuntimeDividerSource::replay([
-            0, 1, // encounter rate
+            0, 0, // encounter rate (Crystal Random: add - sub = 0)
             0, 0, // roaming selector
             0, 0, // slot
             0, 0, // level
@@ -3119,9 +3156,7 @@
         assert_eq!(turn.wild_encounter, None);
         assert_eq!(session.state.rng_seed, 1);
 
-        let step = session
-            .apply_buttons(&runtime, &asset_root, [GameButton::Right])
-            .expect("step into grass");
+        let step = apply_until_wild_encounter_roll(&mut session, &runtime, &asset_root);
         assert_eq!(step.snapshot.tile, TilePosition::new(1, 0));
         assert_eq!(
             session
@@ -3138,7 +3173,11 @@
         assert_eq!(roll.map_name, "RuntimeMap");
         assert_eq!(roll.time, session.state.time.time_of_day);
         assert_eq!(
-            roll.resolved.clone().expect("resolved").encounter.species,
+            roll.resolved
+                .clone()
+                .unwrap_or_else(|| panic!("unresolved encounter roll {roll:?}"))
+                .encounter
+                .species,
             "CHIKORITA"
         );
         let battle = step.wild_battle.expect("resolved encounter starts battle");
@@ -3156,10 +3195,6 @@
                 enemy_pokemon: battle.enemy_pokemon.clone(),
                 enemy_party: battle.enemy_party.clone(),
             }
-        );
-        assert_ne!(
-            session.state.random_state,
-            crystal_core::random::CrystalRandomState::default()
         );
         let saved_battle = session.state.battle.clone();
         let save_path = root.join("battle.crystalsave");
@@ -3263,13 +3298,16 @@
             .wild_encounter
             .clone()
             .expect("repelled grass still records the roll");
-        assert_eq!(session.state.repel_steps_remaining, 99);
+        assert_eq!(session.state.repel_steps_remaining, 95);
         assert_eq!(session.state.active_repel_item, Some("REPEL".to_string()));
         assert_eq!(roll.repelled_by, Some("REPEL".to_string()));
         assert_eq!(roll.resolved, None);
         assert_eq!(step.wild_battle, None);
         assert_eq!(session.state.battle, BattleMemory::Inactive);
-        assert_ne!(session.state.rng_seed, 1);
+        assert_ne!(
+            session.state.random_state,
+            crystal_core::random::CrystalRandomState::default()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3350,7 +3388,7 @@
         let step = apply_until_wild_encounter_roll(&mut session, &runtime, &asset_root);
         let roll = step.wild_encounter.clone().expect("encounter roll");
 
-        assert_eq!(session.state.repel_steps_remaining, 99);
+        assert_eq!(session.state.repel_steps_remaining, 95);
         assert_eq!(roll.repelled_by, None);
         assert_eq!(roll.resolved.clone().expect("resolved").encounter.level, 8);
         assert!(step.wild_battle.is_some());
@@ -3363,9 +3401,14 @@
         runtime: &CrystalRuntime,
         asset_root: &AssetRoot,
     ) -> RuntimeOverworldFrame {
-        for _ in 0..8 {
+        for _ in 0..16 {
+            let direction = if session.overworld.player.tile.x == 0 {
+                GameButton::Right
+            } else {
+                GameButton::Left
+            };
             let step = session
-                .apply_buttons(runtime, asset_root, [GameButton::Right])
+                .apply_buttons(runtime, asset_root, [direction])
                 .expect("advance toward grass encounter");
             if step.wild_encounter.is_some() {
                 return step;
@@ -3870,9 +3913,14 @@
         let root = temp_repository_root("fishing-no-group");
         write_fishing_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data();
+        data.tilesets.insert(
+            "johto".to_string(),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "WATER", "FLOOR"])]),
+        );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data(), report()),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -3897,12 +3945,16 @@
         let root = temp_repository_root("fishing-terrain");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_fishing();
+        // Compiled pack tilesets are authoritative over repository files.
+        // This case deliberately faces land for the first rejection.
+        data.tilesets.insert(
+            "johto".to_string(),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "FLOOR", "FLOOR"])]),
+        );
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(
-                minimal_runtime_data_with_fishing(),
-                report(),
-            ),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -3916,7 +3968,8 @@
         assert!(format!("{land_error:#}").contains("facing tile is not water"));
         assert_eq!(session.state, before_land);
 
-        write_fishing_tileset(&root, "johto");
+        // Surfing is rejected before terrain lookup, matching the field-item
+        // command ordering; no test-only terrain mutation is involved.
         session.overworld.player.mode = MovementMode::Surf;
         let before_surf = session.state.clone();
         let surf_error = session

@@ -1124,7 +1124,11 @@ mod tests {
     use crystal_core::timing::Frame;
 
     fn modpack() -> SaveModpackIdentity {
-        SaveModpackIdentity::new("core-modular", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("modpack identity")
+        SaveModpackIdentity::new(
+            "core-modular",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+        )
+        .expect("modpack identity")
     }
 
     fn pack_content_hash() -> &'static str {
@@ -2030,7 +2034,11 @@ mod tests {
             *hello = LinkHello::from_session(
                 LinkSessionIdentity::new(
                     "session-1",
-                    SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
+                    SaveModpackIdentity::new(
+                        "other-pack",
+                        "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+                    )
+                    .expect("other pack"),
                     pack_content_hash(),
                 )
                 .expect("other session"),
@@ -2066,7 +2074,11 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
+            SaveModpackIdentity::new(
+                "other-pack",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2088,7 +2100,11 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
+            SaveModpackIdentity::new(
+                "other-pack",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2121,7 +2137,11 @@ mod tests {
         let codec = session_codec();
         let other_session = LinkSessionIdentity::new(
             "session-1",
-            SaveModpackIdentity::new("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd").expect("other pack"),
+            SaveModpackIdentity::new(
+                "other-pack",
+                "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            )
+            .expect("other pack"),
             pack_content_hash(),
         )
         .expect("other session");
@@ -2604,7 +2624,12 @@ mod tests {
 
     #[test]
     fn link_endpoint_rejects_bare_save_summary_for_wrong_pack() {
-        let wrong_summary = save_summary_for_modpack("other-pack", "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd", 144, 0xbbcc_ddee);
+        let wrong_summary = save_summary_for_modpack(
+            "other-pack",
+            "1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd",
+            144,
+            0xbbcc_ddee,
+        );
         let transport = RawLinkTransport::with_inbound([LinkMessage::SaveSummary(wrong_summary)]);
         let mut endpoint =
             LinkEndpoint::new(transport, hello_for(1, "HOST")).expect("raw endpoint");

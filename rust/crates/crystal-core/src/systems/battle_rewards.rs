@@ -336,11 +336,11 @@ pub fn claim_active_trainer_battle_rewards(
     };
     let active_index = require_active_battle_party_index(state)?;
     if rewards_disabled {
-        let active = state.storage.party.pokemon[active_index]
-            .as_ref()
-            .ok_or(ActiveBattlePartyError::EmptyPartySlot {
+        let active = state.storage.party.pokemon[active_index].as_ref().ok_or(
+            ActiveBattlePartyError::EmptyPartySlot {
                 index: active_index,
-            })?;
+            },
+        )?;
         let outcome = BattleRewardOutcome {
             defeated_species: enemy.species.id.clone(),
             experience_awarded: 0,
@@ -400,8 +400,7 @@ pub fn claim_active_trainer_battle_rewards(
     } else {
         participant_count.saturating_mul(2)
     };
-    let participant_experience =
-        split_experience_award(rules, &enemy, participant_divisor, true)?;
+    let participant_experience = split_experience_award(rules, &enemy, participant_divisor, true)?;
     let active_traded = state.storage.party.pokemon[active_index]
         .as_ref()
         .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
@@ -588,8 +587,7 @@ where
     } else {
         participant_count.saturating_mul(2)
     };
-    let participant_experience =
-        split_experience_award(rules, &enemy, participant_divisor, false)?;
+    let participant_experience = split_experience_award(rules, &enemy, participant_divisor, false)?;
     let active_traded = state.storage.party.pokemon[active_index]
         .as_ref()
         .is_some_and(|pokemon| pokemon.original_trainer_id != state.player_id);
@@ -752,12 +750,10 @@ fn queue_pending_move_learn(
             .iter()
             .any(|known| known.name == learned_move.name)
             || state.pending_move_learn.iter().any(|pending| {
-                pending.party_index == party_index
-                    && pending.learned_move.name == learned_move.name
+                pending.party_index == party_index && pending.learned_move.name == learned_move.name
             })
             || state.pending_move_learn_queue.iter().any(|pending| {
-                pending.party_index == party_index
-                    && pending.learned_move.name == learned_move.name
+                pending.party_index == party_index && pending.learned_move.name == learned_move.name
             })
         {
             continue;
@@ -767,8 +763,7 @@ fn queue_pending_move_learn(
             species_id: species_id.clone(),
             level,
             learned_move: learned_move.clone(),
-            defer_level_evolution: outcome.deferred_level_evolution
-                && index + 1 == pending_count,
+            defer_level_evolution: outcome.deferred_level_evolution && index + 1 == pending_count,
         };
         if state.pending_move_learn.is_none() {
             state.pending_move_learn = Some(pending);
@@ -990,11 +985,8 @@ fn apply_battle_rewards_with_experience(
     };
     let mut rewarded = player.clone();
     let level_before = rewarded.level;
-    let maximum_experience = calculate_experience(
-        growth_rates,
-        &rewarded.species.growth_rate,
-        rules.max_level,
-    )?;
+    let maximum_experience =
+        calculate_experience(growth_rates, &rewarded.species.growth_rate, rules.max_level)?;
     rewarded.experience = rewarded
         .experience
         .saturating_add(experience_awarded)
@@ -1061,17 +1053,17 @@ pub fn trainer_experience_award(
     )
 }
 
-fn add_stat_experience(
-    player: &mut Pokemon,
-    base_stats: crate::models::BaseStats,
-    divisor: i32,
-) {
+fn add_stat_experience(player: &mut Pokemon, base_stats: crate::models::BaseStats, divisor: i32) {
     let divisor = divisor.max(1) as u16;
     let multiplier = if player.pokerus != 0 { 2 } else { 1 };
     let adjusted = |value: u16| (value / divisor).saturating_mul(multiplier);
     player.hp_exp = player.hp_exp.saturating_add(adjusted(base_stats.hp));
-    player.attack_exp = player.attack_exp.saturating_add(adjusted(base_stats.attack));
-    player.defense_exp = player.defense_exp.saturating_add(adjusted(base_stats.defense));
+    player.attack_exp = player
+        .attack_exp
+        .saturating_add(adjusted(base_stats.attack));
+    player.defense_exp = player
+        .defense_exp
+        .saturating_add(adjusted(base_stats.defense));
     player.speed_exp = player.speed_exp.saturating_add(adjusted(base_stats.speed));
     player.special_exp = player
         .special_exp
@@ -1323,10 +1315,22 @@ mod tests {
             Dv::default(),
         );
 
-        assert_eq!(split_experience_award(&reward_rules(), &defeated, 2, false), Ok(1));
-        assert_eq!(split_experience_award(&reward_rules(), &defeated, 2, true), Ok(1));
-        assert_eq!(wild_experience_award(&reward_rules(), &defeated).unwrap() / 2, 2);
-        assert_eq!(trainer_experience_award(&reward_rules(), &defeated).unwrap() / 2, 3);
+        assert_eq!(
+            split_experience_award(&reward_rules(), &defeated, 2, false),
+            Ok(1)
+        );
+        assert_eq!(
+            split_experience_award(&reward_rules(), &defeated, 2, true),
+            Ok(1)
+        );
+        assert_eq!(
+            wild_experience_award(&reward_rules(), &defeated).unwrap() / 2,
+            2
+        );
+        assert_eq!(
+            trainer_experience_award(&reward_rules(), &defeated).unwrap() / 2,
+            3
+        );
     }
 
     fn pending_move_learn_state() -> GameState {
@@ -1792,7 +1796,10 @@ mod tests {
         .expect("settle Battle Tower opponent");
         assert_eq!(tower_outcome.experience_awarded, 0);
         assert_eq!(
-            tower_state.storage.party.pokemon[0].as_ref().unwrap().experience,
+            tower_state.storage.party.pokemon[0]
+                .as_ref()
+                .unwrap()
+                .experience,
             tower_experience_before
         );
         assert!(tower_state.battle_rewarded_enemy_party_indices.contains(&0));
@@ -1840,7 +1847,13 @@ mod tests {
         assert_eq!(combat.player.level, rewarded.level);
         assert_eq!(combat.player_party[0], *rewarded);
         assert_eq!(rewarded.turns_in_battle, 1);
-        assert_eq!(state.storage.party.pokemon[1].as_ref().unwrap().turns_in_battle, 0);
+        assert_eq!(
+            state.storage.party.pokemon[1]
+                .as_ref()
+                .unwrap()
+                .turns_in_battle,
+            0
+        );
         assert_eq!(combat.player_party[1].turns_in_battle, 0);
     }
 
@@ -2233,14 +2246,20 @@ mod tests {
 
         queue_pending_move_learn(&mut state, 0, &outcome).expect("queue second move learn");
 
-        assert_eq!(state.pending_move_learn.as_ref().unwrap().learned_move.name, "RAZOR_LEAF");
+        assert_eq!(
+            state.pending_move_learn.as_ref().unwrap().learned_move.name,
+            "RAZOR_LEAF"
+        );
         assert_eq!(state.pending_move_learn_queue.len(), 1);
         assert_eq!(state.pending_move_learn_queue[0].learned_move, queued_move);
         assert!(state.pending_move_learn_queue[0].defer_level_evolution);
 
         decline_pending_move_learn(&mut state).expect("resolve first move learn");
         promote_next_pending_move_learn(&mut state);
-        assert_eq!(state.pending_move_learn.as_ref().unwrap().learned_move.name, "SYNTHESIS");
+        assert_eq!(
+            state.pending_move_learn.as_ref().unwrap().learned_move.name,
+            "SYNTHESIS"
+        );
         assert!(state.pending_move_learn_queue.is_empty());
 
         let evolved = state.storage.party.pokemon[0].as_mut().unwrap();

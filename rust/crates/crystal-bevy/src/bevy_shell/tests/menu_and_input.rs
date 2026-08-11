@@ -32,14 +32,14 @@ fn visible_start_menu_responds_to_normal_button_inputs() {
         .expect("Start opens the start menu through normal input dispatch");
     assert_eq!(
         visible_start_menu_entries(&runtime_shell).expect("start menu entries"),
-        vec![">PACK", " AB", " OPTION", " EXIT"]
+        vec![">PACK", " AB", " SAVE", " OPTION", " EXIT"]
     );
 
     apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::Down])
         .expect("Down moves the start menu cursor through normal input dispatch");
     assert_eq!(
         visible_start_menu_entries(&runtime_shell).expect("moved start menu entries"),
-        vec![" PACK", ">AB", " OPTION", " EXIT"]
+        vec![" PACK", ">AB", " SAVE", " OPTION", " EXIT"]
     );
 
     apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
@@ -97,7 +97,7 @@ fn visible_pokedex_and_pokegear_overlays_do_not_render_debug_detail_rows() {
         .expect("Start opens the start menu through normal input dispatch");
     assert_eq!(
         visible_start_menu_entries(&runtime_shell).expect("start menu entries"),
-        vec![">#DEX", " PACK", " #GEAR", " AB", " OPTION", " EXIT"]
+        vec![">#DEX", " PACK", " #GEAR", " AB", " SAVE", " OPTION", " EXIT"]
     );
 
     apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
@@ -288,7 +288,11 @@ fn visible_pack_menu_renders_and_confirms_cancel_row_from_normal_inputs() {
     apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::Down])
         .expect("Down moves from GIVE to TOSS");
     apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
-        .expect("A tosses one item from the Pack action menu");
+        .expect("A opens the ASM toss quantity prompt");
+    apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
+        .expect("A confirms the toss quantity");
+    apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
+        .expect("A accepts the toss confirmation");
     {
         let snapshot = runtime_shell
             .shell
@@ -305,8 +309,8 @@ fn visible_pack_menu_renders_and_confirms_cancel_row_from_normal_inputs() {
         );
     }
 
-    apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::Down])
-        .expect("Down reaches Pack CANCEL through normal input dispatch");
+    apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::A])
+        .expect("A dismisses the canonical threw-away notice");
     {
         let snapshot = runtime_shell
             .shell
@@ -586,7 +590,7 @@ fn arrow_key_dispatch_moves_visible_start_menu_cursor() {
         .expect("open start menu");
     assert_eq!(
         visible_start_menu_entries(&runtime_shell).expect("start menu entries"),
-        vec![">PACK", " AB", " OPTION", " EXIT"]
+        vec![">PACK", " AB", " SAVE", " OPTION", " EXIT"]
     );
 
     let mut keys = ButtonInput::<KeyCode>::default();
@@ -595,7 +599,7 @@ fn arrow_key_dispatch_moves_visible_start_menu_cursor() {
 
     assert_eq!(
         visible_start_menu_entries(&runtime_shell).expect("moved start menu entries"),
-        vec![" PACK", ">AB", " OPTION", " EXIT"]
+        vec![" PACK", ">AB", " SAVE", " OPTION", " EXIT"]
     );
 }
 

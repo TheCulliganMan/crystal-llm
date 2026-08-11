@@ -1297,10 +1297,7 @@ mod tests {
 
     #[test]
     fn registration_fills_the_first_deleted_phone_list_slot() {
-        let mut phone_numbers = BTreeSet::from([
-            "PHONE_MOM".to_string(),
-            "PHONE_JOEY".to_string(),
-        ]);
+        let mut phone_numbers = BTreeSet::from(["PHONE_MOM".to_string(), "PHONE_JOEY".to_string()]);
         let mut slots = vec![
             Some("PHONE_MOM".to_string()),
             None,

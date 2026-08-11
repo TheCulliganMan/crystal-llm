@@ -836,10 +836,7 @@ impl<E: std::fmt::Display> std::fmt::Display for RandomSpecialRoutineError<E> {
     }
 }
 
-impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error
-    for RandomSpecialRoutineError<E>
-{
-}
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for RandomSpecialRoutineError<E> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1000,9 +997,7 @@ impl<'de> Deserialize<'de> for BugContestEncounterEntry {
     }
 }
 
-fn validate_bug_contest_encounters(
-    encounters: &[BugContestEncounterEntry],
-) -> Result<(), String> {
+fn validate_bug_contest_encounters(encounters: &[BugContestEncounterEntry]) -> Result<(), String> {
     if encounters.len() != 11 {
         return Err(format!(
             "bug contest encounters must contain 10 weighted rows plus one sentinel, found {} rows",
@@ -2890,7 +2885,10 @@ impl<'de> Deserialize<'de> for RoamingPokemonCatalog {
             routes: raw.routes,
             jump_mask: raw.jump_mask,
         };
-        if let Some(issue) = roaming_pokemon_catalog_shape_issues(&catalog).into_iter().next() {
+        if let Some(issue) = roaming_pokemon_catalog_shape_issues(&catalog)
+            .into_iter()
+            .next()
+        {
             return Err(serde::de::Error::custom(issue.to_string()));
         }
         Ok(catalog)
@@ -2949,7 +2947,9 @@ pub enum RoamingPokemonCatalogIssue {
     },
     #[error("roaming Pokemon route {index} must contain 1..=4 connections, found {count}")]
     InvalidConnectionCount { index: usize, count: usize },
-    #[error("roaming Pokemon route {index} connection {connection} uses invalid map {map_group}/{map_number}")]
+    #[error(
+        "roaming Pokemon route {index} connection {connection} uses invalid map {map_group}/{map_number}"
+    )]
     InvalidConnectionMap {
         index: usize,
         connection: usize,
@@ -2962,7 +2962,9 @@ pub enum RoamingPokemonCatalogIssue {
         map_group: u8,
         map_number: u8,
     },
-    #[error("roaming Pokemon route {index} connection {map_group}/{map_number} is not a route origin")]
+    #[error(
+        "roaming Pokemon route {index} connection {map_group}/{map_number} is not a route origin"
+    )]
     UnknownConnectionTarget {
         index: usize,
         map_group: u8,
@@ -3660,12 +3662,8 @@ where
 {
     let mut next = state.clone();
     let outcome = match routine {
-        "SampleKenjiBreakCountdown" => {
-            sample_kenji_break_countdown(&mut next, routine, divider)
-        }
-        "ResetLuckyNumberShowFlag" => {
-            reset_lucky_number_show_flag(&mut next, routine, divider)
-        }
+        "SampleKenjiBreakCountdown" => sample_kenji_break_countdown(&mut next, routine, divider),
+        "ResetLuckyNumberShowFlag" => reset_lucky_number_show_flag(&mut next, routine, divider),
         "RandomUnseenWildMon" => random_unseen_wild_mon(
             &mut next,
             context.species_catalog,
@@ -3691,12 +3689,7 @@ where
             divider,
         ),
         "UnownPuzzle" => unown_puzzle(&mut next, routine, divider),
-        "CardFlip" => card_flip(
-            &mut next,
-            context.item_catalog,
-            routine,
-            divider,
-        ),
+        "CardFlip" => card_flip(&mut next, context.item_catalog, routine, divider),
         "GiveShuckle" => give_shuckle(&mut next, context, routine, divider),
         "BuenasPassword" => buenas_password(
             &mut next,
@@ -3710,19 +3703,11 @@ where
             routine,
             divider,
         ),
-        "BugContestJudging" => bug_contest_judging(
-            &mut next,
-            context.bug_contest_config,
-            routine,
-            divider,
-        ),
+        "BugContestJudging" => {
+            bug_contest_judging(&mut next, context.bug_contest_config, routine, divider)
+        }
         "LoadOpponentTrainerAndPokemonWithOTSprite" => {
-            load_opponent_trainer_and_pokemon_with_ot_sprite(
-                &mut next,
-                context,
-                routine,
-                divider,
-            )
+            load_opponent_trainer_and_pokemon_with_ot_sprite(&mut next, context, routine, divider)
         }
         "GiveOddEgg" => give_odd_egg(
             &mut next,
@@ -3892,12 +3877,7 @@ pub fn apply_special_routine_with_context(
         "DaisysGrooming" => daisys_grooming(state, context.happiness_data, routine),
         "NameRater" => name_rater(state, routine),
         "PokeSeer" => poke_seer(state, routine),
-        "MoveTutor" => move_tutor(
-            state,
-            context.move_catalog,
-            context.happiness_data,
-            routine,
-        ),
+        "MoveTutor" => move_tutor(state, context.move_catalog, context.happiness_data, routine),
         "BankOfMom" => bank_of_mom(state, routine),
         "SlotMachine" => slot_machine(state, context.item_catalog, routine),
         "CardFlip" => Err(SpecialRoutineError::MissingDividerSource {
@@ -4075,9 +4055,7 @@ fn heal_party(
         let Some(pokemon) = slot.as_mut() else {
             continue;
         };
-        if pokemon.is_egg
-            || pokemon.species.id == "EGG"
-        {
+        if pokemon.is_egg || pokemon.species.id == "EGG" {
             continue;
         }
         if heal_pokemon(pokemon, move_catalog) {
@@ -5297,10 +5275,10 @@ fn check_for_lucky_number_winners(
             .script_runtime
             .variables
             .insert("wCurPartySpecies".to_string(), species.clone());
-        state.script_runtime.named_buffers.insert(
-            "STRING_BUFFER_1".to_string(),
-            species.replace('_', " "),
-        );
+        state
+            .script_runtime
+            .named_buffers
+            .insert("STRING_BUFFER_1".to_string(), species.replace('_', " "));
     }
     set_script_numeric_value(state, best_tier);
     state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -6247,8 +6225,7 @@ where
 
     let mut puzzle = if matches!(action.as_deref(), None | Some("shuffle")) {
         let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
-        let puzzle = shuffled_unown_puzzle(&mut rng)
-            .map_err(RandomSpecialRoutineError::Divider)?;
+        let puzzle = shuffled_unown_puzzle(&mut rng).map_err(RandomSpecialRoutineError::Divider)?;
         state.random_state = rng.state();
         puzzle
     } else {
@@ -6807,12 +6784,13 @@ where
     S: DividerSource + ?Sized,
 {
     const COIN_CASE: &str = "COIN_CASE";
-    let coin_case = item_catalog.get(COIN_CASE).ok_or_else(|| {
-        SpecialRoutineError::UnknownItem {
-            routine: routine.to_string(),
-            item_id: COIN_CASE.to_string(),
-        }
-    })?;
+    let coin_case =
+        item_catalog
+            .get(COIN_CASE)
+            .ok_or_else(|| SpecialRoutineError::UnknownItem {
+                routine: routine.to_string(),
+                item_id: COIN_CASE.to_string(),
+            })?;
     if state.coins == 0 {
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
@@ -7403,7 +7381,8 @@ where
     if identities != (0_u8..24).collect::<Vec<_>>() {
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
-            message: "card_flip_deck must contain each encoded card identity exactly once".to_string(),
+            message: "card_flip_deck must contain each encoded card identity exactly once"
+                .to_string(),
         }
         .into());
     }
@@ -7501,11 +7480,7 @@ fn play_memory_game(
         let swap_index = rng.randrange((index + 1) as u32) as usize;
         generated_board.swap(index, swap_index);
     }
-    let board = if state
-        .script_runtime
-        .variables
-        .contains_key("memory_board")
-    {
+    let board = if state.script_runtime.variables.contains_key("memory_board") {
         parse_required_comma_tokens(state, routine, "memory_board")?
     } else {
         // TypeScript constructs a shuffled MemoryGame and explicitly shuffles
@@ -7537,16 +7512,13 @@ fn play_memory_game(
     };
     let requested_first = required_game_index(state, routine, "memory_first", board.len())?;
     let requested_second = required_game_index(state, routine, "memory_second", board.len())?;
-    let outcome = memory_reveal(
-        &board,
-        &mut revealed,
-        requested_first,
-        requested_second,
-    )
-    .map_err(|_| SpecialRoutineError::InvalidState {
-        routine: routine.to_string(),
-        message: "memory selections must be distinct unrevealed cards".to_string(),
-    })?;
+    let outcome =
+        memory_reveal(&board, &mut revealed, requested_first, requested_second).map_err(|_| {
+            SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: "memory selections must be distinct unrevealed cards".to_string(),
+            }
+        })?;
 
     state
         .script_runtime
@@ -7674,7 +7646,9 @@ fn coin_game_service_inner(
                     .map(slot_symbol_name)
                     .map(str::to_string),
                 winning_lines: spin.winning_lines,
-                windows: spin.windows.map(|window| window.map(|symbol| slot_symbol_name(symbol).to_string())),
+                windows: spin
+                    .windows
+                    .map(|window| window.map(|symbol| slot_symbol_name(symbol).to_string())),
                 coins,
                 rng_seed_after: state.rng_seed,
             }
@@ -9387,16 +9361,46 @@ struct BugContestant {
 }
 
 const BUG_CONTESTANTS: [BugContestant; 10] = [
-    BugContestant { trainer_name: "BUG CATCHER DON", placements: [("KAKUNA", 300), ("METAPOD", 285), ("CATERPIE", 226)] },
-    BugContestant { trainer_name: "BUG CATCHER ED", placements: [("BUTTERFREE", 286), ("BUTTERFREE", 251), ("CATERPIE", 237)] },
-    BugContestant { trainer_name: "COOLTRAINER NICK", placements: [("SCYTHER", 357), ("BUTTERFREE", 349), ("PINSIR", 368)] },
-    BugContestant { trainer_name: "POKEFAN WILLIAM", placements: [("PINSIR", 332), ("BUTTERFREE", 324), ("VENONAT", 321)] },
-    BugContestant { trainer_name: "BUG CATCHER BENNY", placements: [("BUTTERFREE", 318), ("WEEDLE", 295), ("CATERPIE", 285)] },
-    BugContestant { trainer_name: "CAMPER BARRY", placements: [("PINSIR", 366), ("VENONAT", 329), ("KAKUNA", 314)] },
-    BugContestant { trainer_name: "PICNICKER CINDY", placements: [("BUTTERFREE", 341), ("METAPOD", 301), ("CATERPIE", 264)] },
-    BugContestant { trainer_name: "BUG CATCHER JOSH", placements: [("SCYTHER", 326), ("BUTTERFREE", 292), ("METAPOD", 282)] },
-    BugContestant { trainer_name: "YOUNGSTER SAMUEL", placements: [("WEEDLE", 270), ("PINSIR", 282), ("CATERPIE", 251)] },
-    BugContestant { trainer_name: "SCHOOLBOY KIPP", placements: [("VENONAT", 267), ("PARAS", 254), ("KAKUNA", 259)] },
+    BugContestant {
+        trainer_name: "BUG CATCHER DON",
+        placements: [("KAKUNA", 300), ("METAPOD", 285), ("CATERPIE", 226)],
+    },
+    BugContestant {
+        trainer_name: "BUG CATCHER ED",
+        placements: [("BUTTERFREE", 286), ("BUTTERFREE", 251), ("CATERPIE", 237)],
+    },
+    BugContestant {
+        trainer_name: "COOLTRAINER NICK",
+        placements: [("SCYTHER", 357), ("BUTTERFREE", 349), ("PINSIR", 368)],
+    },
+    BugContestant {
+        trainer_name: "POKEFAN WILLIAM",
+        placements: [("PINSIR", 332), ("BUTTERFREE", 324), ("VENONAT", 321)],
+    },
+    BugContestant {
+        trainer_name: "BUG CATCHER BENNY",
+        placements: [("BUTTERFREE", 318), ("WEEDLE", 295), ("CATERPIE", 285)],
+    },
+    BugContestant {
+        trainer_name: "CAMPER BARRY",
+        placements: [("PINSIR", 366), ("VENONAT", 329), ("KAKUNA", 314)],
+    },
+    BugContestant {
+        trainer_name: "PICNICKER CINDY",
+        placements: [("BUTTERFREE", 341), ("METAPOD", 301), ("CATERPIE", 264)],
+    },
+    BugContestant {
+        trainer_name: "BUG CATCHER JOSH",
+        placements: [("SCYTHER", 326), ("BUTTERFREE", 292), ("METAPOD", 282)],
+    },
+    BugContestant {
+        trainer_name: "YOUNGSTER SAMUEL",
+        placements: [("WEEDLE", 270), ("PINSIR", 282), ("CATERPIE", 251)],
+    },
+    BugContestant {
+        trainer_name: "SCHOOLBOY KIPP",
+        placements: [("VENONAT", 267), ("PARAS", 254), ("KAKUNA", 259)],
+    },
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -9485,10 +9489,7 @@ fn wait_for_linked_friend(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let ready = required_bool_script_variable(state, routine, "_link_friend_ready")?;
-    let serial_established = state
-        .link_session
-        .serial_connection_status
-        .is_established();
+    let serial_established = state.link_session.serial_connection_status.is_established();
     if ready != serial_established {
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
@@ -9521,11 +9522,7 @@ fn check_link_timeout_receptionist(
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let timeout = required_bool_script_variable(state, routine, "_link_timeout")?;
     if timeout {
-        if state
-            .link_session
-            .serial_connection_status
-            .is_established()
-        {
+        if state.link_session.serial_connection_status.is_established() {
             return Err(SpecialRoutineError::InvalidState {
                 routine: routine.to_string(),
                 message: format!(
@@ -9546,11 +9543,7 @@ fn check_link_timeout_receptionist(
         });
     }
     let other_mode = required_u8_script_variable(state, routine, "_other_player_link_mode")?;
-    if !state
-        .link_session
-        .serial_connection_status
-        .is_established()
-    {
+    if !state.link_session.serial_connection_status.is_established() {
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
             message: "connected result requires an established serial clock owner".to_string(),
@@ -10189,10 +10182,7 @@ fn canonical_battle_tower_opponent<S>(
     context: SpecialRoutineContext<'_>,
     routine: &str,
     divider: &mut S,
-) -> Result<
-    (String, String, String, String, Vec<Pokemon>),
-    RandomSpecialRoutineError<S::Error>,
->
+) -> Result<(String, String, String, String, Vec<Pokemon>), RandomSpecialRoutineError<S::Error>>
 where
     S: DividerSource + ?Sized,
 {
@@ -10310,9 +10300,9 @@ where
             }
             let candidate_index = usize::from(candidate);
             let mon = &group[candidate_index];
-            let rejected_current = selected.iter().any(|(_, chosen)| {
-                chosen.species == mon.species || chosen.item == mon.item
-            });
+            let rejected_current = selected
+                .iter()
+                .any(|(_, chosen)| chosen.species == mon.species || chosen.item == mon.item);
             if rejected_current || recent_species.contains(mon.species.as_str()) {
                 mon_accumulator = rng.state().add;
                 continue;
@@ -11348,13 +11338,7 @@ fn calculate_magikarp_length(
 ) -> Result<(u8, u8), SpecialRoutineError> {
     let dv0 = ((pokemon.dvs.attack & 0x0f) << 4) | (pokemon.dvs.defense & 0x0f);
     let dv1 = ((pokemon.dvs.speed & 0x0f) << 4) | (pokemon.dvs.special & 0x0f);
-    calculate_magikarp_length_from_dv_bytes(
-        dv0,
-        dv1,
-        trainer_id,
-        magikarp_lengths,
-        routine,
-    )
+    calculate_magikarp_length_from_dv_bytes(dv0, dv1, trainer_id, magikarp_lengths, routine)
 }
 
 pub fn calculate_magikarp_length_from_dv_bytes(
@@ -11703,8 +11687,7 @@ pub fn advance_day_care_step(
     }
 
     let mut breeding_rng = Random::new_crystal(state.rng_seed);
-    state.day_care.steps_until_next_egg =
-        u16::from(breeding_rng.crystal_random_add_sub().1);
+    state.day_care.steps_until_next_egg = u16::from(breeding_rng.crystal_random_add_sub().1);
     let compatibility = state.day_care.compatibility_score;
     let egg_threshold = match compatibility {
         255 | 0 => 0,
@@ -11713,8 +11696,7 @@ pub fn advance_day_care_step(
         110..=169 => 30,
         _ => 10,
     };
-    let produces_egg = egg_threshold > 0
-        && breeding_rng.crystal_random_add_sub().1 < egg_threshold;
+    let produces_egg = egg_threshold > 0 && breeding_rng.crystal_random_add_sub().1 < egg_threshold;
     state.rng_seed = breeding_rng.seed();
     if !produces_egg {
         return Ok(());
@@ -11740,10 +11722,18 @@ pub fn advance_day_care_step(
         if let Some(parent) = parent {
             let move_and_dv_donor = match parents {
                 (Some(man), Some(lady)) if man.species.id == "DITTO" => {
-                    if pokemon_gender_code(lady) != Some(true) { lady } else { man }
+                    if pokemon_gender_code(lady) != Some(true) {
+                        lady
+                    } else {
+                        man
+                    }
                 }
                 (Some(man), Some(lady)) if lady.species.id == "DITTO" => {
-                    if pokemon_gender_code(man) != Some(true) { man } else { lady }
+                    if pokemon_gender_code(man) != Some(true) {
+                        man
+                    } else {
+                        lady
+                    }
                 }
                 (Some(man), Some(_lady)) if pokemon_gender_code(man) == Some(false) => man,
                 (Some(_man), Some(lady)) => lady,
@@ -11825,12 +11815,21 @@ fn day_care_compatibility_score(first: Option<&Pokemon>, second: Option<&Pokemon
     let (Some(first), Some(second)) = (first, second) else {
         return 0;
     };
-    let first_cannot_breed = matches!(first.species.egg_group1.as_str(), "EGG_NONE" | "EGG_NO_EGGS")
-        && matches!(first.species.egg_group2.as_str(), "EGG_NONE" | "EGG_NO_EGGS");
-    let second_cannot_breed = matches!(second.species.egg_group1.as_str(), "EGG_NONE" | "EGG_NO_EGGS")
-        && matches!(second.species.egg_group2.as_str(), "EGG_NONE" | "EGG_NO_EGGS");
-    if first_cannot_breed || second_cannot_breed
-    {
+    let first_cannot_breed = matches!(
+        first.species.egg_group1.as_str(),
+        "EGG_NONE" | "EGG_NO_EGGS"
+    ) && matches!(
+        first.species.egg_group2.as_str(),
+        "EGG_NONE" | "EGG_NO_EGGS"
+    );
+    let second_cannot_breed = matches!(
+        second.species.egg_group1.as_str(),
+        "EGG_NONE" | "EGG_NO_EGGS"
+    ) && matches!(
+        second.species.egg_group2.as_str(),
+        "EGG_NONE" | "EGG_NO_EGGS"
+    );
+    if first_cannot_breed || second_cannot_breed {
         return 0;
     }
     let first_ditto = first.species.id == "DITTO";
@@ -12438,10 +12437,7 @@ fn screen_fade(
     })
 }
 
-fn heal_pokemon(
-    pokemon: &mut Pokemon,
-    move_catalog: &BTreeMap<String, Move>,
-) -> bool {
+fn heal_pokemon(pokemon: &mut Pokemon, move_catalog: &BTreeMap<String, Move>) -> bool {
     let mut changed = false;
     if pokemon.hp != pokemon.max_hp {
         pokemon.hp = pokemon.max_hp;

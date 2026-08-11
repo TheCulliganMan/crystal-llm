@@ -6463,7 +6463,7 @@ fn spawn_battle_pending_move_learn_screen(
         for (index, label) in ["YES", "NO"].iter().enumerate() {
             let (x, y) = battle_hud_tile_origin(
                 FIELD_YES_NO_LEFT_TILE,
-                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+                FIELD_YES_NO_TOP_TILE + 1.0 + index as f32,
             );
             spawn_battle_command_bitmap_text(
                 commands, rendered_art, asset_root, images,
@@ -7807,7 +7807,7 @@ fn spawn_battle_yes_no_prompt(
             // menu header places that prefix on the window's left tile and
             // the YES/NO label one tile into the window.
             FIELD_YES_NO_LEFT_TILE,
-            FIELD_YES_NO_TOP_TILE + 1.0 + index as f32 * 2.0,
+            FIELD_YES_NO_TOP_TILE + 1.0 + index as f32,
         );
         spawn_battle_command_bitmap_text(
             commands,
