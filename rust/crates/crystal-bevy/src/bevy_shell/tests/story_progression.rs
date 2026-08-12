@@ -395,6 +395,8 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     }
 
     let mut seen_labels = Vec::new();
+    let mut dialogue_activations = Vec::new();
+    let mut previous_visible_label = None;
     let mut saw_rendered_mom_text = false;
     let mut saw_rendered_yes_no = false;
     let mut saw_canonical_day_selector = false;
@@ -412,7 +414,12 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     let baseline_live_entities = app.world().entities().len();
     let mut peak_live_entities = baseline_live_entities;
     let mut previous_progress_signature = None;
+    let mut previous_semantic_trace = None;
     let mut stationary_script_frames = 0usize;
+    let mut saw_dst_question = false;
+    let mut saw_final_phone_text = false;
+    let mut final_phone_text_closed = false;
+    let mut saw_authored_mom_return = false;
     for frame in 0..1024 {
         mom_frames = frame + 1;
         app.update();
@@ -438,6 +445,24 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             shell.visible_script_movement,
             shell.pending_day_of_week,
         );
+        let semantic_trace = format!(
+            "cursor={:?} label={:?} page={:?} yes_no={} special={:?} script_value={:?} day_prompt={:?}",
+            shell.active_script_cursor,
+            snapshot.ui.text.as_ref().map(|text| text.label.as_str()),
+            shell.field_text_reveal.as_ref().map(|reveal| reveal.page_index),
+            snapshot.ui.pending_yes_no.is_some(),
+            snapshot.script_events.last_special_routine,
+            snapshot.script_events.script_value,
+            shell.pending_day_of_week.as_ref().map(|prompt| (
+                prompt.selected_day,
+                prompt.confirming,
+                prompt.yes_no_index,
+            )),
+        );
+        if previous_semantic_trace.as_ref() != Some(&semantic_trace) {
+            eprintln!("mom_dialogue_trace frame={frame} {semantic_trace}");
+            previous_semantic_trace = Some(semantic_trace);
+        }
         if previous_progress_signature.as_ref() == Some(&progress_signature) {
             stationary_script_frames += 1;
         } else {
@@ -449,6 +474,32 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             "Mom script stopped making progress for {stationary_script_frames} frames: {progress_signature}"
         );
         let visible_label = snapshot.ui.text.as_ref().map(|text| text.label.clone());
+        saw_dst_question |= visible_label.as_deref() == Some("IsItDSTText");
+        saw_final_phone_text |= visible_label.as_deref() == Some("InstructionsNextText");
+        final_phone_text_closed |= saw_final_phone_text
+            && visible_label.is_none()
+            && !snapshot.ui.text_window_open
+            && snapshot.ui.pending_yes_no.is_none()
+            && shell.active_script_cursor.as_ref().is_some_and(|cursor| {
+                cursor.source_script != ".FinishPhone@MeetMomScript"
+                    || cursor.next_command_index >= 3
+            });
+        let mom_movement_active = shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| movement.object_id == "PLAYERSHOUSE1F_MOM1");
+        assert!(
+            !(saw_dst_question && !final_phone_text_closed && mom_movement_active),
+            "Mom began her return movement before the complete date/DST/phone dialogue closed; label={visible_label:?} cursor={:?}",
+            shell.active_script_cursor
+        );
+        saw_authored_mom_return |= final_phone_text_closed && mom_movement_active;
+        if visible_label != previous_visible_label {
+            if let Some(label) = visible_label.clone() {
+                dialogue_activations.push(label);
+            }
+            previous_visible_label = visible_label.clone();
+        }
         let pending_yes_no = snapshot.ui.pending_yes_no.is_some();
         if was_pending_yes_no && !pending_yes_no {
             saw_yes_no_prompt_cleared = !app
@@ -538,6 +589,7 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         {
             seen_labels.push(label);
         }
+        let shell = app.world().resource::<BevyRuntimeShell>();
         let current_scene = shell
             .shell
             .current_scene_script()
@@ -632,9 +684,21 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         "Mom must render every ASM-authored dialogue label exactly once and in order"
     );
     assert_eq!(
+        dialogue_activations
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        canonical_mom_labels,
+        "Mom must not reactivate a completed text body while entering its prompt boundary"
+    );
+    assert_eq!(
         yes_no_boundaries.len(),
         3,
         "Mom's ASM path has exactly three YesNoBox boundaries; saw {yes_no_boundaries:?}"
+    );
+    assert!(
+        saw_authored_mom_return,
+        "Mom never performed her ASM-authored return movement after the phone dialogue closed"
     );
     let final_live_entities = app.world().entities().len();
     assert!(
@@ -971,13 +1035,16 @@ fn press_visible_direction_until_tile_changes(app: &mut App, direction: Directio
 fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
     let mut rendered_text = false;
     let mut rendered_picture = false;
+    let mut previous_label = None;
+    let mut completed_labels = std::collections::BTreeSet::new();
+    let mut dialogue_activations = Vec::new();
     // This is a budget for real 60 Hz frames, including typewriter frames,
     // scripted walks, prompt release frames, and every multi-page Elm line.
     // A small loop can time out while the game is still progressing and then
     // falsely report a movement lock.
     for _ in 0..2048 {
         app.update();
-        let (busy, has_text, has_picture, party_nonempty) = {
+        let (busy, has_text, has_picture, party_nonempty, visible_label, cursor) = {
             let shell = app.world().resource::<BevyRuntimeShell>();
             let snapshot = shell.shell.snapshot().expect("story-boundary snapshot");
             (
@@ -990,8 +1057,23 @@ fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
                 snapshot.ui.text_window_open,
                 snapshot.ui.active_pokemon_picture.is_some(),
                 !snapshot.party.slots.is_empty(),
+                snapshot.ui.text.as_ref().map(|text| text.label.clone()),
+                shell.active_script_cursor.clone(),
             )
         };
+        if visible_label != previous_label {
+            if let Some(previous) = previous_label.take() {
+                completed_labels.insert(previous);
+            }
+            if let Some(label) = visible_label.clone() {
+                assert!(
+                    !completed_labels.contains(&label),
+                    "compiled dialogue reactivated a completed text body {label}; activations={dialogue_activations:?} cursor={cursor:?}"
+                );
+                dialogue_activations.push(label);
+            }
+            previous_label = visible_label;
+        }
         if has_text {
             let world = app.world_mut();
             rendered_text |= world
@@ -1112,6 +1194,10 @@ fn visible_overworld_normal_inputs_exit_house_and_trigger_new_bark_teacher_stop(
             vec![GameButton::Left],
             vec![GameButton::Down],
             vec![GameButton::Down],
+            vec![GameButton::Left],
+            vec![GameButton::Left],
+            vec![GameButton::Left],
+            vec![GameButton::Left],
             vec![GameButton::Left],
             vec![GameButton::Left],
             vec![GameButton::Left],
@@ -1304,6 +1390,91 @@ fn adjacent_scripted_npc_dispatches_when_the_player_faces_it() {
 }
 
 #[test]
+fn elm_dialogue_keeps_the_optional_world_frame_active_on_every_render_update() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = CrystalRuntime::load_from_compiled_pack(
+        &asset_root,
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load compiled pack");
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier,
+            map_name: "ElmsLab".to_string(),
+            tile_x: 4,
+            tile_y: 4,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize Elm's Lab beside Elm");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.init_resource::<crystal_render_api::VisualWorldFrame>()
+        .add_systems(
+            Update,
+            publish_visual_world_frame.after(render_playfield),
+        );
+
+    app.update();
+    app.update();
+    assert!(
+        app.world()
+            .resource::<crystal_render_api::VisualWorldFrame>()
+            .active,
+        "Elm's Lab must publish a valid optional-renderer frame before interaction"
+    );
+
+    // ElmsLabWalkUpToElmScript shows EMOTE_SHOCK over Elm immediately before
+    // opening his first textbox. This screen-space effect used to invalidate
+    // the optional world frame for its full 15-frame duration, producing the
+    // visible 2.5D -> 2D -> 2.5D flicker.
+    app.world_mut()
+        .resource_mut::<BevyRuntimeShell>()
+        .visible_overworld_emote = Some(VisibleOverworldEmote {
+        emote: "EMOTE_SHOCK".to_string(),
+        object: "ELMSLAB_ELM".to_string(),
+        frames_remaining: 15,
+    });
+    app.update();
+    assert!(
+        app.world()
+            .resource::<crystal_render_api::VisualWorldFrame>()
+            .active,
+        "Elm's EMOTE_SHOCK must overlay the manually selected world view without changing it"
+    );
+
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowLeft);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+
+    for update in 0..240 {
+        app.update();
+        let world_frame = app
+            .world()
+            .resource::<crystal_render_api::VisualWorldFrame>();
+        if !world_frame.active {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            let snapshot = shell.shell.snapshot().expect("Elm dialogue snapshot");
+            panic!(
+                "optional world frame dropped on Elm render update {update}: text={:?} movement={:?} emote={:?} map={} tile={:?}",
+                snapshot.ui.text.as_ref().map(|text| text.label.as_str()),
+                shell.visible_script_movement,
+                shell.visible_overworld_emote,
+                snapshot.overworld.map_name,
+                snapshot.overworld.tile,
+            );
+        }
+    }
+}
+
+#[test]
 fn visible_overworld_normal_inputs_enter_elms_lab_and_choose_cyndaquil() {
     fn push_frames(frames: &mut Vec<Vec<GameButton>>, button: GameButton, count: usize) {
         frames.extend(std::iter::repeat_n(vec![button], count));
@@ -1464,9 +1635,8 @@ fn visible_overworld_normal_inputs_get_aide_potion_and_exit_elms_lab() {
     push_frames(&mut input_frames, GameButton::Up, 5);
     push_frames(&mut input_frames, GameButton::Right, 2);
     push_frames(&mut input_frames, GameButton::Up, 2);
-    push_frames(&mut input_frames, GameButton::Right, 2);
     push_frames(&mut input_frames, GameButton::Up, 9);
-    push_frames(&mut input_frames, GameButton::Right, 1);
+    push_frames(&mut input_frames, GameButton::Right, 3);
     push_frames(&mut input_frames, GameButton::A, 1);
     push_frames(&mut input_frames, GameButton::Down, 6);
     push_frames(&mut input_frames, GameButton::Down, 3);

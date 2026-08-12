@@ -18,6 +18,9 @@ use serde_json::json;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SourceKey {
     coverage: &'static str,
+    collision: String,
+    metatile_unique_tiles: usize,
+    tile_seen_on_floor: bool,
     tileset: String,
     metatile: u16,
     subtile_column: u8,
@@ -32,6 +35,53 @@ struct SourceFinding {
     sample_map: String,
     sample_x: u32,
     sample_y: u32,
+}
+
+fn collision_for_source(
+    collisions: &BTreeMap<String, Vec<String>>,
+    metatile: u16,
+    subtile_column: u8,
+    subtile_row: u8,
+) -> Result<&str> {
+    let metatile_key = format!("{metatile:02x}");
+    let quadrants = collisions
+        .get(&metatile_key)
+        .with_context(|| format!("missing collision entry ${metatile:02x}"))?;
+    let quadrant = usize::from(subtile_row / 2) * 2 + usize::from(subtile_column / 2);
+    quadrants
+        .get(quadrant)
+        .map(String::as_str)
+        .with_context(|| format!("collision entry ${metatile:02x} has no quadrant {quadrant}"))
+}
+
+fn suspicious_flat(
+    coverage: &str,
+    collision: &str,
+    metatile_unique_tiles: usize,
+    tile_seen_on_floor: bool,
+) -> bool {
+    coverage == "flat"
+        && metatile_unique_tiles > 1
+        && !tile_seen_on_floor
+        && matches!(
+            collision,
+            "WALL"
+                | "UP_WALL"
+                | "LEFT_WALL"
+                | "RIGHT_WALL"
+                | "COUNTER"
+                | "WINDOW"
+                | "HEADBUTT_TREE"
+                | "BUOY"
+                | "MART_SHELF"
+                | "BOOKSHELF"
+                | "TV"
+                | "RADIO"
+                | "TOWN_MAP"
+                | "STAIRCASE"
+                | "LADDER"
+                | "CAVE"
+        )
 }
 
 fn main() -> Result<()> {
@@ -62,6 +112,12 @@ fn main() -> Result<()> {
             .get(map_id)
             .with_context(|| format!("map catalog contains missing module {map_id}"))?;
         let tileset = module.attributes.tileset_name.as_str();
+        let collisions = &runtime
+            .data()
+            .tilesets
+            .get(tileset)
+            .with_context(|| format!("map {map_id} references missing tileset {tileset}"))?
+            .collision;
         let layout = if let Some(layout) = layouts.get(tileset) {
             layout
         } else {
@@ -121,15 +177,53 @@ fn main() -> Result<()> {
             }
         }
         tiles.sort_by_key(|tile| (tile.row, tile.column));
+        let mut floor_tiles = BTreeSet::new();
+        for (metatile, drawing) in layout.chunks_exact(16).enumerate() {
+            for subtile_row in 0..4_u8 {
+                for subtile_column in 0..4_u8 {
+                    if collision_for_source(
+                        collisions,
+                        metatile as u16,
+                        subtile_column,
+                        subtile_row,
+                    )? == "FLOOR"
+                    {
+                        floor_tiles.insert(u16::from(
+                            drawing[usize::from(subtile_row) * 4 + usize::from(subtile_column)],
+                        ));
+                    }
+                }
+            }
+        }
         let coverage = audit_cell_coverage_on_map(map_id, &tiles, width, height)
             .map_err(|error| anyhow::anyhow!("classify voxel coverage for {map_id}: {error:?}"))?;
         let mut map_totals = BTreeMap::<&'static str, u64>::new();
+        let mut suspicious_flat_cells = 0_u64;
         for (tile, kind) in tiles.iter().zip(coverage) {
             let label = kind.label();
+            let collision = collision_for_source(
+                collisions,
+                tile.source.metatile_id,
+                tile.source.subtile_column,
+                tile.source.subtile_row,
+            )?;
+            let metatile_base = usize::from(tile.source.metatile_id) * 16;
+            let metatile_unique_tiles = layout[metatile_base..metatile_base + 16]
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len();
+            let tile_seen_on_floor = floor_tiles.contains(&tile.source.tile_index);
+            if suspicious_flat(label, collision, metatile_unique_tiles, tile_seen_on_floor) {
+                suspicious_flat_cells += 1;
+            }
             *coverage_totals.entry(label).or_default() += 1;
             *map_totals.entry(label).or_default() += 1;
             let key = SourceKey {
                 coverage: label,
+                collision: collision.to_owned(),
+                metatile_unique_tiles,
+                tile_seen_on_floor,
                 tileset: tileset.to_owned(),
                 metatile: tile.source.metatile_id,
                 subtile_column: tile.source.subtile_column,
@@ -152,21 +246,41 @@ fn main() -> Result<()> {
             "source_width": width,
             "source_height": height,
             "coverage": map_totals,
+            "suspicious_flat_cells": suspicious_flat_cells,
         }));
     }
 
     let mut source_reports = findings.into_iter().collect::<Vec<_>>();
     source_reports.sort_by(|(left_key, left), (right_key, right)| {
-        (left_key.coverage != "flat")
-            .cmp(&(right_key.coverage != "flat"))
-            .then_with(|| right.count.cmp(&left.count))
-            .then_with(|| left_key.cmp(right_key))
+        suspicious_flat(
+            right_key.coverage,
+            &right_key.collision,
+            right_key.metatile_unique_tiles,
+            right_key.tile_seen_on_floor,
+        )
+        .cmp(&suspicious_flat(
+            left_key.coverage,
+            &left_key.collision,
+            left_key.metatile_unique_tiles,
+            left_key.tile_seen_on_floor,
+        ))
+        .then_with(|| right.count.cmp(&left.count))
+        .then_with(|| left_key.cmp(right_key))
     });
     let source_reports = source_reports
         .into_iter()
         .map(|(key, finding)| {
             json!({
                 "coverage": key.coverage,
+                "collision": key.collision,
+                "metatile_unique_tiles": key.metatile_unique_tiles,
+                "tile_seen_on_floor": key.tile_seen_on_floor,
+                "suspicious_flat": suspicious_flat(
+                    key.coverage,
+                    &key.collision,
+                    key.metatile_unique_tiles,
+                    key.tile_seen_on_floor,
+                ),
                 "tileset": key.tileset,
                 "metatile": format!("{:02x}", key.metatile),
                 "subtile_column": key.subtile_column,

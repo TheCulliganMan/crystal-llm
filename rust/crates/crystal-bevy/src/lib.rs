@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use crystal_assets::modpack::{
@@ -178,6 +179,65 @@ pub use crystal_audio as audio;
 pub use crystal_core as core;
 pub use crystal_net as net;
 
+#[cfg(target_arch = "wasm32")]
+static BROWSER_RUNTIME_FILES: OnceLock<BTreeMap<String, Vec<u8>>> = OnceLock::new();
+
+pub(crate) fn read_runtime_asset(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    #[cfg(target_arch = "wasm32")]
+    if let Some(files) = BROWSER_RUNTIME_FILES.get() {
+        let key = browser_runtime_asset_key(path);
+        return files.get(&key).cloned().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("embedded runtime asset {key}"),
+            )
+        });
+    }
+    std::fs::read(path)
+}
+
+pub(crate) fn runtime_asset_exists(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    #[cfg(target_arch = "wasm32")]
+    if let Some(files) = BROWSER_RUNTIME_FILES.get() {
+        return files.contains_key(&browser_runtime_asset_key(path));
+    }
+    path.is_file()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_runtime_asset_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.split("apps/web/assets/")
+        .nth(1)
+        .map(str::to_owned)
+        .or_else(|| {
+            text.split("vendor/")
+                .nth(1)
+                .map(|value| format!("vendor/{value}"))
+        })
+        .unwrap_or_else(|| text.trim_start_matches("./").to_owned())
+}
+
+pub(crate) fn read_runtime_asset_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
+    String::from_utf8(read_runtime_asset(path)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn open_runtime_image(
+    path: impl AsRef<Path>,
+) -> image::ImageResult<image::DynamicImage> {
+    let path = path.as_ref();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = read_runtime_asset(path).map_err(image::ImageError::IoError)?;
+        return image::load_from_memory(&bytes);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    image::open(path)
+}
+
 #[cfg(feature = "bevy-shell")]
 pub mod bevy_shell;
 #[cfg(feature = "bevy-shell")]
@@ -269,6 +329,30 @@ pub struct CrystalRuntime {
     runtime_files: BTreeMap<String, Vec<u8>>,
     audio: RuntimeAudioCatalog,
     viewport: GameViewport,
+    /// Immutable pack map catalogs shared by presentation snapshots. Runtime
+    /// snapshots clone only the active/overridden map instead of deep-cloning
+    /// every map, scene, event, object, and block table each movement frame.
+    map_catalog: Vec<Arc<RuntimeMapCatalogSnapshot>>,
+    catalog_cache: Arc<OnceLock<RuntimeStaticCatalogCache>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeStaticCatalogCache {
+    audio: Arc<RuntimeAudioCatalogSnapshot>,
+    items: Arc<Vec<RuntimeItemCatalogSnapshot>>,
+    item_effect_plans: Arc<Vec<RuntimeItemEffectPlanKey>>,
+    moves: Arc<Vec<RuntimeMoveCatalogSnapshot>>,
+    pokemon: Arc<Vec<RuntimePokemonCatalogSnapshot>>,
+    trainers: Arc<Vec<RuntimeTrainerCatalogSnapshot>>,
+    spawn_points: Arc<Vec<RuntimeSpawnPoint>>,
+    tilesets: Arc<Vec<RuntimeTilesetCatalogSnapshot>>,
+    encounters: Arc<RuntimeEncounterCatalogSnapshot>,
+    battle_rules: Arc<RuntimeBattleRuleCatalogSnapshot>,
+    world_rules: Arc<RuntimeWorldRuleCatalogSnapshot>,
+    presentation: Arc<RuntimePresentationCatalogSnapshot>,
+    special: Arc<RuntimeSpecialCatalogSnapshot>,
+    story: Arc<RuntimeStoryCatalogSnapshot>,
+    playability: Arc<crystal_assets::PlayabilityRules>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -373,7 +457,7 @@ pub struct RuntimeShellSnapshot {
     pub battle_tower: crystal_core::state::BattleTowerState,
     pub mobile_link: crystal_core::state::MobileLinkState,
     pub audio: RuntimeShellAudioState,
-    pub audio_catalog: RuntimeAudioCatalogSnapshot,
+    pub audio_catalog: Arc<RuntimeAudioCatalogSnapshot>,
     pub menu: Option<RuntimeMenuSnapshot>,
     pub ui: RuntimeUiSnapshot,
     pub battle: Option<RuntimeBattleSnapshot>,
@@ -382,21 +466,21 @@ pub struct RuntimeShellSnapshot {
     pub storage: RuntimeStorageSnapshot,
     pub mailbox: Vec<crystal_core::state::MailboxMail>,
     pub bag: RuntimeBagSnapshot,
-    pub items: Vec<RuntimeItemCatalogSnapshot>,
-    pub item_effect_plans: Vec<RuntimeItemEffectPlanKey>,
-    pub moves: Vec<RuntimeMoveCatalogSnapshot>,
-    pub pokemon: Vec<RuntimePokemonCatalogSnapshot>,
-    pub trainers: Vec<RuntimeTrainerCatalogSnapshot>,
-    pub maps: Vec<RuntimeMapCatalogSnapshot>,
-    pub spawn_points: Vec<RuntimeSpawnPoint>,
-    pub tilesets: Vec<RuntimeTilesetCatalogSnapshot>,
-    pub encounters: RuntimeEncounterCatalogSnapshot,
-    pub battle_rules: RuntimeBattleRuleCatalogSnapshot,
-    pub world_rules: RuntimeWorldRuleCatalogSnapshot,
-    pub presentation: RuntimePresentationCatalogSnapshot,
-    pub special: RuntimeSpecialCatalogSnapshot,
-    pub story: RuntimeStoryCatalogSnapshot,
-    pub playability: crystal_assets::PlayabilityRules,
+    pub items: Arc<Vec<RuntimeItemCatalogSnapshot>>,
+    pub item_effect_plans: Arc<Vec<RuntimeItemEffectPlanKey>>,
+    pub moves: Arc<Vec<RuntimeMoveCatalogSnapshot>>,
+    pub pokemon: Arc<Vec<RuntimePokemonCatalogSnapshot>>,
+    pub trainers: Arc<Vec<RuntimeTrainerCatalogSnapshot>>,
+    pub maps: Vec<Arc<RuntimeMapCatalogSnapshot>>,
+    pub spawn_points: Arc<Vec<RuntimeSpawnPoint>>,
+    pub tilesets: Arc<Vec<RuntimeTilesetCatalogSnapshot>>,
+    pub encounters: Arc<RuntimeEncounterCatalogSnapshot>,
+    pub battle_rules: Arc<RuntimeBattleRuleCatalogSnapshot>,
+    pub world_rules: Arc<RuntimeWorldRuleCatalogSnapshot>,
+    pub presentation: Arc<RuntimePresentationCatalogSnapshot>,
+    pub special: Arc<RuntimeSpecialCatalogSnapshot>,
+    pub story: Arc<RuntimeStoryCatalogSnapshot>,
+    pub playability: Arc<crystal_assets::PlayabilityRules>,
     pub script_events: RuntimeScriptEventsSnapshot,
     pub pending_shop: Option<ScriptShopRequest>,
     pub linked_menu_results: Vec<MenuChoiceResultFrame>,
@@ -2219,6 +2303,8 @@ pub enum RuntimeCompiledScriptBoundary {
     ActiveMenu(String),
     PendingShop(ScriptShopRequest),
     PendingScriptWarp(ScriptWarpRequest),
+    PendingMapLoad(ScriptMapLoadRequest),
+    PendingMapRefresh(ScriptMapRefreshRequest),
     Delay(ScriptRuntimeDelay),
     Earthquake(ScriptRuntimeEarthquake),
     Emote(ScriptRuntimeEmote),
@@ -2350,6 +2436,14 @@ fn compiled_script_boundary(state: &GameState) -> Option<RuntimeCompiledScriptBo
     if let Some(warp) = &state.script_runtime.pending_script_warp {
         return Some(RuntimeCompiledScriptBoundary::PendingScriptWarp(
             warp.clone(),
+        ));
+    }
+    if let Some(load) = &state.script_runtime.pending_map_load {
+        return Some(RuntimeCompiledScriptBoundary::PendingMapLoad(load.clone()));
+    }
+    if let Some(refresh) = &state.script_runtime.pending_map_refresh {
+        return Some(RuntimeCompiledScriptBoundary::PendingMapRefresh(
+            refresh.clone(),
         ));
     }
     if let Some(delay) = state.script_runtime.pending_delays.first() {
@@ -2938,23 +3032,19 @@ impl RuntimeGameShell {
     ) -> Result<RuntimeMutationOutcome> {
         self.require_valid_script_modal_state("apply runtime mutation command")?;
         if !self.retain_runtime_journal {
-            let outcome = match command.clone() {
-                RuntimeMutationCommand::AdvanceGameTimerVBlanks(command) => Some(
-                    self.runtime
-                        .data
-                        .advance_game_timer_vblanks_fast(
-                            &mut self.session.state,
-                            &mut self.session.overworld,
-                            command.vblanks,
-                            &self.runtime.audio.music_ids(),
-                            &self.runtime.audio.sound_effect_ids(),
-                            &self.runtime.audio.cry_ids(),
-                        )
-                        .context("advance runtime game timer VBlank")?,
-                ),
-                _ => None,
-            };
-            if let Some(outcome) = outcome {
+            if let RuntimeMutationCommand::AdvanceGameTimerVBlanks(command) = command.clone() {
+                let outcome = self
+                    .runtime
+                    .data
+                    .advance_game_timer_vblanks_fast(
+                        &mut self.session.state,
+                        &mut self.session.overworld,
+                        command.vblanks,
+                        &self.runtime.audio.music_ids(),
+                        &self.runtime.audio.sound_effect_ids(),
+                        &self.runtime.audio.cry_ids(),
+                    )
+                    .context("advance runtime game timer VBlank")?;
                 self.record_runtime_mutation_outcome(&outcome);
                 return Ok(outcome);
             }
@@ -3594,19 +3684,34 @@ impl RuntimeGameShell {
             let ended = step.ended;
             cursor = step.next_cursor.clone();
             steps.push(step);
-            // `writetext` publishes a transient label so the renderer can
-            // resolve the text payload.  In Crystal's normal compiled shape
-            // it is immediately followed by `waitbutton`; that command is
-            // the actual input boundary.  Keep stepping through this pair so
-            // callers receive the same modal boundary the game exposes.
-            let transient_text_label =
-                matches!(boundary, Some(RuntimeCompiledScriptBoundary::TextLabel(_)))
-                    && cursor.as_ref().is_some_and(|next| {
-                        self.runtime
-                            .compiled_script_command_name(&next.source_script, next.command_index)
-                            .is_ok_and(|command| command == "waitbutton")
-                    });
-            if (boundary.is_some() && !transient_text_label) || ended {
+            if ended && !self.session.state().script_runtime.call_stack.is_empty() {
+                // ScriptEvents returns from an `scall`/`farscall` frame when
+                // the called command stream ends. A composed run must do the
+                // same instead of exposing the callee's end as the caller's
+                // terminal boundary.
+                self.take_script_end_state()
+                    .context("consume called script end before returning")?;
+                let returned = self
+                    .pop_script_call_stack()
+                    .context("resume compiled script call frame")?;
+                cursor = Some(RuntimeCompiledScriptCursor {
+                    origin_map_name: returned.frame.origin_map_name,
+                    source_script: returned.frame.source_script,
+                    command_index: returned.frame.next_command_index,
+                });
+                continue;
+            }
+            // `writetext`/`farwritetext` publish a label for presentation but
+            // do not pause ScriptEvents. Keep executing until an actual ASM
+            // input or modal command establishes the boundary. Treating the
+            // label itself as a pause makes the shell resume the same text a
+            // second time before `promptbutton`/`yesorno`, and can strand the
+            // eventual wait behind a textbox the shell already closed.
+            if compiled_script_boundary_stops_run(
+                &steps.last().expect("pushed script step").command,
+                &boundary,
+            ) || ended
+            {
                 return Ok(RuntimeCompiledScriptRun {
                     steps,
                     next_cursor: cursor,
@@ -10194,6 +10299,7 @@ impl RuntimeGameShell {
         let ui = self
             .runtime
             .ui_snapshot(&self.session.state, menu.clone())?;
+        let catalogs = self.runtime.static_catalog_cache();
         Ok(RuntimeShellSnapshot {
             boot: self.runtime.boot_summary(),
             overworld: self.session.snapshot(),
@@ -10237,7 +10343,7 @@ impl RuntimeGameShell {
             battle_tower: self.session.state.battle_tower.clone(),
             mobile_link: self.session.state.mobile_link.clone(),
             audio: RuntimeShellAudioState::from_state(&self.session.state),
-            audio_catalog: self.runtime.audio_catalog_snapshot(),
+            audio_catalog: Arc::clone(&catalogs.audio),
             menu,
             ui,
             battle: RuntimeBattleSnapshot::from_state(&self.session.state)?,
@@ -10246,29 +10352,23 @@ impl RuntimeGameShell {
             storage: RuntimeStorageSnapshot::from_state(&self.session.state),
             mailbox: self.session.state.mailbox.clone(),
             bag: self.runtime.bag_snapshot(&self.session.state)?,
-            items: self.runtime.item_catalog_snapshot(),
-            item_effect_plans: self.runtime.item_effect_plan_keys().into_iter().collect(),
-            moves: self.runtime.move_catalog_snapshot(),
-            pokemon: self.runtime.pokemon_catalog_snapshot(),
-            trainers: self.runtime.trainer_catalog_snapshot(),
+            items: Arc::clone(&catalogs.items),
+            item_effect_plans: Arc::clone(&catalogs.item_effect_plans),
+            moves: Arc::clone(&catalogs.moves),
+            pokemon: Arc::clone(&catalogs.pokemon),
+            trainers: Arc::clone(&catalogs.trainers),
             maps: self
                 .runtime
                 .map_catalog_snapshot(&self.session.overworld.map, &self.session.state),
-            spawn_points: self
-                .runtime
-                .data()
-                .runtime_spawn_points
-                .values()
-                .cloned()
-                .collect(),
-            tilesets: self.runtime.tileset_catalog_snapshot(),
-            encounters: self.runtime.encounter_catalog_snapshot(),
-            battle_rules: self.runtime.battle_rule_catalog_snapshot(),
-            world_rules: self.runtime.world_rule_catalog_snapshot(),
-            presentation: self.runtime.presentation_catalog_snapshot(),
-            special: self.runtime.special_catalog_snapshot(),
-            story: self.runtime.story_catalog_snapshot(),
-            playability: self.runtime.playability_rules_snapshot(),
+            spawn_points: Arc::clone(&catalogs.spawn_points),
+            tilesets: Arc::clone(&catalogs.tilesets),
+            encounters: Arc::clone(&catalogs.encounters),
+            battle_rules: Arc::clone(&catalogs.battle_rules),
+            world_rules: Arc::clone(&catalogs.world_rules),
+            presentation: Arc::clone(&catalogs.presentation),
+            special: Arc::clone(&catalogs.special),
+            story: Arc::clone(&catalogs.story),
+            playability: Arc::clone(&catalogs.playability),
             script_events: RuntimeScriptEventsSnapshot::from_state(&self.session.state),
             pending_shop: self.session.state.script_runtime.pending_shop.clone(),
             linked_menu_results: self.linked_menu_results.clone(),
@@ -10535,6 +10635,18 @@ impl RuntimeGameShell {
             ));
         }
     }
+}
+
+fn compiled_script_boundary_stops_run(
+    command: &str,
+    boundary: &Option<RuntimeCompiledScriptBoundary>,
+) -> bool {
+    boundary.is_some()
+        && !matches!(boundary, Some(RuntimeCompiledScriptBoundary::TextLabel(_)))
+        // ASM Script_loadmenu prepares the header and returns. The actual
+        // input boundary is Script_verticalmenu/Script__2dmenu.
+        && !(command == "loadmenu"
+            && matches!(boundary, Some(RuntimeCompiledScriptBoundary::ActiveMenu(_))))
 }
 
 impl RuntimeShellAudioState {
@@ -12419,14 +12531,23 @@ impl CrystalRuntime {
             audio_playback,
             audio_compression.as_deref(),
         )?;
-        Ok(Self {
+        let map_catalog = Self::base_map_catalog_snapshot(&data);
+        let runtime = Self {
             modpack,
             pack_identity,
             data,
             runtime_files,
             audio,
             viewport: GameViewport::default(),
-        })
+            map_catalog,
+            catalog_cache: Arc::new(OnceLock::new()),
+        };
+        // Build once while loading the pack. Every later presentation
+        // snapshot shares these immutable catalogs in O(1).
+        let _ = runtime
+            .catalog_cache
+            .set(runtime.build_static_catalog_cache());
+        Ok(runtime)
     }
 
     pub fn modpack(&self) -> &SaveModpackIdentity {
@@ -12447,6 +12568,13 @@ impl CrystalRuntime {
 
     pub fn has_runtime_files(&self) -> bool {
         !self.runtime_files.is_empty()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn install_browser_runtime_files(&self) -> Result<()> {
+        BROWSER_RUNTIME_FILES
+            .set(self.runtime_files.clone())
+            .map_err(|_| anyhow::anyhow!("browser runtime files were already installed"))
     }
 
     /// Materialize the embedded non-audio presentation bundle into an
@@ -17014,40 +17142,79 @@ impl CrystalRuntime {
             .collect()
     }
 
-    fn map_catalog_snapshot(
-        &self,
-        active_map: &crystal_core::world::map::OverworldMapData,
-        state: &GameState,
-    ) -> Vec<RuntimeMapCatalogSnapshot> {
-        self.data
-            .maps
+    fn base_map_catalog_snapshot(data: &GameDataSet) -> Vec<Arc<RuntimeMapCatalogSnapshot>> {
+        data.maps
             .iter()
             .map(|(map_name, module)| {
                 let metadata = module
                     .attributes
                     .map_constant
                     .as_deref()
-                    .and_then(|constant| self.data.runtime_map_metadata.get(constant));
-                let mut snapshot =
-                    RuntimeMapCatalogSnapshot::from_module(map_name, module, metadata);
-                if active_map.name == map_name.as_str() {
+                    .and_then(|constant| data.runtime_map_metadata.get(constant));
+                Arc::new(RuntimeMapCatalogSnapshot::from_module(
+                    map_name, module, metadata,
+                ))
+            })
+            .collect()
+    }
+
+    fn build_static_catalog_cache(&self) -> RuntimeStaticCatalogCache {
+        RuntimeStaticCatalogCache {
+            audio: Arc::new(self.audio_catalog_snapshot()),
+            items: Arc::new(self.item_catalog_snapshot()),
+            item_effect_plans: Arc::new(self.item_effect_plan_keys().into_iter().collect()),
+            moves: Arc::new(self.move_catalog_snapshot()),
+            pokemon: Arc::new(self.pokemon_catalog_snapshot()),
+            trainers: Arc::new(self.trainer_catalog_snapshot()),
+            spawn_points: Arc::new(self.data.runtime_spawn_points.values().cloned().collect()),
+            tilesets: Arc::new(self.tileset_catalog_snapshot()),
+            encounters: Arc::new(self.encounter_catalog_snapshot()),
+            battle_rules: Arc::new(self.battle_rule_catalog_snapshot()),
+            world_rules: Arc::new(self.world_rule_catalog_snapshot()),
+            presentation: Arc::new(self.presentation_catalog_snapshot()),
+            special: Arc::new(self.special_catalog_snapshot()),
+            story: Arc::new(self.story_catalog_snapshot()),
+            playability: Arc::new(self.playability_rules_snapshot()),
+        }
+    }
+
+    fn static_catalog_cache(&self) -> &RuntimeStaticCatalogCache {
+        self.catalog_cache
+            .get_or_init(|| self.build_static_catalog_cache())
+    }
+
+    fn map_catalog_snapshot(
+        &self,
+        active_map: &crystal_core::world::map::OverworldMapData,
+        state: &GameState,
+    ) -> Vec<Arc<RuntimeMapCatalogSnapshot>> {
+        self.map_catalog
+            .iter()
+            .map(|base| {
+                let map_name = base.map_name.as_str();
+                if active_map.name == map_name {
                     // The active OverworldSession carries callback/field-move
                     // block writes.  Rendering immutable pack blocks here
                     // erased those authoritative mutations, including the
                     // default Town Map in the player's upstairs bedroom.
+                    let mut snapshot = (**base).clone();
                     snapshot.blocks.clone_from(&active_map.metatile_ids);
+                    Arc::new(snapshot)
                 } else if let Some(overrides) = state.map_block_overrides.get(map_name) {
                     // A connection can expose a neighboring map before it
                     // becomes the active session. Keep block writes from an
                     // earlier visit visible at that seam. `snapshot()` has
                     // already validated these coordinates against this map.
+                    let mut snapshot = (**base).clone();
                     for ((x, y), block_id) in overrides {
                         let index = usize::from(*y) * usize::from(snapshot.attributes.width)
                             + usize::from(*x);
                         snapshot.blocks[index] = *block_id;
                     }
+                    Arc::new(snapshot)
+                } else {
+                    Arc::clone(base)
                 }
-                snapshot
             })
             .collect()
     }
@@ -21193,10 +21360,6 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
                 command.origin_map_name
             );
         }
-        data.validate_saved_script_label_reference(
-            &format!("script_runtime.command_queue[{index}].target"),
-            &command.target,
-        )?;
         data.validate_saved_script_command_payload_reference(
             &format!("script_runtime.command_queue[{index}].source_script"),
             &command.source_script,

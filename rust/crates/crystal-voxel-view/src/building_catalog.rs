@@ -42,6 +42,23 @@ const fn traditional(rows: &'static [&'static [u16]], ground_tile: u16) -> Build
     }
 }
 
+const fn traditional_landmark(
+    rows: &'static [&'static [u16]],
+    ground_tile: u16,
+) -> BuildingTemplate {
+    BuildingTemplate {
+        tileset: "johto",
+        rows,
+        // Once the two background-tree rows are skipped, the wide sacred
+        // building drawing has four top-facing roof rows over a two-row
+        // facade.  Treating it as two-over-four folds roof stripes upright.
+        roof_rows: 4,
+        ground_tile,
+        skip_top_source_rows: 2,
+        skip_left_source_columns: 0,
+    }
+}
+
 /// Exact whole-building drawings shared by all maps using these tilesets.
 /// Ordering is most-specific first because placement claiming is deterministic.
 pub(crate) const BUILDING_TEMPLATES: &[BuildingTemplate] = &[
@@ -65,7 +82,7 @@ pub(crate) const BUILDING_TEMPLATES: &[BuildingTemplate] = &[
     template("johto", &[&[0x14, 0x15]], 2, 0x06),
     traditional(&[&[0x2c, 0x2d], &[0x26, 0x2f]], 0x06),
     traditional(&[&[0x2c, 0x2d], &[0x2e, 0x2f]], 0x06),
-    traditional(&[&[0x2c, 0x2a, 0x2d], &[0x26, 0x27, 0x2f]], 0x06),
+    traditional_landmark(&[&[0x2c, 0x2a, 0x2d], &[0x26, 0x27, 0x2f]], 0x06),
     template("johto", &[&[0x20, 0x21], &[0x37, 0x3b]], 4, 0x06),
     template("johto", &[&[0x74, 0x75]], 2, 0x06),
     template(
@@ -113,9 +130,11 @@ pub(crate) const BUILDING_TEMPLATES: &[BuildingTemplate] = &[
         4,
         0x06,
     ),
-    // Goldenrod Department Store: one roof course over two complete window
-    // storeys and the authored entrance course. Matching only the upper pair
-    // leaves the remaining windows painted on the ground.
+    // Goldenrod Department Store: the upper metatile mixes a shallow two-row
+    // cap with the first window course.  Only that cap lies top-facing; the
+    // remaining two source rows join the repeated storeys and entrance on the
+    // upright facade.  Treating the whole metatile as roof folds an entire
+    // floor onto the top and makes the landmark visibly too short.
     template(
         "johto_modern",
         &[
@@ -124,7 +143,7 @@ pub(crate) const BUILDING_TEMPLATES: &[BuildingTemplate] = &[
             &[0x27, 0x23, 0x28],
             &[0x10, 0x17, 0x33],
         ],
-        4,
+        2,
         0x06,
     ),
     template(
@@ -223,6 +242,30 @@ mod tests {
             assert_eq!(template.roof_rows, 2);
             assert_eq!(template.ground_tile, 0x06);
         }
+    }
+
+    #[test]
+    fn goldenrod_department_store_keeps_its_first_window_course_upright() {
+        let store = BUILDING_TEMPLATES
+            .iter()
+            .find(|template| {
+                template.tileset == "johto_modern"
+                    && template.rows
+                        == &[
+                            &[0x18, 0x1f, 0x19][..],
+                            &[0x27, 0x23, 0x28][..],
+                            &[0x27, 0x23, 0x28][..],
+                            &[0x10, 0x17, 0x33][..],
+                        ]
+            })
+            .expect("Goldenrod Department Store template");
+
+        assert_eq!(store.roof_rows, 2, "only the shallow cap is top-facing");
+        assert_eq!(
+            store.rows.len() * 4 - store.roof_rows,
+            14,
+            "all three window storeys and the entrance must remain upright"
+        );
     }
 
     #[test]

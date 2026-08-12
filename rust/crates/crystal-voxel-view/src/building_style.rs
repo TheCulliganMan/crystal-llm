@@ -45,6 +45,61 @@ pub(crate) fn burned_tower_roof_style(
         })
 }
 
+/// Olivine's lighthouse is a twenty-row upright facade under a one-tile cap.
+/// Its physical footprint is not the height of that drawing, but an eight-pixel
+/// wafer provides no sidewall cue at the 45-degree presentation camera. Keep a
+/// bounded three-tile footprint while leaving the authored south door plane and
+/// all facade rows untouched.
+pub(crate) fn lighthouse_depth_pixels(
+    width: usize,
+    height: usize,
+    roof_rows: usize,
+    first: &VisualTileSource,
+) -> Option<usize> {
+    (width == 8
+        && height == 28
+        && roof_rows == 8
+        && first.tileset_id.as_ref() == "johto"
+        && first.metatile_id == 0x08)
+        .then_some(24)
+}
+
+/// Ecruteak's sacred Tin Tower exterior is represented on the 2D map by its
+/// entrance storey.  The 2.5D landmark repeats that complete authored wall
+/// and eave course to express the pagoda's canonical height.  Keep this
+/// strictly map- and drawing-scoped: the same traditional tiles also form
+/// ordinary houses elsewhere.
+pub(crate) fn tin_tower_storeys(
+    map_id: &str,
+    width: usize,
+    height: usize,
+    roof_rows: usize,
+    first: &VisualTileSource,
+) -> usize {
+    if map_id == "EcruteakCity"
+        && width == 12
+        && height == 6
+        && roof_rows == 4
+        && first.tileset_id.as_ref() == "johto"
+        && first.metatile_id == 0x2c
+    {
+        5
+    } else {
+        1
+    }
+}
+
+/// Replace only Tin Tower's entrance bay on upper storeys with the complete
+/// window bay measured from the same 96-pixel source composite.
+pub(crate) fn tin_tower_upper_source_x(pixel_width: usize, x: usize) -> usize {
+    if pixel_width == 96 && (32..48).contains(&x) {
+        // The intact left window occupies source columns 11..27.
+        x - 21
+    } else {
+        x
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -82,6 +137,43 @@ mod tests {
             burned_tower_roof_style(8, 8, 4, &source("kanto", 0x20)),
             None
         );
+    }
+
+    #[test]
+    fn olivine_lighthouse_uses_a_bounded_three_tile_footprint() {
+        assert_eq!(
+            lighthouse_depth_pixels(8, 28, 8, &source("johto", 0x08)),
+            Some(24)
+        );
+        assert_eq!(
+            lighthouse_depth_pixels(8, 28, 8, &source("johto", 0x18)),
+            None
+        );
+        assert_eq!(
+            lighthouse_depth_pixels(8, 28, 8, &source("kanto", 0x08)),
+            None
+        );
+    }
+
+    #[test]
+    fn only_ecruteaks_complete_sacred_tower_becomes_five_storeys() {
+        let first = source("johto", 0x2c);
+        assert_eq!(tin_tower_storeys("EcruteakCity", 12, 6, 4, &first), 5);
+        assert_eq!(tin_tower_storeys("VioletCity", 12, 6, 4, &first), 1);
+        assert_eq!(tin_tower_storeys("EcruteakCity", 8, 6, 4, &first), 1);
+        assert_eq!(
+            tin_tower_storeys("EcruteakCity", 12, 6, 4, &source("johto", 0x2d)),
+            1
+        );
+    }
+
+    #[test]
+    fn sacred_tower_upper_storeys_replace_only_the_door_with_a_native_window() {
+        assert_eq!(tin_tower_upper_source_x(96, 31), 31);
+        assert_eq!(tin_tower_upper_source_x(96, 32), 11);
+        assert_eq!(tin_tower_upper_source_x(96, 47), 26);
+        assert_eq!(tin_tower_upper_source_x(96, 48), 48);
+        assert_eq!(tin_tower_upper_source_x(64, 32), 32);
     }
 
     #[test]

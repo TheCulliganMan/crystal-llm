@@ -3472,7 +3472,7 @@ impl ScriptRuntimeMemory {
                 &format!("command_queue[{index}].command"),
                 &command.command,
             )?;
-            validate_script_runtime_token(
+            validate_script_runtime_label(
                 &format!("command_queue[{index}].target"),
                 &command.target,
             )?;
@@ -13519,8 +13519,19 @@ mod tests {
         });
         assert_eq!(
             runtime.validate(),
-            Err("command_queue[0].target has invalid token 'Queued Target'".to_string())
+            Err("command_queue[0].target has invalid script label 'Queued Target'".to_string())
         );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.command_queue.push(ScriptRuntimeQueuedCommand {
+            origin_map_name: "TestMap".to_string(),
+            command: "writecmdqueue".to_string(),
+            target: ".CommandQueue".to_string(),
+            bank: None,
+            source_script: "QueueScript".to_string(),
+            command_index: 6,
+        });
+        assert_eq!(runtime.validate(), Ok(()));
 
         runtime = ScriptRuntimeMemory::default();
         runtime.command_queue.push(ScriptRuntimeQueuedCommand {

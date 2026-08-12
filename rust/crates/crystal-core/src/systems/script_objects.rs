@@ -3702,7 +3702,11 @@ mod tests {
         assert_eq!(outcome.previous_tile, TilePosition::new(10, 6));
         assert_eq!(outcome.tile, TilePosition::new(7, 5));
         assert_eq!(session.player.tile, TilePosition::new(8, 5));
-        assert_eq!(session.player.facing, Direction::Left);
+        assert_eq!(
+            session.player.facing,
+            Direction::Up,
+            "the follower faces along the previously released queue entry, not the leader's still-buffered final step"
+        );
     }
 
     #[test]

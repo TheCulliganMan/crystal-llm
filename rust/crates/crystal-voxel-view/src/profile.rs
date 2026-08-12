@@ -7,13 +7,14 @@
 use crystal_render_api::{VisualTileSource, VisualWorldFrame};
 
 use crate::battle_tower::tree_group as battle_tower_tree_group;
-use crate::casino::casino_shape;
+use crate::casino::{casino_shape, casino_shape_on_map};
 use crate::cave::cave_shape;
 use crate::cut_tree::cut_tree_shape;
 use crate::flower::flower_shape;
 use crate::forest::forest_ledge_shape;
 use crate::grass::grass_shape;
 use crate::interior::interior_fixture_shape;
+use crate::johto_fence::johto_fence_shape;
 use crate::kanto_cliff::kanto_cliff_shape;
 use crate::kanto_post::kanto_post_shape;
 use crate::modern_route::modern_route_shape;
@@ -27,10 +28,12 @@ pub const WATER_HEIGHT: f32 = -2.0;
 pub const COMPACT_BUILDING_HEIGHT: f32 = 16.0;
 pub const LARGE_BUILDING_HEIGHT: f32 = 32.0;
 pub const MOUNTAIN_LEDGE_HEIGHT: f32 = 16.0;
-pub const MOUNTAIN_CLIFF_HEIGHT: f32 = 32.0;
-// One overworld sprite (16 source pixels). Eight pixels left the raised side
-// nearly coplanar after the 45-degree projection and read as a painted line.
-pub const JUMP_LEDGE_HEIGHT: f32 = 16.0;
+// One complete two-course Crystal rock face. Additional authored terraces
+// stack this unit; a single face must never repeat itself into a 32px wall.
+pub const MOUNTAIN_CLIFF_HEIGHT: f32 = 16.0;
+// The reference renderer's hop-down edge is a shallow lip, distinct from a
+// rock platform or cliff course.
+pub const JUMP_LEDGE_HEIGHT: f32 = 6.0;
 pub const MAX_PROFILE_HEIGHT: f32 = LARGE_BUILDING_HEIGHT;
 pub const MIN_PROFILE_HEIGHT: f32 = WATER_HEIGHT;
 pub const SOURCE_TILE_HEIGHT: f32 = 8.0;
@@ -103,6 +106,13 @@ pub enum CellShape {
         ground_tile_index: u16,
         base_height: f32,
     },
+    /// A thin plan-view prop held above ordinary ground. Unlike `Relief`, its
+    /// authored base does not raise the terrain footprint around it.
+    FloatingRelief {
+        height: f32,
+        ground_tile_index: u16,
+        base_height: f32,
+    },
     /// Exact rocky shore artwork remains on the land cap and also supplies
     /// the cropped two-pixel land-to-water face.
     ShoreBand,
@@ -115,6 +125,12 @@ pub enum CellShape {
     RampNorth {
         north_height: f32,
         south_height: f32,
+    },
+    /// An east-rising ground tile. Heights name its two x edges so adjacent
+    /// source cells form one continuous incline.
+    RampEast {
+        west_height: f32,
+        east_height: f32,
     },
     /// One native-size source band folded onto a shared front plane.
     FacadeBand {
@@ -140,15 +156,18 @@ pub enum CellShape {
 impl CellShape {
     pub fn surface_height(self, tile_height: f32) -> f32 {
         let source_height = match self {
-            Self::Flat | Self::FacadeBand { .. } | Self::Cutout { .. } | Self::ShoreBand => {
-                GROUND_HEIGHT
-            }
+            Self::Flat
+            | Self::FacadeBand { .. }
+            | Self::Cutout { .. }
+            | Self::FloatingRelief { .. }
+            | Self::ShoreBand => GROUND_HEIGHT,
             Self::Relief { base_height, .. } => base_height,
             Self::PlaneAt { height } => height,
             Self::Water => WATER_HEIGHT,
             Self::Waterfall => GROUND_HEIGHT,
             Self::RaisedTop { height, .. } | Self::LedgeBand { height, .. } => height,
             Self::RampNorth { north_height, .. } => north_height,
+            Self::RampEast { east_height, .. } => east_height,
         };
         source_height * tile_height / SOURCE_TILE_HEIGHT
     }
@@ -158,11 +177,15 @@ impl CellShape {
             Self::RaisedTop { solid, .. }
             | Self::FacadeBand { solid, .. }
             | Self::Cutout { solid, .. } => solid,
-            Self::Relief { .. } | Self::PlaneAt { .. } => SolidKind::Prop,
+            Self::Relief { .. } | Self::FloatingRelief { .. } | Self::PlaneAt { .. } => {
+                SolidKind::Prop
+            }
             Self::ShoreBand => SolidKind::Bank,
             Self::LedgeBand { .. } => SolidKind::Bank,
             Self::Flat => SolidKind::Building,
-            Self::Water | Self::Waterfall | Self::RampNorth { .. } => SolidKind::Bank,
+            Self::Water | Self::Waterfall | Self::RampNorth { .. } | Self::RampEast { .. } => {
+                SolidKind::Bank
+            }
         }
     }
 }
@@ -192,6 +215,9 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
         return shape;
     }
     if let Some(shape) = modern_route_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = johto_fence_shape(source) {
         return shape;
     }
     if let Some(shape) = port_shape(source) {
@@ -227,7 +253,25 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
     if let Some(shape) = casino_shape(source) {
         return shape;
     }
+    if let Some(shape) = crate::mart::shape(source) {
+        return shape;
+    }
     if let Some(shape) = tower_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::house::shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::house::stair_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::house::traditional_mixed_wall_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::players_house::stair_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::interior::player_room_stair_shape(source) {
         return shape;
     }
     if let Some(shape) = interior_fixture_shape(source) {
@@ -695,6 +739,25 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             ground_tile_index: 0x05,
             solid: SolidKind::Tree,
         },
+        // `$61` is four independent headbutt trees arranged as a 2x2 grid
+        // of complete 16x16 drawings. Each pair stands at its own foot line;
+        // joining the block would incorrectly make one 32x32 hedge card.
+        0x61 => CellShape::FacadeBand {
+            plane_subtile_row: ((source.subtile_row / 2) + 1) * 2,
+            band_from_top: source.subtile_row % 2,
+            band_count: 2,
+            ground_tile_index: 0x05,
+            solid: SolidKind::Tree,
+        },
+        // `$5d` carries two more complete headbutt trees in its north half;
+        // the south half is ordinary ground and must remain on the map plane.
+        0x5d if source.subtile_row < 2 => CellShape::FacadeBand {
+            plane_subtile_row: 2,
+            band_from_top: source.subtile_row,
+            band_count: 2,
+            ground_tile_index: 0x05,
+            solid: SolidKind::Tree,
+        },
         0x65 if source.subtile_row >= 2 => CellShape::FacadeBand {
             plane_subtile_row: 4,
             band_from_top: source.subtile_row - 2,
@@ -711,6 +774,51 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
 /// interiors reuse an atlas for unrelated objects (notably Game Corners and
 /// Vermilion Gym), so tileset identity alone is not sufficient evidence.
 pub(crate) fn shape_for_source_on_map(map_id: &str, source: &VisualTileSource) -> CellShape {
+    if let Some(shape) = crate::interior::trainer_house_b1f_stair_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::dance_theater::shape(map_id, source) {
+        return shape;
+    }
+    // The facility divider is built as one continuous closed volume by the
+    // grouped mesher. Mark only its authored wall rows non-flat for coverage;
+    // the lower furniture rows remain faithful map art.
+    if crate::facility_divider::is_horizontal_top(map_id, source)
+        || crate::facility_divider::is_horizontal_face(map_id, source)
+        || crate::facility_divider::is_vertical_left(map_id, source)
+        || crate::facility_divider::is_vertical_right(map_id, source)
+    {
+        return CellShape::PlaneAt {
+            height: GROUND_HEIGHT,
+        };
+    }
+    if let Some(shape) = crate::barn::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::ship::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::pokecenter::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::mart::department_store_wall_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::mart::department_store_fifth_floor_fixture_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::mart::goldenrod_roof_south_parapet_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::mart::goldenrod_roof_display_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::mart::department_store_counter_end_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::cafe::shape(map_id, source) {
+        return shape;
+    }
     if let Some(shape) = crate::elite_four_room::shape(map_id, source) {
         return shape;
     }
@@ -732,8 +840,26 @@ pub(crate) fn shape_for_source_on_map(map_id: &str, source: &VisualTileSource) -
     if let Some(shape) = crate::vermilion::shape(map_id, source) {
         return shape;
     }
+    if let Some(shape) = crate::pokecom::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::flower_shop::display_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::flower_shop::stool_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::gate::shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::goldenrod_underground::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::underground_path::shape(map_id, source) {
+        return shape;
+    }
     if crate::casino::is_game_corner_map(map_id)
-        && let Some(shape) = casino_shape(source)
+        && let Some(shape) = casino_shape_on_map(map_id, source)
     {
         return shape;
     }
@@ -758,14 +884,18 @@ pub fn support_height(source: &VisualTileSource, tile_height: f32) -> f32 {
             return crate::cave::CAVE_SHELF_HEIGHT * tile_height / SOURCE_TILE_HEIGHT;
         }
     }
-    let on_jump_ledge = source.tileset_id.as_ref() == JOHTO_TILESET
+    let on_jump_ledge = (source.tileset_id.as_ref() == JOHTO_TILESET
         && source.subtile_row < 3
         && match source.metatile_id {
             0x4b => source.subtile_column < 2,
             0x50..=0x53 | 0x56 | 0x57 => true,
             0x5a => matches!(source.subtile_column, 1 | 2),
             _ => false,
-        };
+        })
+        || (source.tileset_id.as_ref() == "kanto"
+            && source.metatile_id == 0x07
+            && source.subtile_row < 3
+            && source.tile_index == 0x2c);
     if on_jump_ledge {
         return JUMP_LEDGE_HEIGHT * tile_height / SOURCE_TILE_HEIGHT;
     }
@@ -820,6 +950,26 @@ mod tests {
                 priority: false,
             }],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn vermilion_gym_trash_cans_stay_flat_in_the_final_profile() {
+        for row in 0..4 {
+            for column in 2..4 {
+                let can = source_for_tileset("game_corner", 0x1d, column, row, 0);
+                assert_eq!(
+                    shape_for_source_on_map("VermilionGym", &can),
+                    CellShape::Flat
+                );
+            }
+            for column in 0..2 {
+                let can = source_for_tileset("game_corner", 0x1e, column, row, 0);
+                assert_eq!(
+                    shape_for_source_on_map("VermilionGym", &can),
+                    CellShape::Flat
+                );
+            }
         }
     }
 
@@ -940,11 +1090,11 @@ mod tests {
     }
 
     #[test]
-    fn cave_ladder_drawing_does_not_invent_a_staircase_support_height() {
+    fn cave_ladder_drawing_joins_the_visual_shelf_height() {
         let up = source_for_tileset("cave", 0x14, 2, 2, 0x2a);
         let down = source_for_tileset("cave", 0x15, 2, 2, 0x22);
-        assert_eq!(support_height(&up, 8.0), 0.0);
-        assert_eq!(support_height(&down, 8.0), 0.0);
+        assert_eq!(support_height(&up, 8.0), crate::cave::CAVE_SHELF_HEIGHT);
+        assert_eq!(support_height(&down, 8.0), crate::cave::CAVE_SHELF_HEIGHT);
     }
 
     #[test]
@@ -1287,7 +1437,7 @@ mod tests {
         );
         assert_eq!(
             support_height(&source_for_tileset(JOHTO_TILESET, 0x6d, 1, 1, 0x3c), 8.0),
-            32.0
+            16.0
         );
         assert_eq!(
             support_height(&source_for_tileset(JOHTO_TILESET, 0x6d, 3, 1, 0x3d), 8.0),
@@ -1410,6 +1560,69 @@ mod tests {
         ));
         assert_eq!(
             shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x60, 2, 0, 0x05)),
+            CellShape::Flat
+        );
+    }
+
+    #[test]
+    fn block_61_resolves_four_independent_two_band_headbutt_trees() {
+        for row in 0..4 {
+            for column in 0..4 {
+                let shape = shape_for_source(&source_for_tileset(
+                    JOHTO_TILESET,
+                    0x61,
+                    column,
+                    row,
+                    if row % 2 == 0 {
+                        if column % 2 == 0 { 0x1e } else { 0x1f }
+                    } else if column % 2 == 0 {
+                        0x3e
+                    } else {
+                        0x3f
+                    },
+                ));
+                assert_eq!(
+                    shape,
+                    CellShape::FacadeBand {
+                        plane_subtile_row: ((row / 2) + 1) * 2,
+                        band_from_top: row % 2,
+                        band_count: 2,
+                        ground_tile_index: 0x05,
+                        solid: SolidKind::Tree,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_5d_resolves_only_its_two_north_headbutt_trees() {
+        for row in 0..2 {
+            for column in 0..4 {
+                assert!(matches!(
+                    shape_for_source(&source_for_tileset(
+                        JOHTO_TILESET,
+                        0x5d,
+                        column,
+                        row,
+                        if row == 0 {
+                            if column % 2 == 0 { 0x1e } else { 0x1f }
+                        } else if column % 2 == 0 {
+                            0x3e
+                        } else {
+                            0x3f
+                        },
+                    )),
+                    CellShape::FacadeBand {
+                        solid: SolidKind::Tree,
+                        band_count: 2,
+                        ..
+                    }
+                ));
+            }
+        }
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x5d, 0, 2, 0x05)),
             CellShape::Flat
         );
     }

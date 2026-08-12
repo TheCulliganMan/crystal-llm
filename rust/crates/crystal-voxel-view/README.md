@@ -15,8 +15,8 @@ relief profile covering New Bark's Johto artwork:
 - generated caps and sides use a separate solid-color material, so map art is
   never stretched down a wall;
 - terrain meshing runs on Bevy's asynchronous compute pool and is keyed by the
-  complete visual revision; stale jobs are replaced while the faithful 2D
-  world remains available until authored geometry is ready;
+  complete visual revision; stale jobs are replaced while the last complete
+  2.5D terrain remains active;
 - player and NPC textures are vertical cards anchored at their feet;
 - tall-grass rustle is exported as a foot-anchored world card, so it follows
   the pitched scene instead of forcing a switch back to screen-space 2D;
@@ -27,6 +27,9 @@ relief profile covering New Bark's Johto artwork:
   camera then composites the exact 2D UI, dialog, and fades above it;
 - the result is rendered below the existing 2D UI, dialog, fades, and battle
   compositor;
+- renderer readiness never changes presentation mode: startup configuration
+  and the manual `F3` toggle are the only 2D/2.5D switches, and an unavailable
+  2.5D frame cannot reveal the classic overworld;
 - the normal launch remains the unchanged 2D presentation even when the
   optional code is compiled; the tester or an explicit setting must enable
   2.5D, and disabling the Cargo feature removes it entirely.
@@ -48,13 +51,48 @@ in the modern Johto, Kanto, and cave tilesets without lowering shoreline art;
 Kanto's exact two-cell tree bands form masked upright cards whenever their
 authored background cell is present in the visual snapshot. A clipped profile
 with missing art evidence stays flat instead of guessing or disabling 2.5D.
+Celadon Department Store is claimed from its native roof cap through both
+rounded window courses and its entrance course as one exterior landmark. Only
+the real cap is top-facing, so its roof cannot detach and lie flat behind the
+six-storey facade.
 The cave tileset's exact two-row rock drawings likewise fold into masked
 upright props while ambiguous wall contours remain flat pending a connected
 profile; cave collision is never treated as visual height.
 Compact interior fixtures use the same conservative source-art approach:
 authored PCs, TVs, radios, bookcases, counters, shelves, displays, and
 domestic furniture receive only shallow pixel relief, while unprofiled room
-art remains flat.
+art remains flat. Shared house bookcases preserve their authored ten-pixel
+lid/front-rim fold; small shelf and cupboard fields enclosed by the darkest
+frame sit one source pixel behind that frame, matching the reference mod's
+cabinet relief without inventing geometry for plain Crystal furniture.
+Complete wall-appliance drawings keep their exact live front pixels and gain
+only a one-source-pixel shallow casing; generic trees and other flat cards do
+not inherit that thickness.
+Trainer House open books are reconstructed as their complete cross-metatile
+two-by-two page drawing and remain paper-thin on the authored tabletop. Their
+light boundary-touching pages use whole-drawing background separation rather
+than a dark-outline-only mask, which would discard most of the book.
+The two traditional gift shops keep each authored merchandise bank as one
+four-by-four shelf: two source rows form its top, two form its front, and only
+small display fields enclosed by the darkest frame recess one source pixel.
+Goldenrod and Celadon's shared department-store interiors reuse one authored
+fixture vocabulary across both stores. Their elevator cabins fold only the
+north pair of complete wall blocks into one 16-pixel face; the exact door mat,
+walkable cabin floor, and elevator mechanics remain flat and authoritative.
+The shared 5F blocked fixture remains one complete half-cell-high top-view
+surface instead of becoming either a hollow counter or a four-row wall.
+Goldenrod's roof keeps its repeated south parapet as two native upright bands,
+while each complete terrace display above it is an independent shallow
+top-facing fixture; neither profile claims the surrounding roof floor.
+The four 6F machine banks reuse the existing complete two-by-four rack/card
+geometry through their exact `$0b` and `$20` metatile-half variants, so the
+native machine drawing stands once without fusing neighboring banks or
+raising the shop floor.
+The remaining regular-floor variants share those same systems: 2F's final
+two-by-four rack is reconstructed across its `$2c/$2d` metatile boundary, and
+the exact blocked counter-end quadrants on 1F/3F remain eight-pixel top-facing
+surfaces. The full-game coverage audit reports zero suspicious-flat cells for
+both stores' floors 1F through 6F and both elevator cabins.
 Building facade rows fold onto one shared front plane while their vacated cells
 remain walkable ground. Profile metadata is mod-owned presentation data; it is
 neither inferred from collision nor fed back into movement, scripts, saves,

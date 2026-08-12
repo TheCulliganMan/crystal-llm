@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::time::Instant;
+use web_time::Instant;
 
 use serde::{Deserialize, Serialize};
 

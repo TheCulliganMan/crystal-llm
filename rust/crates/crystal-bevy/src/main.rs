@@ -10,6 +10,7 @@ use crystal_bevy::{
 
 const DEFAULT_PACK_FILENAME: &str = "core-modular.crystalpack";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = parse_args_from(env::args().skip(1))?;
     if args.help {
@@ -51,6 +52,30 @@ fn main() -> Result<()> {
         start,
         BevyShellConfig {
             quick_save_path: Some(args.save_path.unwrap_or(default_save_path)),
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() -> Result<()> {
+    const PACK: &[u8] = include_bytes!("../../../../content-packs/core-modular.crystalpack");
+    let loaded = crystal_assets::load_verified_compiled_game_pack_bytes(
+        DEFAULT_PACK_FILENAME,
+        PACK.to_vec(),
+    )?;
+    let asset_root = AssetRoot::new(".");
+    let runtime = CrystalRuntime::from_loaded_compiled_pack(&asset_root, loaded)?;
+    let spawn_identifier = runtime.title_new_game_spawn_identifier()?;
+    crystal_bevy::run_bevy_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::Title {
+            spawn_identifier,
+            save_path: None,
+        },
+        BevyShellConfig {
+            quick_save_path: None,
             ..Default::default()
         },
     )

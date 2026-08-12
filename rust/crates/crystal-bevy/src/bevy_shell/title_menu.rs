@@ -2200,7 +2200,7 @@ fn title_continue_save_path<'a>(
     let path = title.save_path.as_ref()?;
     // An existing primary remains a candidate so Continue can report its
     // validation error. Only a missing primary invokes canonical .bak recovery.
-    if path.exists()
+    if crate::runtime_asset_exists(&path)
         || runtime_shell
             .shell
             .runtime()
@@ -2930,7 +2930,7 @@ fn visible_credits_op_byte_len(op: &VisibleCreditsOp) -> u16 {
 
 fn load_visible_credit_constant_indices(asset_root: &AssetRoot) -> Result<BTreeMap<String, usize>> {
     let path = asset_root.resolve_vendor("constants/credits_constants.asm");
-    let content = std::fs::read_to_string(&path)
+    let content = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read credits constants {}", path.display()))?;
     let mut constants = BTreeMap::new();
     let mut current_value = 0_usize;
@@ -2962,7 +2962,7 @@ fn load_visible_credit_constant_indices(asset_root: &AssetRoot) -> Result<BTreeM
 
 fn load_visible_credits_strings(asset_root: &AssetRoot) -> Result<Vec<String>> {
     let path = asset_root.resolve_vendor("data/credits_strings.asm");
-    let content = std::fs::read_to_string(&path)
+    let content = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read credits strings {}", path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
     let pointer_labels = parse_visible_credits_pointer_table(&lines);
@@ -2982,7 +2982,7 @@ fn load_visible_credits_strings(asset_root: &AssetRoot) -> Result<Vec<String>> {
 
 fn load_visible_credits_string_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<Vec<u16>>>> {
     let path = asset_root.resolve_vendor("data/credits_strings.asm");
-    let content = std::fs::read_to_string(&path)
+    let content = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read credits string tiles {}", path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
     let pointer_labels = parse_visible_credits_pointer_table(&lines);

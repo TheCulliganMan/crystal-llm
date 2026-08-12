@@ -233,7 +233,7 @@ fn load_map_name_sign_frames(
     let path = asset_root
         .runtime_assets()
         .join("gfx/frames/map_entry_sign.png");
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode map-name sign PNG {}", path.display()))?
         .to_rgba8();
     if source.dimensions() != (56, 16) {
@@ -1109,16 +1109,16 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
     const HEIGHT: usize = 144;
     const TILE: usize = 8;
     let root = asset_root.resolve_vendor("gfx/card_flip");
-    let sheet_1 = image::open(root.join("card_flip_1.png"))
+    let sheet_1 = crate::open_runtime_image(root.join("card_flip_1.png"))
         .context("decode Card Flip primary sheet")?
         .to_rgba8();
-    let sheet_2 = image::open(root.join("card_flip_2.png"))
+    let sheet_2 = crate::open_runtime_image(root.join("card_flip_2.png"))
         .context("decode Card Flip secondary sheet")?
         .to_rgba8();
-    let light_off = image::open(root.join("off.png"))
+    let light_off = crate::open_runtime_image(root.join("off.png"))
         .context("decode Card Flip off light")?
         .to_rgba8();
-    let light_on = image::open(root.join("on.png"))
+    let light_on = crate::open_runtime_image(root.join("on.png"))
         .context("decode Card Flip on light")?
         .to_rgba8();
     anyhow::ensure!(
@@ -1138,7 +1138,7 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
         "invalid Card Flip on light"
     );
     let tilemap =
-        std::fs::read(root.join("card_flip.tilemap")).context("read Card Flip tilemap")?;
+        crate::read_runtime_asset(root.join("card_flip.tilemap")).context("read Card Flip tilemap")?;
     anyhow::ensure!(tilemap.len() == 12 * 11, "invalid Card Flip tilemap length");
     let palettes = load_card_flip_palettes(&root.join("card_flip.pal"))?;
     let [red, green, blue] = palettes[0][2];
@@ -1228,7 +1228,7 @@ fn render_visible_card_flip_frame(
 }
 
 fn load_card_flip_palettes(path: &Path) -> Result<Vec<Palette>> {
-    let source = std::fs::read_to_string(path)
+    let source = crate::read_runtime_asset_to_string(path)
         .with_context(|| format!("read Card Flip palette {}", path.display()))?;
     let colors = source
         .lines()
@@ -1281,10 +1281,10 @@ fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachin
     const HEIGHT: usize = 144;
     const TILE: usize = 8;
     let root = asset_root.resolve_vendor("gfx/slots");
-    let ui = image::open(root.join("slots_1.png"))
+    let ui = crate::open_runtime_image(root.join("slots_1.png"))
         .context("decode slots UI sheet")?
         .to_rgba8();
-    let symbols = image::open(root.join("slots_2.png"))
+    let symbols = crate::open_runtime_image(root.join("slots_2.png"))
         .context("decode slots symbol sheet")?
         .to_rgba8();
     anyhow::ensure!(
@@ -1295,7 +1295,7 @@ fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachin
         symbols.dimensions() == (16, 256),
         "invalid slots symbol sheet dimensions"
     );
-    let tilemap = std::fs::read(root.join("slots.tilemap")).context("read slots tilemap")?;
+    let tilemap = crate::read_runtime_asset(root.join("slots.tilemap")).context("read slots tilemap")?;
     anyhow::ensure!(tilemap.len() == 20 * 12, "invalid slots tilemap length");
     let palettes = load_slot_machine_palettes(&root.join("slots.pal"))?;
     let mut target = vec![255_u8; WIDTH * HEIGHT * 4];
@@ -1373,7 +1373,7 @@ fn render_visible_slot_machine_frame(
 }
 
 fn load_slot_machine_palettes(path: &Path) -> Result<Vec<Palette>> {
-    let source = std::fs::read_to_string(path)
+    let source = crate::read_runtime_asset_to_string(path)
         .with_context(|| format!("read slot palette {}", path.display()))?;
     let mut colors = Vec::new();
     for raw_line in source.lines() {
@@ -1497,13 +1497,13 @@ fn load_unown_puzzle_render_sources(asset_root: &AssetRoot) -> Result<UnownPuzzl
     const TILE: usize = 8;
     const PIECE: usize = 24;
     let root = asset_root.resolve_vendor("gfx/unown_puzzle");
-    let border = image::open(root.join("tile_borders.png"))
+    let border = crate::open_runtime_image(root.join("tile_borders.png"))
         .context("decode Unown puzzle piece borders")?
         .to_rgba8();
-    let mut cursor = image::open(root.join("cursor.png"))
+    let mut cursor = crate::open_runtime_image(root.join("cursor.png"))
         .context("decode Unown puzzle cursor")?
         .to_rgba8();
-    let start_cancel = image::open(root.join("start_cancel.png"))
+    let start_cancel = crate::open_runtime_image(root.join("start_cancel.png"))
         .context("decode Unown puzzle START/CANCEL graphics")?
         .to_rgba8();
     anyhow::ensure!(
@@ -1529,7 +1529,7 @@ fn load_unown_puzzle_render_sources(asset_root: &AssetRoot) -> Result<UnownPuzzl
     let mut puzzle_pieces = HashMap::new();
     for puzzle_id in ["aerodactyl", "hooh", "kabuto", "omanyte"] {
         let puzzle_path = root.join(format!("{puzzle_id}.png"));
-        let source = image::open(&puzzle_path)
+        let source = crate::open_runtime_image(&puzzle_path)
             .with_context(|| format!("decode Unown puzzle PNG {}", puzzle_path.display()))?
             .to_rgba8();
         anyhow::ensure!(
@@ -2267,7 +2267,7 @@ fn visible_overworld_town_map_frame(
     let assets = asset_root.runtime_assets();
     let gfx = assets.join("gfx/pokegear");
     let sheet_path = gfx.join("town_map.png");
-    let sheet = image::open(&sheet_path)
+    let sheet = crate::open_runtime_image(&sheet_path)
         .with_context(|| format!("decode town-map tiles {}", sheet_path.display()))?
         .to_rgba8();
     anyhow::ensure!(
@@ -2275,14 +2275,14 @@ fn visible_overworld_town_map_frame(
         "town-map tiles {} are not 8x8 aligned",
         sheet_path.display()
     );
-    let mut tilemap = std::fs::read(gfx.join("johto.bin"))
+    let mut tilemap = crate::read_runtime_asset(gfx.join("johto.bin"))
         .context("read canonical Johto town-map tilemap")?;
     if tilemap.last() == Some(&0xff) {
         tilemap.pop();
     }
     anyhow::ensure!(tilemap.len() == 20 * 18, "Johto town-map tilemap must contain 360 tiles");
     let palette_tokens: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(assets.join("data/pokegear_town_map_palette_map.json"))
+        &crate::read_runtime_asset(assets.join("data/pokegear_town_map_palette_map.json"))
             .context("read town-map palette assignments")?,
     )
     .context("decode town-map palette assignments")?;
@@ -2339,7 +2339,7 @@ fn visible_overworld_town_map_frame(
 }
 
 fn parse_visible_pokegear_palette_bank(path: &std::path::Path) -> Result<HashMap<String, [[u8; 3]; 4]>> {
-    let source = std::fs::read_to_string(path)
+    let source = crate::read_runtime_asset_to_string(path)
         .with_context(|| format!("read Pokégear palette {}", path.display()))?;
     let mut palettes = HashMap::new();
     let mut label = None;
@@ -3215,7 +3215,7 @@ fn load_asm_move_descriptions(
     snapshot: &RuntimeShellSnapshot,
 ) -> Result<HashMap<String, String>> {
     let path = asset_root.resolve_vendor("data/moves/descriptions.asm");
-    let content = std::fs::read_to_string(&path)
+    let content = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read ASM move descriptions {}", path.display()))?;
     let mut table = Vec::new();
     let mut descriptions = HashMap::<String, String>::new();
@@ -3280,7 +3280,7 @@ fn load_asm_move_descriptions(
     }
     flush(&mut labels, &mut parts, &mut descriptions);
     let constants_path = asset_root.resolve_vendor("constants/move_constants.asm");
-    let constants = std::fs::read_to_string(&constants_path)
+    let constants = crate::read_runtime_asset_to_string(&constants_path)
         .with_context(|| format!("read ASM move constants {}", constants_path.display()))?;
     let mut move_order = Vec::new();
     for raw in constants.lines() {
@@ -4249,10 +4249,10 @@ fn spawn_visible_diploma(
 fn load_visible_diploma_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
     const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
     const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
-    let source = image::open(asset_root.resolve_vendor("gfx/diploma/diploma.png"))
+    let source = crate::open_runtime_image(asset_root.resolve_vendor("gfx/diploma/diploma.png"))
         .context("decode diploma graphics")?
         .to_rgba8();
-    let tilemap = std::fs::read(asset_root.resolve_vendor("gfx/diploma/page1.tilemap"))
+    let tilemap = crate::read_runtime_asset(asset_root.resolve_vendor("gfx/diploma/page1.tilemap"))
         .context("read diploma page-one tilemap")?;
     anyhow::ensure!(
         tilemap.len() == 20 * 18,
@@ -4265,7 +4265,7 @@ fn load_visible_diploma_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
     );
     let columns = source.width() as usize / SOURCE_TILE_SIZE;
     let palette_text =
-        std::fs::read_to_string(asset_root.resolve_vendor("gfx/diploma/diploma.pal"))
+        crate::read_runtime_asset_to_string(asset_root.resolve_vendor("gfx/diploma/diploma.pal"))
             .context("read diploma palette")?;
     let palette = parse_palette_file(&palette_text, None)?
         .into_iter()
@@ -4423,14 +4423,14 @@ fn spawn_visible_magnet_train(
 fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
     const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
     const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
-    let tileset = image::open(asset_root.resolve_vendor("gfx/tilesets/train_station.png"))
+    let tileset = crate::open_runtime_image(asset_root.resolve_vendor("gfx/tilesets/train_station.png"))
         .context("decode magnet-train station tileset")?
         .to_rgba8();
     let background =
-        std::fs::read(asset_root.resolve_vendor("gfx/overworld/magnet_train_bg.tilemap"))
+        crate::read_runtime_asset(asset_root.resolve_vendor("gfx/overworld/magnet_train_bg.tilemap"))
             .context("read magnet-train background tilemap")?;
     let foreground =
-        std::fs::read(asset_root.resolve_vendor("gfx/overworld/magnet_train_fg.tilemap"))
+        crate::read_runtime_asset(asset_root.resolve_vendor("gfx/overworld/magnet_train_fg.tilemap"))
             .context("read magnet-train foreground tilemap")?;
     anyhow::ensure!(
         background.len() == 36,
@@ -4586,7 +4586,7 @@ fn load_visible_heal_machine_ball_frames(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<([SpriteFrame; 4], [SpriteFrame; 4])> {
-    let source = image::open(asset_root.resolve_vendor("gfx/overworld/heal_machine.png"))
+    let source = crate::open_runtime_image(asset_root.resolve_vendor("gfx/overworld/heal_machine.png"))
         .context("decode heal-machine source art")?
         .to_rgba8();
     anyhow::ensure!(
@@ -4594,7 +4594,7 @@ fn load_visible_heal_machine_ball_frames(
         "heal-machine source art must be 8x16"
     );
     let palette_source =
-        std::fs::read_to_string(asset_root.resolve_vendor("gfx/overworld/heal_machine.pal"))
+        crate::read_runtime_asset_to_string(asset_root.resolve_vendor("gfx/overworld/heal_machine.pal"))
             .context("read heal-machine palette")?;
     let colors = palette_source
         .lines()
@@ -6524,19 +6524,19 @@ fn load_name_entry_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode naming screen font PNG")?
         .to_rgba8();
-    let cursor = image::open(assets.join("gfx/naming_screen/cursor.png"))
+    let cursor = crate::open_runtime_image(assets.join("gfx/naming_screen/cursor.png"))
         .context("decode naming screen cursor PNG")?
         .to_rgba8();
-    let border = image::open(assets.join("gfx/naming_screen/border.png"))
+    let border = crate::open_runtime_image(assets.join("gfx/naming_screen/border.png"))
         .context("decode naming screen border PNG")?
         .to_rgba8();
-    let underline = image::open(assets.join("gfx/naming_screen/underline.png"))
+    let underline = crate::open_runtime_image(assets.join("gfx/naming_screen/underline.png"))
         .context("decode naming screen underline PNG")?
         .to_rgba8();
-    let middle_line = image::open(assets.join("gfx/naming_screen/middle_line.png"))
+    let middle_line = crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
         .context("decode naming screen middle-line PNG")?
         .to_rgba8();
 
@@ -7122,7 +7122,7 @@ fn pokepic_frame_for_art<'a>(
     {
         let loaded = (|| -> Result<SpriteFrame> {
             let root = asset_root.runtime_assets().join("gfx/pokemon").join(&key);
-            let dimensions = std::fs::read(root.join("front.dimensions"))
+            let dimensions = crate::read_runtime_asset(root.join("front.dimensions"))
                 .with_context(|| format!("read Pokepic dimensions for {species_id}"))?;
             let dimension = dimensions
                 .first()
@@ -7133,7 +7133,7 @@ fn pokepic_frame_for_art<'a>(
                     "Pokepic {species_id} has invalid {dimension}x{dimension} dimensions"
                 );
             }
-            let data = std::fs::read(root.join("front.2bpp"))
+            let data = crate::read_runtime_asset(root.join("front.2bpp"))
                 .with_context(|| format!("read Pokepic graphics for {species_id}"))?;
             let byte_count = dimension * dimension * 16;
             let frame = data

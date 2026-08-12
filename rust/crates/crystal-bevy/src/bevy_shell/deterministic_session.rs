@@ -197,6 +197,23 @@ fn apply_keyboard_input(
     {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
+    if runtime_shell.shell.session().overworld.following.is_none()
+        && (!runtime_shell.pending_follower_walks.is_empty()
+            || !runtime_shell.follower_visible_tile_overrides.is_empty())
+    {
+        let follower_ids = runtime_shell
+            .follower_visible_tile_overrides
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        runtime_shell.pending_follower_walks.clear();
+        runtime_shell.follower_visible_tile_overrides.clear();
+        for object_id in follower_ids {
+            runtime_shell.object_walk_from.remove(&object_id);
+            runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
+            runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
+        }
+    }
     let player_landed = runtime_shell.player_walk_frame_ticks == 1;
     runtime_shell.player_walk_frame_ticks = runtime_shell.player_walk_frame_ticks.saturating_sub(1);
     if runtime_shell.player_walk_frame_ticks == 0 {
@@ -220,15 +237,22 @@ fn apply_keyboard_input(
         .iter()
         .filter_map(|(object_id, remaining)| (*remaining == 0).then_some(object_id.clone()))
         .collect::<Vec<_>>();
+    let object_landed = !landed_object_ids.is_empty();
     for object_id in landed_object_ids {
         runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
         runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
         runtime_shell.object_walk_from.remove(&object_id);
+        runtime_shell
+            .follower_visible_tile_overrides
+            .remove(&object_id);
         let overworld = &mut runtime_shell.shell.session_mut().overworld;
         overworld.object_last_runtime_tiles.remove(&object_id);
         overworld
             .object_last_tiles_occupied_until_frame
             .remove(&object_id);
+    }
+    if player_landed || object_landed {
+        start_next_queued_follower_walk(&mut runtime_shell);
     }
     if runtime_shell.object_walk_frame_ticks == 0 {
         runtime_shell.trainer_walk_from = None;
@@ -1278,7 +1302,7 @@ fn apply_keyboard_input(
         && let Some(direction) = newly_pressed_direction.or_else(|| {
             runtime_shell
                 .overworld_held_directions
-                .front()
+                .back()
                 .copied()
         })
     {
@@ -1334,10 +1358,12 @@ fn apply_keyboard_input(
         }
     } else {
         if let Some(direction) = runtime_shell.overworld_buffered_direction.take() {
-            if runtime_shell.overworld_held_directions.contains(&direction) {
-                buttons.retain(|button| !is_direction_button(*button));
-                buttons.insert(0, direction);
-            }
+            // A press edge captured during the preceding visible tile is a
+            // complete queued joypad command. Execute it once at landing even
+            // if the physical key was released meanwhile; requiring a live
+            // hold here silently loses quick turns beside walls/counters.
+            buttons.retain(|button| !is_direction_button(*button));
+            buttons.insert(0, direction);
         }
         if let Some(direction) = buttons
             .iter()
@@ -1500,7 +1526,7 @@ fn apply_keyboard_input(
                     .overworld
                     .object_runtime_tiles
                     .clone();
-                let newly_walking = object_tiles_before_tick
+                let mut newly_walking = object_tiles_before_tick
                     .into_iter()
                     .filter(|(object_id, from)| {
                         object_tiles_after_tick
@@ -1508,6 +1534,42 @@ fn apply_keyboard_input(
                             .is_some_and(|to| to != from)
                     })
                     .collect::<BTreeMap<_, _>>();
+                if matches!(frame.movement, Some(StepOutcome::Moved { .. }))
+                    && let Some(follower_id) = runtime_shell
+                        .shell
+                        .session()
+                        .overworld
+                        .following
+                        .as_ref()
+                        .filter(|following| following.leader_object_id == "PLAYER")
+                        .map(|following| following.follower_object_id.clone())
+                    && follower_id != "PLAYER"
+                    && let Some(from) = newly_walking.remove(&follower_id)
+                {
+                    // TypeScript queues this command at the leader's landing
+                    // edge. Keep the authoritative destination, but retain
+                    // the follower at its origin until that same LCD edge.
+                    let to = object_tiles_after_tick[&follower_id];
+                    let direction = if to.y > from.y {
+                        Direction::Down
+                    } else if to.y < from.y {
+                        Direction::Up
+                    } else if to.x < from.x {
+                        Direction::Left
+                    } else {
+                        Direction::Right
+                    };
+                    runtime_shell.pending_follower_walks.push_back(VisibleFollowerWalk {
+                        object_id: follower_id.clone(),
+                        from,
+                        to,
+                        direction,
+                    });
+                    runtime_shell
+                        .follower_visible_tile_overrides
+                        .entry(follower_id)
+                        .or_insert(from);
+                }
                 let newly_walking_ids = newly_walking.keys().cloned().collect::<BTreeSet<_>>();
                 let pushed_boulder = runtime_shell
                     .shell
@@ -1847,6 +1909,12 @@ fn apply_keyboard_input(
                         .map(PendingOverworldStepBoundary::StepEvent)
                 };
                 if runtime_shell.pending_overworld_step_boundary.is_some() {
+                    // A buffered direction belongs only to uninterrupted
+                    // overworld walking. Coord scripts, warps, trainer sight,
+                    // battles, and step events take ownership at this tile;
+                    // replaying the edge after their relocation/cutscene can
+                    // move the player out from under the authored boundary.
+                    runtime_shell.overworld_buffered_direction = None;
                     if matches!(
                         runtime_shell.pending_overworld_step_boundary,
                         Some(PendingOverworldStepBoundary::WildBattle)
@@ -2048,11 +2116,40 @@ fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) 
 }
 
 fn next_player_walk_stride(_remaining_ticks: u8, current_stride: bool) -> bool {
-    // TypeScript's `primeWalkStride` advances its two-frame walk cycle once
-    // per completed tile, including when the next held step begins exactly
-    // as the previous timer expires. Resetting here made every tile reuse
-    // the same stepping image, which looks like sliding.
+    // This bit selects the stepping foot, not standing versus walking. The
+    // renderer keeps the action frame for every in-flight tile and mirrors
+    // vertical art on alternate steps. Showing standing art for one entire
+    // moving tile is visible skating rather than a walk cycle.
     !current_stride
+}
+
+fn start_next_queued_follower_walk(runtime_shell: &mut BevyRuntimeShell) {
+    let Some(next) = runtime_shell.pending_follower_walks.front() else {
+        return;
+    };
+    if runtime_shell
+        .object_walk_frame_ticks_by_id
+        .contains_key(&next.object_id)
+    {
+        return;
+    }
+    let next = runtime_shell
+        .pending_follower_walks
+        .pop_front()
+        .expect("front follower walk exists");
+    advance_object_walk_phase(runtime_shell, &next.object_id, next.direction);
+    runtime_shell
+        .follower_visible_tile_overrides
+        .insert(next.object_id.clone(), next.to);
+    runtime_shell
+        .object_walk_from
+        .insert(next.object_id.clone(), next.from);
+    runtime_shell
+        .object_walk_total_ticks_by_id
+        .insert(next.object_id.clone(), WALK_FRAME_HOLD_TICKS);
+    runtime_shell
+        .object_walk_frame_ticks_by_id
+        .insert(next.object_id, WALK_FRAME_HOLD_TICKS);
 }
 
 fn advance_object_walk_phase(
@@ -2636,7 +2733,7 @@ fn sync_overworld_held_directions(
 /// The core advances movement at tile granularity.  Preserve the Game Boy's
 /// visible walking pace by forwarding a newly held direction immediately and
 /// then at eight-frame intervals. Direction arbitration has already reduced
-/// the physical keyboard state to TypeScript's single queued/oldest-held
+/// the physical keyboard state to the single most recently pressed held
 /// direction before this cadence gate.
 fn throttle_held_overworld_direction(
     runtime_shell: &mut BevyRuntimeShell,
@@ -3392,7 +3489,8 @@ fn visible_ui_initial_repeat_ticks(runtime_shell: &BevyRuntimeShell) -> u8 {
 }
 
 fn dispatch_visible_ui_direction(runtime_shell: &mut BevyRuntimeShell, direction: GameButton) {
-    if runtime_shell
+    if !runtime_shell.battle_messages.is_empty()
+        || runtime_shell
         .battle_exp_tween
         .as_ref()
         .is_some_and(|tween| tween.started)
@@ -3401,6 +3499,12 @@ fn dispatch_visible_ui_direction(runtime_shell: &mut BevyRuntimeShell, direction
             .front()
             .is_some_and(|stats| stats.active)
     {
+        // Battle text owns the complete joypad while it is visible. Crystal's
+        // text engine ignores directional input here; it must not move the
+        // retained battle-menu cursor hidden underneath the textbox. Besides
+        // selecting the wrong command after the text closes, moving that
+        // hidden cursor changes the render key every repeat tick and can turn
+        // a held direction into an expensive redraw loop.
         return;
     }
     let (input_action, action) = match direction {

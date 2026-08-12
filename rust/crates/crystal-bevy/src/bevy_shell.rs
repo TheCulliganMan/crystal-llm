@@ -91,12 +91,12 @@ const GAME_TICK_SECONDS: f32 = GB_FRAME_DURATION_SECONDS as f32;
 const VIEWPORT_TILES_X: i16 = 20;
 const VIEWPORT_TILES_Y: i16 = 18;
 #[cfg(feature = "voxel-view")]
-// The pitched camera only needs a small guard band around the 20x18 LCD.
-// A 32-tile halo expanded every walking refresh to 84x82 (6,888 tiles),
-// forcing the classic compositor, validation, hashing, cloning, and voxel
-// extraction paths to process mostly invisible terrain. Four tiles cover the
-// camera fringe while the classic fallback camera owns anything beyond it.
-const VISUAL_WORLD_HALO_TILES: i16 = 4;
+// The pitched camera needs enough real map context behind the 20x18 LCD to
+// keep the far plane from cutting through structures. The optional renderer
+// deliberately publishes a broad map halo so pitched views can keep drawing
+// streets, trees, landmarks, and connected-map terrain far beyond the LCD
+// window instead of exposing a clipped background edge.
+const VISUAL_WORLD_HALO_TILES: i16 = 32;
 #[cfg(not(feature = "voxel-view"))]
 const VISUAL_WORLD_HALO_TILES: i16 = 0;
 const VISUAL_WORLD_TILES_X: i16 = VIEWPORT_TILES_X + VISUAL_WORLD_HALO_TILES * 2;
@@ -539,6 +539,14 @@ struct VisibleFollowerStep {
     standing_frame: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleFollowerWalk {
+    object_id: String,
+    from: TilePosition,
+    to: TilePosition,
+    direction: Direction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleScriptMovementProgram {
     object_id: String,
@@ -612,6 +620,11 @@ struct BevyRuntimeShell {
     // Core commits autonomous object tiles atomically. Retain their prior
     // tiles while the shell presents Crystal's eight-frame walk.
     object_walk_from: BTreeMap<String, TilePosition>,
+    // A player-led follower consumes its queued step only when the player's
+    // visible stride lands. TypeScript/Crystal keep this distinct from an
+    // autonomous object stride so the follower remains one full step behind.
+    pending_follower_walks: VecDeque<VisibleFollowerWalk>,
+    follower_visible_tile_overrides: BTreeMap<String, TilePosition>,
     object_walk_phases: BTreeMap<String, u8>,
     object_walk_directions: BTreeMap<String, Direction>,
     trainer_walk_from: Option<(String, TilePosition)>,
@@ -898,20 +911,20 @@ const SAVE_TEXT_SAVING: &str = "_SavingDontTurnOffThePowerText";
 const SAVE_TEXT_SAVED: &str = "_SavedTheGameText";
 const SAVE_TEXT_CORRUPTED: &str = "_SaveFileCorruptedText";
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 struct NativeAudioBackend {
     output: Option<NativeAudioOutput>,
     music_sink: Option<rodio::Sink>,
     transient_sinks: Vec<rodio::Sink>,
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 struct NativeAudioOutput {
     _stream: rodio::OutputStream,
     handle: rodio::OutputStreamHandle,
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 impl NativeAudioBackend {
     fn new() -> Self {
         Self {
@@ -997,6 +1010,29 @@ impl NativeAudioBackend {
     }
 }
 
+#[cfg(all(not(test), target_arch = "wasm32"))]
+struct NativeAudioBackend;
+
+#[cfg(all(not(test), target_arch = "wasm32"))]
+impl NativeAudioBackend {
+    fn new() -> Self {
+        Self
+    }
+    fn stop_music(&mut self) {}
+    fn stop_transient(&mut self) {}
+    fn transient_finished(&mut self) -> bool {
+        true
+    }
+    fn play(
+        &mut self,
+        _: &BevyAudioCommand,
+        _: Arc<[u8]>,
+        _: Option<(usize, usize)>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn native_audio_repeats_without_pcm_loop(command: &BevyAudioCommand) -> bool {
     // A rendered PCM asset is finite unless the exporter supplied exact loop
     // sample bounds.  Repeating the whole file restarts one-shot score cues
@@ -1004,7 +1040,7 @@ fn native_audio_repeats_without_pcm_loop(command: &BevyAudioCommand) -> bool {
     command.looped && matches!(command.mode, ModpackAudioPlaybackMode::SequencedMidi)
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 struct PcmLoopSource {
     samples: Vec<i16>,
     position: usize,
@@ -1014,7 +1050,7 @@ struct PcmLoopSource {
     sample_rate: u32,
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 impl PcmLoopSource {
     fn new(
         samples: Vec<i16>,
@@ -1044,7 +1080,7 @@ impl PcmLoopSource {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 impl Iterator for PcmLoopSource {
     type Item = i16;
 
@@ -1058,7 +1094,7 @@ impl Iterator for PcmLoopSource {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 impl rodio::Source for PcmLoopSource {
     fn current_frame_len(&self) -> Option<usize> {
         None
@@ -2402,12 +2438,29 @@ impl NativeRtcSource {
     fn sample(self) -> RuntimeRtcSample {
         match self {
             Self::SystemLocal => {
-                let now = ChronoLocal::now();
-                RuntimeRtcSample {
-                    date: GameDate::new(now.year(), now.month() as u8, now.day() as u8),
-                    hour: now.hour() as u8,
-                    minute: now.minute() as u8,
-                    second: now.second() as u8,
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let now = ChronoLocal::now();
+                    RuntimeRtcSample {
+                        date: GameDate::new(now.year(), now.month() as u8, now.day() as u8),
+                        hour: now.hour() as u8,
+                        minute: now.minute() as u8,
+                        second: now.second() as u8,
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let now = js_sys::Date::new_0();
+                    RuntimeRtcSample {
+                        date: GameDate::new(
+                            now.get_full_year() as i32,
+                            (now.get_month() + 1) as u8,
+                            now.get_date() as u8,
+                        ),
+                        hour: now.get_hours() as u8,
+                        minute: now.get_minutes() as u8,
+                        second: now.get_seconds() as u8,
+                    }
                 }
             }
             Self::Fixed(sample) => sample,
@@ -2490,6 +2543,11 @@ struct RenderedViewport {
     /// same LCD frames as the player sprite instead of snapping the camera.
     walk_viewport_origin: Option<(i16, i16)>,
     map_visual_key: Option<u64>,
+    /// Exact ordered identity of the source images in the retained base,
+    /// priority, and optional visual-world composites. Ambient animation
+    /// schedules can tick even when none of their animated tiles are visible;
+    /// this key prevents rebuilding identical multi-megabyte textures.
+    tile_frame_key: Option<u64>,
     world_key: Option<u64>,
     position_key: Option<u64>,
     appearance_key: Option<u64>,
@@ -3532,7 +3590,7 @@ pub fn run_bevy_shell(
     )
     .add_systems(
         Update,
-        sync_voxel_classic_world_layers.after(crystal_render_api::WorldRenderSet::RenderSync),
+        sync_manual_world_view_layers.after(crystal_render_api::WorldRenderSet::RenderSync),
     );
     #[cfg(feature = "location-tester")]
     if let Some(path) = render_test_screenshot.clone() {
@@ -3569,8 +3627,8 @@ fn configure_voxel_composite_camera(
 }
 
 #[cfg(feature = "voxel-view")]
-fn sync_voxel_classic_world_layers(
-    status: Res<crystal_voxel_view::VoxelViewStatus>,
+fn sync_manual_world_view_layers(
+    settings: Res<crystal_voxel_view::VoxelViewSettings>,
     mut commands: Commands,
     classic_world: Query<
         Entity,
@@ -3586,14 +3644,15 @@ fn sync_voxel_classic_world_layers(
     >,
 ) {
     for entity in &classic_world {
-        if status.active {
-            // The voxel plugin's first camera draws this faithful world as a
-            // coverage layer. Its 3D camera then overlays authored geometry,
-            // and the layer-0 camera composites unchanged UI and fades.
+        if settings.enabled {
+            // Manual 2.5D selection parks the classic overworld on a layer
+            // that no camera renders. Renderer readiness must never expose it;
+            // only the startup setting or F3 can return these entities to the
+            // main layer. UI, dialogue, battle, and fades remain on layer 0.
             commands
                 .entity(entity)
                 .insert(bevy::render::view::RenderLayers::layer(
-                    crystal_voxel_view::CLASSIC_FALLBACK_RENDER_LAYER,
+                    crystal_voxel_view::HIDDEN_CLASSIC_WORLD_RENDER_LAYER,
                 ));
         } else {
             commands
@@ -3621,12 +3680,11 @@ fn capture_render_test_screenshot(
     mut exit: EventWriter<AppExit>,
 ) {
     capture.frame = capture.frame.saturating_add(1);
-    // Give the retained classic renderer, extracted visual frame, voxel mesh,
-    // and GPU render target several presented frames to settle. Capturing the
-    // first frame in which status flips active can still read the preceding
-    // classic frame from the window swapchain.
+    // Give the extracted visual frame, voxel mesh, and GPU render target
+    // several presented frames to settle. Capturing the first frame in which
+    // status flips active can still read an earlier swapchain frame.
     let presentation_settled = voxel_status.active_frames >= 30
-        || voxel_status.fallback_reason.as_deref() == Some("disabled");
+        || voxel_status.inactive_reason.as_deref() == Some("disabled");
     if !capture.requested && capture.frame >= 90 && presentation_settled {
         println!(
             "2.5D renderer status: {}{}",
@@ -3636,7 +3694,7 @@ fn capture_render_test_screenshot(
                 "inactive"
             },
             voxel_status
-                .fallback_reason
+                .inactive_reason
                 .as_deref()
                 .map(|reason| format!(" ({reason})"))
                 .unwrap_or_default()
@@ -4822,9 +4880,11 @@ fn initialize_bevy_runtime_shell(
     start: BevyShellStart,
     config: BevyShellConfig,
 ) -> Result<BevyRuntimeShell> {
+    #[cfg(target_arch = "wasm32")]
+    runtime.install_browser_runtime_files()?;
     #[cfg(any(test, feature = "location-tester"))]
     let runtime_tile_start = matches!(&start, BevyShellStart::NewGameAtRuntimeTile { .. });
-    let asset_root = if runtime.has_runtime_files() {
+    let asset_root = if cfg!(not(target_arch = "wasm32")) && runtime.has_runtime_files() {
         runtime.materialize_runtime_files()?
     } else {
         asset_root
@@ -4963,6 +5023,8 @@ fn initialize_bevy_runtime_shell(
         object_walk_total_ticks_by_id: BTreeMap::new(),
         object_walk_stride: false,
         object_walk_from: BTreeMap::new(),
+        pending_follower_walks: VecDeque::new(),
+        follower_visible_tile_overrides: BTreeMap::new(),
         object_walk_phases: BTreeMap::new(),
         object_walk_directions: BTreeMap::new(),
         trainer_walk_from: None,

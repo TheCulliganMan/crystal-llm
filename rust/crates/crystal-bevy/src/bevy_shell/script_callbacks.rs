@@ -287,8 +287,7 @@ fn sync_visible_player_sprite(
         || scripted_rock_smash_action
         || (!scripted_standing
             && (runtime_shell.visible_ledge_jump.is_some()
-                || (runtime_shell.player_walk_frame_ticks > 0
-                    && runtime_shell.player_walk_stride)));
+                || runtime_shell.player_walk_frame_ticks > 0));
     rendered.player_sprite_walking = Some(walking);
     for (mut texture, mut sprite, frames) in &mut players {
         let next = if walking {
@@ -298,7 +297,7 @@ fn sync_visible_player_sprite(
         };
         sprite.flip_x = walking
             && frames.mirror_walking
-            && runtime_shell.player_walk_mirror_stride;
+            && !runtime_shell.player_walk_stride;
         if texture.id() != next.id() {
             *texture = next.clone();
         }
@@ -529,13 +528,13 @@ fn sync_visible_object_sprites(
                     .trainer_walk_from
                     .as_ref()
                     .is_some_and(|(walking_id, _)| walking_id == object_id))
-            .then(|| runtime_shell.object_walk_phases.get(object_id).copied().unwrap_or(1))
+                .then(|| runtime_shell.object_walk_phases.get(object_id).copied().unwrap_or(1))
         });
-        let autonomous_action = autonomous_phase.is_some_and(|phase| matches!(phase, 1 | 3));
+        let translating = autonomous_phase.is_some();
         let scripted_action = walking_phase
             && object_is_moving
             && autonomous_phase.is_none();
-        let action_frame = !scripted_standing && (autonomous_action || scripted_action);
+        let action_frame = !scripted_standing && (translating || scripted_action);
         let next = if action_frame {
             frames.walking.as_ref().unwrap_or(&frames.standing)
         } else {
@@ -543,7 +542,8 @@ fn sync_visible_object_sprites(
         };
         sprite.flip_x = action_frame
             && frames.mirror_walking
-            && autonomous_phase == Some(3);
+            && autonomous_phase
+                .map_or(!runtime_shell.object_walk_stride, |phase| matches!(phase, 0 | 2));
         if texture.id() != next.id() {
             *texture = next.clone();
         }
@@ -1081,8 +1081,9 @@ fn consume_visible_runtime_flag_kind(
             .shell
             .snapshot()?
             .spawn_points
-            .into_iter()
+            .iter()
             .find(|spawn| spawn.map_constant == *map_constant)
+            .cloned()
             .with_context(|| {
                 format!("blackoutmod map {map_constant} has no compiled spawn point")
             })?;

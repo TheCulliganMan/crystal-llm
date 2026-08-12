@@ -5979,14 +5979,31 @@ fn visible_map_block_identity(snapshot: &RuntimeShellSnapshot) -> u64 {
     visible_map_block_identity_from_catalog(&snapshot.overworld.map_name, &snapshot.maps)
 }
 
-fn visible_map_block_identity_from_catalog(
+trait VisibleMapCatalogEntry {
+    fn visible_map(&self) -> &crate::RuntimeMapCatalogSnapshot;
+}
+
+impl VisibleMapCatalogEntry for crate::RuntimeMapCatalogSnapshot {
+    fn visible_map(&self) -> &crate::RuntimeMapCatalogSnapshot {
+        self
+    }
+}
+
+impl VisibleMapCatalogEntry for std::sync::Arc<crate::RuntimeMapCatalogSnapshot> {
+    fn visible_map(&self) -> &crate::RuntimeMapCatalogSnapshot {
+        self
+    }
+}
+
+fn visible_map_block_identity_from_catalog<M: VisibleMapCatalogEntry>(
     active_map_name: &str,
-    maps: &[crate::RuntimeMapCatalogSnapshot],
+    maps: &[M],
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     active_map_name.hash(&mut hasher);
     let active = maps
         .iter()
+        .map(VisibleMapCatalogEntry::visible_map)
         .find(|map| map.map_name == active_map_name);
     active.map(|map| map.blocks.as_slice()).hash(&mut hasher);
     if let Some(active) = active {
@@ -5994,6 +6011,7 @@ fn visible_map_block_identity_from_catalog(
             connection.target_map.hash(&mut hasher);
             maps
                 .iter()
+                .map(VisibleMapCatalogEntry::visible_map)
                 .find(|map| map.map_name == connection.target_map)
                 .map(|map| map.blocks.as_slice())
                 .hash(&mut hasher);

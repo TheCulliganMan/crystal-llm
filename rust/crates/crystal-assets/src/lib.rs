@@ -462,8 +462,8 @@ pub mod modpack {
         ModpackMetadata, ModpackPayload, PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart,
         ProgressionGrants, ProgressionRequirements, ProgressionRule,
         REQUIRED_VENDOR_RUNTIME_FILE_KEYS, VerificationError, VerificationSeverity,
-        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
-        validate_compiled_runtime_files,
+        load_verified_compiled_game_pack_bytes, read_loaded_verified_compiled_game_pack,
+        read_verified_compiled_game_pack, validate_compiled_runtime_files,
     };
     pub use crystal_core::models::{Trainer, TrainerCatalog};
     pub use crystal_core::systems::special_routines::{

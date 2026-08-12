@@ -19,6 +19,70 @@ pub(crate) fn is_game_corner_map(map_id: &str) -> bool {
     )
 }
 
+/// The Prize Room's northern course is one front-facing drawing. Keep its
+/// picture, vendor windows, and green counter bands together on a single
+/// opaque plane; splitting the lower rows into a box lets the counter top
+/// occlude the windows under the pitched camera.
+pub(crate) fn casino_shape_on_map(map_id: &str, source: &VisualTileSource) -> Option<CellShape> {
+    if map_id == "CeladonGameCornerPrizeRoom"
+        && source.tileset_id.as_ref() == "game_corner"
+        && matches!(source.metatile_id, 0x10 | 0x11)
+    {
+        return Some(CellShape::FacadeBand {
+            plane_subtile_row: 4,
+            band_from_top: source.subtile_row,
+            band_count: 4,
+            ground_tile_index: FLOOR_TILE,
+            solid: SolidKind::Building,
+        });
+    }
+    casino_shape(source)
+}
+
+/// Block $08 packs two independent 16x16 front-facing terminals. Return the
+/// local coordinate within either terminal so the grouped card mesher never
+/// fuses both drawings into one wide object.
+pub(crate) fn terminal_local(source: &VisualTileSource) -> Option<(u8, u8)> {
+    if source.tileset_id.as_ref() != "game_corner" || source.metatile_id != 0x08 {
+        return None;
+    }
+    match source.tile_index {
+        0x80 | 0x82 => Some((0, 0)),
+        0x81 | 0x83 => Some((1, 0)),
+        0x90 | 0x92 => Some((0, 1)),
+        0x91 | 0x93 => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// Each $07/$0b bank contains four independent 16x16 slot cabinets in a 2x2
+/// arrangement. Resolve the local coordinate within one cabinet so each
+/// source drawing becomes its own tall flat card instead of either lying on
+/// the floor or joining into a repeated 16x32 billboard.
+pub(crate) fn slot_machine_local(source: &VisualTileSource) -> Option<(u8, u8)> {
+    if source.tileset_id.as_ref() != "game_corner" || !matches!(source.metatile_id, 0x07 | 0x0b) {
+        return None;
+    }
+    Some((source.subtile_column % 2, source.subtile_row % 2))
+}
+
+/// Block $12 contains two identical 16x32 potted-plant drawings; $2a contains
+/// the same drawing in its left half. Resolve each complete plant so both maps
+/// use the same whole-object mask instead of folding $2a as a solid rectangle.
+pub(crate) fn plant_local(source: &VisualTileSource) -> Option<(u8, u8)> {
+    if source.tileset_id.as_ref() != "game_corner" || !matches!(source.metatile_id, 0x12 | 0x2a) {
+        return None;
+    }
+    let local_column = match source.metatile_id {
+        0x12 => source.subtile_column % 2,
+        0x2a if source.subtile_column < 2 => source.subtile_column,
+        _ => return None,
+    };
+    let expected = [[0x19, 0x2c], [0x29, 0x3c], [0x39, 0x0f], [0x24, 0x25]];
+    (expected[usize::from(source.subtile_row)][usize::from(local_column)] == source.tile_index)
+        .then_some((local_column, source.subtile_row))
+}
+
 /// Returns a casino shape only where the Crystal source art has one
 /// unambiguous orientation. Shared checkerboard and wall tiles stay generic.
 pub(crate) fn casino_shape(source: &VisualTileSource) -> Option<CellShape> {
@@ -39,19 +103,16 @@ pub(crate) fn casino_shape(source: &VisualTileSource) -> Option<CellShape> {
             band_from_top: source.subtile_row,
             band_count: 4,
             ground_tile_index: FLOOR_TILE,
-            solid: SolidKind::Prop,
+            solid: SolidKind::Building,
         });
     }
 
     // The casino floor alternates $05 chair / $07 machine / $06 chair.
-    // $07 is the body of a north/south machine bank and $0b its dark south
-    // end. The art remains top-facing on a continuous 16px cabinet volume;
-    // folding each course south incorrectly puts machines on the back wall.
+    // $07 and $0b are long perspective machine-rank drawings. Keep their
+    // exact faithful map-plane presentation. Generated tops/sides make cans,
+    // while lifting arbitrary subgroups destroys the continuous source art.
     if matches!(source.metatile_id, 0x07 | 0x0b) {
-        return Some(CellShape::RaisedTop {
-            height: 16.0,
-            solid: SolidKind::Prop,
-        });
+        return Some(CellShape::Flat);
     }
 
     // $09 is the straight prize/service counter; $14/$27/$1b are its corner
@@ -84,40 +145,28 @@ pub(crate) fn casino_shape(source: &VisualTileSource) -> Option<CellShape> {
     }
 
     // $05 and $06 each contain two independent 2x2 stools beside the bank.
-    // They are consumed by the grouped casino-stool mesher, which can crop
-    // and unproject the complete 16x16 drawing. Per-cell geometry cannot
-    // preserve the seat/front split without leaving a square footprint.
+    // They are consumed by the grouped casino-stool mesher as one masked,
+    // upright 16x16 card. Per-cell geometry leaves a square footprint, while
+    // adding a seat top/front/side turns the small drawing into a can-like
+    // voxel object that the source art never depicts.
     let chair_half = (source.metatile_id == 0x05 && source.subtile_column >= 2)
         || (source.metatile_id == 0x06 && source.subtile_column < 2);
     if chair_half {
         return Some(CellShape::Flat);
     }
 
-    // $2a's left half is the repeated 2x4 west-aisle plant (crown, stem and
-    // pot); its right half is ordinary wall/floor. Preserve only that complete
-    // grouped drawing as a thin upright prop.
+    // $2a's left half is the repeated 2x4 west-aisle plant. It is consumed by
+    // the same grouped, background-masked zero-depth card path as $12 below;
+    // the right half remains ordinary wall/floor.
     if source.metatile_id == 0x2a && source.subtile_column < 2 {
-        return Some(CellShape::FacadeBand {
-            plane_subtile_row: 4,
-            band_from_top: source.subtile_row,
-            band_count: 4,
-            ground_tile_index: FLOOR_TILE,
-            solid: SolidKind::FlatCard,
-        });
+        return Some(CellShape::Flat);
     }
 
-    // Celadon's $12 is two independent 2x4 potted plants packed side by
-    // side. Both halves use the same crown/stem/pot drawing and stand at the
-    // north wall. Leaving these cells planar projects green floor fragments
-    // into the black interior void behind the wall.
+    // Celadon's $12 is consumed as two complete grouped plant cards below.
+    // Keeping the cells flat here prevents the generic facade path from
+    // slicing each drawing into four separate panels.
     if source.metatile_id == 0x12 {
-        return Some(CellShape::FacadeBand {
-            plane_subtile_row: 4,
-            band_from_top: source.subtile_row,
-            band_count: 4,
-            ground_tile_index: FLOOR_TILE,
-            solid: SolidKind::FlatCard,
-        });
+        return Some(CellShape::Flat);
     }
 
     // Service desks and display counters are waist-high. Their top-down work
@@ -165,14 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn machine_bank_is_one_continuous_cabinet_volume() {
+    fn machine_bank_stays_faithful_flat_art() {
         for row in 0..4 {
             assert_eq!(
                 casino_shape(&source(0x07, 2, row, 0x90 + u16::from(row))),
-                Some(CellShape::RaisedTop {
-                    height: 16.0,
-                    solid: SolidKind::Prop,
-                })
+                Some(CellShape::Flat)
             );
         }
     }
@@ -229,38 +275,61 @@ mod tests {
     }
 
     #[test]
-    fn west_aisle_plants_claim_only_the_complete_left_half() {
+    fn west_aisle_plant_stays_flat_until_grouped_and_masks_only_the_left_half() {
         for row in 0..4 {
             assert_eq!(
                 casino_shape(&source(0x2a, 0, row, 0x19)),
-                Some(CellShape::FacadeBand {
-                    plane_subtile_row: 4,
-                    band_from_top: row,
-                    band_count: 4,
-                    ground_tile_index: FLOOR_TILE,
-                    solid: SolidKind::FlatCard,
-                })
+                Some(CellShape::Flat)
             );
         }
         assert_eq!(casino_shape(&source(0x2a, 2, 0, 0x01)), None);
     }
 
     #[test]
-    fn celadon_double_plant_groups_both_two_column_halves() {
+    fn celadon_double_plant_stays_flat_until_grouped() {
         for column in 0..4 {
             for row in 0..4 {
                 assert_eq!(
                     casino_shape(&source(0x12, column, row, 0x19)),
-                    Some(CellShape::FacadeBand {
-                        plane_subtile_row: 4,
-                        band_from_top: row,
-                        band_count: 4,
-                        ground_tile_index: FLOOR_TILE,
-                        solid: SolidKind::FlatCard,
-                    })
+                    Some(CellShape::Flat)
                 );
             }
         }
+    }
+
+    #[test]
+    fn block_12_resolves_two_independent_two_by_four_plants() {
+        let rows = [[0x19, 0x2c], [0x29, 0x3c], [0x39, 0x0f], [0x24, 0x25]];
+        for half in [0, 2] {
+            for row in 0..4 {
+                for column in 0..2 {
+                    assert_eq!(
+                        plant_local(&source(
+                            0x12,
+                            half + column,
+                            row,
+                            rows[usize::from(row)][usize::from(column)]
+                        )),
+                        Some((column, row))
+                    );
+                }
+            }
+        }
+        assert_eq!(plant_local(&source(0x12, 0, 0, 0x01)), None);
+    }
+
+    #[test]
+    fn block_2a_reuses_the_same_complete_masked_plant_drawing() {
+        let expected = [[0x19, 0x2c], [0x29, 0x3c], [0x39, 0x0f], [0x24, 0x25]];
+        for (row, tiles) in expected.into_iter().enumerate() {
+            for (column, tile) in tiles.into_iter().enumerate() {
+                let source = source(0x2a, column as u8, row as u8, tile);
+                assert_eq!(plant_local(&source), Some((column as u8, row as u8)));
+                assert_eq!(casino_shape(&source), Some(CellShape::Flat));
+            }
+        }
+        assert_eq!(plant_local(&source(0x2a, 2, 0, 0x01)), None);
+        assert_eq!(casino_shape(&source(0x2a, 2, 0, 0x01)), None);
     }
 
     #[test]
@@ -274,7 +343,7 @@ mod tests {
                         band_from_top: row,
                         band_count: 4,
                         ground_tile_index: FLOOR_TILE,
-                        solid: SolidKind::Prop,
+                        solid: SolidKind::Building,
                     })
                 );
             }
@@ -296,5 +365,63 @@ mod tests {
     #[test]
     fn shared_floor_art_is_not_promoted() {
         assert_eq!(casino_shape(&source(0x01, 0, 0, 0x37)), None);
+    }
+
+    #[test]
+    fn prize_room_wall_stays_one_complete_opaque_drawing() {
+        for metatile in [0x10, 0x11] {
+            for row in 0..4 {
+                assert_eq!(
+                    casino_shape_on_map(
+                        "CeladonGameCornerPrizeRoom",
+                        &source(metatile, 0, row, 0x4d)
+                    ),
+                    Some(CellShape::FacadeBand {
+                        plane_subtile_row: 4,
+                        band_from_top: row,
+                        band_count: 4,
+                        ground_tile_index: FLOOR_TILE,
+                        solid: SolidKind::Building,
+                    })
+                );
+            }
+        }
+        assert_eq!(
+            casino_shape_on_map("GoldenrodGameCorner", &source(0x10, 0, 0, 0x4d)),
+            None
+        );
+    }
+
+    #[test]
+    fn block_08_resolves_two_separate_terminal_cards() {
+        for (tile, local) in [
+            (0x80, (0, 0)),
+            (0x81, (1, 0)),
+            (0x90, (0, 1)),
+            (0x91, (1, 1)),
+            (0x82, (0, 0)),
+            (0x83, (1, 0)),
+            (0x92, (0, 1)),
+            (0x93, (1, 1)),
+        ] {
+            assert_eq!(terminal_local(&source(0x08, 0, 0, tile)), Some(local));
+        }
+        assert_eq!(terminal_local(&source(0x08, 0, 0, 0x01)), None);
+        assert_eq!(terminal_local(&source(0x07, 0, 0, 0x80)), None);
+    }
+
+    #[test]
+    fn machine_banks_resolve_four_independent_two_by_two_cabinets() {
+        for metatile in [0x07, 0x0b] {
+            for row in 0..4 {
+                for column in 0..4 {
+                    assert_eq!(
+                        slot_machine_local(&source(metatile, column, row, 0x90)),
+                        Some((column % 2, row % 2))
+                    );
+                }
+            }
+        }
+        assert_eq!(slot_machine_local(&source(0x08, 0, 0, 0x80)), None);
     }
 }

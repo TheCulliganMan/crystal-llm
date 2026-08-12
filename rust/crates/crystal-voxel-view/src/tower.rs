@@ -2,8 +2,7 @@
 //!
 //! Pewter Gym's rock maze is drawn as repeated complete 2x2 boulders. The
 //! surrounding metatile arrangement describes placement, not one continuous
-//! wall, so each drawing is grouped independently and stood up like the
-//! renderer's flat 2.5D trees. No inferred voxel volume is added.
+//! wall, so each complete drawing is grouped independently by the mesher.
 
 use crystal_render_api::VisualTileSource;
 
@@ -11,47 +10,75 @@ use crate::profile::{CellShape, SolidKind};
 
 pub(crate) const TOWER_FLOOR_TILE: u16 = 0x02;
 
+/// Block `$26` contains two independent 16x16 statues in its lower half.
+/// Return coordinates local to each two-by-two drawing so the mesher does not
+/// fuse the pair into one four-tile-wide facade.
+pub(crate) fn statue_local(source: &VisualTileSource) -> Option<(u8, u8)> {
+    if source.tileset_id.as_ref() != "tower" || source.metatile_id != 0x26 || source.subtile_row < 2
+    {
+        return None;
+    }
+    let local_column = source.subtile_column % 2;
+    let local_row = source.subtile_row - 2;
+    let expected = if source.subtile_column < 2 {
+        [[0x07, 0x08], [0x17, 0x18]]
+    } else {
+        [[0x08, 0x09], [0x18, 0x19]]
+    }[usize::from(local_row)][usize::from(local_column)];
+    (source.tile_index == expected).then_some((local_column, local_row))
+}
+
+pub(crate) fn boulder_local(source: &VisualTileSource) -> Option<(u8, u8)> {
+    if source.tileset_id.as_ref() != "tower" || !matches!(source.metatile_id, 0x32..=0x36) {
+        return None;
+    }
+    let local = match source.tile_index {
+        0x04 => (0, 0),
+        0x05 => (1, 0),
+        0x14 => (0, 1),
+        0x15 => (1, 1),
+        _ => return None,
+    };
+    (source.subtile_column % 2 == local.0 && source.subtile_row % 2 == local.1).then_some(local)
+}
+
 pub(crate) fn tower_shape(source: &VisualTileSource) -> Option<CellShape> {
     if source.tileset_id.as_ref() != "tower" {
         return None;
     }
 
-    let boulder = matches!(source.metatile_id, 0x32..=0x36)
-        && matches!(source.tile_index, 0x04 | 0x05 | 0x14 | 0x15);
-    let statue = source.metatile_id == 0x26
-        && source.subtile_row >= 2
-        && matches!(source.tile_index, 0x07..=0x09 | 0x17..=0x19);
-    if !boulder && !statue {
-        let north_wall = matches!(source.metatile_id, 0x04..=0x06)
-            && source.subtile_row < 2
-            && matches!(source.tile_index, 0x11 | 0x20..=0x23 | 0x40);
-        let partition = matches!(source.metatile_id, 0x0c..=0x0e | 0x16 | 0x17)
-            && source.subtile_row >= 2
-            && matches!(source.tile_index, 0x11 | 0x20 | 0x21 | 0x40);
-        if north_wall || partition {
-            let first_row = if north_wall { 0 } else { 2 };
-            return Some(CellShape::FacadeBand {
-                plane_subtile_row: first_row + 2,
-                band_from_top: source.subtile_row - first_row,
-                band_count: 2,
-                ground_tile_index: TOWER_FLOOR_TILE,
-                solid: SolidKind::Prop,
-            });
-        }
-        return None;
+    // `$0b` is the repeated dark board/void field around the authored tower
+    // walkways. Crystal marks it impassable, but the drawing is deliberately
+    // parallel to the floor; turning that collision into a wall would cover
+    // the paths with a forest of striped columns. Pin the complete exact
+    // metatile as a presentation plane and let the coverage auditor distinguish
+    // intentional flat background from an unsupported object.
+    if source.metatile_id == 0x0b
+        && matches!(
+            (source.subtile_column, source.tile_index),
+            (0, 0x1a) | (1..=3, 0x1b)
+        )
+    {
+        return Some(CellShape::PlaneAt { height: 0.0 });
     }
 
-    Some(CellShape::FacadeBand {
-        plane_subtile_row: source.subtile_row + 2,
-        band_from_top: if boulder {
-            u8::from(matches!(source.tile_index, 0x14 | 0x15))
-        } else {
-            source.subtile_row - 2
-        },
-        band_count: 2,
-        ground_tile_index: TOWER_FLOOR_TILE,
-        solid: SolidKind::Tree,
-    })
+    let north_wall = matches!(source.metatile_id, 0x04..=0x06)
+        && source.subtile_row < 2
+        && matches!(source.tile_index, 0x11 | 0x20..=0x23 | 0x40);
+    let partition = matches!(source.metatile_id, 0x0c..=0x0e | 0x16 | 0x17)
+        && source.subtile_row >= 2
+        && matches!(source.tile_index, 0x11 | 0x20 | 0x21 | 0x40);
+    if north_wall || partition {
+        let first_row = if north_wall { 0 } else { 2 };
+        return Some(CellShape::FacadeBand {
+            plane_subtile_row: first_row + 2,
+            band_from_top: source.subtile_row - first_row,
+            band_count: 2,
+            ground_tile_index: TOWER_FLOOR_TILE,
+            solid: SolidKind::Prop,
+        });
+    }
+    None
 }
 
 #[cfg(test)]
@@ -71,37 +98,30 @@ mod tests {
     }
 
     #[test]
-    fn pewter_boulder_drawing_is_grouped_but_floor_stays_flat() {
+    fn pewter_boulder_drawing_resolves_one_exact_two_by_two_group() {
         for (tile, row) in [(0x04, 0), (0x05, 0), (0x14, 1), (0x15, 1)] {
-            assert!(matches!(
-                tower_shape(&source(
-                    0x32,
-                    u8::from(tile == 0x05 || tile == 0x15),
-                    row,
-                    tile
-                )),
-                Some(CellShape::FacadeBand {
-                    solid: SolidKind::Tree,
-                    ground_tile_index: TOWER_FLOOR_TILE,
-                    ..
-                })
-            ));
+            let column = u8::from(tile == 0x05 || tile == 0x15);
+            let source = source(0x32, column, row, tile);
+            assert_eq!(boulder_local(&source), Some((column, row)));
+            assert_eq!(tower_shape(&source), None);
         }
-        assert_eq!(tower_shape(&source(0x32, 0, 2, TOWER_FLOOR_TILE)), None);
+        assert_eq!(boulder_local(&source(0x32, 0, 2, TOWER_FLOOR_TILE)), None);
     }
 
     #[test]
-    fn pewter_entrance_statues_are_grouped_flat_standees() {
-        for (column, tile) in [(0, 0x07), (1, 0x08), (2, 0x08), (3, 0x09)] {
-            assert!(matches!(
-                tower_shape(&source(0x26, column, 2, tile)),
-                Some(CellShape::FacadeBand {
-                    solid: SolidKind::Tree,
-                    ground_tile_index: TOWER_FLOOR_TILE,
-                    ..
-                })
-            ));
+    fn entrance_statues_are_two_independent_two_by_two_cards() {
+        for (column, tile, local) in [
+            (0, 0x07, (0, 0)),
+            (1, 0x08, (1, 0)),
+            (2, 0x08, (0, 0)),
+            (3, 0x09, (1, 0)),
+        ] {
+            let cell = source(0x26, column, 2, tile);
+            assert_eq!(statue_local(&cell), Some(local));
+            assert_eq!(tower_shape(&cell), None);
         }
+        assert_eq!(statue_local(&source(0x26, 0, 3, 0x17)), Some((0, 1)));
+        assert_eq!(statue_local(&source(0x26, 3, 3, 0x19)), Some((1, 1)));
     }
 
     #[test]
@@ -127,5 +147,22 @@ mod tests {
             })
         ));
         assert_eq!(tower_shape(&source(0x37, 0, 0, 0x01)), None);
+    }
+
+    #[test]
+    fn dark_walkway_background_is_an_explicit_flat_plane_not_a_collision_wall() {
+        for row in 0..4 {
+            assert_eq!(
+                tower_shape(&source(0x0b, 0, row, 0x1a)),
+                Some(CellShape::PlaneAt { height: 0.0 })
+            );
+            for column in 1..4 {
+                assert_eq!(
+                    tower_shape(&source(0x0b, column, row, 0x1b)),
+                    Some(CellShape::PlaneAt { height: 0.0 })
+                );
+            }
+        }
+        assert_eq!(tower_shape(&source(0x0b, 0, 0, 0x1b)), None);
     }
 }

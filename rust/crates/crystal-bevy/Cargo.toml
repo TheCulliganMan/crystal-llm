@@ -17,9 +17,8 @@ bevy = { version = "0.14", optional = true, default-features = false, features =
     "bevy_text",
     "bevy_ui",
     "bevy_winit",
-    "multi_threaded",
     "wav",
-    "x11",
+    "webgl2",
 ] }
 chrono.workspace = true
 crystal-assets = { path = "../crystal-assets" }
@@ -30,9 +29,18 @@ crystal-render-api = { path = "../crystal-render-api", optional = true }
 crystal-voxel-view = { path = "../crystal-voxel-view", optional = true }
 flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.14", optional = true, default-features = false, features = ["multi_threaded", "x11"] }
+rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+uuid = { version = "1", features = ["js"] }
 
 [features]
 default = ["bevy-shell"]

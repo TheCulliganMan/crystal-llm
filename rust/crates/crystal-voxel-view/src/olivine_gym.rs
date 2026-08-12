@@ -1,8 +1,22 @@
-//! Exact grouped boulder drawings for Olivine Gym.
+//! Exact grouped boulder and entrance-statue drawings for Olivine Gym.
 
 use crystal_render_api::VisualTileSource;
 
 pub(crate) const GROUND_TILE: u16 = 0x53;
+
+pub(crate) fn statue_local(map_id: &str, source: &VisualTileSource) -> Option<(u8, u8)> {
+    if map_id != "OlivineGym" || source.tileset_id.as_ref() != "champions_room" {
+        return None;
+    }
+    let local_column = match source.metatile_id {
+        0x1a if source.subtile_column < 2 => source.subtile_column,
+        0x1b if source.subtile_column >= 2 => source.subtile_column - 2,
+        _ => return None,
+    };
+    let expected = [[0x2e, 0x2f], [0x3e, 0x3f], [0x4e, 0x4f], [0x5e, 0x5f]]
+        [usize::from(source.subtile_row)][usize::from(local_column)];
+    (source.tile_index == expected).then_some((local_column, source.subtile_row))
+}
 
 pub(crate) fn boulder_local(source: &VisualTileSource) -> Option<(u8, u8)> {
     if source.tileset_id.as_ref() != "champions_room"
@@ -49,5 +63,24 @@ mod tests {
         assert_eq!(boulder_local(&source(0x11, 1, 1, 0x57)), Some((1, 1)));
         assert_eq!(boulder_local(&source(0x11, 0, 0, 0x53)), None);
         assert_eq!(boulder_local(&source(0x10, 0, 0, 0x46)), None);
+    }
+
+    #[test]
+    fn split_entrance_blocks_resolve_complete_two_by_four_statues() {
+        let drawing = [[0x2e, 0x2f], [0x3e, 0x3f], [0x4e, 0x4f], [0x5e, 0x5f]];
+        for (block, offset) in [(0x1a, 0), (0x1b, 2)] {
+            for row in 0..4 {
+                for column in 0..2 {
+                    let cell = source(
+                        block,
+                        column + offset,
+                        row,
+                        drawing[row as usize][column as usize],
+                    );
+                    assert_eq!(statue_local("OlivineGym", &cell), Some((column, row)));
+                    assert_eq!(statue_local("ChampionsRoom", &cell), None);
+                }
+            }
+        }
     }
 }

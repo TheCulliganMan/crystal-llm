@@ -2372,7 +2372,7 @@ fn battle_minimize_frame<'a>(
     {
         let loaded = (|| -> Result<SpriteFrame> {
             let path = asset_root.runtime_assets().join("gfx/battle/minimize.png");
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode Minimize battle PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
@@ -2459,7 +2459,7 @@ fn battle_substitute_frames<'a>(
     {
         let loaded = (|| -> Result<[SpriteFrame; 2]> {
             let path = asset_root.runtime_assets().join("gfx/sprites/monster.png");
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode substitute source PNG {}", path.display()))?
                 .to_rgba8();
             if source.width() != 16 || source.height() < 32 {
@@ -2750,7 +2750,7 @@ fn battle_party_ball_frames<'a>(
     {
         let loaded = (|| -> Result<[SpriteFrame; 4]> {
             let path = asset_root.runtime_assets().join("gfx/battle/balls.2bpp");
-            let data = std::fs::read(&path)
+            let data = crate::read_runtime_asset(&path)
                 .with_context(|| format!("read battle party-ball graphics {}", path.display()))?;
             if data.len() != 4 * 16 {
                 anyhow::bail!(
@@ -2890,7 +2890,7 @@ fn battle_hud_border_tiles<'a>(
             let mut result = HashMap::new();
             for (name, start_tile, tile_count) in sources {
                 let path = battle_root.join(name);
-                let source = image::open(&path)
+                let source = crate::open_runtime_image(&path)
                     .with_context(|| format!("decode battle HUD PNG {}", path.display()))?
                     .to_rgba8();
                 let (width, height) = source.dimensions();
@@ -3046,9 +3046,9 @@ fn battle_exp_bar_tiles<'a>(
     {
         let loaded = (|| -> Result<HashMap<u8, SpriteFrame>> {
             let assets = asset_root.runtime_assets();
-            let exp = std::fs::read(assets.join("gfx/battle/expbar.2bpp"))
+            let exp = crate::read_runtime_asset(assets.join("gfx/battle/expbar.2bpp"))
                 .context("read battle EXP partial-tile graphics")?;
-            let battle_font = std::fs::read(assets.join("gfx/font/font_battle_extra.2bpp"))
+            let battle_font = crate::read_runtime_asset(assets.join("gfx/font/font_battle_extra.2bpp"))
                 .context("read battle HP/EXP template graphics")?;
             let mut result = HashMap::new();
             for (tile_id, data, source_index) in [
@@ -3366,9 +3366,9 @@ fn battle_hp_bar_tiles<'a>(
     {
         let loaded = (|| -> Result<HashMap<(u8, u8), SpriteFrame>> {
             let assets = asset_root.runtime_assets();
-            let battle_font = std::fs::read(assets.join("gfx/font/font_battle_extra.2bpp"))
+            let battle_font = crate::read_runtime_asset(assets.join("gfx/font/font_battle_extra.2bpp"))
                 .context("read battle HP tile graphics")?;
-            let player_end = std::fs::read(assets.join("gfx/battle/enemy_hp_bar_border.1bpp"))
+            let player_end = crate::read_runtime_asset(assets.join("gfx/battle/enemy_hp_bar_border.1bpp"))
                 .context("read player HP end tile graphics")?;
             let mut result = HashMap::new();
             for zone in 0..=2_u8 {
@@ -5914,7 +5914,7 @@ fn battle_anim_rendered_frame(
         } else {
             compressed_path
         };
-        let tile_data = std::fs::read(&raw_path)
+        let tile_data = crate::read_runtime_asset(&raw_path)
             .with_context(|| format!("read battle animation graphics {}", raw_path.display()))?;
         if tile_data.len() % 16 != 0 {
             anyhow::bail!("battle animation graphics {} are not 2bpp tile aligned", raw_path.display());
@@ -6046,7 +6046,7 @@ fn battle_anim_rendered_frame(
 
 fn load_battle_anim_palette(asset_root: &AssetRoot, requested: &str) -> Result<[[u8; 4]; 4]> {
     let path = asset_root.runtime_assets().join("gfx/battle_anims/battle_anims.pal");
-    let source = std::fs::read_to_string(&path)
+    let source = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read battle animation palettes {}", path.display()))?;
     let mut section = "";
     let mut colours = Vec::new();
@@ -6797,7 +6797,7 @@ fn fishing_rod_frame<'a>(
             let path = asset_root
                 .runtime_assets()
                 .join("gfx/overworld/fishing_rod.png");
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode fishing rod PNG {}", path.display()))?
                 .to_rgba8();
             if source.width() != 8 || source.height() != 16 {
@@ -6870,10 +6870,10 @@ fn fishing_player_frame(
             let fish_path = assets
                 .join("gfx/overworld")
                 .join(format!("{player_name}_fish.png"));
-            let normal = image::open(&normal_path)
+            let normal = crate::open_runtime_image(&normal_path)
                 .with_context(|| format!("decode player sprite PNG {}", normal_path.display()))?
                 .to_rgba8();
-            let fish = image::open(&fish_path)
+            let fish = crate::open_runtime_image(&fish_path)
                 .with_context(|| format!("decode fishing sprite PNG {}", fish_path.display()))?
                 .to_rgba8();
             if normal.width() != 16 || normal.height() < 48 || fish.width() != 16 || fish.height() < 24 {
@@ -6940,7 +6940,7 @@ fn battle_send_out_poof_frames<'a>(
         && rendered_art.battle_send_out_poof_error.is_none()
     {
         let loaded = (|| -> Result<[SpriteFrame; 4]> {
-            let data = std::fs::read(
+            let data = crate::read_runtime_asset(
                 asset_root.runtime_assets().join("gfx/battle_anims/smoke.2bpp"),
             )
             .context("read battle send-out smoke graphics")?;
@@ -7639,7 +7639,7 @@ fn load_party_icon_overlay(
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
     let palette_path = assets.join("gfx/stats/party_menu_ob.pal");
-    let palette_content = std::fs::read_to_string(&palette_path)
+    let palette_content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read party icon palette {}", palette_path.display()))?;
     let palette = parse_palette_file(&palette_content, None)?
         .into_iter()
@@ -7648,7 +7648,7 @@ fn load_party_icon_overlay(
     let path = assets
         .join("gfx/stats")
         .join(format!("{overlay_id}.2bpp"));
-    let data = std::fs::read(&path)
+    let data = crate::read_runtime_asset(&path)
         .with_context(|| format!("read party icon overlay {}", path.display()))?;
     if data.len() != 16 {
         anyhow::bail!(
@@ -7688,7 +7688,7 @@ fn load_party_icon_frame(
 ) -> Result<[SpriteFrame; 2]> {
     let assets = asset_root.runtime_assets();
     let palette_path = assets.join("gfx/stats/party_menu_ob.pal");
-    let palette_content = std::fs::read_to_string(&palette_path)
+    let palette_content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read party icon palette {}", palette_path.display()))?;
     let palette = parse_palette_file(&palette_content, None)?
         .into_iter()
@@ -7699,7 +7699,7 @@ fn load_party_icon_frame(
         .unwrap_or(icon_id)
         .to_ascii_lowercase();
     let icon_path = assets.join("gfx/icons").join(format!("{stem}.2bpp"));
-    let data = std::fs::read(&icon_path)
+    let data = crate::read_runtime_asset(&icon_path)
         .with_context(|| format!("read party icon {}", icon_path.display()))?;
     if data.len() < 8 * 16 || data.len() % 16 != 0 {
         anyhow::bail!(
@@ -8987,10 +8987,10 @@ fn load_bitmap_font_art(
 ) -> Result<BitmapFontArt> {
     let font_path = asset_root.runtime_assets().join("gfx/font/font.png");
     let space_path = asset_root.runtime_assets().join("gfx/font/space.png");
-    let source = image::open(&font_path)
+    let source = crate::open_runtime_image(&font_path)
         .with_context(|| format!("load bitmap font {}", font_path.display()))?
         .to_rgba8();
-    let space = image::open(&space_path)
+    let space = crate::open_runtime_image(&space_path)
         .with_context(|| format!("load bitmap font space {}", space_path.display()))?
         .to_rgba8();
     let source_width = source.width() as usize;
@@ -9048,7 +9048,7 @@ fn load_bitmap_font_frame_glyphs(
     glyphs: &mut HashMap<char, SpriteFrame>,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    let frame = image::open(frame_path)
+    let frame = crate::open_runtime_image(frame_path)
         .with_context(|| format!("load bitmap font frame {}", frame_path.display()))?
         .to_rgba8();
     if frame.width() != 24 || frame.height() != 16 {
@@ -9105,7 +9105,7 @@ fn load_bitmap_font_extra_glyphs(
     };
 
     let battle_extra_path = font_root.join("font_battle_extra.2bpp");
-    let battle_extra = std::fs::read(&battle_extra_path)
+    let battle_extra = crate::read_runtime_asset(&battle_extra_path)
         .with_context(|| format!("read bitmap battle font extras {}", battle_extra_path.display()))?;
     for source_tile in 0..battle_extra.len() / 16 {
         install(
@@ -9117,15 +9117,15 @@ fn load_bitmap_font_extra_glyphs(
         )?;
     }
     let up_arrow_path = font_root.join("up_arrow.2bpp");
-    let up_arrow = std::fs::read(&up_arrow_path)
+    let up_arrow = crate::read_runtime_asset(&up_arrow_path)
         .with_context(|| format!("read bitmap up-arrow glyph {}", up_arrow_path.display()))?;
     install(&up_arrow, 0, 0x61, glyphs, images)?;
     let phone_icon_path = font_root.join("phone_icon.2bpp");
-    let phone_icon = std::fs::read(&phone_icon_path)
+    let phone_icon = crate::read_runtime_asset(&phone_icon_path)
         .with_context(|| format!("read bitmap phone glyph {}", phone_icon_path.display()))?;
     install(&phone_icon, 0, 0x62, glyphs, images)?;
     let font_extra_path = font_root.join("font_extra.2bpp");
-    let font_extra = std::fs::read(&font_extra_path)
+    let font_extra = crate::read_runtime_asset(&font_extra_path)
         .with_context(|| format!("read bitmap font extras {}", font_extra_path.display()))?;
     // LoadFontsExtra copies source tiles 3..24 into VRAM tiles 0x63..0x78.
     for offset in 0..22 {

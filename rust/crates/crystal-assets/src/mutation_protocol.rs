@@ -29,6 +29,17 @@ pub fn read_loaded_verified_compiled_game_pack(
     Ok(loaded)
 }
 
+pub fn load_verified_compiled_game_pack_bytes(
+    path: impl Into<PathBuf>,
+    bytes: Vec<u8>,
+) -> Result<LoadedCompiledGamePack> {
+    let path = path.into();
+    validate_compiled_game_pack_path(&path)?;
+    let pack = decode_compiled_game_pack(&bytes, &path)?;
+    verify_compiled_game_pack_for_runtime(&pack)?;
+    Ok(LoadedCompiledGamePack { path, bytes, pack })
+}
+
 pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<()> {
     if pack.format_version != COMPILED_GAME_PACK_FORMAT_VERSION {
         anyhow::bail!(

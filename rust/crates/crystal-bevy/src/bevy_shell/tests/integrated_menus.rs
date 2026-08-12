@@ -623,6 +623,46 @@ fn integrated_players_house_bookshelf_renders_dialogue_from_the_live_compiled_pa
     assert_overworld_control_returns_and_player_moves(&mut app, "PictureBookshelfScript");
 }
 
+#[test]
+fn blocked_bookshelf_direction_turns_player_without_moving() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier,
+            map_name: "PlayersHouse2F".to_string(),
+            tile_x: 5,
+            tile_y: 2,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize bookshelf-facing fixture");
+    runtime_shell.shell.session.overworld.player.facing = Direction::Down;
+    let initial_tile = runtime_shell.shell.session.overworld.player.tile;
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowUp);
+
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = shell.shell.snapshot().expect("snapshot after blocked turn");
+    assert_eq!(snapshot.overworld.tile, initial_tile);
+    assert_eq!(
+        snapshot.overworld.facing,
+        Direction::Up,
+        "a blocked bookshelf tile must still accept an immediate facing change"
+    );
+}
+
 fn assert_overworld_control_returns_and_player_moves(app: &mut App, script: &str) {
     {
         let shell = app.world().resource::<BevyRuntimeShell>();

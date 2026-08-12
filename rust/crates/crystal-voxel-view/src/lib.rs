@@ -3,43 +3,70 @@
 //! Optional, presentation-only voxel view for Crystal's Bevy shell.
 
 mod azalea_gym;
+mod barn;
 mod battle_tower;
 mod building_catalog;
 mod building_style;
+mod cafe;
 mod camera;
 mod casino;
 mod cave;
 mod celadon_gym;
 mod cerulean_gym;
 mod cut_tree;
+mod dance_theater;
 mod elevation;
 mod elite_four_room;
+mod facility_divider;
 mod flower;
+mod flower_shop;
 mod footing;
 mod forest;
+mod fuchsia_gym;
+mod gate;
+mod goldenrod_underground;
 mod grass;
 mod hall_of_fame;
+mod house;
 mod ice_path;
 mod interior;
+mod johto_fence;
 mod kanto_cliff;
 mod kanto_post;
+mod mart;
 mod mesh;
 mod modern_route;
 mod olivine_gym;
 mod park;
+mod players_house;
+mod pokecenter;
+mod pokecom;
 mod port;
+mod power_plant;
 mod profile;
 mod rock_platform;
+mod rocket_base;
+mod ruins_of_alph;
 mod saffron_gym;
+mod ship;
 mod sign;
 mod tower;
+mod train_station;
+mod underground_path;
 mod vermilion;
+mod vermilion_gym;
 mod violet_gym;
 mod viridian_gym;
+mod warehouse;
 mod waterfall;
+mod wise_trios;
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::tasks::AsyncComputeTaskPool;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::tasks::Task;
 use bevy::{
     asset::{AssetId, load_internal_asset},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
@@ -54,7 +81,7 @@ use bevy::{
         },
         view::RenderLayers,
     },
-    tasks::{AsyncComputeTaskPool, Task, futures_lite::future},
+    tasks::futures_lite::future,
 };
 use crystal_render_api::{VisualActor, VisualActorId, VisualWorldFrame, WorldRenderSet};
 
@@ -64,9 +91,9 @@ pub use footing::{
     visual_point_to_voxel,
 };
 pub use mesh::{
-    CellCoverageKind, SurfaceMeshData, TerrainImageSamples, TerrainMeshData, TerrainMeshError,
-    audit_cell_coverage, audit_cell_coverage_on_map, build_terrain_mesh,
-    build_terrain_mesh_with_images, build_terrain_mesh_with_samples,
+    CellCoverageKind, SurfaceMeshData, TerrainImageSamples, TerrainMeshError, audit_cell_coverage,
+    audit_cell_coverage_on_map, build_terrain_mesh, build_terrain_mesh_with_images,
+    build_terrain_mesh_with_samples,
 };
 pub use profile::{
     COMPACT_BUILDING_HEIGHT, CellShape, GROUND_HEIGHT, LARGE_BUILDING_HEIGHT, MAX_PROFILE_HEIGHT,
@@ -74,17 +101,19 @@ pub use profile::{
     support_height, supports_frame_profile,
 };
 
-/// Layer used by the host's faithful world while 2.5D is active. A dedicated
-/// camera draws it first, providing exact coverage outside the pitched mesh
-/// and during viewport scrolling without inventing geometry.
-pub const CLASSIC_FALLBACK_RENDER_LAYER: usize = 30;
+/// Parking layer used to keep the classic overworld out of every active
+/// camera while the user has manually selected 2.5D.
+pub const HIDDEN_CLASSIC_WORLD_RENDER_LAYER: usize = 30;
 
 const VOXEL_RENDER_LAYER: usize = 31;
 /// Logical LCD grid used only to derive source-pixel camera scale. The
 /// optional terrain grid may extend beyond it in every direction.
 pub const EXPECTED_GRID_SIZE: UVec2 = UVec2::new(20, 18);
-const NORMAL_ACTOR_CAMERA_PULL: f32 = 0.05;
-const ABOVE_PRIORITY_CAMERA_PULL: f32 = 0.75;
+const ACTOR_BASE_CAMERA_PULL: f32 = 6.0;
+const ACTOR_CARD_HEIGHT: f32 = 16.0;
+const ACTOR_FOOT_ANCHOR: f32 = 8.0;
+const MIN_PULL_SINE: f32 = 0.2;
+const ABOVE_PRIORITY_EXTRA_PULL: f32 = 0.70;
 const SILHOUETTE_SHADER_HANDLE: Handle<Shader> =
     Handle::weak_from_u128(0x7a88_22d4_d773_4874_94d3_c20a_0dcc_f21a);
 #[derive(Clone, Copy, Debug, Default)]
@@ -111,12 +140,6 @@ impl Plugin for VoxelViewPlugin {
             .add_systems(Update, sync_voxel_view.in_set(WorldRenderSet::RenderSync))
             .add_systems(
                 Update,
-                sync_classic_fallback_camera
-                    .after(sync_voxel_view)
-                    .in_set(WorldRenderSet::RenderSync),
-            )
-            .add_systems(
-                Update,
                 sync_player_silhouette_system
                     .after(sync_voxel_view)
                     .in_set(WorldRenderSet::RenderSync),
@@ -138,7 +161,7 @@ pub struct VoxelViewSettings {
 pub struct VoxelViewStatus {
     pub active: bool,
     pub active_frames: u32,
-    pub fallback_reason: Option<String>,
+    pub inactive_reason: Option<String>,
 }
 
 impl Default for VoxelViewSettings {
@@ -156,23 +179,8 @@ fn toggle_voxel_view(keyboard: Res<ButtonInput<KeyCode>>, mut settings: ResMut<V
     }
 }
 
-fn sync_classic_fallback_camera(
-    status: Res<VoxelViewStatus>,
-    mut cameras: Query<&mut Camera, With<VoxelClassicFallbackCamera>>,
-) {
-    for mut camera in &mut cameras {
-        // This camera exists only to cover disabled, pending, and failed mod
-        // frames. Once authored terrain is active it would redraw vacated
-        // source cells behind folded walls and create duplicate 2D scenery.
-        camera.is_active = !status.active;
-    }
-}
-
 #[derive(Component)]
 struct VoxelWorldCamera;
-
-#[derive(Component)]
-struct VoxelClassicFallbackCamera;
 
 #[derive(Component)]
 struct VoxelTerrain;
@@ -233,13 +241,22 @@ struct TerrainRevisionCache {
 #[derive(Resource, Default)]
 struct TerrainBuildQueue {
     key: Option<TerrainCacheKey>,
+    #[cfg(not(target_arch = "wasm32"))]
     task: Option<Task<TerrainBuildResult>>,
+    #[cfg(target_arch = "wasm32")]
+    completed: Option<TerrainBuildResult>,
 }
 
 struct TerrainBuildResult {
     key: TerrainCacheKey,
     frame: VisualWorldFrame,
-    terrain: Result<TerrainMeshData, TerrainMeshError>,
+    terrain: Result<BuiltTerrain, TerrainMeshError>,
+}
+
+struct BuiltTerrain {
+    footing_heights: Vec<f32>,
+    textured_mesh: Mesh,
+    solid_mesh: Mesh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,21 +342,6 @@ fn setup_voxel_view(
     });
     let initial_viewport = Vec2::new(160.0, 144.0);
     let pose = camera_pose(initial_viewport);
-    commands.spawn((
-        Camera2dBundle {
-            camera: Camera {
-                order: -1,
-                ..default()
-            },
-            projection: OrthographicProjection {
-                scaling_mode: ScalingMode::WindowSize(1.0),
-                ..default()
-            },
-            ..default()
-        },
-        RenderLayers::layer(CLASSIC_FALLBACK_RENDER_LAYER),
-        VoxelClassicFallbackCamera,
-    ));
     let camera = commands
         .spawn((
             Camera3dBundle {
@@ -448,16 +450,16 @@ fn sync_voxel_view(
         let failure = "voxel world camera is unavailable";
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some(failure.to_owned());
-        report_fallback_change(&mut last_failure, failure);
+        status.inactive_reason = Some(failure.to_owned());
+        report_inactive_change(&mut last_failure, failure);
         return;
     }
     if !valid {
         let failure = failure.unwrap_or("unknown reason");
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some(failure.to_owned());
-        report_fallback_change(&mut last_failure, failure);
+        status.inactive_reason = Some(failure.to_owned());
+        report_inactive_change(&mut last_failure, failure);
         return;
     }
 
@@ -476,21 +478,21 @@ fn sync_voxel_view(
             let failure = format!("terrain sync failed: {error:?}");
             status.active = false;
             status.active_frames = 0;
-            status.fallback_reason = Some(failure.clone());
-            report_fallback_change(&mut last_failure, &failure);
+            status.inactive_reason = Some(failure.clone());
+            report_inactive_change(&mut last_failure, &failure);
             set_output_active(&scene, false, &mut cameras, &frame);
             return;
         }
     };
     if must_wait_for_initial_terrain(terrain_state, &terrain_cache) {
-        // Initial activation has no authored mesh to present yet, so the
-        // faithful layer remains visible until the first build completes.
-        // Subsequent revisions deliberately keep the last complete terrain
-        // alive while its replacement builds. Retiring the output here made
-        // every scrolling step flash back to 2D for an intermediate frame.
+        // Initial activation has no authored mesh to present yet. Keep the
+        // manually selected 2.5D presentation inactive until the first build
+        // completes; the classic world remains parked on its hidden layer.
+        // Subsequent revisions keep the last complete terrain alive while its
+        // replacement builds.
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some("building authored terrain".to_owned());
+        status.inactive_reason = Some("building authored terrain".to_owned());
         set_output_active(&scene, false, &mut cameras, &frame);
         return;
     }
@@ -498,8 +500,8 @@ fn sync_voxel_view(
     let Some(actor_quad) = scene.actor_quad.as_ref() else {
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some("actor card mesh is unavailable".to_owned());
-        report_fallback_change(&mut last_failure, "actor card mesh is unavailable");
+        status.inactive_reason = Some("actor card mesh is unavailable".to_owned());
+        report_inactive_change(&mut last_failure, "actor card mesh is unavailable");
         set_output_active(&scene, false, &mut cameras, &frame);
         return;
     };
@@ -516,21 +518,21 @@ fn sync_voxel_view(
         let failure = format!("actor sync failed: {error:?}");
         status.active = false;
         status.active_frames = 0;
-        status.fallback_reason = Some(failure.clone());
-        report_fallback_change(&mut last_failure, &failure);
+        status.inactive_reason = Some(failure.clone());
+        report_inactive_change(&mut last_failure, &failure);
         set_output_active(&scene, false, &mut cameras, &frame);
         return;
     }
     status.active = true;
     status.active_frames = status.active_frames.saturating_add(1);
-    status.fallback_reason = None;
+    status.inactive_reason = None;
     last_failure.take();
 }
 
-fn report_fallback_change(last_failure: &mut Option<String>, failure: &str) {
+fn report_inactive_change(last_failure: &mut Option<String>, failure: &str) {
     if last_failure.as_deref() != Some(failure) {
         if failure != "disabled" {
-            bevy::log::warn!("optional 2.5D renderer fell back to the classic view: {failure}");
+            bevy::log::warn!("optional 2.5D renderer is inactive: {failure}");
         }
         *last_failure = Some(failure.to_owned());
     }
@@ -566,14 +568,23 @@ fn set_output_active(
 }
 
 fn voxel_clear_color(frame: &VisualWorldFrame) -> Color {
-    if frame
+    let tileset = frame
         .tiles
         .first()
-        .is_some_and(|tile| tile.source.tileset_id.as_ref() == "game_corner")
-    {
+        .map(|tile| tile.source.tileset_id.as_ref());
+    if tileset == Some("game_corner") {
         // The casino wall backs onto unlit interior void, not an outdoor
         // horizon. This also matches the black source course above the wall.
         Color::srgb(0.10, 0.09, 0.08)
+    } else if matches!(tileset, Some("cave" | "dark_cave")) {
+        // A cave is an enclosed room. Exposed space beyond its authored rock
+        // boundary is unlit void, never the outdoor horizon color.
+        Color::srgb(0.035, 0.025, 0.065)
+    } else if tileset.is_some_and(crate::interior::has_back_wall) {
+        // The recovered renderer treats every indoor scene as a room, not an
+        // outdoor diorama. Keep the generated architectural back wall, but
+        // clear anything beyond its finite edges to a neutral interior void.
+        Color::srgb(0.055, 0.050, 0.045)
     } else {
         Color::srgb(0.72, 0.83, 0.78)
     }
@@ -596,22 +607,48 @@ fn sync_terrain(
         let samples = TerrainImageSamples::capture(frame, images);
         let build_key = next_key.clone();
         builds.key = Some(next_key.clone());
-        builds.task = Some(AsyncComputeTaskPool::get().spawn(async move {
-            let terrain = build_terrain_mesh_with_samples(&build_frame, &samples);
+        let build = async move {
+            // SurfaceMeshData -> Bevy Mesh conversion walks and moves every
+            // vertex/index buffer. Keep that work on the compute task too;
+            // doing it when polling the completed build caused a deterministic
+            // 30-45 ms main-thread hitch several seconds into 2.5D movement.
+            let terrain = build_terrain_mesh_with_samples(&build_frame, &samples).map(|terrain| {
+                let footing_heights = terrain.footing_heights.clone();
+                let (textured_mesh, solid_mesh) = terrain.into_meshes();
+                BuiltTerrain {
+                    footing_heights,
+                    textured_mesh,
+                    solid_mesh,
+                }
+            });
             TerrainBuildResult {
                 key: build_key,
                 frame: build_frame,
                 terrain,
             }
-        }));
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            builds.task = Some(AsyncComputeTaskPool::get().spawn(build));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            builds.completed = Some(future::block_on(build));
+        }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     let completed = builds
         .task
         .as_mut()
         .and_then(|task| future::block_on(future::poll_once(task)));
+    #[cfg(target_arch = "wasm32")]
+    let completed = builds.completed.take();
     if let Some(completed) = completed {
-        builds.task = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            builds.task = None;
+        }
         builds.key = None;
         if completed.key == next_key {
             let terrain = completed.terrain.map_err(TerrainSyncError::Mesh)?;
@@ -637,13 +674,20 @@ fn sync_terrain(
                 material.base_color_texture = Some(frame.map_texture.clone());
             }
         }
+    }
+    // A viewport-origin change starts an asynchronous replacement build. The
+    // last complete mesh remains the terrain shown during that build, so it
+    // must consume the same live camera-scroll transform as actors. Leaving
+    // it at the preceding frame center makes every actor slide or float over
+    // stationary geometry until the replacement happens to finish.
+    if let Some(live_transform) = retained_terrain_transform(frame, cache) {
         for entity in [cache.textured_entity, cache.solid_entity]
             .into_iter()
             .flatten()
         {
             if let Ok((mut visibility, mut transform)) = terrain_entities.get_mut(entity) {
                 *visibility = Visibility::Visible;
-                *transform = terrain_transform(frame);
+                *transform = live_transform;
             }
         }
     }
@@ -658,25 +702,24 @@ fn sync_terrain(
 fn apply_built_terrain(
     frame: &VisualWorldFrame,
     key: TerrainCacheKey,
-    terrain: TerrainMeshData,
+    terrain: BuiltTerrain,
     commands: &mut Commands,
     cache: &mut TerrainRevisionCache,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> Result<(), TerrainSyncError> {
-    cache.footing_heights = terrain.footing_heights.clone();
-    let (textured_mesh, solid_mesh) = terrain.into_meshes();
+    cache.footing_heights = terrain.footing_heights;
 
     let textured_mesh_handle = update_mesh_asset(
         meshes,
         &mut cache.textured_mesh,
-        textured_mesh,
+        terrain.textured_mesh,
         TerrainSyncError::CachedTexturedMeshUnavailable,
     )?;
     let solid_mesh_handle = update_mesh_asset(
         meshes,
         &mut cache.solid_mesh,
-        solid_mesh,
+        terrain.solid_mesh,
         TerrainSyncError::CachedSolidMeshUnavailable,
     )?;
     let textured_material_handle = if let Some(handle) = cache.textured_material.as_ref() {
@@ -767,7 +810,7 @@ fn textured_terrain_material(texture: Handle<Image>) -> StandardMaterial {
         base_color_texture: Some(texture),
         perceptual_roughness: 1.0,
         reflectance: 0.0,
-        unlit: false,
+        unlit: voxel_material_unlit(),
         alpha_mode: AlphaMode::Opaque,
         cull_mode: Some(Face::Back),
         ..default()
@@ -780,11 +823,19 @@ fn solid_terrain_material() -> StandardMaterial {
         base_color_texture: None,
         perceptual_roughness: 1.0,
         reflectance: 0.0,
-        unlit: false,
+        unlit: voxel_material_unlit(),
         alpha_mode: AlphaMode::Opaque,
         cull_mode: Some(Face::Back),
         ..default()
     }
+}
+
+/// WebGL's reduced PBR path visibly washes the four-color Game Boy palettes
+/// toward the scene light colors. The browser renderer should preserve the
+/// already-resolved palette texels; native backends retain dimensional PBR
+/// lighting.
+const fn voxel_material_unlit() -> bool {
+    cfg!(target_arch = "wasm32")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -985,7 +1036,7 @@ fn sync_player_silhouette(
         }
         let material = materials.add(OcclusionSilhouetteMaterial {
             texture: player.texture.clone(),
-            color: LinearRgba::new(0.20, 0.06, 0.32, 0.72),
+            color: LinearRgba::new(1.0, 1.0, 1.0, 0.82),
         });
         cache.texture = Some(texture_id);
         cache.material = Some(material.clone());
@@ -1033,7 +1084,7 @@ fn actor_material(
         base_color_texture: Some(actor.texture.clone()),
         perceptual_roughness: 1.0,
         reflectance: 0.0,
-        unlit: false,
+        unlit: voxel_material_unlit(),
         alpha_mode: AlphaMode::Mask(0.5),
         cull_mode: None,
         ..default()
@@ -1057,11 +1108,11 @@ fn actor_transform(
     let mut position = visual_point_to_voxel(foot, height + 0.05);
     let profile_scale = frame.tile_size.y / SOURCE_TILE_HEIGHT;
     let pose = camera_pose(frame.viewport_size);
-    let camera_pull = actor_camera_pull(actor) * profile_scale;
-    // Keep only a sub-pixel tie break. A full-card pull made the player draw
-    // in front of a Cut tree occupying the next south cell, defeating real
-    // terrain depth. The dedicated silhouette pass already preserves a
-    // readable player outline where terrain legitimately occludes the card.
+    let camera_pull = actor_camera_pull(actor, CAMERA_PITCH_DEGREES.to_radians()) * profile_scale;
+    // A camera-facing card leans across the ground in screen space. Pull it
+    // forward by exactly the depth needed for its upper half to clear terrain
+    // at the actor's own footing height. Real trees and buildings remain much
+    // farther apart in depth and still occlude the actor normally.
     position += (pose.eye - pose.target).normalize_or_zero() * camera_pull;
     let mut transform = Transform::from_translation(position)
         .with_rotation(camera::card_rotation_toward_camera(pose));
@@ -1077,16 +1128,28 @@ fn actor_transform(
     Some(transform)
 }
 
-fn actor_camera_pull(actor: &VisualActor) -> f32 {
-    if actor.above_priority {
-        ABOVE_PRIORITY_CAMERA_PULL
-    } else {
-        NORMAL_ACTOR_CAMERA_PULL
-    }
+fn actor_camera_pull(actor: &VisualActor, pitch_radians: f32) -> f32 {
+    let sine = pitch_radians.sin().max(MIN_PULL_SINE);
+    let lean_overlap = (ACTOR_CARD_HEIGHT * pitch_radians.cos() - ACTOR_FOOT_ANCHOR).max(0.0);
+    let normal_pull = ACTOR_BASE_CAMERA_PULL + lean_overlap / sine;
+    normal_pull
+        + if actor.above_priority {
+            ABOVE_PRIORITY_EXTRA_PULL
+        } else {
+            0.0
+        }
 }
 
 fn terrain_transform(frame: &VisualWorldFrame) -> Transform {
     Transform::from_xyz(frame.center.x, 0.0, -frame.center.y)
+}
+
+fn retained_terrain_transform(
+    frame: &VisualWorldFrame,
+    cache: &TerrainRevisionCache,
+) -> Option<Transform> {
+    cache.key.as_ref()?;
+    Some(terrain_transform(frame))
 }
 
 fn actor_quad_mesh() -> Mesh {
@@ -1159,6 +1222,33 @@ mod renderer_tests {
     }
 
     #[test]
+    fn cave_clear_color_is_enclosed_void_not_outdoor_horizon() {
+        let mut frame = VisualWorldFrame::default();
+        frame.tiles.push(crystal_render_api::VisualTile {
+            column: 0,
+            row: 0,
+            source: crystal_render_api::VisualTileSource {
+                tileset_id: "cave".into(),
+                metatile_id: 0,
+                subtile_column: 0,
+                subtile_row: 0,
+                tile_index: 0,
+            },
+            texture: Handle::default(),
+            priority: false,
+        });
+
+        assert_eq!(voxel_clear_color(&frame), Color::srgb(0.035, 0.025, 0.065));
+
+        frame.tiles[0].source.tileset_id = "house".into();
+        assert_eq!(
+            voxel_clear_color(&frame),
+            Color::srgb(0.055, 0.050, 0.045),
+            "enclosed ordinary interiors must not inherit the outdoor horizon"
+        );
+    }
+
+    #[test]
     fn terrain_rebuild_keeps_the_last_complete_voxel_frame_visible() {
         let mut cache = TerrainRevisionCache::default();
         assert!(must_wait_for_initial_terrain(
@@ -1179,10 +1269,18 @@ mod renderer_tests {
             TerrainSyncState::Ready,
             &cache
         ));
+
+        let frame = VisualWorldFrame {
+            center: Vec2::new(24.0, -12.0),
+            ..default()
+        };
+        let retained = retained_terrain_transform(&frame, &cache)
+            .expect("a pending replacement keeps the completed terrain posed");
+        assert_eq!(retained.translation, Vec3::new(24.0, 0.0, 12.0));
     }
 
     #[test]
-    fn player_has_only_the_normal_tie_break_and_can_be_occluded_by_south_props() {
+    fn player_depth_pull_clears_same_level_terrain_at_forty_five_degrees() {
         let player = VisualActor {
             id: VisualActorId::Player,
             source_id: "player".into(),
@@ -1192,7 +1290,49 @@ mod renderer_tests {
             flip_x: false,
             above_priority: false,
         };
-        assert_eq!(actor_camera_pull(&player), NORMAL_ACTOR_CAMERA_PULL);
+        let pull = actor_camera_pull(&player, 45.0_f32.to_radians());
+        let expected = ACTOR_BASE_CAMERA_PULL
+            + (ACTOR_CARD_HEIGHT * 45.0_f32.to_radians().cos() - ACTOR_FOOT_ANCHOR)
+                / 45.0_f32.to_radians().sin();
+        assert!((pull - expected).abs() < 0.001);
+        assert!(pull > 10.0 && pull < 11.0);
+    }
+
+    #[test]
+    fn scrolling_frame_keeps_actor_locked_to_retained_terrain() {
+        let mut frame = VisualWorldFrame {
+            center: Vec2::ZERO,
+            viewport_size: Vec2::splat(16.0),
+            tile_size: Vec2::splat(8.0),
+            grid_size: UVec2::new(2, 2),
+            ..default()
+        };
+        let mut player = VisualActor {
+            id: VisualActorId::Player,
+            source_id: "player".into(),
+            texture: Handle::weak_from_u128(1),
+            center: Vec2::ZERO,
+            size: Vec2::splat(16.0),
+            flip_x: false,
+            above_priority: false,
+        };
+        let heights = vec![0.0; 4];
+        let actor_before =
+            actor_transform(&frame, &player, &heights).expect("player has footing before scroll");
+        let terrain_before = terrain_transform(&frame);
+
+        let scroll = Vec2::new(6.0, -3.0);
+        frame.center += scroll;
+        player.center += scroll;
+        let actor_after =
+            actor_transform(&frame, &player, &heights).expect("player has footing during scroll");
+        let terrain_after = terrain_transform(&frame);
+
+        assert_eq!(
+            actor_after.translation - terrain_after.translation,
+            actor_before.translation - terrain_before.translation,
+            "actor and retained terrain must consume the identical live scroll"
+        );
     }
 
     #[test]

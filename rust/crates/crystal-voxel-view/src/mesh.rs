@@ -1,5 +1,14 @@
 //! Pure authored-profile mesh construction for the optional voxel renderer.
 
+#[path = "mesh/background.rs"]
+mod background;
+#[path = "mesh/ordinary_house.rs"]
+mod ordinary_house;
+#[path = "mesh/players_house.rs"]
+mod players_house;
+#[path = "mesh/traditional_house.rs"]
+mod traditional_house;
+
 use std::collections::{HashMap, VecDeque};
 
 use bevy::{
@@ -12,9 +21,10 @@ use crystal_render_api::{VisualTile, VisualTileSource, VisualWorldFrame};
 use crate::battle_tower::tree_group as battle_tower_tree_group;
 use crate::building_catalog::BUILDING_TEMPLATES;
 use crate::building_style::{
-    HOUSE_WALL_INSET_PIXELS, burned_tower_roof_style, uses_center_ridge_roof,
+    HOUSE_WALL_INSET_PIXELS, burned_tower_roof_style, lighthouse_depth_pixels, tin_tower_storeys,
+    tin_tower_upper_source_x, uses_center_ridge_roof,
 };
-use crate::elevation::{resolve_authored_mountain_tiers, resolve_jump_ledge_ground};
+use crate::elevation::resolve_authored_mountain_tiers;
 use crate::park::{FountainPlacement, fountain_placements};
 use crate::profile::{
     CellShape, KANTO_GROUND_TILE_INDEX, LedgeFace, SOURCE_TILE_HEIGHT, SolidKind, shape_for_source,
@@ -220,6 +230,17 @@ fn build_terrain_mesh_internal(
         .map(|tile| shape_for_source_on_map(frame.map_id.as_ref(), &tile.source))
         .collect();
     resolve_rock_platform_tiers(&cells, &mut shapes, width);
+    // Blackthorn's closed `[6a 70 6b; 6c 72 6d]` drawing is a free-standing
+    // mound, not part of the surrounding mountain datum graph. Claim the
+    // complete drawing only; the same individual metatiles remain valid
+    // cliff pieces everywhere else.
+    for (column, row) in johto_closed_mound_origins(&cells, width, height) {
+        for local_row in 0..8 {
+            for local_column in 0..12 {
+                shapes[(row + local_row) * width + column + local_column] = CellShape::Flat;
+            }
+        }
+    }
     // Upright profiles require an exact live background cell for both the
     // vacated floor and pixel mask. A clipped viewport may not carry that
     // evidence; resolve only that shape back to the documented flat baseline
@@ -264,6 +285,9 @@ fn build_terrain_mesh_internal(
         }
         if let CellShape::Relief {
             ground_tile_index, ..
+        }
+        | CellShape::FloatingRelief {
+            ground_tile_index, ..
         } = *shape
             && !available_relief_base_tiles.contains(&ground_tile_index)
         {
@@ -272,7 +296,6 @@ fn build_terrain_mesh_internal(
     }
 
     resolve_authored_mountain_tiers(&mut shapes, width, height);
-    resolve_jump_ledge_ground(&mut shapes, width, height);
 
     let grid_width = frame.tile_size.x * frame.grid_size.x as f32;
     let grid_height = frame.tile_size.y * frame.grid_size.y as f32;
@@ -285,6 +308,34 @@ fn build_terrain_mesh_internal(
         origin_z: -grid_height * 0.5,
     };
     let mut mesh = TerrainMeshData::default();
+    if let Some(tileset) = cells.first().map(|tile| tile.source.tileset_id.as_ref()) {
+        if crate::interior::has_back_wall(tileset) {
+            append_room_back_wall(&mut mesh, &geometry, tileset);
+        } else {
+            background::append_repeating_background_apron(&mut mesh, &geometry, &cells, &shapes);
+        }
+    }
+    // Cave faces are folds cut from the same continuous map drawing. Keep a
+    // faithful copy of that drawing just below the modeled shelves so a fold,
+    // diagonal corner, or clipped neighbor can never punch the clear color
+    // through the cave floor. This is the connected-volume rule used by the
+    // rock/cliff mesher: authored face art changes elevation, not topology.
+    if cells
+        .iter()
+        .all(|tile| matches!(tile.source.tileset_id.as_ref(), "cave" | "dark_cave"))
+    {
+        append_top(
+            &mut mesh.textured,
+            [
+                geometry.origin_x,
+                geometry.origin_x + grid_width,
+                geometry.origin_z,
+                geometry.origin_z + grid_height,
+            ],
+            -0.02,
+            (0.0, 1.0, 0.0, 1.0),
+        );
+    }
     mesh.footing_heights = cells
         .iter()
         .zip(&shapes)
@@ -298,12 +349,57 @@ fn build_terrain_mesh_internal(
                 north_height,
                 south_height,
             } => (north_height + south_height) * 0.5 * frame.tile_size.y / SOURCE_TILE_HEIGHT,
+            CellShape::RampEast {
+                west_height,
+                east_height,
+            } => (west_height + east_height) * 0.5 * frame.tile_size.y / SOURCE_TILE_HEIGHT,
             _ => support_height(&tile.source, frame.tile_size.y),
         })
         .collect();
     let mut claimed_by_building = vec![false; cell_count];
     let mut claimed_by_tree = vec![false; cell_count];
     let mut claimed_by_casino_stool = vec![false; cell_count];
+    let mut claimed_by_house_furniture = vec![false; cell_count];
+    traditional_house::append_north_wall_courses(
+        &mut mesh,
+        &cells,
+        &geometry,
+        &mut claimed_by_tree,
+    )?;
+    ordinary_house::append_north_wall_courses(&mut mesh, &cells, &geometry, &mut claimed_by_tree)?;
+    players_house::append_north_wall_courses(&mut mesh, &cells, &geometry, &mut claimed_by_tree)?;
+    append_house_stairs(
+        &mut mesh,
+        frame.map_id.as_ref(),
+        &cells,
+        &geometry,
+        &mut claimed_by_tree,
+    );
+    append_facility_divider_network(
+        &mut mesh,
+        frame.map_id.as_ref(),
+        &cells,
+        &geometry,
+        &mut claimed_by_tree,
+    )?;
+    append_rocket_base_wall_network(
+        &mut mesh,
+        frame.map_id.as_ref(),
+        &cells,
+        &geometry,
+        &mut claimed_by_tree,
+    );
+    for (column, row) in ice_path_closed_rock_mass_origins(&cells, geometry.width, geometry.height)
+    {
+        append_ice_path_closed_rock_mass(
+            &mut mesh,
+            &cells,
+            &geometry,
+            column,
+            row,
+            &mut claimed_by_building,
+        )?;
+    }
     if let Some(images) = images {
         let placements = outdoor_building_placements(&cells, &geometry);
         for placement in &placements {
@@ -312,6 +408,7 @@ fn build_terrain_mesh_internal(
                 images,
                 &cells,
                 &geometry,
+                frame.map_id.as_ref(),
                 *placement,
                 &mut claimed_by_building,
             );
@@ -329,6 +426,15 @@ fn build_terrain_mesh_internal(
                     continue;
                 }
                 return Err(error);
+            }
+            if is_trapezoid_mound_placement(&cells, &geometry, *placement) {
+                let height =
+                    crate::cave::TRAPEZOID_MOUND_HEIGHT * geometry.tile_height / SOURCE_TILE_HEIGHT;
+                for row in placement.row..placement.row + placement.roof_rows {
+                    for column in placement.column..placement.column + placement.width {
+                        mesh.footing_heights[row * geometry.width + column] = height;
+                    }
+                }
             }
         }
         // A partial template at the viewport edge is not enough evidence to
@@ -366,6 +472,61 @@ fn build_terrain_mesh_internal(
                 return Err(error);
             }
         }
+        for placement in park_bench_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in wise_trios_divider_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in kanto_round_barrier_placements(&cells, &geometry)
+            .into_iter()
+            .chain(kanto_round_path_barrier_placements(&cells, &geometry))
+        {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in kanto_shoreline_round_barrier_placements(&cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                // A complete shoreline rock may enter the source halo before
+                // a separate animated-water sample does. Leave just that
+                // drawing on the faithful map plane; an optional prop must
+                // never make the whole 2.5D frame disappear while scrolling.
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
         if frame.map_id.as_ref() == "CeladonGym" {
             for placement in celadon_hedge_placements(&cells, &geometry) {
                 append_grouped_tree(
@@ -378,6 +539,352 @@ fn build_terrain_mesh_internal(
                     &mut claimed_by_tree,
                 )?;
             }
+        }
+        if frame.map_id.as_ref() == "VermilionGym" {
+            for placement in vermilion_statue_placements(frame.map_id.as_ref(), &cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+        }
+        if frame.map_id.as_ref() == "ViridianGym" {
+            for placement in viridian_statue_placements(frame.map_id.as_ref(), &cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+        }
+        for placement in pokecom_workstation_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in pokecom_plant_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in pokecom_chair_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in ship_stool_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in ship_rack_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in ship_barrel_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in train_station_seat_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in train_station_planter_placements(frame.map_id.as_ref(), &cells, &geometry)
+        {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in train_station_gate_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in warehouse_crate_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            append_warehouse_crate(
+                &mut mesh,
+                &cells,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in house_plant_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in house_upright_fixture_placements(&cells, &geometry) {
+            if (placement.row..placement.row + placement.height).any(|row| {
+                (placement.column..placement.column + placement.width)
+                    .any(|column| claimed_by_tree[row * geometry.width + column])
+            }) {
+                continue;
+            }
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in house_bookcase_placements(&cells, &geometry) {
+            append_house_bookcase(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in
+            traditional_gift_shop_shelf_placements(frame.map_id.as_ref(), &cells, &geometry)
+        {
+            append_traditional_gift_shop_shelf(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in players_house_bookcase_placements(&cells, &geometry) {
+            append_house_bookcase_with_ground(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                crate::players_house::FLOOR_TILE,
+            )?;
+        }
+        for placement in players_house_upright_fixture_placements(&cells, &geometry) {
+            if (placement.row..placement.row + placement.height).any(|row| {
+                (placement.column..placement.column + placement.width)
+                    .any(|column| claimed_by_tree[row * geometry.width + column])
+            }) {
+                continue;
+            }
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in players_house_tv_placements(&cells, &geometry) {
+            if (placement.row..placement.row + placement.height).any(|row| {
+                (placement.column..placement.column + placement.width)
+                    .any(|column| claimed_by_tree[row * geometry.width + column])
+            }) {
+                continue;
+            }
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in players_house_console_placements(&cells, &geometry) {
+            if let Err(error) = append_shallow_top_group(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                crate::players_house::FLOOR_TILE,
+                3.0,
+            ) && !matches!(error, TerrainMeshError::MissingGroundSample { .. })
+            {
+                return Err(error);
+            }
+        }
+        for placement in players_house_bed_placements(&cells, &geometry) {
+            append_player_bed_card(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in traditional_house_radio_placements(&cells, &geometry) {
+            if (placement.row..placement.row + placement.height).any(|row| {
+                (placement.column..placement.column + placement.width)
+                    .any(|column| claimed_by_tree[row * geometry.width + column])
+            }) {
+                continue;
+            }
+            let mut placement = placement;
+            placement.base_height = 4.0 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+            let mut overlay_claimed = vec![false; cells.len()];
+            append_grouped_tree_overlay(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut overlay_claimed,
+            )?;
+        }
+        for placement in traditional_house_cushion_placements(&cells, &geometry) {
+            if let Err(error) = append_shallow_top_group(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+                2.0,
+            ) && !matches!(error, TerrainMeshError::MissingGroundSample { .. })
+            {
+                return Err(error);
+            }
+        }
+        if frame.map_id.as_ref() == "SoulHouse" {
+            for placement in soul_house_bench_placements(&cells, &geometry) {
+                if let Err(error) = append_shallow_top_group(
+                    &mut mesh,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                    crate::house::HOUSE_FLOOR_TILE,
+                    4.0,
+                ) && !matches!(error, TerrainMeshError::MissingGroundSample { .. })
+                {
+                    return Err(error);
+                }
+            }
+        }
+        for placement in house_furniture_placements(&cells, &geometry) {
+            append_house_furniture(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_house_furniture,
+            )?;
+        }
+        for placement in house_table_placements(&cells, &geometry) {
+            append_house_table(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_house_furniture,
+            )?;
+        }
+        for mut placement in house_open_book_placements(&cells, &geometry) {
+            placement.base_height = crate::house::FurnitureKind::Table.height()
+                * geometry.tile_height
+                / SOURCE_TILE_HEIGHT;
+            let mut overlay_claimed = vec![false; cells.len()];
+            append_grouped_tree_overlay(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut overlay_claimed,
+            )?;
         }
         if crate::azalea_gym::supports_display_map(frame.map_id.as_ref()) {
             for placement in
@@ -417,7 +924,10 @@ fn build_terrain_mesh_internal(
                 )?;
             }
         }
-        if matches!(frame.map_id.as_ref(), "VioletGym" | "MahoganyGym") {
+        if matches!(
+            frame.map_id.as_ref(),
+            "VioletGym" | "MahoganyGym" | "BlackthornGym1F"
+        ) {
             for placement in violet_gym_card_placements(frame.map_id.as_ref(), &cells, &geometry) {
                 if let Err(error) = append_grouped_tree(
                     &mut mesh,
@@ -453,7 +963,45 @@ fn build_terrain_mesh_internal(
                 )?;
             }
         }
+        if frame.map_id.as_ref() == "FuchsiaGym" {
+            for placement in fuchsia_statue_placements(frame.map_id.as_ref(), &cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+        }
+        if frame.map_id.as_ref() == "CeladonGym" {
+            for placement in celadon_statue_placements(frame.map_id.as_ref(), &cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+        }
         if frame.map_id.as_ref() == "OlivineGym" {
+            for placement in olivine_gym_statue_placements(frame.map_id.as_ref(), &cells, &geometry)
+            {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
             for placement in olivine_gym_boulder_placements(&cells, &geometry) {
                 if let Err(error) = append_grouped_tree(
                     &mut mesh,
@@ -473,6 +1021,34 @@ fn build_terrain_mesh_internal(
                         continue;
                     }
                     return Err(error);
+                }
+            }
+        }
+        for placement in tower_statue_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        if frame.map_id.as_ref() == "PewterGym" {
+            for placement in tower_boulder_placements(&cells, &geometry) {
+                if let Err(error) = append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                ) {
+                    if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -523,11 +1099,9 @@ fn build_terrain_mesh_internal(
             }
         }
         for placement in ice_path_boulder_placements(&cells, &geometry) {
-            if let Err(error) = append_grouped_tree(
+            if let Err(error) = append_ice_path_small_boulder(
                 &mut mesh,
-                images,
                 &cells,
-                &shapes,
                 &geometry,
                 placement,
                 &mut claimed_by_tree,
@@ -543,7 +1117,69 @@ fn build_terrain_mesh_internal(
                 return Err(error);
             }
         }
-        if crate::casino::is_game_corner_map(frame.map_id.as_ref()) {
+        for placement in ice_path_edge_rock_placements(&cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+        for placement in ruins_statue_placements(&cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+        for placement in power_plant_plant_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+        for placement in rocket_base_plant_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+        if crate::casino::is_game_corner_map(frame.map_id.as_ref())
+            || crate::cafe::is_cafe_map(frame.map_id.as_ref())
+        {
             for placement in casino_stool_placements(&cells, &geometry) {
                 append_casino_stool(
                     &mut mesh,
@@ -556,6 +1192,189 @@ fn build_terrain_mesh_internal(
                 )?;
             }
         }
+        if crate::casino::is_game_corner_map(frame.map_id.as_ref()) {
+            for placement in casino_slot_machine_placements(&cells, &geometry) {
+                append_grouped_tree_scaled(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                    1.6,
+                )?;
+            }
+            for placement in casino_terminal_placements(&cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+            for placement in casino_plant_placements(&cells, &geometry) {
+                append_grouped_tree(
+                    &mut mesh,
+                    images,
+                    &cells,
+                    &shapes,
+                    &geometry,
+                    placement,
+                    &mut claimed_by_tree,
+                )?;
+            }
+        }
+        for placement in player_room_fixture_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in player_room_pc_monitor_placements(&cells, &geometry) {
+            append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in player_room_pc_keyboard_placements(&cells, &geometry) {
+            append_shallow_top_group(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                0x02,
+                3.0,
+            )?;
+        }
+        for placement in player_bed_placements(&cells, &geometry) {
+            append_player_bed_card(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            )?;
+        }
+        for placement in
+            mr_pokemon_work_counter_placements(frame.map_id.as_ref(), &cells, &geometry)
+        {
+            if let Err(error) = append_shallow_top_group(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                0x26,
+                4.0,
+            ) && !matches!(error, TerrainMeshError::MissingGroundSample { .. })
+            {
+                return Err(error);
+            }
+        }
+        for placement in house_display_table_placements(&cells, &geometry) {
+            if let Err(error) = append_shallow_top_group(
+                &mut mesh,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+                crate::house::HOUSE_FLOOR_TILE,
+                5.0,
+            ) && !matches!(error, TerrainMeshError::MissingGroundSample { .. })
+            {
+                return Err(error);
+            }
+        }
+        if cells
+            .first()
+            .is_some_and(|tile| tile.source.tileset_id.as_ref() == "players_room")
+        {
+            append_player_room_wall(&mut mesh, &cells, &shapes, &geometry, &mut claimed_by_tree)?;
+        }
+        for placement in pokecenter_pc_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+        for placement in mart_display_rack_placements(frame.map_id.as_ref(), &cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                // The expanded source halo can include a complete rack while
+                // excluding the separate authored floor texel. Keep only
+                // that rack as faithful flat art; an optional object must not
+                // retire the entire 2.5D frame and produce movement flicker.
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    for placement in diagonal_cave_corner_placements(&cells, &geometry) {
+        if let Err(error) = append_diagonal_cave_corner(
+            &mut mesh,
+            &cells,
+            &shapes,
+            &geometry,
+            placement,
+            &mut claimed_by_tree,
+        ) {
+            if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                return Err(error);
+            }
+        }
+    }
+    if let Some(images) = images {
+        for placement in cave_small_rock_placements(&cells, &geometry) {
+            if let Err(error) = append_grouped_tree(
+                &mut mesh,
+                images,
+                &cells,
+                &shapes,
+                &geometry,
+                placement,
+                &mut claimed_by_tree,
+            ) {
+                if !matches!(error, TerrainMeshError::MissingGroundSample { .. }) {
+                    return Err(error);
+                }
+            }
+        }
     }
     let bank_runs = bank_column_runs(&shapes, &geometry);
 
@@ -565,6 +1384,7 @@ fn build_terrain_mesh_internal(
             if claimed_by_building[index]
                 || claimed_by_tree[index]
                 || claimed_by_casino_stool[index]
+                || claimed_by_house_furniture[index]
             {
                 continue;
             }
@@ -573,6 +1393,8 @@ fn build_terrain_mesh_internal(
             )?;
         }
     }
+
+    append_cafe_table_pedestals(&mut mesh.solid, &cells, &geometry, frame.map_id.as_ref());
 
     for placement in waterfall_placements(&cells, width, height) {
         append_waterfall(&mut mesh.textured, &geometry, &cells, placement);
@@ -587,6 +1409,7 @@ fn build_terrain_mesh_internal(
             if claimed_by_building[row * width + column]
                 || claimed_by_tree[row * width + column]
                 || claimed_by_casino_stool[row * width + column]
+                || claimed_by_house_furniture[row * width + column]
             {
                 continue;
             }
@@ -615,6 +1438,20 @@ fn celadon_hedge_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                 )
             })
         },
+    )
+}
+
+fn wise_trios_divider_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::wise_trios::FLOOR_TILE,
+        false,
+        |source| crate::wise_trios::divider_local(map_id, source),
     )
 }
 
@@ -714,7 +1551,89 @@ fn cerulean_statue_placements(
     )
 }
 
+fn fuchsia_statue_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::fuchsia_gym::FLOOR_TILE,
+        true,
+        |source| {
+            crate::fuchsia_gym::statue_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn celadon_statue_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::celadon_gym::STATUE_FLOOR_TILE,
+        true,
+        |source| {
+            crate::celadon_gym::statue_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn vermilion_statue_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::vermilion_gym::FLOOR_TILE,
+        true,
+        |source| {
+            crate::vermilion_gym::statue_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn viridian_statue_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::viridian_gym::FLOOR_TILE,
+        true,
+        |source| {
+            crate::viridian_gym::statue_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
 fn olivine_gym_boulder_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    rounded_object_placements(grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::olivine_gym::GROUND_TILE,
+        true,
+        |source| crate::olivine_gym::boulder_local(source).map(|(column, row)| (column, row, 2, 2)),
+    ))
+}
+
+fn olivine_gym_statue_placements(
+    map_id: &str,
     cells: &[&VisualTile],
     geometry: &GridGeometry,
 ) -> Vec<TreePlacement> {
@@ -723,7 +1642,30 @@ fn olivine_gym_boulder_placements(
         geometry,
         crate::olivine_gym::GROUND_TILE,
         true,
-        |source| crate::olivine_gym::boulder_local(source).map(|(column, row)| (column, row, 2, 2)),
+        |source| {
+            crate::olivine_gym::statue_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn tower_boulder_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    rounded_object_placements(grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::tower::TOWER_FLOOR_TILE,
+        true,
+        |source| crate::tower::boulder_local(source).map(|(column, row)| (column, row, 2, 2)),
+    ))
+}
+
+fn tower_statue_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::tower::TOWER_FLOOR_TILE,
+        true,
+        |source| crate::tower::statue_local(source).map(|(column, row)| (column, row, 2, 2)),
     )
 }
 
@@ -779,7 +1721,1366 @@ fn ice_path_boulder_placements(
                 .map(|(column, row)| (column, row, 2, 2))
         },
     ));
+    placements.extend(grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::ice_path::CAVE_GROUND_TILE,
+        true,
+        |source| {
+            crate::ice_path::boulder_local(source, crate::ice_path::BoulderBase::UpperRight)
+                .map(|(column, row)| (column, row, 2, 2))
+        },
+    ));
+    // Ice Path boulders are a face-on 16x16 drawing. Keep them as the same
+    // cut-out standing cards used for cave props; a generated rounded hull
+    // turns the four source tiles into a spiky basket and invents pixels the
+    // map never supplied.
     placements
+}
+
+fn ruins_statue_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::ruins_of_alph::FLOOR_TILE,
+        true,
+        |source| {
+            crate::ruins_of_alph::statue_local(source).map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn power_plant_plant_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::power_plant::FLOOR_TILE,
+        true,
+        |source| {
+            crate::power_plant::plant_local(map_id, source).map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn rocket_base_plant_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::rocket_base::FLOOR_TILE,
+        true,
+        |source| {
+            crate::rocket_base::plant_local(map_id, source).map(|(column, row)| (column, row, 2, 3))
+        },
+    )
+}
+
+fn rounded_object_placements(mut placements: Vec<TreePlacement>) -> Vec<TreePlacement> {
+    for placement in &mut placements {
+        placement.rounded = true;
+    }
+    placements
+}
+
+fn ice_path_edge_rock_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = Vec::new();
+    for kind in [
+        crate::ice_path::EdgeRockKind::Left,
+        crate::ice_path::EdgeRockKind::Right,
+        crate::ice_path::EdgeRockKind::Single,
+    ] {
+        placements.extend(grouped_flat_card_placements(
+            cells,
+            geometry,
+            crate::ice_path::CAVE_GROUND_TILE,
+            true,
+            |source| {
+                crate::ice_path::edge_rock_local(source).and_then(|(source_kind, column, row)| {
+                    (source_kind == kind).then_some((column, row, 2, 2))
+                })
+            },
+        ));
+    }
+    placements.sort_by_key(|placement| (placement.row, placement.column));
+    placements
+}
+
+fn cave_small_rock_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::cave::small_rock_local(source).map(|(column, row)| (column, row, 2, 2))
+    })
+    .into_iter()
+    .map(|mut placement| {
+        placement.base_height = crate::cave::CAVE_SHELF_HEIGHT;
+        placement
+    })
+    .collect()
+}
+
+fn diagonal_cave_corner_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<DiagonalCaveCornerPlacement> {
+    let mut placements = Vec::new();
+    for (index, cell) in cells.iter().enumerate() {
+        let Some((corner, local_column, local_row)) =
+            crate::cave::diagonal_corner_local(&cell.source)
+        else {
+            continue;
+        };
+        if local_column != 0 || local_row != 0 {
+            continue;
+        }
+        let column = index % geometry.width;
+        let row = index / geometry.width;
+        if column + 2 > geometry.width || row + 2 > geometry.height {
+            continue;
+        }
+        let complete = (0..2).all(|dy| {
+            (0..2).all(|dx| {
+                let source = &cells[(row + dy) * geometry.width + column + dx].source;
+                crate::cave::diagonal_corner_local(source) == Some((corner, dx as u8, dy as u8))
+            })
+        });
+        if complete {
+            placements.push(DiagonalCaveCornerPlacement {
+                column,
+                row,
+                corner,
+            });
+        }
+    }
+    placements
+}
+
+fn append_diagonal_cave_corner(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: DiagonalCaveCornerPlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground_index = authored_surface_cell(cells, shapes, 0x16, None, 0.0, geometry.tile_height)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: 0x16,
+        })?;
+    for dy in 0..2 {
+        for dx in 0..2 {
+            let column = placement.column + dx;
+            let row = placement.row + dy;
+            claimed[row * geometry.width + column] = true;
+            append_top(
+                &mut mesh.textured,
+                geometry.bounds(column, row).into(),
+                0.0,
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+            );
+        }
+    }
+
+    let (x0, _, z0, _) = geometry.bounds(placement.column, placement.row);
+    let (_, x1, _, z1) = geometry.bounds(placement.column + 1, placement.row + 1);
+    let height = crate::cave::CAVE_ROCK_HEIGHT * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let (u0, _, v0, _) = geometry.uv(placement.column, placement.row);
+    let (_, u1, _, v1) = geometry.uv(placement.column + 1, placement.row + 1);
+
+    let bevel = geometry.tile_width * 0.5;
+    let (cap, face, south, side, side_normal) = match placement.corner {
+        crate::cave::DiagonalCorner::SouthEast => (
+            [
+                ([x1, height, z0], [u1, v0]),
+                ([x1, height, z1], [u1, v1]),
+                ([x0, height, z1], [u0, v1]),
+            ],
+            [
+                [x1 - bevel, 0.0, z0 - bevel],
+                [x1, height, z0],
+                [x0, height, z1],
+                [x0 - bevel, 0.0, z1 - bevel],
+            ],
+            [
+                [x0 - bevel, 0.0, z1 - bevel],
+                [x0, height, z1],
+                [x1, height, z1],
+                [x1, 0.0, z1],
+            ],
+            [
+                [x1, 0.0, z1],
+                [x1, height, z1],
+                [x1, height, z0],
+                [x1 - bevel, 0.0, z0 - bevel],
+            ],
+            [1.0, 0.0, 0.0],
+        ),
+        crate::cave::DiagonalCorner::SouthWest => (
+            [
+                ([x0, height, z0], [u0, v0]),
+                ([x1, height, z1], [u1, v1]),
+                ([x0, height, z1], [u0, v1]),
+            ],
+            [
+                [x0 + bevel, 0.0, z0 - bevel],
+                [x1 + bevel, 0.0, z1 - bevel],
+                [x1, height, z1],
+                [x0, height, z0],
+            ],
+            [
+                [x0, 0.0, z1],
+                [x0, height, z1],
+                [x1, height, z1],
+                [x1 + bevel, 0.0, z1 - bevel],
+            ],
+            [
+                [x0 + bevel, 0.0, z0 - bevel],
+                [x0, height, z0],
+                [x0, height, z1],
+                [x0, 0.0, z1],
+            ],
+            [-1.0, 0.0, 0.0],
+        ),
+    };
+    append_polygon(&mut mesh.textured, &cap, [0.0, 1.0, 0.0], BANK_TOP_SHADE);
+    let edge_a = Vec3::from_array(face[1]) - Vec3::from_array(face[0]);
+    let edge_b = Vec3::from_array(face[2]) - Vec3::from_array(face[0]);
+    append_quad(
+        &mut mesh.textured,
+        face,
+        edge_a.cross(edge_b).normalize().to_array(),
+        [[u0, v1], [u0, v0], [u1, v0], [u1, v1]],
+        TEXTURED_SHADE,
+    );
+    // Close the diagonal with one-pixel strips from the live authored art.
+    // A fixed solid color ignored the active cave palette and appeared as a
+    // tan flyaway triangle at exposed corners.
+    let pixel_u = (u1 - u0) / (2 * SOURCE_TILE_PIXELS) as f32;
+    let pixel_v = (v1 - v0) / (2 * SOURCE_TILE_PIXELS) as f32;
+    append_quad(
+        &mut mesh.textured,
+        south,
+        [0.0, 0.0, 1.0],
+        [[u0, v1], [u0, v1 - pixel_v], [u1, v1 - pixel_v], [u1, v1]],
+        TEXTURED_SHADE,
+    );
+    let side_uv = match placement.corner {
+        crate::cave::DiagonalCorner::SouthEast => {
+            [[u1 - pixel_u, v1], [u1 - pixel_u, v0], [u1, v0], [u1, v1]]
+        }
+        crate::cave::DiagonalCorner::SouthWest => {
+            [[u0 + pixel_u, v0], [u0, v0], [u0, v1], [u0 + pixel_u, v1]]
+        }
+    };
+    append_quad(
+        &mut mesh.textured,
+        side,
+        side_normal,
+        side_uv,
+        TEXTURED_SHADE,
+    );
+    Ok(())
+}
+
+fn casino_terminal_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, true, |source| {
+        crate::casino::terminal_local(source).map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn casino_slot_machine_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::casino::slot_machine_local(source).map(|(column, row)| (column, row, 2, 2))
+    })
+    .into_iter()
+    .map(|mut placement| {
+        placement.remove_all_ground = true;
+        placement
+    })
+    .collect()
+}
+
+fn casino_plant_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, true, |source| {
+        crate::casino::plant_local(source).map(|(column, row)| (column, row, 2, 4))
+    })
+}
+
+fn player_room_fixture_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x02, true, |source| {
+        crate::interior::player_room_fixture_group(source).map(|(column, row, width, height)| {
+            (column, row, usize::from(width), usize::from(height))
+        })
+    })
+}
+
+fn player_room_pc_monitor_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x02, true, |source| {
+        crate::interior::player_room_pc_monitor_local(source)
+            .map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn player_room_pc_keyboard_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x02, false, |source| {
+        crate::interior::player_room_pc_keyboard_local(source)
+            .map(|(column, row)| (column, row, 2, 1))
+    })
+}
+
+fn player_bed_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::interior::player_bed_local(source).map(|(column, row)| (column, row, 2, 4))
+    })
+}
+
+fn mr_pokemon_work_counter_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x26, false, |source| {
+        crate::interior::mr_pokemon_work_counter_local(map_id, source)
+            .map(|(column, row)| (column, row, 4, 2))
+    })
+}
+
+fn house_display_table_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        false,
+        |source| crate::house::display_table_local(source).map(|(column, row)| (column, row, 2, 2)),
+    )
+}
+
+fn append_player_bed_card(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    if mesh.footing_heights.len() < cells.len() {
+        mesh.footing_heights.resize(cells.len(), 0.0);
+    }
+    let ground_index = authored_surface_cell(cells, shapes, 0x01, None, 0.0, geometry.tile_height)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: 0x01,
+        })?;
+    // Bedroom beds are drawn from above.  Keep the complete mattress art on
+    // one shallow horizontal surface; pitching the four source rows made the
+    // bed read as a loose board leaning out of the room.
+    let bed_height = 7.0 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            mesh.footing_heights[index] = bed_height;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                0.0,
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+            );
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                bed_height,
+                geometry.uv(column, row),
+            );
+        }
+    }
+
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + placement.width as f32 * geometry.tile_width;
+    let z0 = geometry.origin_z + placement.row as f32 * geometry.tile_height;
+    let z1 = z0 + placement.height as f32 * geometry.tile_height;
+    for (vertices, normal, direction) in [
+        (
+            [
+                [x0, 0.0, z1],
+                [x0, bed_height, z1],
+                [x0, bed_height, z0],
+                [x0, 0.0, z0],
+            ],
+            [-1.0, 0.0, 0.0],
+            Direction::West,
+        ),
+        (
+            [
+                [x1, 0.0, z0],
+                [x1, bed_height, z0],
+                [x1, bed_height, z1],
+                [x1, 0.0, z1],
+            ],
+            [1.0, 0.0, 0.0],
+            Direction::East,
+        ),
+        (
+            [
+                [x1, 0.0, z0],
+                [x0, 0.0, z0],
+                [x0, bed_height, z0],
+                [x1, bed_height, z0],
+            ],
+            [0.0, 0.0, -1.0],
+            Direction::North,
+        ),
+    ] {
+        append_solid_quad(
+            &mut mesh.solid,
+            vertices,
+            normal,
+            solid_color(SolidKind::Prop, direction),
+        );
+    }
+
+    // A bed's visible foot is the lower lip of the source drawing, not a
+    // generated neutral wall. Crop the last seven source-pixel rows from the
+    // southern source cells and stand those rows up exactly once.
+    let source_row = placement.row + placement.height - 1;
+    for local_column in 0..placement.width {
+        let column = placement.column + local_column;
+        let cell_x0 = geometry.origin_x + column as f32 * geometry.tile_width;
+        let cell_x1 = cell_x0 + geometry.tile_width;
+        let (u0, u1, v0, v1) = geometry.uv(column, source_row);
+        let cropped_v0 = v0 + (v1 - v0) / SOURCE_TILE_PIXELS as f32;
+        append_quad(
+            &mut mesh.textured,
+            [
+                [cell_x0, 0.0, z1],
+                [cell_x1, 0.0, z1],
+                [cell_x1, bed_height, z1],
+                [cell_x0, bed_height, z1],
+            ],
+            [0.0, 0.0, 1.0],
+            [[u0, v1], [u1, v1], [u1, cropped_v0], [u0, cropped_v0]],
+            TEXTURED_SHADE,
+        );
+    }
+    Ok(())
+}
+
+fn append_player_room_wall(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    const WALL_BANDS: usize = 4;
+    // The visual grid includes a camera halo before map row zero. Find the
+    // first authored room-block row instead of treating that halo boundary as
+    // the wall seam. Player's Room's north wall is one complete 4x4 metatile
+    // course. Its top collision quadrants are WALL and its bottom quadrants
+    // are FLOOR, so only the first two source rows belong on the vertical
+    // plane; folding all four rows visibly turns the striped floor upright.
+    let wall_origin = (0..geometry.height).find_map(|row| {
+        (0..=geometry.width.saturating_sub(16)).find_map(|column| {
+            (0..16)
+                .all(|offset| {
+                    let source = &cells[row * geometry.width + column + offset].source;
+                    source.metatile_id != 0
+                        && usize::from(source.subtile_column) == offset % 4
+                        && source.subtile_row == 0
+                })
+                .then_some((column, row))
+        })
+    });
+    let (wall_start_column, wall_start_row) =
+        wall_origin.ok_or(TerrainMeshError::MissingGroundSample {
+            column: 0,
+            row: 0,
+            tile_index: 0x01,
+        })?;
+    let seam_row = (wall_start_row + 2).min(geometry.height);
+    // Wall-mounted art and the staircase card terminate at this same authored
+    // seam. Recess the architectural plane slightly so those independent
+    // cards remain visible instead of z-fighting with or disappearing behind
+    // the wall.
+    let plane_z =
+        geometry.origin_z + seam_row as f32 * geometry.tile_height - geometry.tile_height * 0.08;
+    let clean_wall_samples = std::array::from_fn::<_, 4, _>(|subtile_column| {
+        cells.iter().position(|tile| {
+            tile.source.metatile_id == 0x04
+                && usize::from(tile.source.subtile_column) == subtile_column
+                && tile.source.subtile_row == 0
+        })
+    });
+    for row in 0..wall_start_row {
+        for column in 0..geometry.width {
+            claimed[row * geometry.width + column] = true;
+        }
+    }
+    let room_columns = wall_start_column..wall_start_column + 16;
+    for column in room_columns {
+        let x0 = geometry.origin_x + column as f32 * geometry.tile_width;
+        let x1 = x0 + geometry.tile_width;
+        for row in wall_start_row..seam_row {
+            let index = row * geometry.width + column;
+            let already_claimed = claimed[index];
+            // Furniture cards already own their pixels. The remaining cells
+            // are the actual authored wall artwork and must be lifted from the
+            // floor, not replaced with a synthetic panel texture.
+            if already_claimed || shapes[index] != CellShape::Flat {
+                continue;
+            }
+            claimed[index] = true;
+        }
+        // Continue the authored wall pattern only to the same four-tile
+        // architectural height used by the other house interiors. Repeating
+        // this strip ten times produced an 80px tower behind the player's
+        // bedroom even though Crystal draws the same compact room course as
+        // the neighboring fixtures.
+        for band in 0..WALL_BANDS {
+            let Some(sample_index) = clean_wall_samples[column % 4] else {
+                continue;
+            };
+            let source_column = sample_index % geometry.width;
+            let source_row = sample_index / geometry.width;
+            let y0 = band as f32 * geometry.tile_height;
+            let y1 = y0 + geometry.tile_height;
+            let (u0, u1, v0, v1) = geometry.uv(source_column, source_row);
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x1, y0, plane_z],
+                    [x1, y1, plane_z],
+                    [x0, y1, plane_z],
+                    [x0, y0, plane_z],
+                ],
+                [0.0, 0.0, 1.0],
+                [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+                TEXTURED_SHADE,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn pokecom_workstation_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::pokecom::WORKSTATION_FLOOR_TILE,
+        true,
+        |source| {
+            crate::pokecom::workstation_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 3))
+        },
+    )
+}
+
+fn pokecom_plant_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::pokecom::PLANT_FLOOR_TILE,
+        true,
+        |source| {
+            crate::pokecom::plant_local(map_id, source).map(|(column, row)| (column, row, 2, 3))
+        },
+    )
+}
+
+fn pokecom_chair_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::pokecom::PLANT_FLOOR_TILE,
+        true,
+        |source| {
+            crate::pokecom::chair_local(map_id, source).map(|(column, row)| (column, row, 2, 2))
+        },
+    )
+}
+
+fn train_station_seat_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::train_station::FLOOR_TILE,
+        true,
+        |source| {
+            crate::train_station::seat_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 2))
+        },
+    )
+}
+
+fn ship_stool_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::ship::CABIN_FLOOR_TILE,
+        true,
+        |source| crate::ship::stool_local(map_id, source).map(|(column, row)| (column, row, 2, 2)),
+    )
+}
+
+fn ship_rack_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::ship::CABIN_FLOOR_TILE,
+        false,
+        |source| crate::ship::rack_local(map_id, source).map(|(column, row)| (column, row, 2, 4)),
+    )
+}
+
+fn park_bench_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::park::PARK_PLAZA_GROUND_TILE,
+        false,
+        |source| crate::park::bench_local(source).map(|(column, row)| (column, row, 4, 2)),
+    )
+}
+
+fn kanto_round_barrier_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x2c, true, |source| {
+        crate::kanto_cliff::round_barrier_local(source).map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn kanto_round_path_barrier_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x11, true, |source| {
+        crate::kanto_cliff::round_path_barrier_local(source)
+            .map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn kanto_shoreline_round_barrier_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x14, true, |source| {
+        crate::kanto_cliff::shoreline_round_barrier_local(source)
+            .map(|(column, row)| (column, row, 2, 2))
+    })
+    .into_iter()
+    .map(|mut placement| {
+        placement.base_height = crate::profile::WATER_HEIGHT;
+        placement
+    })
+    .collect()
+}
+
+fn ship_barrel_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::ship::CABIN_FLOOR_TILE,
+        true,
+        |source| crate::ship::barrel_local(map_id, source).map(|(column, row)| (column, row, 2, 2)),
+    )
+}
+
+fn train_station_planter_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::train_station::FLOOR_TILE,
+        true,
+        |source| {
+            crate::train_station::planter_local(map_id, source)
+                .map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn train_station_gate_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x3e, true, |source| {
+        crate::train_station::gate_local(map_id, source).map(|(column, row)| (column, row, 2, 4))
+    })
+}
+
+fn warehouse_crate_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let Some(floor_tile) = crate::warehouse::floor_tile(map_id) else {
+        return Vec::new();
+    };
+    grouped_flat_card_placements(cells, geometry, floor_tile, false, |source| {
+        crate::warehouse::crate_local(map_id, source).map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn append_warehouse_crate(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == placement.ground_tile_index)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: placement.ground_tile_index,
+        })?;
+    let ground_uv = geometry.uv(ground % geometry.width, ground / geometry.width);
+    let first = geometry.bounds(placement.column, placement.row);
+    let last = geometry.bounds(placement.column + 1, placement.row);
+    let x0 = first.0;
+    let x1 = last.1;
+    let rear_z = first.2;
+    let front_z = first.3;
+    let height = crate::warehouse::CRATE_HEIGHT * geometry.tile_height / SOURCE_TILE_HEIGHT;
+
+    for row in placement.row..placement.row + 2 {
+        for column in placement.column..placement.column + 2 {
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            let bounds = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [bounds.0, bounds.1, bounds.2, bounds.3],
+                0.0,
+                ground_uv,
+            );
+        }
+    }
+    for local_column in 0..2 {
+        let column = placement.column + local_column;
+        let bounds = geometry.bounds(column, placement.row);
+        append_top_shaded(
+            &mut mesh.textured,
+            [bounds.0, bounds.1, rear_z, front_z],
+            height,
+            geometry.uv(column, placement.row),
+            [0.94, 0.94, 0.94, 1.0],
+        );
+        let face_uv = geometry.uv(column, placement.row + 1);
+        append_quad(
+            &mut mesh.textured,
+            [
+                [bounds.0, 0.0, front_z],
+                [bounds.1, 0.0, front_z],
+                [bounds.1, height, front_z],
+                [bounds.0, height, front_z],
+            ],
+            [0.0, 0.0, 1.0],
+            [
+                [face_uv.0, face_uv.3],
+                [face_uv.1, face_uv.3],
+                [face_uv.1, face_uv.2],
+                [face_uv.0, face_uv.2],
+            ],
+            TEXTURED_SHADE,
+        );
+    }
+    let left_uv = geometry.uv(placement.column, placement.row + 1);
+    let right_uv = geometry.uv(placement.column + 1, placement.row + 1);
+    append_quad(
+        &mut mesh.textured,
+        [
+            [x0, 0.0, rear_z],
+            [x0, 0.0, front_z],
+            [x0, height, front_z],
+            [x0, height, rear_z],
+        ],
+        [-1.0, 0.0, 0.0],
+        [
+            [left_uv.0, left_uv.3],
+            [left_uv.1, left_uv.3],
+            [left_uv.1, left_uv.2],
+            [left_uv.0, left_uv.2],
+        ],
+        [0.78, 0.78, 0.78, 1.0],
+    );
+    append_quad(
+        &mut mesh.textured,
+        [
+            [x1, 0.0, front_z],
+            [x1, 0.0, rear_z],
+            [x1, height, rear_z],
+            [x1, height, front_z],
+        ],
+        [1.0, 0.0, 0.0],
+        [
+            [right_uv.0, right_uv.3],
+            [right_uv.1, right_uv.3],
+            [right_uv.1, right_uv.2],
+            [right_uv.0, right_uv.2],
+        ],
+        [0.84, 0.84, 0.84, 1.0],
+    );
+    Ok(())
+}
+
+fn house_plant_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        true,
+        |source| crate::house::plant_local(source).map(|(column, row)| (column, row, 2, 4)),
+    )
+}
+
+fn house_upright_fixture_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        false,
+        crate::house::upright_fixture_local,
+    );
+    // These fixtures occupy their complete rectangular drawings. Remove only
+    // exact floor-colored pixels; boundary-color flooding would eat cabinet
+    // corners that legitimately share a palette shade with the room.
+    for placement in &mut placements {
+        placement.remove_all_ground = true;
+        placement.card_thickness = geometry.tile_height * 0.125;
+    }
+    placements
+}
+
+fn house_bookcase_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        false,
+        |source| crate::house::bookcase_local(source).map(|(column, row)| (column, row, 2, 4)),
+    )
+}
+
+fn traditional_gift_shop_shelf_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+        false,
+        |source| {
+            crate::house::traditional_gift_shop_shelf_local(map_id, source)
+                .map(|(column, row)| (column, row, 4, 4))
+        },
+    )
+}
+
+fn players_house_upright_fixture_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = grouped_flat_card_placements(
+        cells,
+        geometry,
+        0x11,
+        false,
+        crate::players_house::upright_fixture_local,
+    );
+    for placement in &mut placements {
+        placement.remove_all_ground = true;
+        placement.card_thickness = geometry.tile_height * 0.125;
+    }
+    placements
+}
+
+fn players_house_bookcase_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::players_house::FLOOR_TILE,
+        false,
+        |source| {
+            crate::players_house::bookcase_local(source).map(|(column, row)| (column, row, 2, 4))
+        },
+    )
+}
+
+fn players_house_tv_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::players_house::tv_local(source).map(|(column, row)| (column, row, 2, 2))
+    });
+    for placement in &mut placements {
+        placement.remove_all_ground = true;
+        placement.card_thickness = geometry.tile_height * 0.125;
+    }
+    placements
+}
+
+fn players_house_console_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::players_house::console_local(source).map(|(column, row)| (column, row, 2, 2))
+    })
+}
+
+fn players_house_bed_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(cells, geometry, 0x01, false, |source| {
+        crate::players_house::bed_local(source).map(|(column, row)| (column, row, 2, 4))
+    })
+}
+
+fn traditional_house_radio_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+        false,
+        |source| {
+            crate::house::traditional_radio_local(source).map(|(column, row)| (column, row, 2, 2))
+        },
+    );
+    for placement in &mut placements {
+        placement.card_thickness = geometry.tile_height * 0.125;
+    }
+    placements
+}
+
+fn traditional_house_cushion_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+        false,
+        |source| {
+            crate::house::traditional_cushion_local(source).map(|(column, row)| (column, row, 2, 2))
+        },
+    )
+}
+
+fn soul_house_bench_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        false,
+        |source| {
+            crate::house::soul_house_bench_local(source).map(|(column, row)| (column, row, 2, 2))
+        },
+    )
+}
+
+fn house_open_book_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::house::HOUSE_FLOOR_TILE,
+        false,
+        |source| crate::house::open_book_local(source).map(|(column, row)| (column, row, 2, 2)),
+    )
+}
+
+fn house_stair_local(
+    map_id: &str,
+    source: &VisualTileSource,
+) -> Option<(u8, u8, crate::players_house::StairKind)> {
+    crate::interior::trainer_house_b1f_stair_local(map_id, source)
+        .map(|(column, row)| (column, row, crate::players_house::StairKind::UpEast))
+        .or_else(|| crate::house::wise_trios_stair_local(map_id, source))
+        .or_else(|| crate::players_house::stair_local(source))
+        .or_else(|| crate::house::stair_local(source))
+        .or_else(|| crate::interior::player_room_stair_local(source))
+}
+
+fn append_house_stairs(
+    mesh: &mut TerrainMeshData,
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    claimed: &mut [bool],
+) {
+    for row in 0..geometry.height.saturating_sub(1) {
+        for column in 0..geometry.width.saturating_sub(1) {
+            let kind = house_stair_local(map_id, &cells[row * geometry.width + column].source)
+                .and_then(|(local_column, local_row, kind)| {
+                    (local_column == 0 && local_row == 0).then_some(kind)
+                });
+            let Some(kind) = kind else {
+                continue;
+            };
+            let complete = (0..2).all(|local_row| {
+                (0..2).all(|local_column| {
+                    house_stair_local(
+                        map_id,
+                        &cells[(row + local_row) * geometry.width + column + local_column].source,
+                    ) == Some((local_column as u8, local_row as u8, kind))
+                })
+            });
+            if !complete {
+                continue;
+            }
+            // This facility flight is an above-floor stair, not a sunken
+            // stairwell. Preserve the authored checker floor beneath its
+            // four cells so perspective cannot expose a black rectangular
+            // hole between/behind the rising treads.
+            if map_id == "TrainerHouseB1F" {
+                if let Some(ground_index) = cells.iter().position(|tile| {
+                    tile.source.tileset_id.as_ref() == "facility" && tile.source.tile_index == 0x26
+                }) {
+                    let ground_uv =
+                        geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+                    for local_row in 0..2 {
+                        for local_column in 0..2 {
+                            let (x0, x1, z0, z1) =
+                                geometry.bounds(column + local_column, row + local_row);
+                            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+                        }
+                    }
+                }
+            }
+            let step_count = if map_id == "TrainerHouseB1F" { 8 } else { 4 };
+            let strips_per_tile = step_count / 2;
+            let step_width = geometry.tile_width * 2.0 / step_count as f32;
+            let z0 = geometry.origin_z + row as f32 * geometry.tile_height;
+            for step in 0..step_count {
+                let source_column = column + step / strips_per_tile;
+                let source_strip = step % strips_per_tile;
+                let x0 = geometry.origin_x
+                    + column as f32 * geometry.tile_width
+                    + step as f32 * step_width;
+                let x1 = x0 + step_width;
+                let height = match kind {
+                    crate::players_house::StairKind::UpEast => {
+                        (step + 1) as f32 * geometry.tile_height * 2.0 / step_count as f32
+                    }
+                    crate::players_house::StairKind::DownWest => {
+                        (step as f32 - (step_count - 1) as f32) * geometry.tile_height * 2.0
+                            / step_count as f32
+                    }
+                };
+                for local_row in 0..2 {
+                    let source_row = row + local_row;
+                    let tile_z0 = z0 + local_row as f32 * geometry.tile_height;
+                    let tile_z1 = tile_z0 + geometry.tile_height;
+                    let (u0, u1, v0, v1) = geometry.uv(source_column, source_row);
+                    let strip_u0 = u0 + (u1 - u0) * source_strip as f32 / strips_per_tile as f32;
+                    let strip_u1 =
+                        u0 + (u1 - u0) * (source_strip + 1) as f32 / strips_per_tile as f32;
+                    let step_uv = (strip_u0, strip_u1, v0, v1);
+                    append_top(
+                        &mut mesh.textured,
+                        [x0, x1, tile_z0, tile_z1],
+                        height,
+                        step_uv,
+                    );
+                    let previous_height = height - geometry.tile_height * 2.0 / step_count as f32;
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [
+                            [x0, previous_height, tile_z1],
+                            [x0, height, tile_z1],
+                            [x0, height, tile_z0],
+                            [x0, previous_height, tile_z0],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        solid_color(SolidKind::Bank, Direction::West),
+                    );
+                }
+            }
+            for local_row in 0..2 {
+                for local_column in 0..2 {
+                    claimed[(row + local_row) * geometry.width + column + local_column] = true;
+                }
+            }
+        }
+    }
+}
+
+fn house_furniture_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<HouseFurniturePlacement> {
+    let mut placements = Vec::new();
+    for (index, tile) in cells.iter().enumerate() {
+        let Some((0, 0, kind @ crate::house::FurnitureKind::Stool)) =
+            crate::house::furniture_local(&tile.source)
+        else {
+            continue;
+        };
+        let column = index % geometry.width;
+        let row = index / geometry.width;
+        if column + 1 >= geometry.width || row + 1 >= geometry.height {
+            continue;
+        }
+        let complete = (0..2).all(|local_row| {
+            (0..2).all(|local_column| {
+                let candidate = cells[(row + local_row) * geometry.width + column + local_column];
+                crate::house::furniture_local(&candidate.source)
+                    == Some((local_column as u8, local_row as u8, kind))
+            })
+        });
+        if complete {
+            placements.push(HouseFurniturePlacement { column, row, kind });
+        }
+    }
+    placements.sort_by_key(|placement| (placement.row, placement.column));
+    placements
+}
+
+fn house_table_placements(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<HouseTablePlacement> {
+    const HOUSE_DRAWING: [[u16; 4]; 4] = [
+        [0x26, 0x27, 0x27, 0x29],
+        [0x36, 0x2f, 0x2f, 0x39],
+        [0x36, 0x2f, 0x2f, 0x39],
+        [0x3c, 0x3a, 0x3a, 0x3b],
+    ];
+    const PLAYER_FAMILY_DRAWING: [[u16; 4]; 4] = [
+        [0x23, 0x22, 0x22, 0x24],
+        [0x25, 0x15, 0x15, 0x35],
+        [0x25, 0x15, 0x15, 0x35],
+        [0x33, 0x32, 0x32, 0x34],
+    ];
+    let mut placements = Vec::new();
+    for row in 0..geometry.height.saturating_sub(3) {
+        for column in 0..geometry.width.saturating_sub(3) {
+            if (0..4).all(|local_row| {
+                (0..4).all(|local_column| {
+                    let tile = cells[(row + local_row) * geometry.width + column + local_column];
+                    let drawing = match tile.source.tileset_id.as_ref() {
+                        "house" => HOUSE_DRAWING,
+                        "players_house" => PLAYER_FAMILY_DRAWING,
+                        _ => return false,
+                    };
+                    tile.source.tile_index == drawing[local_row][local_column]
+                })
+            }) {
+                placements.push(HouseTablePlacement {
+                    column,
+                    row,
+                    ground_tile_index: crate::house::HOUSE_FLOOR_TILE,
+                    height_pixels: crate::house::FurnitureKind::Table.height(),
+                });
+            }
+        }
+    }
+    const TRADITIONAL_DRAWING: [[u16; 4]; 4] = [
+        [0x23, 0x22, 0x22, 0x24],
+        [0x42, 0x15, 0x15, 0x43],
+        [0x42, 0x15, 0x15, 0x43],
+        [0x33, 0x32, 0x32, 0x34],
+    ];
+    for row in 0..geometry.height.saturating_sub(3) {
+        for column in 0..geometry.width.saturating_sub(3) {
+            if (0..4).all(|local_row| {
+                (0..4).all(|local_column| {
+                    let tile = cells[(row + local_row) * geometry.width + column + local_column];
+                    tile.source.tileset_id.as_ref() == "traditional_house"
+                        && tile.source.tile_index == TRADITIONAL_DRAWING[local_row][local_column]
+                })
+            }) {
+                placements.push(HouseTablePlacement {
+                    column,
+                    row,
+                    ground_tile_index: crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+                    height_pixels: 4.0,
+                });
+            }
+        }
+    }
+    placements
+}
+
+fn mart_display_rack_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    let mut placements = grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::mart::ground_tile_for_map(map_id),
+        false,
+        |source| crate::mart::display_rack_local(source).map(|(column, row)| (column, row, 2, 4)),
+    );
+    for placement in &mut placements {
+        placement.remove_all_ground = true;
+    }
+    placements
+}
+
+fn pokecenter_pc_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<TreePlacement> {
+    grouped_flat_card_placements(
+        cells,
+        geometry,
+        crate::pokecenter::FLOOR_TILE,
+        true,
+        |source| {
+            crate::pokecenter::pc_local(map_id, source).map(|(column, row)| (column, row, 2, 2))
+        },
+    )
+}
+
+fn append_cafe_table_pedestals(
+    mesh: &mut SurfaceMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    map_id: &str,
+) {
+    for tile in cells {
+        let source = &tile.source;
+        if source.subtile_column != 0
+            || source.subtile_row != 0
+            || !crate::cafe::is_table(map_id, source)
+        {
+            continue;
+        }
+        let column = tile.column as usize;
+        let row = tile.row as usize;
+        if column + 4 > geometry.width || row + 4 > geometry.height {
+            continue;
+        }
+        let x0 = geometry.origin_x + (column as f32 + 1.5) * geometry.tile_width;
+        let x1 = geometry.origin_x + (column as f32 + 2.5) * geometry.tile_width;
+        let z0 = geometry.origin_z + (row as f32 + 1.5) * geometry.tile_height;
+        let z1 = geometry.origin_z + (row as f32 + 2.5) * geometry.tile_height;
+        let y1 = crate::cafe::TABLETOP_BOTTOM;
+        for (positions, normal, direction) in [
+            (
+                [[x0, 0.0, z1], [x0, y1, z1], [x0, y1, z0], [x0, 0.0, z0]],
+                [-1.0, 0.0, 0.0],
+                Direction::West,
+            ),
+            (
+                [[x1, 0.0, z0], [x1, y1, z0], [x1, y1, z1], [x1, 0.0, z1]],
+                [1.0, 0.0, 0.0],
+                Direction::East,
+            ),
+            (
+                [[x0, 0.0, z0], [x0, y1, z0], [x1, y1, z0], [x1, 0.0, z0]],
+                [0.0, 0.0, -1.0],
+                Direction::North,
+            ),
+            (
+                [[x1, 0.0, z1], [x1, y1, z1], [x0, y1, z1], [x0, 0.0, z1]],
+                [0.0, 0.0, 1.0],
+                Direction::South,
+            ),
+        ] {
+            append_solid_quad(
+                mesh,
+                positions,
+                normal,
+                solid_color(SolidKind::Prop, direction),
+            );
+        }
+    }
 }
 
 fn grouped_flat_card_placements(
@@ -820,9 +3121,12 @@ fn grouped_flat_card_placements(
                 width,
                 height,
                 ground_tile_index,
+                ground_metatile_id: None,
                 base_height: 0.0,
                 rounded: false,
                 outline_mask,
+                remove_all_ground: false,
+                card_thickness: 0.0,
             });
         }
     }
@@ -847,15 +3151,810 @@ struct TreePlacement {
     width: usize,
     height: usize,
     ground_tile_index: u16,
+    ground_metatile_id: Option<u16>,
     base_height: f32,
     rounded: bool,
     outline_mask: bool,
+    remove_all_ground: bool,
+    /// Shallow depth behind an authored upright drawing. Most cards stay
+    /// paper-thin; house appliances opt into a small casing without changing
+    /// or stretching their exact live front art.
+    card_thickness: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CasinoStoolPlacement {
     column: usize,
     row: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HouseFurniturePlacement {
+    column: usize,
+    row: usize,
+    kind: crate::house::FurnitureKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HouseTablePlacement {
+    column: usize,
+    row: usize,
+    ground_tile_index: u16,
+    height_pixels: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiagonalCaveCornerPlacement {
+    column: usize,
+    row: usize,
+    corner: crate::cave::DiagonalCorner,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FacilityDividerPlacement {
+    column: usize,
+    row: usize,
+    width: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FacilityVerticalDividerPlacement {
+    column: usize,
+    row: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FacilityDividerCapPlacement {
+    column: usize,
+    row: usize,
+    width: usize,
+}
+
+fn facility_divider_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<FacilityDividerPlacement> {
+    if !crate::facility_divider::supports_map(map_id) || geometry.height < 2 {
+        return Vec::new();
+    }
+    let is_complete_wall_column = |column: usize, row: usize| {
+        let top = cells[row * geometry.width + column];
+        let face = cells[(row + 1) * geometry.width + column];
+        crate::facility_divider::is_horizontal_top(map_id, &top.source)
+            && crate::facility_divider::is_horizontal_face(map_id, &face.source)
+            && crate::facility_divider::horizontal_pair(&top.source, &face.source)
+    };
+    let mut placements = Vec::new();
+    for row in 0..geometry.height - 1 {
+        let mut column = 0;
+        while column < geometry.width {
+            if !is_complete_wall_column(column, row) {
+                column += 1;
+                continue;
+            }
+            let start = column;
+            while column < geometry.width && is_complete_wall_column(column, row) {
+                column += 1;
+            }
+            placements.push(FacilityDividerPlacement {
+                column: start,
+                row,
+                width: column - start,
+            });
+        }
+    }
+    placements
+}
+
+fn facility_vertical_divider_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<FacilityVerticalDividerPlacement> {
+    if !crate::facility_divider::supports_map(map_id) || geometry.width < 2 {
+        return Vec::new();
+    }
+    let is_complete_wall_row = |column: usize, row: usize| {
+        let left = cells[row * geometry.width + column];
+        let right = cells[row * geometry.width + column + 1];
+        crate::facility_divider::is_vertical_left(map_id, &left.source)
+            && crate::facility_divider::is_vertical_right(map_id, &right.source)
+    };
+    let mut placements = Vec::new();
+    for column in 0..geometry.width - 1 {
+        let mut row = 0;
+        while row < geometry.height {
+            if !is_complete_wall_row(column, row) {
+                row += 1;
+                continue;
+            }
+            let start = row;
+            while row < geometry.height && is_complete_wall_row(column, row) {
+                row += 1;
+            }
+            placements.push(FacilityVerticalDividerPlacement {
+                column,
+                row: start,
+                height: row - start,
+            });
+        }
+    }
+    placements
+}
+
+fn facility_divider_cap_placements(
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+) -> Vec<FacilityDividerCapPlacement> {
+    if !crate::facility_divider::supports_map(map_id) || geometry.width < 2 {
+        return Vec::new();
+    }
+    let is_cap_pair = |column: usize, row: usize| {
+        let left = cells[row * geometry.width + column];
+        let right = cells[row * geometry.width + column + 1];
+        left.source.tile_index == 0x40
+            && right.source.tile_index == 0x42
+            && crate::facility_divider::is_horizontal_top(map_id, &left.source)
+            && crate::facility_divider::is_horizontal_top(map_id, &right.source)
+            && (row + 1 >= geometry.height
+                || !crate::facility_divider::horizontal_pair(
+                    &left.source,
+                    &cells[(row + 1) * geometry.width + column].source,
+                ))
+    };
+    let mut placements = Vec::new();
+    for row in 0..geometry.height {
+        let mut column = 0;
+        while column + 1 < geometry.width {
+            if !is_cap_pair(column, row) {
+                column += 1;
+                continue;
+            }
+            let start = column;
+            column += 2;
+            while column + 1 < geometry.width && is_cap_pair(column, row) {
+                column += 2;
+            }
+            placements.push(FacilityDividerCapPlacement {
+                column: start,
+                row,
+                width: column - start,
+            });
+        }
+    }
+    placements
+}
+
+fn facility_divider_stripe_uv(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    column: usize,
+    row: usize,
+) -> Result<[[f32; 2]; 4], TerrainMeshError> {
+    let stripe_index = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == 0x4d)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: column as u32,
+            row: row as u32,
+            tile_index: 0x4d,
+        })?;
+    let uv = geometry.uv(stripe_index % geometry.width, stripe_index / geometry.width);
+    Ok([[uv.0, uv.3], [uv.1, uv.3], [uv.1, uv.2], [uv.0, uv.2]])
+}
+
+fn append_facility_divider_network(
+    mesh: &mut TerrainMeshData,
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    if !crate::facility_divider::supports_map(map_id) {
+        return Ok(());
+    }
+    let find_tile = |tile_index| {
+        cells
+            .iter()
+            .position(|tile| tile.source.tile_index == tile_index)
+            .ok_or(TerrainMeshError::MissingGroundSample {
+                column: 0,
+                row: 0,
+                tile_index,
+            })
+    };
+    let ground = find_tile(crate::facility_divider::FLOOR_TILE)?;
+    let brown = find_tile(0x41)?;
+    let ground_uv = geometry.uv(ground % geometry.width, ground / geometry.width);
+    let brown_uv = geometry.uv(brown % geometry.width, brown / geometry.width);
+    let stripe_uv = facility_divider_stripe_uv(cells, geometry, 0, 0)?;
+    let mut occupied = vec![false; geometry.width * geometry.height];
+
+    for placement in facility_divider_placements(map_id, cells, geometry) {
+        for column in placement.column..placement.column + placement.width {
+            occupied[placement.row * geometry.width + column] = true;
+            occupied[(placement.row + 1) * geometry.width + column] = true;
+        }
+    }
+    for placement in facility_vertical_divider_placements(map_id, cells, geometry) {
+        for row in placement.row..placement.row + placement.height {
+            occupied[row * geometry.width + placement.column] = true;
+            occupied[row * geometry.width + placement.column + 1] = true;
+        }
+    }
+    for placement in facility_divider_cap_placements(map_id, cells, geometry) {
+        for column in placement.column..placement.column + placement.width {
+            occupied[placement.row * geometry.width + column] = true;
+        }
+    }
+
+    let wall_height = crate::facility_divider::WALL_HEIGHT;
+    for row in 0..geometry.height {
+        for column in 0..geometry.width {
+            let index = row * geometry.width + column;
+            if !occupied[index] {
+                continue;
+            }
+            claimed[index] = true;
+            let bounds = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [bounds.0, bounds.1, bounds.2, bounds.3],
+                0.0,
+                ground_uv,
+            );
+            let source = &cells[index].source;
+            let top_uv = if matches!(source.tile_index, 0x40..=0x42) {
+                geometry.uv(column, row)
+            } else if matches!(source.tile_index, 0x4c..=0x4e)
+                && row > 0
+                && occupied[(row - 1) * geometry.width + column]
+            {
+                geometry.uv(column, row - 1)
+            } else {
+                brown_uv
+            };
+            append_top_shaded(
+                &mut mesh.textured,
+                [bounds.0, bounds.1, bounds.2, bounds.3],
+                wall_height,
+                top_uv,
+                [0.9, 0.9, 0.9, 1.0],
+            );
+
+            let north_open = row == 0 || !occupied[(row - 1) * geometry.width + column];
+            let south_open =
+                row + 1 == geometry.height || !occupied[(row + 1) * geometry.width + column];
+            let west_open = column == 0 || !occupied[row * geometry.width + column - 1];
+            let east_open =
+                column + 1 == geometry.width || !occupied[row * geometry.width + column + 1];
+            for band in 0..2 {
+                let y0 = band as f32 * geometry.tile_height;
+                let y1 = y0 + geometry.tile_height;
+                if north_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.1, y0, bounds.2],
+                            [bounds.0, y0, bounds.2],
+                            [bounds.0, y1, bounds.2],
+                            [bounds.1, y1, bounds.2],
+                        ],
+                        [0.0, 0.0, -1.0],
+                        stripe_uv,
+                        [0.72, 0.72, 0.72, 1.0],
+                    );
+                }
+                if south_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.0, y0, bounds.3],
+                            [bounds.1, y0, bounds.3],
+                            [bounds.1, y1, bounds.3],
+                            [bounds.0, y1, bounds.3],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        stripe_uv,
+                        TEXTURED_SHADE,
+                    );
+                }
+                if west_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.0, y0, bounds.2],
+                            [bounds.0, y0, bounds.3],
+                            [bounds.0, y1, bounds.3],
+                            [bounds.0, y1, bounds.2],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        stripe_uv,
+                        [0.8, 0.8, 0.8, 1.0],
+                    );
+                }
+                if east_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.1, y0, bounds.3],
+                            [bounds.1, y0, bounds.2],
+                            [bounds.1, y1, bounds.2],
+                            [bounds.1, y1, bounds.3],
+                        ],
+                        [1.0, 0.0, 0.0],
+                        stripe_uv,
+                        TEXTURED_SHADE,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_rocket_base_wall_network(
+    mesh: &mut TerrainMeshData,
+    map_id: &str,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    claimed: &mut [bool],
+) {
+    let occupied: Vec<_> = cells
+        .iter()
+        .map(|tile| crate::rocket_base::is_wall_cell(map_id, &tile.source))
+        .collect();
+    let closes_edge: Vec<_> = cells
+        .iter()
+        .zip(&occupied)
+        .map(|(tile, occupied)| {
+            *occupied || crate::rocket_base::closes_wall_edge(map_id, &tile.source)
+        })
+        .collect();
+    if !occupied.iter().any(|occupied| *occupied) {
+        return;
+    }
+    let find_tile = |tile_index| {
+        cells
+            .iter()
+            .position(|tile| tile.source.tile_index == tile_index)
+    };
+    let (Some(floor), Some(upper), Some(lower)) = (
+        find_tile(crate::rocket_base::FLOOR_TILE),
+        find_tile(0x04),
+        find_tile(0x14),
+    ) else {
+        // A clipped frame without the complete authored wall vocabulary is
+        // insufficient evidence to fold it. Preserve the faithful flat map.
+        return;
+    };
+    let floor_uv = geometry.uv(floor % geometry.width, floor / geometry.width);
+    let default_upper_uv = geometry.uv(upper % geometry.width, upper / geometry.width);
+    let default_lower_uv = geometry.uv(lower % geometry.width, lower / geometry.width);
+    let face_uv = |(u0, u1, v0, v1)| [[u0, v1], [u1, v1], [u1, v0], [u0, v0]];
+    let wall_height = crate::rocket_base::WALL_HEIGHT;
+
+    for row in 0..geometry.height {
+        for column in 0..geometry.width {
+            let index = row * geometry.width + column;
+            if !occupied[index] {
+                continue;
+            }
+            claimed[index] = true;
+            let bounds = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [bounds.0, bounds.1, bounds.2, bounds.3],
+                0.0,
+                floor_uv,
+            );
+            let source = &cells[index].source;
+            let source_uv = geometry.uv(column, row);
+            let top_uv = if crate::rocket_base::is_upper_face(source) {
+                source_uv
+            } else {
+                default_upper_uv
+            };
+            append_top_shaded(
+                &mut mesh.textured,
+                [bounds.0, bounds.1, bounds.2, bounds.3],
+                wall_height,
+                top_uv,
+                [0.88, 0.88, 0.88, 1.0],
+            );
+
+            let north_open = row == 0 || !closes_edge[(row - 1) * geometry.width + column];
+            let south_open =
+                row + 1 == geometry.height || !closes_edge[(row + 1) * geometry.width + column];
+            let west_open = column == 0 || !closes_edge[row * geometry.width + column - 1];
+            let east_open =
+                column + 1 == geometry.width || !closes_edge[row * geometry.width + column + 1];
+            for band in 0..2 {
+                let y0 = band as f32 * geometry.tile_height;
+                let y1 = y0 + geometry.tile_height;
+                let horizontal_uv = if band == 0 {
+                    if crate::rocket_base::is_lower_face(source) {
+                        source_uv
+                    } else {
+                        default_lower_uv
+                    }
+                } else if crate::rocket_base::is_upper_face(source) {
+                    source_uv
+                } else {
+                    default_upper_uv
+                };
+                let vertical_uv = if matches!(source.tile_index, 0x0c | 0x0d) {
+                    source_uv
+                } else {
+                    horizontal_uv
+                };
+                let horizontal_uv = face_uv(horizontal_uv);
+                let vertical_uv = face_uv(vertical_uv);
+                if north_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.1, y0, bounds.2],
+                            [bounds.0, y0, bounds.2],
+                            [bounds.0, y1, bounds.2],
+                            [bounds.1, y1, bounds.2],
+                        ],
+                        [0.0, 0.0, -1.0],
+                        horizontal_uv,
+                        [0.72, 0.72, 0.72, 1.0],
+                    );
+                }
+                if south_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.0, y0, bounds.3],
+                            [bounds.1, y0, bounds.3],
+                            [bounds.1, y1, bounds.3],
+                            [bounds.0, y1, bounds.3],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        horizontal_uv,
+                        TEXTURED_SHADE,
+                    );
+                }
+                if west_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.0, y0, bounds.2],
+                            [bounds.0, y0, bounds.3],
+                            [bounds.0, y1, bounds.3],
+                            [bounds.0, y1, bounds.2],
+                        ],
+                        [-1.0, 0.0, 0.0],
+                        vertical_uv,
+                        [0.8, 0.8, 0.8, 1.0],
+                    );
+                }
+                if east_open {
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [bounds.1, y0, bounds.3],
+                            [bounds.1, y0, bounds.2],
+                            [bounds.1, y1, bounds.2],
+                            [bounds.1, y1, bounds.3],
+                        ],
+                        [1.0, 0.0, 0.0],
+                        vertical_uv,
+                        TEXTURED_SHADE,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn append_facility_divider(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: FacilityDividerPlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == crate::facility_divider::FLOOR_TILE)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: crate::facility_divider::FLOOR_TILE,
+        })?;
+    let ground_uv = geometry.uv(ground % geometry.width, ground / geometry.width);
+    let first = geometry.bounds(placement.column, placement.row);
+    let last = geometry.bounds(placement.column + placement.width - 1, placement.row);
+    let x0 = first.0;
+    let x1 = last.1;
+    let front_z = first.2 + geometry.tile_height * 2.0;
+    let rear_z = front_z - crate::facility_divider::WALL_DEPTH;
+    let wall_height = crate::facility_divider::WALL_HEIGHT;
+    let stripe_uv = facility_divider_stripe_uv(cells, geometry, placement.column, placement.row)?;
+
+    for column in placement.column..placement.column + placement.width {
+        let top_index = placement.row * geometry.width + column;
+        let face_index = (placement.row + 1) * geometry.width + column;
+        claimed[top_index] = true;
+        claimed[face_index] = true;
+        for row in [placement.row, placement.row + 1] {
+            let (gx0, gx1, gz0, gz1) = geometry.bounds(column, row);
+            append_top(&mut mesh.textured, [gx0, gx1, gz0, gz1], 0.0, ground_uv);
+        }
+
+        let (cx0, cx1, _, _) = geometry.bounds(column, placement.row);
+        let top_uv = geometry.uv(column, placement.row);
+        let depth_band_count =
+            (crate::facility_divider::WALL_DEPTH / geometry.tile_height) as usize;
+        for depth_band in 0..depth_band_count {
+            let z0 = rear_z + depth_band as f32 * geometry.tile_height;
+            append_top_shaded(
+                &mut mesh.textured,
+                [cx0, cx1, z0, z0 + geometry.tile_height],
+                wall_height,
+                top_uv,
+                [0.9, 0.9, 0.9, 1.0],
+            );
+        }
+        let band_count = (wall_height / geometry.tile_height) as usize;
+        for band in 0..band_count {
+            let y0 = band as f32 * geometry.tile_height;
+            let y1 = y0 + geometry.tile_height;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [cx0, y0, front_z],
+                    [cx1, y0, front_z],
+                    [cx1, y1, front_z],
+                    [cx0, y1, front_z],
+                ],
+                [0.0, 0.0, 1.0],
+                stripe_uv,
+                TEXTURED_SHADE,
+            );
+        }
+    }
+
+    for column in placement.column..placement.column + placement.width {
+        let (cx0, cx1, _, _) = geometry.bounds(column, placement.row);
+        let band_count = (wall_height / geometry.tile_height) as usize;
+        for band in 0..band_count {
+            let y0 = band as f32 * geometry.tile_height;
+            let y1 = y0 + geometry.tile_height;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [cx1, y0, rear_z],
+                    [cx0, y0, rear_z],
+                    [cx0, y1, rear_z],
+                    [cx1, y1, rear_z],
+                ],
+                [0.0, 0.0, -1.0],
+                stripe_uv,
+                [0.72, 0.72, 0.72, 1.0],
+            );
+        }
+    }
+    for (x, _column, normal) in [
+        (x0, placement.column, [-1.0, 0.0, 0.0]),
+        (x1, placement.column + placement.width - 1, [1.0, 0.0, 0.0]),
+    ] {
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x, 0.0, rear_z],
+                [x, 0.0, front_z],
+                [x, wall_height, front_z],
+                [x, wall_height, rear_z],
+            ],
+            normal,
+            stripe_uv,
+            [0.8, 0.8, 0.8, 1.0],
+        );
+    }
+    Ok(())
+}
+
+fn append_facility_vertical_divider(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: FacilityVerticalDividerPlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == crate::facility_divider::FLOOR_TILE)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: crate::facility_divider::FLOOR_TILE,
+        })?;
+    let ground_uv = geometry.uv(ground % geometry.width, ground / geometry.width);
+    let first = geometry.bounds(placement.column, placement.row);
+    let last = geometry.bounds(placement.column, placement.row + placement.height - 1);
+    let front_x = first.0 + geometry.tile_width * 2.0;
+    let rear_x = front_x - crate::facility_divider::WALL_DEPTH;
+    let z0 = first.2;
+    let z1 = last.3;
+    let wall_height = crate::facility_divider::WALL_HEIGHT;
+    let stripe_uv = facility_divider_stripe_uv(cells, geometry, placement.column, placement.row)?;
+
+    for row in placement.row..placement.row + placement.height {
+        for column in placement.column..placement.column + 2 {
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            let (cx0, cx1, cz0, cz1) = geometry.bounds(column, row);
+            append_top(&mut mesh.textured, [cx0, cx1, cz0, cz1], 0.0, ground_uv);
+        }
+        let (_, _, row_z0, row_z1) = geometry.bounds(placement.column, row);
+        let top_uv = geometry.uv(placement.column, row);
+        let depth_band_count = (crate::facility_divider::WALL_DEPTH / geometry.tile_width) as usize;
+        for depth_band in 0..depth_band_count {
+            let x0 = rear_x + depth_band as f32 * geometry.tile_width;
+            append_top_shaded(
+                &mut mesh.textured,
+                [x0, x0 + geometry.tile_width, row_z0, row_z1],
+                wall_height,
+                top_uv,
+                [0.9, 0.9, 0.9, 1.0],
+            );
+        }
+        for band in 0..2 {
+            let y0 = band as f32 * wall_height * 0.5;
+            let y1 = y0 + wall_height * 0.5;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [front_x, y0, row_z1],
+                    [front_x, y0, row_z0],
+                    [front_x, y1, row_z0],
+                    [front_x, y1, row_z1],
+                ],
+                [1.0, 0.0, 0.0],
+                stripe_uv,
+                TEXTURED_SHADE,
+            );
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [rear_x, y0, row_z0],
+                    [rear_x, y0, row_z1],
+                    [rear_x, y1, row_z1],
+                    [rear_x, y1, row_z0],
+                ],
+                [-1.0, 0.0, 0.0],
+                stripe_uv,
+                [0.72, 0.72, 0.72, 1.0],
+            );
+        }
+    }
+
+    for (z, _row, normal) in [
+        (z0, placement.row, [0.0, 0.0, -1.0]),
+        (z1, placement.row + placement.height - 1, [0.0, 0.0, 1.0]),
+    ] {
+        append_quad(
+            &mut mesh.textured,
+            [
+                [rear_x, 0.0, z],
+                [front_x, 0.0, z],
+                [front_x, wall_height, z],
+                [rear_x, wall_height, z],
+            ],
+            normal,
+            stripe_uv,
+            [0.8, 0.8, 0.8, 1.0],
+        );
+    }
+    Ok(())
+}
+
+fn append_facility_divider_cap(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: FacilityDividerCapPlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    let ground = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == crate::facility_divider::FLOOR_TILE)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: crate::facility_divider::FLOOR_TILE,
+        })?;
+    let ground_uv = geometry.uv(ground % geometry.width, ground / geometry.width);
+    let first = geometry.bounds(placement.column, placement.row);
+    let last = geometry.bounds(placement.column + placement.width - 1, placement.row);
+    let x0 = first.0;
+    let x1 = last.1;
+    let front_z = first.3;
+    let rear_z = front_z - crate::facility_divider::WALL_DEPTH;
+    let wall_height = crate::facility_divider::WALL_HEIGHT;
+    let stripe_uv = facility_divider_stripe_uv(cells, geometry, placement.column, placement.row)?;
+
+    for column in placement.column..placement.column + placement.width {
+        let index = placement.row * geometry.width + column;
+        claimed[index] = true;
+        let (cx0, cx1, cz0, cz1) = geometry.bounds(column, placement.row);
+        append_top(&mut mesh.textured, [cx0, cx1, cz0, cz1], 0.0, ground_uv);
+        let top_uv = geometry.uv(column, placement.row);
+        let depth_band_count =
+            (crate::facility_divider::WALL_DEPTH / geometry.tile_height) as usize;
+        for depth_band in 0..depth_band_count {
+            let z0 = rear_z + depth_band as f32 * geometry.tile_height;
+            append_top_shaded(
+                &mut mesh.textured,
+                [cx0, cx1, z0, z0 + geometry.tile_height],
+                wall_height,
+                top_uv,
+                [0.9, 0.9, 0.9, 1.0],
+            );
+        }
+    }
+
+    for column in placement.column..placement.column + placement.width {
+        let (cx0, cx1, _, _) = geometry.bounds(column, placement.row);
+        for band in 0..2 {
+            let y0 = band as f32 * geometry.tile_height;
+            let y1 = y0 + geometry.tile_height;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [cx0, y0, front_z],
+                    [cx1, y0, front_z],
+                    [cx1, y1, front_z],
+                    [cx0, y1, front_z],
+                ],
+                [0.0, 0.0, 1.0],
+                stripe_uv,
+                TEXTURED_SHADE,
+            );
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [cx1, y0, rear_z],
+                    [cx0, y0, rear_z],
+                    [cx0, y1, rear_z],
+                    [cx1, y1, rear_z],
+                ],
+                [0.0, 0.0, -1.0],
+                stripe_uv,
+                [0.72, 0.72, 0.72, 1.0],
+            );
+        }
+    }
+    for (x, _column, normal) in [
+        (x0, placement.column, [-1.0, 0.0, 0.0]),
+        (x1, placement.column + placement.width - 1, [1.0, 0.0, 0.0]),
+    ] {
+        for band in 0..2 {
+            let y0 = band as f32 * geometry.tile_height;
+            let y1 = y0 + geometry.tile_height;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x, y0, rear_z],
+                    [x, y0, front_z],
+                    [x, y1, front_z],
+                    [x, y1, rear_z],
+                ],
+                normal,
+                stripe_uv,
+                [0.8, 0.8, 0.8, 1.0],
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Classify a complete row-major source grid with the same group ownership
@@ -921,18 +4020,23 @@ pub fn audit_cell_coverage_on_map(
         origin_x: 0.0,
         origin_z: 0.0,
     };
-    let mut coverage: Vec<_> = cells
+    let mut audit_shapes: Vec<_> = cells
         .iter()
-        .map(|tile| match shape_for_source_on_map(map_id, &tile.source) {
+        .map(|tile| shape_for_source_on_map(map_id, &tile.source))
+        .collect();
+    resolve_rock_platform_tiers(&cells, &mut audit_shapes, width);
+    let mut coverage: Vec<_> = audit_shapes
+        .into_iter()
+        .map(|shape| match shape {
             CellShape::Flat => CellCoverageKind::Flat,
             CellShape::Water => CellCoverageKind::Water,
             CellShape::PlaneAt { .. } => CellCoverageKind::Plane,
             CellShape::Waterfall => CellCoverageKind::Waterfall,
             CellShape::Cutout { .. } => CellCoverageKind::Cutout,
-            CellShape::Relief { .. } => CellCoverageKind::Relief,
+            CellShape::Relief { .. } | CellShape::FloatingRelief { .. } => CellCoverageKind::Relief,
             CellShape::ShoreBand => CellCoverageKind::Shore,
             CellShape::RaisedTop { .. } => CellCoverageKind::Raised,
-            CellShape::RampNorth { .. } => CellCoverageKind::Ramp,
+            CellShape::RampNorth { .. } | CellShape::RampEast { .. } => CellCoverageKind::Ramp,
             CellShape::FacadeBand {
                 solid: SolidKind::Tree,
                 ..
@@ -941,6 +4045,37 @@ pub fn audit_cell_coverage_on_map(
             CellShape::LedgeBand { .. } => CellCoverageKind::Ledge,
         })
         .collect();
+    for (index, tile) in cells.iter().enumerate() {
+        if house_stair_local(map_id, &tile.source).is_some() {
+            coverage[index] = CellCoverageKind::Ramp;
+        }
+    }
+    for (index, tile) in cells.iter().enumerate() {
+        if crate::rocket_base::is_wall_cell(map_id, &tile.source) {
+            coverage[index] = CellCoverageKind::Raised;
+        }
+    }
+    for (column, row, course_width) in players_house::course_origins(&cells, &geometry)
+        .into_iter()
+        .chain(ordinary_house::course_origins(&cells, &geometry))
+    {
+        for local_row in 0..4 {
+            for local_column in 0..course_width {
+                let index = (row + local_row) * width + column + local_column;
+                if house_stair_local(map_id, &cells[index].source).is_none() {
+                    coverage[index] = CellCoverageKind::Facade;
+                }
+            }
+        }
+    }
+    for (column, row, course_width, _) in traditional_house::course_origins(&cells, &geometry) {
+        for local_row in 0..4 {
+            for local_column in 0..course_width {
+                coverage[(row + local_row) * width + column + local_column] =
+                    CellCoverageKind::Facade;
+            }
+        }
+    }
     for placement in outdoor_building_placements(&cells, &geometry) {
         for row in placement.row..placement.row + placement.height {
             for column in placement.column..placement.column + placement.width {
@@ -961,13 +4096,36 @@ pub fn audit_cell_coverage_on_map(
         Vec::new()
     };
     apply_grouped_card_coverage(&mut coverage, width, tree_cards, CellCoverageKind::Tree);
+    apply_grouped_card_coverage(
+        &mut coverage,
+        width,
+        cave_small_rock_placements(&cells, &geometry),
+        CellCoverageKind::Cutout,
+    );
+    for placement in diagonal_cave_corner_placements(&cells, &geometry) {
+        for row in placement.row..placement.row + 2 {
+            for column in placement.column..placement.column + 2 {
+                coverage[row * width + column] = CellCoverageKind::Ledge;
+            }
+        }
+    }
 
     let mut prop_cards = match map_id {
         "AzaleaGym" | "GoldenrodGym" => elite_four_gym_card_placements(map_id, &cells, &geometry),
         "HallOfFame" => hall_of_fame_console_placements(&cells, &geometry),
         "CeruleanGym" => cerulean_statue_placements(&cells, &geometry),
-        "VioletGym" | "MahoganyGym" => violet_gym_card_placements(map_id, &cells, &geometry),
-        "OlivineGym" => olivine_gym_boulder_placements(&cells, &geometry),
+        "FuchsiaGym" => fuchsia_statue_placements(map_id, &cells, &geometry),
+        "CeladonGym" => celadon_statue_placements(map_id, &cells, &geometry),
+        "VermilionGym" => vermilion_statue_placements(map_id, &cells, &geometry),
+        "ViridianGym" => viridian_statue_placements(map_id, &cells, &geometry),
+        "VioletGym" | "MahoganyGym" | "BlackthornGym1F" => {
+            violet_gym_card_placements(map_id, &cells, &geometry)
+        }
+        "OlivineGym" => {
+            let mut placements = olivine_gym_boulder_placements(&cells, &geometry);
+            placements.extend(olivine_gym_statue_placements(map_id, &cells, &geometry));
+            placements
+        }
         "SaffronGym" => saffron_gym_planter_placements(&cells, &geometry),
         map_id if crate::elite_four_room::supports_boulder_map(map_id) => {
             elite_four_room_boulder_placements(&cells, &geometry)
@@ -975,7 +4133,105 @@ pub fn audit_cell_coverage_on_map(
         _ => Vec::new(),
     };
     prop_cards.extend(ice_path_boulder_placements(&cells, &geometry));
+    prop_cards.extend(ice_path_edge_rock_placements(&cells, &geometry));
+    prop_cards.extend(ruins_statue_placements(&cells, &geometry));
+    prop_cards.extend(tower_statue_placements(&cells, &geometry));
+    prop_cards.extend(power_plant_plant_placements(map_id, &cells, &geometry));
+    prop_cards.extend(rocket_base_plant_placements(map_id, &cells, &geometry));
+    prop_cards.extend(mart_display_rack_placements(map_id, &cells, &geometry));
+    prop_cards.extend(pokecenter_pc_placements(map_id, &cells, &geometry));
+    prop_cards.extend(pokecom_workstation_placements(map_id, &cells, &geometry));
+    prop_cards.extend(pokecom_plant_placements(map_id, &cells, &geometry));
+    prop_cards.extend(pokecom_chair_placements(map_id, &cells, &geometry));
+    prop_cards.extend(park_bench_placements(&cells, &geometry));
+    prop_cards.extend(kanto_round_barrier_placements(&cells, &geometry));
+    prop_cards.extend(kanto_round_path_barrier_placements(&cells, &geometry));
+    prop_cards.extend(kanto_shoreline_round_barrier_placements(&cells, &geometry));
+    prop_cards.extend(ship_stool_placements(map_id, &cells, &geometry));
+    prop_cards.extend(ship_rack_placements(map_id, &cells, &geometry));
+    prop_cards.extend(ship_barrel_placements(map_id, &cells, &geometry));
+    prop_cards.extend(train_station_seat_placements(map_id, &cells, &geometry));
+    prop_cards.extend(train_station_planter_placements(map_id, &cells, &geometry));
+    prop_cards.extend(train_station_gate_placements(map_id, &cells, &geometry));
+    prop_cards.extend(house_plant_placements(&cells, &geometry));
+    prop_cards.extend(house_upright_fixture_placements(&cells, &geometry));
+    prop_cards.extend(house_bookcase_placements(&cells, &geometry));
+    prop_cards.extend(traditional_gift_shop_shelf_placements(
+        map_id, &cells, &geometry,
+    ));
+    prop_cards.extend(house_open_book_placements(&cells, &geometry));
+    prop_cards.extend(players_house_bookcase_placements(&cells, &geometry));
+    prop_cards.extend(players_house_upright_fixture_placements(&cells, &geometry));
+    prop_cards.extend(players_house_tv_placements(&cells, &geometry));
+    prop_cards.extend(players_house_console_placements(&cells, &geometry));
+    prop_cards.extend(players_house_bed_placements(&cells, &geometry));
+    prop_cards.extend(player_room_fixture_placements(&cells, &geometry));
+    prop_cards.extend(player_bed_placements(&cells, &geometry));
+    prop_cards.extend(traditional_house_radio_placements(&cells, &geometry));
+    prop_cards.extend(traditional_house_cushion_placements(&cells, &geometry));
+    prop_cards.extend(wise_trios_divider_placements(map_id, &cells, &geometry));
+    if map_id == "SoulHouse" {
+        prop_cards.extend(soul_house_bench_placements(&cells, &geometry));
+    }
     apply_grouped_card_coverage(&mut coverage, width, prop_cards, CellCoverageKind::Cutout);
+    for placement in mr_pokemon_work_counter_placements(map_id, &cells, &geometry) {
+        for row in placement.row..placement.row + placement.height {
+            for column in placement.column..placement.column + placement.width {
+                coverage[row * width + column] = CellCoverageKind::Raised;
+            }
+        }
+    }
+    for placement in house_display_table_placements(&cells, &geometry) {
+        for row in placement.row..placement.row + placement.height {
+            for column in placement.column..placement.column + placement.width {
+                coverage[row * width + column] = CellCoverageKind::Raised;
+            }
+        }
+    }
+    for placement in warehouse_crate_placements(map_id, &cells, &geometry) {
+        for row in placement.row..placement.row + placement.height {
+            for column in placement.column..placement.column + placement.width {
+                coverage[row * width + column] = CellCoverageKind::Raised;
+            }
+        }
+    }
+    for placement in house_furniture_placements(&cells, &geometry) {
+        for row in placement.row..placement.row + 2 {
+            for column in placement.column..placement.column + 2 {
+                coverage[row * width + column] = CellCoverageKind::Raised;
+            }
+        }
+    }
+    for placement in house_table_placements(&cells, &geometry) {
+        for row in placement.row..placement.row + 4 {
+            for column in placement.column..placement.column + 4 {
+                coverage[row * width + column] = CellCoverageKind::Raised;
+            }
+        }
+    }
+    if crate::casino::is_game_corner_map(map_id) || crate::cafe::is_cafe_map(map_id) {
+        for placement in casino_stool_placements(&cells, &geometry) {
+            for row in placement.row..placement.row + 2 {
+                for column in placement.column..placement.column + 2 {
+                    coverage[row * width + column] = CellCoverageKind::Cutout;
+                }
+            }
+        }
+    }
+    if crate::casino::is_game_corner_map(map_id) {
+        apply_grouped_card_coverage(
+            &mut coverage,
+            width,
+            casino_terminal_placements(&cells, &geometry),
+            CellCoverageKind::Cutout,
+        );
+        apply_grouped_card_coverage(
+            &mut coverage,
+            width,
+            casino_plant_placements(&cells, &geometry),
+            CellCoverageKind::Cutout,
+        );
+    }
     Ok(coverage)
 }
 
@@ -1025,8 +4281,10 @@ fn bank_column_runs(shapes: &[CellShape], geometry: &GridGeometry) -> Vec<Option
         let mut row = 0;
         while row < geometry.height {
             let index = row * geometry.width + column;
-            let is_bank = !matches!(shapes[index], CellShape::RampNorth { .. })
-                && shapes[index].solid_kind() == SolidKind::Bank
+            let is_bank = !matches!(
+                shapes[index],
+                CellShape::RampNorth { .. } | CellShape::RampEast { .. }
+            ) && shapes[index].solid_kind() == SolidKind::Bank
                 && shapes[index].surface_height(geometry.tile_height) > 0.0;
             if !is_bank {
                 row += 1;
@@ -1115,6 +4373,24 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     0.0,
                     false,
                 ),
+                ("johto", 0x61) => (
+                    tile.source.subtile_column % 2,
+                    tile.source.subtile_row % 2,
+                    2,
+                    2,
+                    0x05,
+                    0.0,
+                    false,
+                ),
+                ("johto", 0x5d) if tile.source.subtile_row < 2 => (
+                    tile.source.subtile_column % 2,
+                    tile.source.subtile_row,
+                    2,
+                    2,
+                    0x05,
+                    0.0,
+                    false,
+                ),
                 ("johto", 0x2a | 0x2c | 0x2d) if tile.source.subtile_row < 2 => (
                     tile.source.subtile_column % 2,
                     tile.source.subtile_row,
@@ -1160,6 +4436,35 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     0.0,
                     false,
                 ),
+                ("park", _) => {
+                    if let Some((local_column, local_row)) =
+                        crate::park::large_tree_local(&tile.source)
+                    {
+                        (
+                            local_column,
+                            local_row,
+                            4,
+                            4,
+                            crate::park::PARK_TREE_GROUND_TILE,
+                            0.0,
+                            false,
+                        )
+                    } else if let Some((_, local_column, local_row)) =
+                        crate::park::hedge_local(&tile.source)
+                    {
+                        (
+                            local_column,
+                            local_row,
+                            2,
+                            2,
+                            crate::park::PARK_TREE_GROUND_TILE,
+                            0.0,
+                            false,
+                        )
+                    } else {
+                        continue;
+                    }
+                }
                 ("kanto", _) if shape_for_source(&tile.source).solid_kind() == SolidKind::Tree => (
                     tile.source.subtile_column % 2,
                     tile.source.subtile_row % 2,
@@ -1215,6 +4520,13 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                     + column];
                 cell.source.tileset_id == tile.source.tileset_id
                     && (shape_for_source(&cell.source).solid_kind() == SolidKind::Tree
+                        || crate::park::large_tree_local(&cell.source).is_some()
+                        || crate::park::hedge_local(&tile.source).is_some_and(
+                            |(expected_kind, _, _)| {
+                                crate::park::hedge_local(&cell.source)
+                                    .is_some_and(|(kind, _, _)| kind == expected_kind)
+                            },
+                        )
                         || (cell.source.tileset_id.as_ref() == "johto"
                             && cell.source.metatile_id == 0x6a
                             && cell.source.subtile_column < 2)
@@ -1231,9 +4543,13 @@ fn complete_tree_placements(cells: &[&VisualTile], geometry: &GridGeometry) -> V
                 width,
                 height,
                 ground_tile_index,
+                ground_metatile_id: (tile.source.tileset_id.as_ref() == "park")
+                    .then_some(crate::park::PARK_TREE_GROUND_METATILE),
                 base_height,
                 rounded,
                 outline_mask: false,
+                remove_all_ground: false,
+                card_thickness: 0.0,
             });
         }
     }
@@ -1305,6 +4621,26 @@ fn outdoor_building_placements(
     }
 
     append_kanto_building_placements(&metatiles, geometry, &mut placements);
+    for (column, row) in johto_closed_mound_origins(cells, geometry.width, geometry.height) {
+        placements.push(BuildingPlacement {
+            column,
+            row,
+            width: 12,
+            height: 8,
+            roof_rows: 6,
+            ground_tile_index: 0x01,
+        });
+    }
+    for (column, row, width) in ice_path_plateau_origins(cells, geometry.width, geometry.height) {
+        placements.push(BuildingPlacement {
+            column,
+            row,
+            width,
+            height: 8,
+            roof_rows: 6,
+            ground_tile_index: 0x9a,
+        });
+    }
     // A facade row can itself resemble a shorter catalog template. Game
     // Corner is the clearest case: its $10/$17/$11 lower row was stamped a
     // second time as a shallow building, producing an L-shaped roof across
@@ -1336,6 +4672,387 @@ fn outdoor_building_placements(
     placements.sort_by_key(|placement| (placement.row, placement.column));
     placements.dedup();
     placements
+}
+
+fn johto_closed_mound_origins(
+    cells: &[&VisualTile],
+    width: usize,
+    height: usize,
+) -> Vec<(usize, usize)> {
+    let mut metatiles = HashMap::new();
+    for tile in cells {
+        if tile.source.tileset_id.as_ref() != "johto" {
+            continue;
+        }
+        let origin_column = tile.column as isize - tile.source.subtile_column as isize;
+        let origin_row = tile.row as isize - tile.source.subtile_row as isize;
+        if origin_column >= 0 && origin_row >= 0 {
+            metatiles
+                .entry((origin_column as usize, origin_row as usize))
+                .or_insert(tile.source.metatile_id);
+        }
+    }
+    let expected = [[0x6a, 0x70, 0x6b], [0x6c, 0x72, 0x6d]];
+    let mut origins = Vec::new();
+    for (&(column, row), &first) in &metatiles {
+        if first != expected[0][0] || column + 12 > width || row + 8 > height {
+            continue;
+        }
+        let complete = expected.iter().enumerate().all(|(block_row, ids)| {
+            ids.iter().enumerate().all(|(block_column, expected_id)| {
+                metatiles.get(&(column + block_column * 4, row + block_row * 4))
+                    == Some(expected_id)
+            })
+        });
+        if complete {
+            origins.push((column, row));
+        }
+    }
+    origins.sort_unstable();
+    origins.dedup();
+    origins
+}
+
+/// Ice Path's rock islands and mainland shelves use one variable-width,
+/// two-block-deep drawing. The north row is `$04 $05... $06`; the south row
+/// carries exact front, corner, and opening variants. Six source-tile rows
+/// form the cap and the final two form its front, matching the existing mound
+/// primitive without classifying any block in isolation.
+fn ice_path_plateau_origins(
+    cells: &[&VisualTile],
+    width: usize,
+    height: usize,
+) -> Vec<(usize, usize, usize)> {
+    let mut metatiles = HashMap::new();
+    for tile in cells {
+        if tile.source.tileset_id.as_ref() != "ice_path" {
+            continue;
+        }
+        let origin_column = tile.column as isize - tile.source.subtile_column as isize;
+        let origin_row = tile.row as isize - tile.source.subtile_row as isize;
+        if origin_column >= 0 && origin_row >= 0 {
+            metatiles
+                .entry((origin_column as usize, origin_row as usize))
+                .or_insert(tile.source.metatile_id);
+        }
+    }
+    let mut origins = Vec::new();
+    for (&(column, row), &first) in &metatiles {
+        if first != 0x04 || row + 8 > height {
+            continue;
+        }
+        for block_width in 2..=(width.saturating_sub(column) / 4) {
+            let last_column = column + (block_width - 1) * 4;
+            if metatiles.get(&(last_column, row)) != Some(&0x06)
+                || (1..block_width - 1)
+                    .any(|block| metatiles.get(&(column + block * 4, row)) != Some(&0x05))
+            {
+                continue;
+            }
+            let south: Vec<_> = (0..block_width)
+                .filter_map(|block| metatiles.get(&(column + block * 4, row + 4)).copied())
+                .collect();
+            let complete_south = south.len() == block_width
+                && matches!(south.last(), Some(0x0e | 0x3a))
+                && matches!(south.first(), Some(0x09 | 0x0c | 0x10))
+                && south.iter().all(|id| {
+                    matches!(
+                        id,
+                        0x09 | 0x0c | 0x0d | 0x0e | 0x10 | 0x11 | 0x12 | 0x3a | 0x3e
+                    )
+                });
+            if complete_south {
+                origins.push((column, row, block_width * 4));
+                break;
+            }
+        }
+    }
+    origins.sort_unstable();
+    origins.dedup();
+    origins
+}
+
+fn ice_path_closed_rock_mass_origins(
+    cells: &[&VisualTile],
+    width: usize,
+    height: usize,
+) -> Vec<(usize, usize)> {
+    let mut origins = Vec::new();
+    for tile in cells {
+        let Some((local_column, local_row)) = crate::ice_path::rock_mass_local(&tile.source) else {
+            continue;
+        };
+        let origin_column = tile.column as isize - isize::from(local_column);
+        let origin_row = tile.row as isize - isize::from(local_row);
+        if origin_column < 0
+            || origin_row < 0
+            || origin_column as usize + 4 > width
+            || origin_row as usize + 4 > height
+        {
+            continue;
+        }
+        let complete = (0..4).all(|row| {
+            (0..4).all(|column| {
+                let candidate =
+                    cells[(origin_row as usize + row) * width + origin_column as usize + column];
+                crate::ice_path::rock_mass_local(&candidate.source)
+                    == Some((column as u8, row as u8))
+                    && candidate.source.metatile_id == tile.source.metatile_id
+            })
+        });
+        if complete {
+            origins.push((origin_column as usize, origin_row as usize));
+        }
+    }
+    origins.sort_unstable();
+    origins.dedup();
+    origins
+}
+
+fn append_ice_path_closed_rock_mass(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    column: usize,
+    row: usize,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    const WIDTH: usize = 4;
+    const HEIGHT: usize = 4;
+    const CAP_ROWS: usize = 2;
+    let world_height = 12.0 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let batter = 2.0 * geometry.tile_width / SOURCE_TILE_HEIGHT;
+
+    let ground_index = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == crate::ice_path::CAVE_GROUND_TILE)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: column as u32,
+            row: row as u32,
+            tile_index: crate::ice_path::CAVE_GROUND_TILE,
+        })?;
+    let ground_uv = geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+    for local_row in 0..HEIGHT {
+        for local_column in 0..WIDTH {
+            let index = (row + local_row) * geometry.width + column + local_column;
+            claimed[index] = true;
+            let (x0, x1, z0, z1) = geometry.bounds(column + local_column, row + local_row);
+            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+        }
+    }
+
+    // The northern two source rows are the authored top. Preserve every
+    // source cell once on a single level plane; the southern two rows become
+    // the front face below rather than remaining duplicated on the floor.
+    for local_row in 0..CAP_ROWS {
+        for local_column in 0..WIDTH {
+            let (x0, x1, z0, z1) = geometry.bounds(column + local_column, row + local_row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                world_height,
+                geometry.uv(column + local_column, row + local_row),
+            );
+        }
+    }
+
+    let first = geometry.bounds(column, row);
+    let last = geometry.bounds(column + WIDTH - 1, row + CAP_ROWS - 1);
+    let x0 = first.0;
+    let x1 = last.1;
+    let north_z = first.2;
+    let front_z = last.3;
+    let face_band_height = world_height / (HEIGHT - CAP_ROWS) as f32;
+    for band in 0..HEIGHT - CAP_ROWS {
+        let top = world_height - band as f32 * face_band_height;
+        let bottom = top - face_band_height;
+        let top_batter = batter * (1.0 - top / world_height);
+        let bottom_batter = batter * (1.0 - bottom / world_height);
+        for local_column in 0..WIDTH {
+            let bounds = geometry.bounds(column + local_column, row + CAP_ROWS + band);
+            let left_top = bounds.0 - if local_column == 0 { top_batter } else { 0.0 };
+            let left_bottom = bounds.0
+                - if local_column == 0 {
+                    bottom_batter
+                } else {
+                    0.0
+                };
+            let right_top = bounds.1
+                + if local_column + 1 == WIDTH {
+                    top_batter
+                } else {
+                    0.0
+                };
+            let right_bottom = bounds.1
+                + if local_column + 1 == WIDTH {
+                    bottom_batter
+                } else {
+                    0.0
+                };
+            let (u0, u1, v0, v1) = geometry.uv(column + local_column, row + CAP_ROWS + band);
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [right_bottom, bottom, front_z + bottom_batter],
+                    [right_top, top, front_z + top_batter],
+                    [left_top, top, front_z + top_batter],
+                    [left_bottom, bottom, front_z + bottom_batter],
+                ],
+                Vec3::new(0.0, batter, world_height).normalize().to_array(),
+                [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+                TEXTURED_SHADE,
+            );
+        }
+    }
+
+    let side = solid_color(SolidKind::Rock, Direction::West);
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x0 - batter, 0.0, front_z + batter],
+            [x0, world_height, front_z],
+            [x0, world_height, north_z],
+            [x0 - batter, 0.0, north_z - batter],
+        ],
+        Vec3::new(-world_height, batter, 0.0).normalize().to_array(),
+        side,
+    );
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x1 + batter, 0.0, north_z - batter],
+            [x1, world_height, north_z],
+            [x1, world_height, front_z],
+            [x1 + batter, 0.0, front_z + batter],
+        ],
+        Vec3::new(world_height, batter, 0.0).normalize().to_array(),
+        solid_color(SolidKind::Rock, Direction::East),
+    );
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x0 - batter, 0.0, north_z - batter],
+            [x0, world_height, north_z],
+            [x1, world_height, north_z],
+            [x1 + batter, 0.0, north_z - batter],
+        ],
+        Vec3::new(0.0, batter, -world_height).normalize().to_array(),
+        solid_color(SolidKind::Rock, Direction::North),
+    );
+    Ok(())
+}
+
+fn append_ice_path_small_boulder(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    debug_assert_eq!((placement.width, placement.height), (2, 2));
+    let world_height = geometry.tile_height;
+    // Keep the flare inside one source pixel. A wider untextured wedge reads
+    // as a separate black diamond beside the boulder at the pitched camera.
+    let batter = 0.75 * geometry.tile_width / SOURCE_TILE_HEIGHT;
+    let ground_index = cells
+        .iter()
+        .position(|tile| tile.source.tile_index == placement.ground_tile_index)
+        .ok_or(TerrainMeshError::MissingGroundSample {
+            column: placement.column as u32,
+            row: placement.row as u32,
+            tile_index: placement.ground_tile_index,
+        })?;
+    let ground_uv = geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+    for local_row in 0..2 {
+        for local_column in 0..2 {
+            let index =
+                (placement.row + local_row) * geometry.width + placement.column + local_column;
+            claimed[index] = true;
+            let (x0, x1, z0, z1) =
+                geometry.bounds(placement.column + local_column, placement.row + local_row);
+            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+        }
+    }
+
+    // The upper native row is the boulder's cap; the lower native row is its
+    // front. This is one low trapezoid, not four pixel columns and not a
+    // zero-depth billboard.
+    for local_column in 0..2 {
+        let (x0, x1, z0, z1) = geometry.bounds(placement.column + local_column, placement.row);
+        append_top(
+            &mut mesh.textured,
+            [x0, x1, z0, z1],
+            world_height,
+            geometry.uv(placement.column + local_column, placement.row),
+        );
+    }
+    let first = geometry.bounds(placement.column, placement.row);
+    let last = geometry.bounds(placement.column + 1, placement.row);
+    let x0 = first.0;
+    let x1 = last.1;
+    let north_z = first.2;
+    let front_z = first.3;
+    for local_column in 0..2 {
+        let bounds = geometry.bounds(placement.column + local_column, placement.row + 1);
+        let left_bottom = bounds.0 - if local_column == 0 { batter } else { 0.0 };
+        let right_bottom = bounds.1 + if local_column == 1 { batter } else { 0.0 };
+        let (u0, u1, v0, v1) = geometry.uv(placement.column + local_column, placement.row + 1);
+        append_quad(
+            &mut mesh.textured,
+            [
+                [right_bottom, 0.0, front_z + batter],
+                [bounds.1, world_height, front_z],
+                [bounds.0, world_height, front_z],
+                [left_bottom, 0.0, front_z + batter],
+            ],
+            Vec3::new(0.0, batter, world_height).normalize().to_array(),
+            [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+            TEXTURED_SHADE,
+        );
+    }
+    // Pull the side colors from the drawing's own outermost texel columns.
+    // This is the same edge-strip principle used by the reference renderer:
+    // recognizable artwork stays on the cap/front and narrow generated sides
+    // inherit its palette instead of becoming unrelated solid-color fins.
+    let west_uv = geometry.uv(placement.column, placement.row);
+    let east_uv = geometry.uv(placement.column + 1, placement.row);
+    let west_strip = (west_uv.1 - west_uv.0) / SOURCE_TILE_HEIGHT;
+    let east_strip = (east_uv.1 - east_uv.0) / SOURCE_TILE_HEIGHT;
+    append_quad(
+        &mut mesh.textured,
+        [
+            [x0 - batter, 0.0, front_z + batter],
+            [x0, world_height, front_z],
+            [x0, world_height, north_z],
+            [x0 - batter, 0.0, north_z - batter],
+        ],
+        Vec3::new(-world_height, batter, 0.0).normalize().to_array(),
+        [
+            [west_uv.0 + west_strip, west_uv.3],
+            [west_uv.0 + west_strip, west_uv.2],
+            [west_uv.0, west_uv.2],
+            [west_uv.0, west_uv.3],
+        ],
+        TEXTURED_SHADE,
+    );
+    append_quad(
+        &mut mesh.textured,
+        [
+            [x1 + batter, 0.0, north_z - batter],
+            [x1, world_height, north_z],
+            [x1, world_height, front_z],
+            [x1 + batter, 0.0, front_z + batter],
+        ],
+        Vec3::new(world_height, batter, 0.0).normalize().to_array(),
+        [
+            [east_uv.1 - east_strip, east_uv.2],
+            [east_uv.1 - east_strip, east_uv.2],
+            [east_uv.1, east_uv.3],
+            [east_uv.1, east_uv.3],
+        ],
+        TEXTURED_SHADE,
+    );
+    Ok(())
 }
 
 fn append_kanto_building_placements(
@@ -1399,6 +5116,37 @@ fn append_kanto_building_placements(
                     })
                 {
                     add(x, y, width_blocks, 2, 4);
+                    break;
+                }
+
+                // Celadon Department Store combines the ordinary
+                // $20/$54*/$21 roof cap with repeated rounded window
+                // courses before its $37/$3a*/$73 entrance course.  The
+                // rounded-course detector below cannot own the cap above
+                // it, which left that roof artwork painted flat behind the
+                // tower.  Claim the complete landmark from its real cap and
+                // keep only that first metatile row top-facing.
+                let rounded_row_matches = |candidate_y: isize| {
+                    at(x, candidate_y) == Some(0x68)
+                        && at(last_x, candidate_y) == Some(0x69)
+                        && (1..width_blocks - 1)
+                            .all(|column| at(x + (column * 4) as isize, candidate_y) == Some(0x7f))
+                };
+                let mut rounded_rows = 0;
+                while rounded_row_matches(y + ((rounded_rows + 1) * 4) as isize) {
+                    rounded_rows += 1;
+                }
+                if rounded_rows == 0 {
+                    continue;
+                }
+                let entrance_y = y + ((rounded_rows + 1) * 4) as isize;
+                if at(x, entrance_y) == Some(0x37)
+                    && matches!(at(last_x, entrance_y), Some(0x73 | 0x7e))
+                    && (1..width_blocks - 1).all(|column| {
+                        matches!(at(x + (column * 4) as isize, entrance_y), Some(0x3a | 0x7d))
+                    })
+                {
+                    add(x, y, width_blocks, rounded_rows + 2, 4);
                     break;
                 }
             }
@@ -1525,11 +5273,72 @@ fn append_grouped_tree(
     placement: TreePlacement,
     claimed: &mut [bool],
 ) -> Result<(), TerrainMeshError> {
+    append_grouped_tree_scaled(
+        mesh, images, cells, shapes, geometry, placement, claimed, 1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_grouped_tree_scaled(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+    height_scale: f32,
+) -> Result<(), TerrainMeshError> {
+    append_grouped_tree_scaled_inner(
+        mesh,
+        images,
+        cells,
+        shapes,
+        geometry,
+        placement,
+        claimed,
+        height_scale,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_grouped_tree_overlay(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    append_grouped_tree_scaled_inner(
+        mesh, images, cells, shapes, geometry, placement, claimed, 1.0, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_grouped_tree_scaled_inner(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+    height_scale: f32,
+    replace_source_surface: bool,
+) -> Result<(), TerrainMeshError> {
     let ground_index = authored_surface_cell(
         cells,
         shapes,
         placement.ground_tile_index,
-        placement.base_height,
+        placement.ground_metatile_id,
+        if replace_source_surface {
+            placement.base_height
+        } else {
+            0.0
+        },
         geometry.tile_height,
     )
     .ok_or(TerrainMeshError::MissingGroundSample {
@@ -1593,23 +5402,65 @@ fn append_grouped_tree(
             .map(|(index, pixel)| equals_ground[index] || corner_colors.contains(pixel))
             .collect()
     };
-    let removable_ground =
-        boundary_connected_mask(pixel_width, pixel_height, &background_candidates);
-    let solid_pixels: Vec<_> = removable_ground.into_iter().map(|ground| !ground).collect();
+    let removable_ground = if placement.remove_all_ground {
+        equals_ground
+    } else {
+        boundary_connected_mask(pixel_width, pixel_height, &background_candidates)
+    };
+    let mut solid_pixels: Vec<_> = removable_ground.into_iter().map(|ground| !ground).collect();
+    // Scaled Game Corner cabinets are painted over palette-shifted aisle
+    // tiles, so equality with the standalone floor sample cannot remove the
+    // grid reliably. The vivid pink/yellow/orange cabinet face provides an
+    // exact authored crop; retain its bounding casing and discard everything
+    // outside it before standing the sprite up.
+    if height_scale > 1.0 {
+        for cell_y in 0..placement.height {
+            for cell_x in 0..placement.width {
+                let px0 = cell_x * SOURCE_TILE_PIXELS;
+                let py0 = cell_y * SOURCE_TILE_PIXELS;
+                let mut bounds = None::<(usize, usize, usize, usize)>;
+                for py in py0..py0 + SOURCE_TILE_PIXELS {
+                    for px in px0..px0 + SOURCE_TILE_PIXELS {
+                        let [r, g, b, _] = drawing[py * pixel_width + px];
+                        let vivid = r.max(g).max(b).saturating_sub(r.min(g).min(b)) > 72
+                            && r.max(g).max(b) > 160;
+                        if vivid {
+                            bounds = Some(match bounds {
+                                Some((min_x, max_x, min_y, max_y)) => {
+                                    (min_x.min(px), max_x.max(px), min_y.min(py), max_y.max(py))
+                                }
+                                None => (px, px, py, py),
+                            });
+                        }
+                    }
+                }
+                if let Some((min_x, max_x, min_y, max_y)) = bounds {
+                    for py in py0..py0 + SOURCE_TILE_PIXELS {
+                        for px in px0..px0 + SOURCE_TILE_PIXELS {
+                            solid_pixels[py * pixel_width + px] =
+                                px >= min_x && px <= max_x && py >= min_y && py <= max_y;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     for local_row in 0..placement.height {
         for local_column in 0..placement.width {
             let column = placement.column + local_column;
             let row = placement.row + local_row;
             let index = row * geometry.width + column;
-            claimed[index] = true;
-            let (x0, x1, z0, z1) = geometry.bounds(column, row);
-            append_top(
-                &mut mesh.textured,
-                [x0, x1, z0, z1],
-                placement.base_height,
-                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
-            );
+            if replace_source_surface {
+                claimed[index] = true;
+                let (x0, x1, z0, z1) = geometry.bounds(column, row);
+                append_top(
+                    &mut mesh.textured,
+                    [x0, x1, z0, z1],
+                    placement.base_height,
+                    geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+                );
+            }
         }
     }
 
@@ -1617,7 +5468,7 @@ fn append_grouped_tree(
     let x1 = x0 + placement.width as f32 * geometry.tile_width;
     let plane_z =
         geometry.origin_z + (placement.row + placement.height) as f32 * geometry.tile_height;
-    let object_height = placement.height as f32 * geometry.tile_height;
+    let object_height = placement.height as f32 * geometry.tile_height * height_scale;
     let crown_height = placement.base_height + object_height;
     if placement.rounded {
         append_rounded_tree_hull(
@@ -1636,6 +5487,15 @@ fn append_grouped_tree(
     // produced huge lumpy masses. Stand the complete, background-masked
     // drawing upright at its feet instead: one source pixel maps to one world
     // pixel and the terrain/depth buffer still occludes the card naturally.
+    let card_cos = std::f32::consts::FRAC_1_SQRT_2;
+    let card_sin = std::f32::consts::FRAC_1_SQRT_2;
+    let solid_at = |x: isize, y: isize| {
+        x >= 0
+            && y >= 0
+            && x < pixel_width as isize
+            && y < pixel_height as isize
+            && solid_pixels[y as usize * pixel_width + x as usize]
+    };
     for pixel_y in 0..pixel_height {
         for pixel_x in 0..pixel_width {
             if !solid_pixels[pixel_y * pixel_width + pixel_x] {
@@ -1647,8 +5507,6 @@ fn append_grouped_tree(
             // authored foot line. Leaving it world-vertical foreshortens a
             // two-tile tree until it reads as a one-tile shrub. This preserves
             // one source pixel per displayed pixel without stretching it.
-            let card_cos = std::f32::consts::FRAC_1_SQRT_2;
-            let card_sin = std::f32::consts::FRAC_1_SQRT_2;
             let local_top = object_height - pixel_y as f32 * object_height / pixel_height as f32;
             let local_bottom =
                 object_height - (pixel_y + 1) as f32 * object_height / pixel_height as f32;
@@ -1677,6 +5535,59 @@ fn append_grouped_tree(
                 [[pu1, pv1], [pu1, pv0], [pu0, pv0], [pu0, pv1]],
                 TEXTURED_SHADE,
             );
+            if placement.card_thickness > 0.0 {
+                let dy = card_sin * placement.card_thickness;
+                let dz = card_cos * placement.card_thickness;
+                let back = |p: [f32; 3]| [p[0], p[1] - dy, p[2] - dz];
+                let front_bl = [world_x0, world_y0, world_z0];
+                let front_br = [world_x1, world_y0, world_z0];
+                let front_tr = [world_x1, world_y1, world_z1];
+                let front_tl = [world_x0, world_y1, world_z1];
+                let shade = [0.52, 0.52, 0.52, 1.0];
+                append_solid_quad(
+                    &mut mesh.solid,
+                    [
+                        back(front_br),
+                        back(front_bl),
+                        back(front_tl),
+                        back(front_tr),
+                    ],
+                    [0.0, -card_sin, -card_cos],
+                    shade,
+                );
+                if !solid_at(pixel_x as isize - 1, pixel_y as isize) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [front_bl, back(front_bl), back(front_tl), front_tl],
+                        [-1.0, 0.0, 0.0],
+                        shade,
+                    );
+                }
+                if !solid_at(pixel_x as isize + 1, pixel_y as isize) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [front_tr, back(front_tr), back(front_br), front_br],
+                        [1.0, 0.0, 0.0],
+                        shade,
+                    );
+                }
+                if !solid_at(pixel_x as isize, pixel_y as isize - 1) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [front_tl, back(front_tl), back(front_tr), front_tr],
+                        [0.0, card_cos, -card_sin],
+                        shade,
+                    );
+                }
+                if !solid_at(pixel_x as isize, pixel_y as isize + 1) {
+                    append_solid_quad(
+                        &mut mesh.solid,
+                        [front_br, back(front_br), back(front_bl), front_bl],
+                        [0.0, -card_cos, card_sin],
+                        shade,
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -1829,11 +5740,37 @@ fn append_rounded_tree_hull(
     }
 }
 
+fn is_trapezoid_mound_placement(
+    cells: &[&VisualTile],
+    geometry: &GridGeometry,
+    placement: BuildingPlacement,
+) -> bool {
+    let source = &cells[placement.row * geometry.width + placement.column].source;
+    let kanto = placement.width == 16
+        && placement.height == 8
+        && placement.roof_rows == 6
+        && source.tileset_id.as_ref() == "kanto"
+        && source.metatile_id == 0x3e;
+    let johto = placement.width == 12
+        && placement.height == 8
+        && placement.roof_rows == 6
+        && source.tileset_id.as_ref() == "johto"
+        && source.metatile_id == 0x6a;
+    let ice_path = placement.width >= 12
+        && placement.width % 4 == 0
+        && placement.height == 8
+        && placement.roof_rows == 6
+        && source.tileset_id.as_ref() == "ice_path"
+        && source.metatile_id == 0x04;
+    kanto || johto || ice_path
+}
+
 fn append_pixel_building(
     mesh: &mut TerrainMeshData,
     images: &TerrainImageSamples,
     cells: &[&VisualTile],
     geometry: &GridGeometry,
+    map_id: &str,
     placement: BuildingPlacement,
     claimed: &mut [bool],
 ) -> Result<(), TerrainMeshError> {
@@ -1893,15 +5830,15 @@ fn append_pixel_building(
     let inside: Vec<_> = outside.into_iter().map(|outside| !outside).collect();
     let pixel_x_size = geometry.tile_width / SOURCE_TILE_PIXELS as f32;
     let pixel_z_size = geometry.tile_height / SOURCE_TILE_PIXELS as f32;
-    let mut wall_height = (pixel_height - roof_pixels) as f32 * pixel_z_size;
+    let wall_course_height = (pixel_height - roof_pixels) as f32 * pixel_z_size;
     let (building_x0, _, building_z0, _) = geometry.bounds(placement.column, placement.row);
-    let tall_lighthouse = placement.width == 8
-        && placement.height == 28
-        && placement.roof_rows == 8
-        && cells[placement.row * geometry.width + placement.column]
-            .source
-            .metatile_id
-            == 0x08;
+    let lighthouse_depth = lighthouse_depth_pixels(
+        placement.width,
+        placement.height,
+        placement.roof_rows,
+        &cells[placement.row * geometry.width + placement.column].source,
+    );
+    let tall_lighthouse = lighthouse_depth.is_some();
     let kanto_cliff_mound = placement.width == 16
         && placement.height == 8
         && placement.roof_rows == 6
@@ -1914,6 +5851,32 @@ fn append_pixel_building(
             .source
             .metatile_id
             == 0x3e;
+    let johto_closed_mound = placement.width == 12
+        && placement.height == 8
+        && placement.roof_rows == 6
+        && cells[placement.row * geometry.width + placement.column]
+            .source
+            .tileset_id
+            .as_ref()
+            == "johto"
+        && cells[placement.row * geometry.width + placement.column]
+            .source
+            .metatile_id
+            == 0x6a;
+    let ice_path_plateau = placement.width >= 12
+        && placement.width % 4 == 0
+        && placement.height == 8
+        && placement.roof_rows == 6
+        && cells[placement.row * geometry.width + placement.column]
+            .source
+            .tileset_id
+            .as_ref()
+            == "ice_path"
+        && cells[placement.row * geometry.width + placement.column]
+            .source
+            .metatile_id
+            == 0x04;
+    let cliff_mound = kanto_cliff_mound || johto_closed_mound || ice_path_plateau;
     let burned_tower_roof = burned_tower_roof_style(
         placement.width,
         placement.height,
@@ -1921,6 +5884,14 @@ fn append_pixel_building(
         &cells[placement.row * geometry.width + placement.column].source,
     );
     let first_building_source = &cells[placement.row * geometry.width + placement.column].source;
+    let tower_storeys = tin_tower_storeys(
+        map_id,
+        placement.width,
+        placement.height,
+        placement.roof_rows,
+        first_building_source,
+    );
+    let mut wall_height = wall_course_height * tower_storeys as f32;
     let game_corner_box = is_goldenrod_game_corner(cells, geometry, placement);
     let kanto_plan_roof = first_building_source.tileset_id.as_ref() == "kanto"
         && matches!(first_building_source.metatile_id, 0x0c | 0x20);
@@ -1938,8 +5909,8 @@ fn append_pixel_building(
     let traditional_gable =
         uses_center_ridge_roof(placement.height, placement.roof_rows, first_building_source);
     let gabled_roof = traditional_gable;
-    if kanto_cliff_mound {
-        wall_height += 8.0;
+    if cliff_mound {
+        wall_height = crate::cave::TRAPEZOID_MOUND_HEIGHT * pixel_z_size;
     }
     // The visible doorway must remain on the drawing's original south edge:
     // gameplay warps and actor feet are authored against that exact edge.
@@ -1953,6 +5924,8 @@ fn append_pixel_building(
     // warps, actors, or the visible doorway south across the map.
     let roof_depth_pixels = if let Some(style) = burned_tower_roof {
         style.depth_pixels
+    } else if let Some(depth_pixels) = lighthouse_depth {
+        depth_pixels
     } else {
         // Keep the footprint compact enough for Crystal's dense town layout:
         // use the authored roof band as depth. Full drawing-height footprints
@@ -1984,8 +5957,9 @@ fn append_pixel_building(
         .last()
         .copied()
         .unwrap_or(pixel_width.saturating_sub(1));
-    let inset_house_walls = !tall_lighthouse
-        && !kanto_cliff_mound
+    let inset_house_walls = tower_storeys == 1
+        && !tall_lighthouse
+        && !cliff_mound
         && burned_tower_roof.is_none()
         && !straight_modern_facade;
     let body_left = if inset_house_walls {
@@ -2053,97 +6027,110 @@ fn append_pixel_building(
             darkest,
         );
         let recess_depth = pixel_z_size;
-        for y in roof_pixels..pixel_height {
-            for x in 0..pixel_width {
-                // Background flooding is valid for discovering a roof's outer
-                // silhouette, but not for a facade: Crystal commonly paints pale
-                // siding with the same palette entry as the surrounding ground.
-                // Dropping those pixels hollowed the Game Corner and reduced the
-                // repeated $12/$13 houses to roof-like fragments. A catalogued
-                // building owns its complete facade rectangle; only explicitly
-                // framed panes are recessed below that plane.
-                if inset_house_walls && !(body_left..=body_right).contains(&x) {
-                    continue;
-                }
-                let x0 = building_x0 + x as f32 * pixel_x_size;
-                let x1 = x0 + pixel_x_size;
-                let top = (pixel_height - y) as f32 * pixel_z_size * facade_height_scale;
-                let bottom = top - pixel_z_size * facade_height_scale;
-                let front_z = facade_z
-                    - recessed[y * pixel_width + x]
-                        .then_some(recess_depth)
-                        .unwrap_or(0.0);
-                append_quad(
-                    &mut mesh.textured,
-                    [
-                        [x1, bottom, front_z],
-                        [x1, top, front_z],
-                        [x0, top, front_z],
-                        [x0, bottom, front_z],
-                    ],
-                    [0.0, 0.0, 1.0],
-                    source_pixel_uv(geometry, placement, x, y, true),
-                    TEXTURED_SHADE,
-                );
-                if recessed[y * pixel_width + x] {
-                    let open = |nx: isize, ny: isize| {
-                        nx < 0
-                            || ny < roof_pixels as isize
-                            || nx >= pixel_width as isize
-                            || ny >= pixel_height as isize
-                            || !recessed[ny as usize * pixel_width + nx as usize]
+        for storey in 0..tower_storeys {
+            for y in roof_pixels..pixel_height {
+                for x in 0..pixel_width {
+                    // Background flooding is valid for discovering a roof's outer
+                    // silhouette, but not for a facade: Crystal commonly paints pale
+                    // siding with the same palette entry as the surrounding ground.
+                    // Dropping those pixels hollowed the Game Corner and reduced the
+                    // repeated $12/$13 houses to roof-like fragments. A catalogued
+                    // building owns its complete facade rectangle; only explicitly
+                    // framed panes are recessed below that plane.
+                    if inset_house_walls && !(body_left..=body_right).contains(&x) {
+                        continue;
+                    }
+                    let x0 = building_x0 + x as f32 * pixel_x_size;
+                    let x1 = x0 + pixel_x_size;
+                    let top = storey as f32 * wall_course_height
+                        + (pixel_height - y) as f32 * pixel_z_size * facade_height_scale;
+                    let bottom = top - pixel_z_size * facade_height_scale;
+                    let source_x = if storey > 0 && tower_storeys > 1 {
+                        tin_tower_upper_source_x(pixel_width, x)
+                    } else {
+                        x
                     };
-                    if open(x as isize - 1, y as isize) {
-                        append_solid_quad(
-                            &mut mesh.solid,
-                            [
-                                [x0, bottom, facade_z],
-                                [x0, top, facade_z],
-                                [x0, top, front_z],
-                                [x0, bottom, front_z],
-                            ],
-                            [1.0, 0.0, 0.0],
-                            solid_color(SolidKind::Building, Direction::West),
-                        );
-                    }
-                    if open(x as isize + 1, y as isize) {
-                        append_solid_quad(
-                            &mut mesh.solid,
-                            [
-                                [x1, bottom, front_z],
-                                [x1, top, front_z],
-                                [x1, top, facade_z],
-                                [x1, bottom, facade_z],
-                            ],
-                            [-1.0, 0.0, 0.0],
-                            solid_color(SolidKind::Building, Direction::East),
-                        );
-                    }
-                    if open(x as isize, y as isize - 1) {
-                        append_solid_quad(
-                            &mut mesh.solid,
-                            [
-                                [x0, top, front_z],
-                                [x1, top, front_z],
-                                [x1, top, facade_z],
-                                [x0, top, facade_z],
-                            ],
-                            [0.0, -1.0, 0.0],
-                            solid_color(SolidKind::Building, Direction::North),
-                        );
-                    }
-                    if open(x as isize, y as isize + 1) {
-                        append_solid_quad(
-                            &mut mesh.solid,
-                            [
-                                [x0, bottom, facade_z],
-                                [x1, bottom, facade_z],
-                                [x1, bottom, front_z],
-                                [x0, bottom, front_z],
-                            ],
-                            [0.0, 1.0, 0.0],
-                            solid_color(SolidKind::Building, Direction::South),
-                        );
+                    let is_recessed = recessed[y * pixel_width + source_x];
+                    let front_z = facade_z - is_recessed.then_some(recess_depth).unwrap_or(0.0);
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [x1, bottom, front_z],
+                            [x1, top, front_z],
+                            [x0, top, front_z],
+                            [x0, bottom, front_z],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        source_pixel_uv(geometry, placement, source_x, y, true),
+                        TEXTURED_SHADE,
+                    );
+                    if is_recessed {
+                        let open = |nx: isize, ny: isize| {
+                            nx < 0
+                                || ny < roof_pixels as isize
+                                || nx >= pixel_width as isize
+                                || ny >= pixel_height as isize
+                                || {
+                                    let neighbor_x = if storey > 0 && tower_storeys > 1 {
+                                        tin_tower_upper_source_x(pixel_width, nx as usize)
+                                    } else {
+                                        nx as usize
+                                    };
+                                    !recessed[ny as usize * pixel_width + neighbor_x]
+                                }
+                        };
+                        if open(x as isize - 1, y as isize) {
+                            append_solid_quad(
+                                &mut mesh.solid,
+                                [
+                                    [x0, bottom, facade_z],
+                                    [x0, top, facade_z],
+                                    [x0, top, front_z],
+                                    [x0, bottom, front_z],
+                                ],
+                                [1.0, 0.0, 0.0],
+                                solid_color(SolidKind::Building, Direction::West),
+                            );
+                        }
+                        if open(x as isize + 1, y as isize) {
+                            append_solid_quad(
+                                &mut mesh.solid,
+                                [
+                                    [x1, bottom, front_z],
+                                    [x1, top, front_z],
+                                    [x1, top, facade_z],
+                                    [x1, bottom, facade_z],
+                                ],
+                                [-1.0, 0.0, 0.0],
+                                solid_color(SolidKind::Building, Direction::East),
+                            );
+                        }
+                        if open(x as isize, y as isize - 1) {
+                            append_solid_quad(
+                                &mut mesh.solid,
+                                [
+                                    [x0, top, front_z],
+                                    [x1, top, front_z],
+                                    [x1, top, facade_z],
+                                    [x0, top, facade_z],
+                                ],
+                                [0.0, -1.0, 0.0],
+                                solid_color(SolidKind::Building, Direction::North),
+                            );
+                        }
+                        if open(x as isize, y as isize + 1) {
+                            append_solid_quad(
+                                &mut mesh.solid,
+                                [
+                                    [x0, bottom, facade_z],
+                                    [x1, bottom, facade_z],
+                                    [x1, bottom, front_z],
+                                    [x0, bottom, front_z],
+                                ],
+                                [0.0, 1.0, 0.0],
+                                solid_color(SolidKind::Building, Direction::South),
+                            );
+                        }
                     }
                 }
             }
@@ -2157,7 +6144,7 @@ fn append_pixel_building(
     // into the same triangular prism.
     let roof_slab_pixels = if let Some(style) = burned_tower_roof {
         style.slab_pixels
-    } else if kanto_cliff_mound {
+    } else if cliff_mound {
         0
     } else {
         roof_pixels.min(4)
@@ -2167,7 +6154,7 @@ fn append_pixel_building(
     let roof_rise = roof_pixels as f32 * pixel_z_size;
     let pitched_height_at_depth =
         |depth: f32| gabled_roof_height(wall_height, roof_rise, depth, roof_depth_pixels as f32);
-    if kanto_cliff_mound {
+    if cliff_mound {
         append_kanto_cliff_cap(
             mesh,
             geometry,
@@ -2223,7 +6210,7 @@ fn append_pixel_building(
                 let source_y = roof_source_row(depth_pixel, roof_depth_pixels, roof_pixels)
                     .max(roof_top[x])
                     .min(roof_pixels - 1);
-                if kanto_cliff_mound && !inside[source_y * pixel_width + x] {
+                if cliff_mound && !inside[source_y * pixel_width + x] {
                     continue;
                 }
                 if battle_tower_landmark && !inside[source_y * pixel_width + x] {
@@ -2316,7 +6303,7 @@ fn append_pixel_building(
         }
     }
 
-    if !kanto_cliff_mound {
+    if !cliff_mound {
         // Close the underside of the eaves created by the inset house body.
         // Without these two narrow soffits the roof overhang exposes the sky
         // between its outer fascia and the side wall—the visible corner gap
@@ -2374,52 +6361,61 @@ fn append_pixel_building(
                 solid_color(SolidKind::Building, Direction::East),
             );
         } else {
-            for source_y in roof_pixels..pixel_height {
-                let west_source_x = facade_side_course_x(
-                    &inside,
-                    &luminance,
-                    pixel_width,
-                    source_y,
-                    darkest,
-                    false,
-                );
-                let east_source_x =
-                    facade_side_course_x(&inside, &luminance, pixel_width, source_y, darkest, true);
-                let y_top = (pixel_height - source_y) as f32 * pixel_z_size;
-                let y_bottom = y_top - pixel_z_size;
-                for depth_pixel in 0..roof_depth_pixels {
-                    let z0 = roof_back_z + depth_pixel as f32 * pixel_z_size;
-                    let z1 = z0 + pixel_z_size;
-                    // A facade side is the drawing's visible edge carried backward
-                    // through the building depth. Sweeping across the entire source
-                    // tile here repeatedly sampled its black window/outline pixels,
-                    // producing nearly black sidewalls. The reference building fold
-                    // clamps to the measured edge course; preserve that exact course
-                    // at every depth pixel instead of inventing new side artwork.
-                    append_quad(
-                        &mut mesh.textured,
-                        [
-                            [wall_x0, y_bottom, z1],
-                            [wall_x0, y_top, z1],
-                            [wall_x0, y_top, z0],
-                            [wall_x0, y_bottom, z0],
-                        ],
-                        [-1.0, 0.0, 0.0],
-                        source_pixel_uv(geometry, placement, west_source_x, source_y, true),
-                        [0.78, 0.78, 0.78, 1.0],
+            for storey in 0..tower_storeys {
+                for source_y in roof_pixels..pixel_height {
+                    let west_source_x = facade_side_course_x(
+                        &inside,
+                        &luminance,
+                        pixel_width,
+                        source_y,
+                        darkest,
+                        false,
                     );
-                    append_quad(
-                        &mut mesh.textured,
-                        [
-                            [wall_x1, y_bottom, z0],
-                            [wall_x1, y_top, z0],
-                            [wall_x1, y_top, z1],
-                            [wall_x1, y_bottom, z1],
-                        ],
-                        [1.0, 0.0, 0.0],
-                        source_pixel_uv(geometry, placement, east_source_x, source_y, true),
-                        [0.86, 0.86, 0.86, 1.0],
+                    let east_source_x = facade_side_course_x(
+                        &inside,
+                        &luminance,
+                        pixel_width,
+                        source_y,
+                        darkest,
+                        true,
                     );
+                    let y_top = storey as f32 * wall_course_height
+                        + (pixel_height - source_y) as f32 * pixel_z_size;
+                    let y_bottom = y_top - pixel_z_size;
+                    for depth_pixel in 0..roof_depth_pixels {
+                        let z0 = roof_back_z + depth_pixel as f32 * pixel_z_size;
+                        let z1 = z0 + pixel_z_size;
+                        // A facade side is the drawing's visible edge carried backward
+                        // through the building depth. Sweeping across the entire source
+                        // tile here repeatedly sampled its black window/outline pixels,
+                        // producing nearly black sidewalls. The reference building fold
+                        // clamps to the measured edge course; preserve that exact course
+                        // at every depth pixel instead of inventing new side artwork.
+                        append_quad(
+                            &mut mesh.textured,
+                            [
+                                [wall_x0, y_bottom, z1],
+                                [wall_x0, y_top, z1],
+                                [wall_x0, y_top, z0],
+                                [wall_x0, y_bottom, z0],
+                            ],
+                            [-1.0, 0.0, 0.0],
+                            source_pixel_uv(geometry, placement, west_source_x, source_y, true),
+                            [0.78, 0.78, 0.78, 1.0],
+                        );
+                        append_quad(
+                            &mut mesh.textured,
+                            [
+                                [wall_x1, y_bottom, z0],
+                                [wall_x1, y_top, z0],
+                                [wall_x1, y_top, z1],
+                                [wall_x1, y_bottom, z1],
+                            ],
+                            [1.0, 0.0, 0.0],
+                            source_pixel_uv(geometry, placement, east_source_x, source_y, true),
+                            [0.86, 0.86, 0.86, 1.0],
+                        );
+                    }
                 }
             }
         }
@@ -2429,29 +6425,32 @@ fn append_pixel_building(
         // light, as the reference mesher does for non-front faces. Omitting
         // this plane exposed the ground through Ecruteak's rear eaves and
         // between adjoining traditional roof sections.
-        for source_y in roof_pixels..pixel_height {
-            let y_top = (pixel_height - source_y) as f32 * pixel_z_size;
-            let y_bottom = y_top - pixel_z_size;
-            for x in body_left..=body_right {
-                let x0 = building_x0 + x as f32 * pixel_x_size;
-                let x1 = x0 + pixel_x_size;
-                append_quad(
-                    &mut mesh.textured,
-                    [
-                        [x0, y_bottom, roof_back_z],
-                        [x0, y_top, roof_back_z],
-                        [x1, y_top, roof_back_z],
-                        [x1, y_bottom, roof_back_z],
-                    ],
-                    [0.0, 0.0, -1.0],
-                    source_pixel_uv(geometry, placement, x, source_y, true),
-                    [0.68, 0.68, 0.68, 1.0],
-                );
+        for storey in 0..tower_storeys {
+            for source_y in roof_pixels..pixel_height {
+                let y_top = storey as f32 * wall_course_height
+                    + (pixel_height - source_y) as f32 * pixel_z_size;
+                let y_bottom = y_top - pixel_z_size;
+                for x in body_left..=body_right {
+                    let x0 = building_x0 + x as f32 * pixel_x_size;
+                    let x1 = x0 + pixel_x_size;
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [x0, y_bottom, roof_back_z],
+                            [x0, y_top, roof_back_z],
+                            [x1, y_top, roof_back_z],
+                            [x1, y_bottom, roof_back_z],
+                        ],
+                        [0.0, 0.0, -1.0],
+                        source_pixel_uv(geometry, placement, x, source_y, true),
+                        [0.68, 0.68, 0.68, 1.0],
+                    );
+                }
             }
         }
     }
 
-    if !kanto_cliff_mound && !kanto_plan_roof {
+    if !cliff_mound && !kanto_plan_roof {
         for (x, source_tile_x, normal, shade, reverse) in [
             (building_x0, 0, [-1.0, 0.0, 0.0], 0.78, false),
             (
@@ -2638,8 +6637,8 @@ fn append_kanto_cliff_cap(
         );
 
         if row == 0 {
-            append_solid_quad(
-                &mut mesh.solid,
+            append_quad(
+                &mut mesh.textured,
                 [
                     [rx0 + batter, 0.0, z0 - batter],
                     [rx0, height, z0],
@@ -2647,7 +6646,54 @@ fn append_kanto_cliff_cap(
                     [lx0 - batter, 0.0, z0 - batter],
                 ],
                 [0.0, 0.0, -1.0],
-                solid_color(SolidKind::Bank, Direction::North),
+                [
+                    uv(width, slope_pixels),
+                    uv(width, 0),
+                    uv(0, 0),
+                    uv(0, slope_pixels),
+                ],
+                [0.68, 0.68, 0.68, 1.0],
+            );
+        }
+        if row + 1 == depth {
+            // The authored south face occupies the cap-width rectangle.
+            // Battering the west/east walls widens only their feet, leaving
+            // one triangular opening at either end of that face unless the
+            // widened base is explicitly joined back to the facade.
+            let facade_bottom = placement.height * SOURCE_TILE_PIXELS;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [lx1, 0.0, z1],
+                    [lx1, height, z1],
+                    [lx1, height, z1],
+                    [lx1 - batter, 0.0, z1],
+                ],
+                [0.0, 0.0, 1.0],
+                [
+                    uv(slope_pixels, facade_bottom),
+                    uv(slope_pixels, depth),
+                    uv(slope_pixels, depth),
+                    uv(0, facade_bottom),
+                ],
+                [0.90, 0.90, 0.90, 1.0],
+            );
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [rx1 + batter, 0.0, z1],
+                    [rx1, height, z1],
+                    [rx1, height, z1],
+                    [rx1, 0.0, z1],
+                ],
+                [0.0, 0.0, 1.0],
+                [
+                    uv(width, facade_bottom),
+                    uv(width - slope_pixels, depth),
+                    uv(width - slope_pixels, depth),
+                    uv(width - slope_pixels, facade_bottom),
+                ],
+                [0.90, 0.90, 0.90, 1.0],
             );
         }
     }
@@ -3023,6 +7069,30 @@ struct GridGeometry {
     origin_z: f32,
 }
 
+fn append_room_back_wall(mesh: &mut TerrainMeshData, geometry: &GridGeometry, tileset: &str) {
+    let x0 = geometry.origin_x;
+    let x1 = geometry.origin_x + geometry.width as f32 * geometry.tile_width;
+    // Indoor metatiles reserve their northern four-subtile course for wall
+    // and fixture artwork. Stand the architectural wall at that authored
+    // floor seam, not at the outer render-grid edge behind the void.
+    let seam_rows = if tileset == "players_room" { 12.0 } else { 8.0 };
+    let wall_rows = 4.0;
+    let z = geometry.origin_z + geometry.tile_height * seam_rows - geometry.tile_height * 0.08;
+    let height = geometry.tile_height * wall_rows;
+    let bottom = -geometry.tile_height * 1.5;
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x1, bottom, z],
+            [x1, height, z],
+            [x0, height, z],
+            [x0, bottom, z],
+        ],
+        [0.0, 0.0, 1.0],
+        [0.20, 0.18, 0.15, 1.0],
+    );
+}
+
 impl GridGeometry {
     fn bounds(self, column: usize, row: usize) -> (f32, f32, f32, f32) {
         let x0 = self.origin_x + column as f32 * self.tile_width;
@@ -3063,6 +7133,7 @@ fn append_textured_cell(
                         cells,
                         shapes,
                         top_tile_index,
+                        None,
                         surface_height,
                         geometry.tile_height,
                     )
@@ -3201,6 +7272,30 @@ fn append_textured_cell(
                 BANK_TOP_SHADE,
             );
         }
+        CellShape::RampEast {
+            west_height,
+            east_height,
+        } => {
+            let scale = geometry.tile_height / SOURCE_TILE_HEIGHT;
+            let west_height = west_height * scale;
+            let east_height = east_height * scale;
+            let (u0, u1, v0, v1) = geometry.uv(column, row);
+            let normal = Vec3::new(west_height - east_height, geometry.tile_width, 0.0)
+                .normalize()
+                .to_array();
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x0, west_height, z1],
+                    [x1, east_height, z1],
+                    [x1, east_height, z0],
+                    [x0, west_height, z0],
+                ],
+                normal,
+                [[u0, v1], [u1, v1], [u1, v0], [u0, v0]],
+                BANK_TOP_SHADE,
+            );
+        }
         CellShape::Waterfall => {
             let replacement = authored_water_cell(cells, shapes).ok_or(
                 TerrainMeshError::MissingGroundSample {
@@ -3292,6 +7387,38 @@ fn append_textured_cell(
                     [x0, x1, z0, z1],
                     geometry.uv(column, row),
                     base_height,
+                    height * geometry.tile_height / SOURCE_TILE_HEIGHT,
+                )?;
+            }
+        }
+        CellShape::FloatingRelief {
+            height,
+            ground_tile_index,
+            base_height,
+        } => {
+            let replacement = authored_relief_base_cell(cells, shapes, ground_tile_index).ok_or(
+                TerrainMeshError::MissingGroundSample {
+                    column: column as u32,
+                    row: row as u32,
+                    tile_index: ground_tile_index,
+                },
+            )?;
+            let ground_height = shapes[replacement].surface_height(geometry.tile_height);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                ground_height,
+                geometry.uv(replacement % geometry.width, replacement / geometry.width),
+            );
+            if let Some(images) = images {
+                append_pixel_relief(
+                    mesh,
+                    images,
+                    cells[index],
+                    cells[replacement],
+                    [x0, x1, z0, z1],
+                    geometry.uv(column, row),
+                    base_height * geometry.tile_height / SOURCE_TILE_HEIGHT,
                     height * geometry.tile_height / SOURCE_TILE_HEIGHT,
                 )?;
             }
@@ -3433,133 +7560,837 @@ fn append_casino_stool(
     placement: CasinoStoolPlacement,
     claimed: &mut [bool],
 ) -> Result<(), TerrainMeshError> {
-    const CROP_LEFT: usize = 2;
-    const CROP_RIGHT: usize = 14;
-    const TOP_FIRST_ROW: usize = 4;
-    const TOP_LAST_ROW: usize = 10;
-    const FRONT_FIRST_ROW: usize = 10;
-    const FRONT_LAST_ROW: usize = 15;
-    const SEAT_DEPTH: f32 = 11.0;
-    const SEAT_HEIGHT: f32 = 5.0;
+    append_grouped_tree(
+        mesh,
+        images,
+        cells,
+        shapes,
+        geometry,
+        TreePlacement {
+            column: placement.column,
+            row: placement.row,
+            width: 2,
+            height: 2,
+            ground_tile_index: 0x01,
+            ground_metatile_id: None,
+            base_height: 0.0,
+            rounded: false,
+            outline_mask: true,
+            remove_all_ground: false,
+            card_thickness: 0.0,
+        },
+        claimed,
+    )
+}
 
-    let replacement =
-        authored_ground_cell(cells, shapes, 0x01).ok_or(TerrainMeshError::MissingGroundSample {
-            column: placement.column as u32,
-            row: placement.row as u32,
-            tile_index: 0x01,
-        })?;
-    for dy in 0..2 {
-        for dx in 0..2 {
-            let column = placement.column + dx;
-            let row = placement.row + dy;
+#[allow(clippy::too_many_arguments)]
+fn append_house_furniture(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: HouseFurniturePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    if mesh.footing_heights.len() < cells.len() {
+        mesh.footing_heights.resize(cells.len(), 0.0);
+    }
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        crate::house::HOUSE_FLOOR_TILE,
+        None,
+        0.0,
+        geometry.tile_height,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: crate::house::HOUSE_FLOOR_TILE,
+    })?;
+    let top_height = placement.kind.height() * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    for local_row in 0..2 {
+        for local_column in 0..2 {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            mesh.footing_heights[index] = top_height;
             let (x0, x1, z0, z1) = geometry.bounds(column, row);
             append_top(
                 &mut mesh.textured,
                 [x0, x1, z0, z1],
                 0.0,
-                geometry.uv(replacement % geometry.width, replacement / geometry.width),
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
             );
-            claimed[row * geometry.width + column] = true;
         }
     }
 
-    let (origin_x, _, origin_z, _) = geometry.bounds(placement.column, placement.row);
-    let pixel_width = geometry.tile_width / SOURCE_TILE_PIXELS as f32;
-    let pixel_height = geometry.tile_height / SOURCE_TILE_PIXELS as f32;
-    let x_at = |pixel: usize| origin_x + pixel as f32 * pixel_width;
-    let top_z_at = |pixel: usize| {
-        origin_z
-            + (pixel - TOP_FIRST_ROW) as f32 * SEAT_DEPTH * pixel_height
-                / (TOP_LAST_ROW - TOP_FIRST_ROW) as f32
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let z0 = geometry.origin_z + placement.row as f32 * geometry.tile_height;
+    let pixel_x = geometry.tile_width / SOURCE_TILE_PIXELS as f32;
+    let pixel_z = geometry.tile_height / SOURCE_TILE_PIXELS as f32;
+    let ground = tile_rgba(images, cells[ground_index])?;
+    let source_pixel =
+        |x: usize, y: usize| -> Result<(&VisualTile, usize, usize), TerrainMeshError> {
+            let column = placement.column + x / SOURCE_TILE_PIXELS;
+            let row = placement.row + y / SOURCE_TILE_PIXELS;
+            Ok((
+                cells[row * geometry.width + column],
+                x % SOURCE_TILE_PIXELS,
+                y % SOURCE_TILE_PIXELS,
+            ))
+        };
+    let uv_pixel = |x: usize, y: usize| {
+        let column = placement.column + x / SOURCE_TILE_PIXELS;
+        let row = placement.row + y / SOURCE_TILE_PIXELS;
+        let (u0, u1, v0, v1) = geometry.uv(column, row);
+        let px = x % SOURCE_TILE_PIXELS;
+        let py = y % SOURCE_TILE_PIXELS;
+        [
+            lerp_pixel(u0, u1, px),
+            lerp_pixel(u0, u1, px + 1),
+            lerp_pixel(v0, v1, py),
+            lerp_pixel(v0, v1, py + 1),
+        ]
     };
-    let front_z = origin_z + SEAT_DEPTH * pixel_height;
-    let scaled_height = SEAT_HEIGHT * pixel_height;
 
-    for source_y in TOP_FIRST_ROW..TOP_LAST_ROW {
-        for source_x in CROP_LEFT..CROP_RIGHT {
-            let cell_column = placement.column + source_x / SOURCE_TILE_PIXELS;
-            let cell_row = placement.row + source_y / SOURCE_TILE_PIXELS;
-            let (u0, u1, v0, v1) = geometry.uv(cell_column, cell_row);
-            let local_x = source_x % SOURCE_TILE_PIXELS;
-            let local_y = source_y % SOURCE_TILE_PIXELS;
-            let pu0 = lerp_pixel(u0, u1, local_x);
-            let pu1 = lerp_pixel(u0, u1, local_x + 1);
-            let pv0 = lerp_pixel(v0, v1, local_y);
-            let pv1 = lerp_pixel(v0, v1, local_y + 1);
+    // The authored stool is a small round seat painted over room floor, not
+    // a 16x16 solid cube. As in the reference mod, rows 5..10 form a shallow
+    // lid and rows 11..15 fold once into its front/legs. Pixel-level ground
+    // rejection keeps the gaps between the legs open.
+    for depth_pixel in 0..11 {
+        let source_y = 5 + depth_pixel * 6 / 11;
+        for source_x in 2..14 {
+            let (tile, px, py) = source_pixel(source_x, source_y)?;
+            if pixels_equal(tile_rgba(images, tile)?, ground, px, py) {
+                continue;
+            }
+            let [u0, u1, v0, v1] = uv_pixel(source_x, source_y);
+            let wx0 = x0 + source_x as f32 * pixel_x;
+            let wx1 = wx0 + pixel_x;
+            let wz0 = z0 + (3 + depth_pixel) as f32 * pixel_z;
+            let wz1 = wz0 + pixel_z;
             append_quad(
                 &mut mesh.textured,
                 [
-                    [x_at(source_x), scaled_height, top_z_at(source_y)],
-                    [x_at(source_x), scaled_height, top_z_at(source_y + 1)],
-                    [x_at(source_x + 1), scaled_height, top_z_at(source_y + 1)],
-                    [x_at(source_x + 1), scaled_height, top_z_at(source_y)],
+                    [wx0, top_height, wz0],
+                    [wx0, top_height, wz1],
+                    [wx1, top_height, wz1],
+                    [wx1, top_height, wz0],
                 ],
                 [0.0, 1.0, 0.0],
-                [[pu0, pv0], [pu0, pv1], [pu1, pv1], [pu1, pv0]],
+                [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
                 TEXTURED_SHADE,
             );
         }
     }
-    for source_y in FRONT_FIRST_ROW..FRONT_LAST_ROW {
-        for source_x in CROP_LEFT..CROP_RIGHT {
-            let cell_column = placement.column + source_x / SOURCE_TILE_PIXELS;
-            let cell_row = placement.row + source_y / SOURCE_TILE_PIXELS;
-            let tile = cells[cell_row * geometry.width + cell_column];
-            let _ = tile_rgba(images, tile)?;
-            let (u0, u1, v0, v1) = geometry.uv(cell_column, cell_row);
-            let local_x = source_x % SOURCE_TILE_PIXELS;
-            let local_y = source_y % SOURCE_TILE_PIXELS;
-            let pu0 = lerp_pixel(u0, u1, local_x);
-            let pu1 = lerp_pixel(u0, u1, local_x + 1);
-            let pv0 = lerp_pixel(v0, v1, local_y);
-            let pv1 = lerp_pixel(v0, v1, local_y + 1);
-            let y_top = (FRONT_LAST_ROW - source_y) as f32 * pixel_height;
-            let y_bottom = y_top - pixel_height;
+    let front_z = z0 + 14.0 * pixel_z;
+    for source_y in 11..16 {
+        for source_x in 2..14 {
+            let (tile, px, py) = source_pixel(source_x, source_y)?;
+            if pixels_equal(tile_rgba(images, tile)?, ground, px, py) {
+                continue;
+            }
+            let [u0, u1, v0, v1] = uv_pixel(source_x, source_y);
+            let wx0 = x0 + source_x as f32 * pixel_x;
+            let wx1 = wx0 + pixel_x;
+            let wy1 = (16 - source_y) as f32 * pixel_z;
+            let wy0 = wy1 - pixel_z;
             append_quad(
                 &mut mesh.textured,
                 [
-                    [x_at(source_x + 1), y_bottom, front_z],
-                    [x_at(source_x + 1), y_top, front_z],
-                    [x_at(source_x), y_top, front_z],
-                    [x_at(source_x), y_bottom, front_z],
+                    [wx1, wy0, front_z],
+                    [wx1, wy1, front_z],
+                    [wx0, wy1, front_z],
+                    [wx0, wy0, front_z],
                 ],
                 [0.0, 0.0, 1.0],
-                [[pu1, pv1], [pu1, pv0], [pu0, pv0], [pu0, pv1]],
+                [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
                 TEXTURED_SHADE,
             );
         }
     }
-    let x0 = x_at(CROP_LEFT);
-    let x1 = x_at(CROP_RIGHT);
-    for (positions, direction) in [
-        (
+    Ok(())
+}
+
+fn append_house_table(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: HouseTablePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    if mesh.footing_heights.len() < cells.len() {
+        mesh.footing_heights.resize(cells.len(), 0.0);
+    }
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        placement.ground_tile_index,
+        None,
+        0.0,
+        geometry.tile_height,
+    )
+    .or_else(|| {
+        (cells[placement.row * geometry.width + placement.column]
+            .source
+            .tileset_id
+            .as_ref()
+            == "traditional_house")
+            .then(|| {
+                shapes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, shape)| {
+                        matches!(shape, CellShape::Flat)
+                            && shape.surface_height(geometry.tile_height).abs() < f32::EPSILON
+                    })
+                    .min_by_key(|(index, _)| {
+                        let column = *index % geometry.width;
+                        let row = *index / geometry.width;
+                        (
+                            column.abs_diff(placement.column),
+                            row.abs_diff(placement.row),
+                        )
+                    })
+                    .map(|(index, _)| index)
+            })
+            .flatten()
+    })
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: placement.ground_tile_index,
+    })?;
+    let height = placement.height_pixels * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let ground_uv = geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+    for local_row in 0..4 {
+        for local_column in 0..4 {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            mesh.footing_heights[index] = height;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+            let (u0, u1, v0, v1) = geometry.uv(column, row);
+            if local_row < 3 {
+                append_top(
+                    &mut mesh.textured,
+                    [x0, x1, z0, z1],
+                    height,
+                    (u0, u1, v0, v1),
+                );
+            } else {
+                let top_v1 = lerp_pixel(v0, v1, 4);
+                append_top(
+                    &mut mesh.textured,
+                    [x0, x1, z0, z0 + geometry.tile_height * 0.5],
+                    height,
+                    (u0, u1, v0, top_v1),
+                );
+            }
+        }
+    }
+
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + 4.0 * geometry.tile_width;
+    let z0 = geometry.origin_z + placement.row as f32 * geometry.tile_height;
+    let front_z = z0 + 3.5 * geometry.tile_height;
+    for local_column in 0..4 {
+        let column = placement.column + local_column;
+        let segment_x0 = x0 + local_column as f32 * geometry.tile_width;
+        let segment_x1 = segment_x0 + geometry.tile_width;
+        let (u0, u1, v0, v1) = geometry.uv(column, placement.row + 3);
+        let facade_v0 = lerp_pixel(v0, v1, 4);
+        append_quad(
+            &mut mesh.textured,
             [
-                [x0, 0.0, origin_z],
-                [x0, scaled_height, origin_z],
-                [x0, scaled_height, front_z],
-                [x0, 0.0, front_z],
+                [segment_x1, 0.0, front_z],
+                [segment_x1, height, front_z],
+                [segment_x0, height, front_z],
+                [segment_x0, 0.0, front_z],
             ],
-            Direction::West,
-        ),
-        (
+            [0.0, 0.0, 1.0],
+            [[u1, v1], [u1, facade_v0], [u0, facade_v0], [u0, v1]],
+            TEXTURED_SHADE,
+        );
+    }
+    for local_row in 0..4 {
+        let segment_z0 = z0 + local_row as f32 * geometry.tile_height;
+        let segment_z1 = if local_row == 3 {
+            front_z
+        } else {
+            segment_z0 + geometry.tile_height
+        };
+        let (west_u0, west_u1, v0, v1) = geometry.uv(placement.column, placement.row + local_row);
+        let source_v1 = if local_row == 3 {
+            lerp_pixel(v0, v1, 4)
+        } else {
+            v1
+        };
+        append_quad(
+            &mut mesh.textured,
             [
-                [x1, 0.0, front_z],
-                [x1, scaled_height, front_z],
-                [x1, scaled_height, origin_z],
-                [x1, 0.0, origin_z],
+                [x0, 0.0, segment_z1],
+                [x0, height, segment_z1],
+                [x0, height, segment_z0],
+                [x0, 0.0, segment_z0],
             ],
-            Direction::East,
-        ),
-    ] {
-        append_solid_quad(
-            &mut mesh.solid,
-            positions,
-            match direction {
-                Direction::West => [-1.0, 0.0, 0.0],
-                Direction::East => [1.0, 0.0, 0.0],
-                _ => unreachable!(),
-            },
-            solid_color(SolidKind::Prop, direction),
+            [-1.0, 0.0, 0.0],
+            [
+                [west_u0, source_v1],
+                [west_u0, v0],
+                [lerp_pixel(west_u0, west_u1, 1), v0],
+                [lerp_pixel(west_u0, west_u1, 1), source_v1],
+            ],
+            TEXTURED_SHADE,
+        );
+        let (east_u0, east_u1, v0, v1) =
+            geometry.uv(placement.column + 3, placement.row + local_row);
+        let source_v1 = if local_row == 3 {
+            lerp_pixel(v0, v1, 4)
+        } else {
+            v1
+        };
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x1, 0.0, segment_z0],
+                [x1, height, segment_z0],
+                [x1, height, segment_z1],
+                [x1, 0.0, segment_z1],
+            ],
+            [1.0, 0.0, 0.0],
+            [
+                [east_u1, source_v1],
+                [east_u1, v0],
+                [lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1), v0],
+                [
+                    lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1),
+                    source_v1,
+                ],
+            ],
+            TEXTURED_SHADE,
+        );
+    }
+    Ok(())
+}
+
+fn append_house_bookcase(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    append_house_bookcase_with_ground(
+        mesh,
+        images,
+        cells,
+        shapes,
+        geometry,
+        placement,
+        claimed,
+        crate::house::HOUSE_FLOOR_TILE,
+    )
+}
+
+fn append_traditional_gift_shop_shelf(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+) -> Result<(), TerrainMeshError> {
+    debug_assert_eq!((placement.width, placement.height), (4, 4));
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+        None,
+        0.0,
+        geometry.tile_height,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+    })?;
+    let ground_uv = geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+    for local_row in 0..4 {
+        for local_column in 0..4 {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            claimed[row * geometry.width + column] = true;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+        }
+    }
+
+    let height = 16.0 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let north_z = geometry.origin_z + placement.row as f32 * geometry.tile_height;
+    let front_z = north_z + 2.0 * geometry.tile_height;
+    for local_row in 0..2 {
+        for local_column in 0..4 {
+            let column = placement.column + local_column;
+            let (x0, x1, z0, z1) = geometry.bounds(column, placement.row + local_row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                height,
+                geometry.uv(column, placement.row + local_row),
+            );
+        }
+    }
+    let pixel_width = placement.width * SOURCE_TILE_PIXELS;
+    let pixel_height = 2 * SOURCE_TILE_PIXELS;
+    let mut inside = vec![false; pixel_width * pixel_height];
+    let mut luminance = vec![0_u16; pixel_width * pixel_height];
+    for source_y in 0..pixel_height {
+        for source_x in 0..pixel_width {
+            let column = placement.column + source_x / SOURCE_TILE_PIXELS;
+            let row = placement.row + 2 + source_y / SOURCE_TILE_PIXELS;
+            let rgba = tile_rgba(images, cells[row * geometry.width + column])?;
+            let pixel_x = source_x % SOURCE_TILE_PIXELS;
+            let pixel_y = source_y % SOURCE_TILE_PIXELS;
+            let offset = (pixel_y * SOURCE_TILE_PIXELS + pixel_x) * 4;
+            inside[source_y * pixel_width + source_x] = rgba[offset + 3] != 0;
+            luminance[source_y * pixel_width + source_x] = u16::from(rgba[offset]) * 3
+                + u16::from(rgba[offset + 1]) * 6
+                + u16::from(rgba[offset + 2]);
+        }
+    }
+    let darkest = luminance
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| inside[index].then_some(*value))
+        .min()
+        .unwrap_or(0);
+    let recessed = facade_recess_mask(&inside, &luminance, pixel_width, pixel_height, 0, darkest);
+    let recess_depth = geometry.tile_height / SOURCE_TILE_HEIGHT;
+    for band in 0..2 {
+        let top = height - band as f32 * geometry.tile_height;
+        for local_column in 0..4 {
+            let column = placement.column + local_column;
+            let x0 = geometry.origin_x + column as f32 * geometry.tile_width;
+            let (u0, u1, v0, v1) = geometry.uv(column, placement.row + 2 + band);
+            for pixel_y in 0..SOURCE_TILE_PIXELS {
+                let world_top = top - geometry.tile_height * pixel_y as f32 / SOURCE_TILE_HEIGHT;
+                let world_bottom =
+                    top - geometry.tile_height * (pixel_y + 1) as f32 / SOURCE_TILE_HEIGHT;
+                let pv0 = lerp_pixel(v0, v1, pixel_y);
+                let pv1 = lerp_pixel(v0, v1, pixel_y + 1);
+                for pixel_x in 0..SOURCE_TILE_PIXELS {
+                    let source_x = local_column * SOURCE_TILE_PIXELS + pixel_x;
+                    let source_y = band * SOURCE_TILE_PIXELS + pixel_y;
+                    let world_x0 = x0 + geometry.tile_width * pixel_x as f32 / SOURCE_TILE_HEIGHT;
+                    let world_x1 =
+                        x0 + geometry.tile_width * (pixel_x + 1) as f32 / SOURCE_TILE_HEIGHT;
+                    let pu0 = lerp_pixel(u0, u1, pixel_x);
+                    let pu1 = lerp_pixel(u0, u1, pixel_x + 1);
+                    let z = front_z
+                        - if recessed[source_y * pixel_width + source_x] {
+                            recess_depth
+                        } else {
+                            0.0
+                        };
+                    append_quad(
+                        &mut mesh.textured,
+                        [
+                            [world_x1, world_bottom, z],
+                            [world_x1, world_top, z],
+                            [world_x0, world_top, z],
+                            [world_x0, world_bottom, z],
+                        ],
+                        [0.0, 0.0, 1.0],
+                        [[pu1, pv1], [pu1, pv0], [pu0, pv0], [pu0, pv1]],
+                        TEXTURED_SHADE,
+                    );
+                }
+            }
+        }
+    }
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + placement.width as f32 * geometry.tile_width;
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x0, 0.0, front_z],
+            [x0, height, front_z],
+            [x0, height, north_z],
+            [x0, 0.0, north_z],
+        ],
+        [-1.0, 0.0, 0.0],
+        solid_color(SolidKind::Prop, Direction::West),
+    );
+    append_solid_quad(
+        &mut mesh.solid,
+        [
+            [x1, 0.0, north_z],
+            [x1, height, north_z],
+            [x1, height, front_z],
+            [x1, 0.0, front_z],
+        ],
+        [1.0, 0.0, 0.0],
+        solid_color(SolidKind::Prop, Direction::East),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_house_bookcase_with_ground(
+    mesh: &mut TerrainMeshData,
+    images: &TerrainImageSamples,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+    ground_tile_index: u16,
+) -> Result<(), TerrainMeshError> {
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        ground_tile_index,
+        None,
+        0.0,
+        geometry.tile_height,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: ground_tile_index,
+    })?;
+    let ground_uv = geometry.uv(ground_index % geometry.width, ground_index / geometry.width);
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            claimed[row * geometry.width + column] = true;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(&mut mesh.textured, [x0, x1, z0, z1], 0.0, ground_uv);
+        }
+    }
+
+    let plane_z =
+        geometry.origin_z + (placement.row + placement.height) as f32 * geometry.tile_height;
+    let depth = geometry.tile_height;
+    let facade_height = 23.0 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let pixel_width = placement.width * SOURCE_TILE_PIXELS;
+    let pixel_height = placement.height * SOURCE_TILE_PIXELS;
+    let mut inside = vec![false; pixel_width * pixel_height];
+    let mut luminance = vec![0_u16; pixel_width * pixel_height];
+    for source_y in 0..pixel_height {
+        for source_x in 0..pixel_width {
+            let column = placement.column + source_x / SOURCE_TILE_PIXELS;
+            let row = placement.row + source_y / SOURCE_TILE_PIXELS;
+            let tile = cells[row * geometry.width + column];
+            let rgba = tile_rgba(images, tile)?;
+            let pixel_x = source_x % SOURCE_TILE_PIXELS;
+            let pixel_y = source_y % SOURCE_TILE_PIXELS;
+            let offset = (pixel_y * SOURCE_TILE_PIXELS + pixel_x) * 4;
+            inside[source_y * pixel_width + source_x] = rgba[offset + 3] != 0;
+            luminance[source_y * pixel_width + source_x] = u16::from(rgba[offset]) * 3
+                + u16::from(rgba[offset + 1]) * 6
+                + u16::from(rgba[offset + 2]);
+        }
+    }
+    let darkest = luminance
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| inside[index].then_some(*value))
+        .min()
+        .unwrap_or(0);
+    // As in the reference renderer, only small non-outline components sealed
+    // inside the facade are recessed. This leaves the cabinet frame proud
+    // while shelf contents and door panels sit one source pixel behind it.
+    let recessed = facade_recess_mask(&inside, &luminance, pixel_width, pixel_height, 9, darkest);
+    let recess_depth = geometry.tile_height / SOURCE_TILE_HEIGHT;
+    for local_column in 0..placement.width {
+        let column = placement.column + local_column;
+        let x0 = geometry.origin_x + column as f32 * geometry.tile_width;
+        let x1 = x0 + geometry.tile_width;
+        // Rows 0..=9 are the authored top/depth course. Row 9 is also the
+        // cabinet's one-pixel front rim, so it participates in both planes at
+        // the fold. Stopping at row 8 made every shared house bookcase one
+        // pixel too shallow and erased that corner from the lid.
+        for source_y in 0..10 {
+            let source_row = placement.row + source_y / SOURCE_TILE_PIXELS;
+            let pixel_y = source_y % SOURCE_TILE_PIXELS;
+            let (u0, u1, v0, v1) = geometry.uv(column, source_row);
+            let sv0 = lerp_pixel(v0, v1, pixel_y);
+            let sv1 = lerp_pixel(v0, v1, pixel_y + 1);
+            let z0 = plane_z - depth + depth * source_y as f32 / 10.0;
+            let z1 = plane_z - depth + depth * (source_y + 1) as f32 / 10.0;
+            append_quad(
+                &mut mesh.textured,
+                [
+                    [x0, facade_height, z0],
+                    [x0, facade_height, z1],
+                    [x1, facade_height, z1],
+                    [x1, facade_height, z0],
+                ],
+                [0.0, 1.0, 0.0],
+                [[u0, sv0], [u0, sv1], [u1, sv1], [u1, sv0]],
+                TEXTURED_SHADE,
+            );
+        }
+        for source_y in 9..32 {
+            let source_row = placement.row + source_y / SOURCE_TILE_PIXELS;
+            let pixel_y = source_y % SOURCE_TILE_PIXELS;
+            let (u0, u1, v0, v1) = geometry.uv(column, source_row);
+            let sv0 = lerp_pixel(v0, v1, pixel_y);
+            let sv1 = lerp_pixel(v0, v1, pixel_y + 1);
+            let top = (32 - source_y) as f32 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+            let bottom = (31 - source_y) as f32 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+            let source_x = local_column * SOURCE_TILE_PIXELS;
+            let recessed_row = &recessed[source_y * pixel_width + source_x
+                ..source_y * pixel_width + source_x + SOURCE_TILE_PIXELS];
+            if recessed_row.iter().all(|pixel| !pixel) {
+                append_quad(
+                    &mut mesh.textured,
+                    [
+                        [x1, bottom, plane_z],
+                        [x1, top, plane_z],
+                        [x0, top, plane_z],
+                        [x0, bottom, plane_z],
+                    ],
+                    [0.0, 0.0, 1.0],
+                    [[u1, sv1], [u1, sv0], [u0, sv0], [u0, sv1]],
+                    TEXTURED_SHADE,
+                );
+                continue;
+            }
+            for pixel_x in 0..SOURCE_TILE_PIXELS {
+                let world_x0 = x0 + geometry.tile_width * pixel_x as f32 / SOURCE_TILE_HEIGHT;
+                let world_x1 = x0 + geometry.tile_width * (pixel_x + 1) as f32 / SOURCE_TILE_HEIGHT;
+                let pu0 = lerp_pixel(u0, u1, pixel_x);
+                let pu1 = lerp_pixel(u0, u1, pixel_x + 1);
+                let is_recessed = recessed_row[pixel_x];
+                let front_z = plane_z - if is_recessed { recess_depth } else { 0.0 };
+                append_quad(
+                    &mut mesh.textured,
+                    [
+                        [world_x1, bottom, front_z],
+                        [world_x1, top, front_z],
+                        [world_x0, top, front_z],
+                        [world_x0, bottom, front_z],
+                    ],
+                    [0.0, 0.0, 1.0],
+                    [[pu1, sv1], [pu1, sv0], [pu0, sv0], [pu0, sv1]],
+                    TEXTURED_SHADE,
+                );
+            }
+        }
+    }
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + placement.width as f32 * geometry.tile_width;
+    for source_y in 9..32 {
+        let source_row = placement.row + source_y / SOURCE_TILE_PIXELS;
+        let pixel_y = source_y % SOURCE_TILE_PIXELS;
+        let (west_u0, west_u1, west_v0, west_v1) = geometry.uv(placement.column, source_row);
+        let (east_u0, east_u1, east_v0, east_v1) =
+            geometry.uv(placement.column + placement.width - 1, source_row);
+        let west_sv0 = lerp_pixel(west_v0, west_v1, pixel_y);
+        let west_sv1 = lerp_pixel(west_v0, west_v1, pixel_y + 1);
+        let east_sv0 = lerp_pixel(east_v0, east_v1, pixel_y);
+        let east_sv1 = lerp_pixel(east_v0, east_v1, pixel_y + 1);
+        let top = (32 - source_y) as f32 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+        let bottom = (31 - source_y) as f32 * geometry.tile_height / SOURCE_TILE_HEIGHT;
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x0, bottom, plane_z],
+                [x0, top, plane_z],
+                [x0, top, plane_z - depth],
+                [x0, bottom, plane_z - depth],
+            ],
+            [-1.0, 0.0, 0.0],
+            [
+                [west_u0, west_sv1],
+                [west_u0, west_sv0],
+                [lerp_pixel(west_u0, west_u1, 1), west_sv0],
+                [lerp_pixel(west_u0, west_u1, 1), west_sv1],
+            ],
+            TEXTURED_SHADE,
+        );
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x1, bottom, plane_z - depth],
+                [x1, top, plane_z - depth],
+                [x1, top, plane_z],
+                [x1, bottom, plane_z],
+            ],
+            [1.0, 0.0, 0.0],
+            [
+                [
+                    lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1),
+                    east_sv1,
+                ],
+                [
+                    lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1),
+                    east_sv0,
+                ],
+                [east_u1, east_sv0],
+                [east_u1, east_sv1],
+            ],
+            TEXTURED_SHADE,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_shallow_top_group(
+    mesh: &mut TerrainMeshData,
+    cells: &[&VisualTile],
+    shapes: &[CellShape],
+    geometry: &GridGeometry,
+    placement: TreePlacement,
+    claimed: &mut [bool],
+    ground_tile_index: u16,
+    source_height: f32,
+) -> Result<(), TerrainMeshError> {
+    if mesh.footing_heights.len() < cells.len() {
+        mesh.footing_heights.resize(cells.len(), 0.0);
+    }
+    let ground_index = authored_surface_cell(
+        cells,
+        shapes,
+        ground_tile_index,
+        None,
+        0.0,
+        geometry.tile_height,
+    )
+    .ok_or(TerrainMeshError::MissingGroundSample {
+        column: placement.column as u32,
+        row: placement.row as u32,
+        tile_index: ground_tile_index,
+    })?;
+    let height = source_height * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    for local_row in 0..placement.height {
+        for local_column in 0..placement.width {
+            let column = placement.column + local_column;
+            let row = placement.row + local_row;
+            let index = row * geometry.width + column;
+            claimed[index] = true;
+            mesh.footing_heights[index] = height;
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                0.0,
+                geometry.uv(ground_index % geometry.width, ground_index / geometry.width),
+            );
+            append_top(
+                &mut mesh.textured,
+                [x0, x1, z0, z1],
+                height,
+                geometry.uv(column, row),
+            );
+        }
+    }
+
+    // A cushion's source art is a top view. Its sides are only the outermost
+    // source-pixel strips, never a repeated or stretched recognizable tile.
+    let x0 = geometry.origin_x + placement.column as f32 * geometry.tile_width;
+    let x1 = x0 + placement.width as f32 * geometry.tile_width;
+    let z0 = geometry.origin_z + placement.row as f32 * geometry.tile_height;
+    let z1 = z0 + placement.height as f32 * geometry.tile_height;
+    for local_column in 0..placement.width {
+        let segment_x0 = x0 + local_column as f32 * geometry.tile_width;
+        let segment_x1 = segment_x0 + geometry.tile_width;
+        let (u0, u1, north_v0, north_v1) =
+            geometry.uv(placement.column + local_column, placement.row);
+        append_quad(
+            &mut mesh.textured,
+            [
+                [segment_x0, 0.0, z0],
+                [segment_x0, height, z0],
+                [segment_x1, height, z0],
+                [segment_x1, 0.0, z0],
+            ],
+            [0.0, 0.0, -1.0],
+            [
+                [u0, lerp_pixel(north_v0, north_v1, 1)],
+                [u0, north_v0],
+                [u1, north_v0],
+                [u1, lerp_pixel(north_v0, north_v1, 1)],
+            ],
+            TEXTURED_SHADE,
+        );
+        let (u0, u1, south_v0, south_v1) = geometry.uv(
+            placement.column + local_column,
+            placement.row + placement.height - 1,
+        );
+        append_quad(
+            &mut mesh.textured,
+            [
+                [segment_x1, 0.0, z1],
+                [segment_x1, height, z1],
+                [segment_x0, height, z1],
+                [segment_x0, 0.0, z1],
+            ],
+            [0.0, 0.0, 1.0],
+            [
+                [u1, south_v1],
+                [u1, lerp_pixel(south_v0, south_v1, SOURCE_TILE_PIXELS - 1)],
+                [u0, lerp_pixel(south_v0, south_v1, SOURCE_TILE_PIXELS - 1)],
+                [u0, south_v1],
+            ],
+            TEXTURED_SHADE,
+        );
+    }
+    for local_row in 0..placement.height {
+        let segment_z0 = z0 + local_row as f32 * geometry.tile_height;
+        let segment_z1 = segment_z0 + geometry.tile_height;
+        let (west_u0, west_u1, v0, v1) = geometry.uv(placement.column, placement.row + local_row);
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x0, 0.0, segment_z1],
+                [x0, height, segment_z1],
+                [x0, height, segment_z0],
+                [x0, 0.0, segment_z0],
+            ],
+            [-1.0, 0.0, 0.0],
+            [
+                [west_u0, v1],
+                [west_u0, v0],
+                [lerp_pixel(west_u0, west_u1, 1), v0],
+                [lerp_pixel(west_u0, west_u1, 1), v1],
+            ],
+            TEXTURED_SHADE,
+        );
+        let (east_u0, east_u1, v0, v1) = geometry.uv(
+            placement.column + placement.width - 1,
+            placement.row + local_row,
+        );
+        append_quad(
+            &mut mesh.textured,
+            [
+                [x1, 0.0, segment_z0],
+                [x1, height, segment_z0],
+                [x1, height, segment_z1],
+                [x1, 0.0, segment_z1],
+            ],
+            [1.0, 0.0, 0.0],
+            [
+                [east_u1, v1],
+                [east_u1, v0],
+                [lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1), v0],
+                [lerp_pixel(east_u0, east_u1, SOURCE_TILE_PIXELS - 1), v1],
+            ],
+            TEXTURED_SHADE,
         );
     }
     Ok(())
@@ -3676,28 +8507,36 @@ fn append_waterfall(
     cells: &[&VisualTile],
     placement: WaterfallPlacement,
 ) {
-    let plane_row = placement.row + placement.height;
-    let plane_z = geometry.origin_z + plane_row as f32 * geometry.tile_height;
     let base = crate::profile::GROUND_HEIGHT * geometry.tile_height / SOURCE_TILE_HEIGHT;
+    let drop = crate::cave::CAVE_ROCK_HEIGHT * geometry.tile_height / SOURCE_TILE_HEIGHT;
     for source_row in 0..placement.height {
-        let band_top = base + (placement.height - source_row) as f32 * geometry.tile_height;
-        let band_bottom = band_top - geometry.tile_height;
+        // The source rows describe the cascade's north-to-south footprint,
+        // not independent eight-pixel elevation courses. Preserve each live
+        // animated row once on one bounded slope spanning exactly one cave
+        // level; folding an N-row waterfall upright made its height N*8.
+        let north_fraction = 1.0 - source_row as f32 / placement.height as f32;
+        let south_fraction = 1.0 - (source_row + 1) as f32 / placement.height as f32;
+        let north_height = base + drop * north_fraction;
+        let south_height = base + drop * south_fraction;
         for offset_column in 0..placement.width {
             let column = placement.column + offset_column;
             let row = placement.row + source_row;
             let index = row * geometry.width + column;
-            let (x0, x1, _, _) = geometry.bounds(column, row);
+            let (x0, x1, z0, z1) = geometry.bounds(column, row);
             let (u0, u1, v0, v1) = geometry.uv(column, row);
+            let normal = Vec3::new(0.0, z1 - z0, north_height - south_height)
+                .normalize()
+                .to_array();
             append_quad(
                 mesh,
                 [
-                    [x1, band_bottom, plane_z],
-                    [x1, band_top, plane_z],
-                    [x0, band_top, plane_z],
-                    [x0, band_bottom, plane_z],
+                    [x0, north_height, z0],
+                    [x0, south_height, z1],
+                    [x1, south_height, z1],
+                    [x1, north_height, z0],
                 ],
-                [0.0, 0.0, 1.0],
-                [[u1, v1], [u1, v0], [u0, v0], [u0, v1]],
+                normal,
+                [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
                 TEXTURED_SHADE,
             );
             debug_assert_eq!(cells[index].source.tile_index, 0x40);
@@ -3732,6 +8571,7 @@ fn authored_surface_cell(
     cells: &[&VisualTile],
     shapes: &[CellShape],
     tile_index: u16,
+    metatile_id: Option<u16>,
     height: f32,
     tile_height: f32,
 ) -> Option<usize> {
@@ -3740,6 +8580,7 @@ fn authored_surface_cell(
         .enumerate()
         .filter(|(index, shape)| {
             cells[*index].source.tile_index == tile_index
+                && metatile_id.is_none_or(|id| cells[*index].source.metatile_id == id)
                 && (shape.surface_height(tile_height) - height).abs() < f32::EPSILON
         })
         .min_by_key(|(index, _)| (cells[*index].row, cells[*index].column))
@@ -4364,6 +9205,63 @@ fn append_ramp_sidewalls(
     }
 }
 
+fn append_east_ramp_sidewalls(
+    mesh: &mut TerrainMeshData,
+    geometry: &GridGeometry,
+    shapes: &[CellShape],
+    column: usize,
+    row: usize,
+    west_height: f32,
+    east_height: f32,
+) {
+    let (x0, x1, z0, z1) = geometry.bounds(column, row);
+    let is_east_ramp = |column: usize, row: usize| {
+        matches!(
+            shapes[row * geometry.width + column],
+            CellShape::RampEast { .. }
+        )
+    };
+    if row + 1 >= geometry.height || !is_east_ramp(column, row + 1) {
+        append_solid_quad(
+            &mut mesh.solid,
+            [
+                [x0, 0.0, z1],
+                [x1, 0.0, z1],
+                [x1, east_height, z1],
+                [x0, west_height, z1],
+            ],
+            [0.0, 0.0, 1.0],
+            solid_color(SolidKind::Bank, Direction::South),
+        );
+    }
+    if row == 0 || !is_east_ramp(column, row - 1) {
+        append_solid_quad(
+            &mut mesh.solid,
+            [
+                [x0, 0.0, z0],
+                [x0, west_height, z0],
+                [x1, east_height, z0],
+                [x1, 0.0, z0],
+            ],
+            [0.0, 0.0, -1.0],
+            solid_color(SolidKind::Bank, Direction::North),
+        );
+    }
+    if column + 1 >= geometry.width || !is_east_ramp(column + 1, row) {
+        append_solid_quad(
+            &mut mesh.solid,
+            [
+                [x1, 0.0, z1],
+                [x1, 0.0, z0],
+                [x1, east_height, z0],
+                [x1, east_height, z1],
+            ],
+            [1.0, 0.0, 0.0],
+            solid_color(SolidKind::Bank, Direction::East),
+        );
+    }
+}
+
 fn append_exposed_sides(
     mesh: &mut TerrainMeshData,
     geometry: &GridGeometry,
@@ -4387,6 +9285,23 @@ fn append_exposed_sides(
             row,
             north_height * geometry.tile_height / SOURCE_TILE_HEIGHT,
             south_height * geometry.tile_height / SOURCE_TILE_HEIGHT,
+        );
+        return;
+    }
+    if let CellShape::RampEast {
+        west_height,
+        east_height,
+    } = shapes[index]
+    {
+        let scale = geometry.tile_height / SOURCE_TILE_HEIGHT;
+        append_east_ramp_sidewalls(
+            mesh,
+            geometry,
+            shapes,
+            column,
+            row,
+            west_height * scale,
+            east_height * scale,
         );
         return;
     }
@@ -4487,7 +9402,9 @@ fn append_exposed_sides(
                     || lateral_column >= geometry.width as isize
                     || lateral_row >= geometry.height as isize
                 {
-                    0.0
+                    // Outside the published grid is unknown continuation,
+                    // never evidence for an exposed mound corner.
+                    top
                 } else {
                     shapes[lateral_row as usize * geometry.width + lateral_column as usize]
                         .surface_height(geometry.tile_height)
@@ -4496,7 +9413,6 @@ fn append_exposed_sides(
             let (left, right) = direction.lateral_offsets();
             append_bank_run_side(
                 &mut mesh.textured,
-                &mut mesh.solid,
                 geometry,
                 cells,
                 shapes,
@@ -4507,7 +9423,7 @@ fn append_exposed_sides(
                 bottom,
                 top,
                 [height_at(left), height_at(right)],
-                bank_taper(&cells[index].source),
+                bank_taper(&cells[index].source, shapes[index]),
                 cells[index].source.subtile_column,
                 cells[index].source.subtile_row,
             );
@@ -4571,18 +9487,30 @@ fn append_exposed_sides(
     }
 }
 
-fn bank_taper(source: &VisualTileSource) -> Option<[f32; 2]> {
-    if matches!(source.tileset_id.as_ref(), "johto" | "johto_modern") && source.metatile_id == 0x0a
-    {
-        return Some([10.0, 4.0]);
+fn bank_taper(source: &VisualTileSource, shape: CellShape) -> Option<[f32; 2]> {
+    // A profiled cliff is a geometric class, not a regional exception. Once
+    // its exact authored cells resolve to cliff height, every exposed edge
+    // uses the same narrow-cap/wide-foot silhouette. This does not promote
+    // unknown art: unprofiled cells are still Flat and never enter this path.
+    if shape.surface_height(SOURCE_TILE_HEIGHT) >= crate::profile::MOUNTAIN_CLIFF_HEIGHT {
+        return Some([SOURCE_TILE_HEIGHT * 0.25, 0.0]);
     }
-    if source.tileset_id.as_ref() == "kanto"
-        && matches!(
-            source.metatile_id,
-            0x3e | 0x3f | 0x3b | 0x24 | 0x06 | 0x57 | 0x25
-        )
-    {
-        return Some([16.0, 8.0]);
+    // Exact source identities only answer "is this authored as a mound?".
+    // Once recognized, Kanto, Johto, cave, and Ice Path all use the same
+    // Route 2 trapezoid. No region-specific dimensions are permitted.
+    let authored_mound = matches!(source.tileset_id.as_ref(), "cave" | "dark_cave")
+        && (shape.surface_height(SOURCE_TILE_HEIGHT) - crate::cave::CAVE_ROCK_HEIGHT).abs()
+            < f32::EPSILON
+        || source.tileset_id.as_ref() == "ice_path" && source.metatile_id == 0x19
+        || matches!(source.tileset_id.as_ref(), "johto" | "johto_modern")
+            && source.metatile_id == 0x0a
+        || source.tileset_id.as_ref() == "kanto"
+            && matches!(
+                source.metatile_id,
+                0x3e | 0x3f | 0x3b | 0x24 | 0x06 | 0x57 | 0x25
+            );
+    if authored_mound {
+        return Some([SOURCE_TILE_HEIGHT * 0.25, 0.0]);
     }
     None
 }
@@ -4670,7 +9598,6 @@ fn append_textured_ship_side(
 #[allow(clippy::too_many_arguments)]
 fn append_bank_run_side(
     textured_mesh: &mut SurfaceMeshData,
-    solid_mesh: &mut SurfaceMeshData,
     geometry: &GridGeometry,
     cells: &[&VisualTile],
     shapes: &[CellShape],
@@ -4715,9 +9642,9 @@ fn append_bank_run_side(
                 run.front.saturating_sub(local_band).max(run.north)
             }
         };
-        let source =
-            authored_bank_face_cell(cells, shapes, geometry, run, column, direction, local_band)
-                .unwrap_or(fallback_row * geometry.width + column);
+        let authored_source =
+            authored_bank_face_cell(cells, shapes, geometry, run, column, direction, local_band);
+        let source = authored_source.unwrap_or(fallback_row * geometry.width + column);
         let (u0, u1, v0, v1) = geometry.uv(source % geometry.width, source / geometry.width);
         let crop_top = (band_ceiling - band_top) / geometry.tile_height;
         let crop_bottom = (band_ceiling - band_bottom) / geometry.tile_height;
@@ -4880,19 +9807,30 @@ fn append_bank_run_side(
             ),
         };
         append_quad_colors(textured_mesh, positions, normal, uvs, colors);
-        if taper.is_some() && matches!(direction, Direction::North | Direction::South) {
+        let corner_source = &cells[source].source;
+        let uses_authored_corner_chamfer =
+            matches!(corner_source.tileset_id.as_ref(), "johto" | "johto_modern")
+                && corner_source.metatile_id == 0x0a
+                || corner_source.tileset_id.as_ref() == "kanto"
+                    && matches!(
+                        corner_source.metatile_id,
+                        0x3e | 0x3f | 0x3b | 0x24 | 0x06 | 0x57 | 0x25
+                    );
+        if taper.is_some()
+            && uses_authored_corner_chamfer
+            && matches!(direction, Direction::North | Direction::South)
+        {
             append_rock_platform_corner_faces(
-                solid_mesh,
+                textured_mesh,
                 direction,
                 [x0, x1, z0, z1],
                 band_bottom,
                 band_top,
                 bottom_inset,
                 top_inset,
-                corner_clip,
                 left_open,
                 right_open,
-                shade,
+                [u0, u1, cropped_v0, cropped_v1],
                 subtile_column,
                 subtile_row,
             );
@@ -4909,55 +9847,77 @@ fn append_rock_platform_corner_faces(
     band_top: f32,
     bottom_inset: f32,
     top_inset: f32,
-    clip: f32,
     left_open: bool,
     right_open: bool,
-    _shade: f32,
+    source_uv: [f32; 4],
     subtile_column: u8,
     subtile_row: u8,
 ) {
     let [x0, x1, z0, z1] = bounds;
-    let color = solid_color(SolidKind::Bank, direction);
-    let mut corner = |positions: [[f32; 3]; 4]| {
-        let edge_a = Vec3::from_array(positions[1]) - Vec3::from_array(positions[0]);
-        let edge_b = Vec3::from_array(positions[2]) - Vec3::from_array(positions[0]);
-        let normal = edge_a.cross(edge_b).normalize().to_array();
-        append_solid_quad(mesh, positions, normal, color);
+    let [u0, u1, v0, v1] = source_uv;
+    let edge_u = u0 + (u1 - u0) / SOURCE_TILE_PIXELS as f32;
+    let shade = match direction {
+        Direction::North => 0.68,
+        Direction::South => 0.90,
+        Direction::West => 0.72,
+        Direction::East => 0.84,
+    };
+    let mut corner = |mut positions: [[f32; 3]; 4]| {
+        let face_normal = |points: &[[f32; 3]; 4]| {
+            let edge_a = Vec3::from_array(points[1]) - Vec3::from_array(points[0]);
+            let edge_b = Vec3::from_array(points[2]) - Vec3::from_array(points[0]);
+            edge_a.cross(edge_b).normalize()
+        };
+        if positions[1] == positions[2] {
+            positions = [positions[0], positions[1], positions[3], positions[3]];
+        }
+        let mut normal = face_normal(&positions);
+        if normal.y < 0.0 {
+            positions.reverse();
+            normal = face_normal(&positions);
+        }
+        append_quad(
+            mesh,
+            positions,
+            normal.to_array(),
+            [[u0, v1], [u0, v0], [edge_u, v0], [edge_u, v1]],
+            [shade, shade, shade, 1.0],
+        );
     };
     match direction {
         Direction::North => {
             if right_open && subtile_column == 0 && subtile_row == 0 {
                 corner([
-                    [x0 + bottom_inset, band_bottom, z0 + clip + bottom_inset],
-                    [x0 + top_inset, band_top, z0 + clip + top_inset],
-                    [x0 + clip + top_inset, band_top, z0 + top_inset],
-                    [x0 + clip + bottom_inset, band_bottom, z0 + bottom_inset],
+                    [x0, band_bottom, z0 + bottom_inset],
+                    [x0, band_top, z0 + top_inset],
+                    [x0 + top_inset, band_top, z0],
+                    [x0 + bottom_inset, band_bottom, z0],
                 ]);
             }
             if left_open && subtile_column == 3 && subtile_row == 0 {
                 corner([
-                    [x1 - clip - bottom_inset, band_bottom, z0 + bottom_inset],
-                    [x1 - clip - top_inset, band_top, z0 + top_inset],
-                    [x1 - top_inset, band_top, z0 + clip + top_inset],
-                    [x1 - bottom_inset, band_bottom, z0 + clip + bottom_inset],
+                    [x1 - bottom_inset, band_bottom, z0],
+                    [x1 - top_inset, band_top, z0],
+                    [x1, band_top, z0 + top_inset],
+                    [x1, band_bottom, z0 + bottom_inset],
                 ]);
             }
         }
         Direction::South => {
             if left_open && subtile_column == 0 && subtile_row == 3 {
                 corner([
-                    [x0 + clip + bottom_inset, band_bottom, z1 - bottom_inset],
-                    [x0 + clip + top_inset, band_top, z1 - top_inset],
-                    [x0 + top_inset, band_top, z1 - clip - top_inset],
-                    [x0 + bottom_inset, band_bottom, z1 - clip - bottom_inset],
+                    [x0 + bottom_inset, band_bottom, z1],
+                    [x0 + top_inset, band_top, z1],
+                    [x0, band_top, z1 - top_inset],
+                    [x0, band_bottom, z1 - bottom_inset],
                 ]);
             }
             if right_open && subtile_column == 3 && subtile_row == 3 {
                 corner([
-                    [x1 - bottom_inset, band_bottom, z1 - clip - bottom_inset],
-                    [x1 - top_inset, band_top, z1 - clip - top_inset],
-                    [x1 - clip - top_inset, band_top, z1 - top_inset],
-                    [x1 - clip - bottom_inset, band_bottom, z1 - bottom_inset],
+                    [x1, band_bottom, z1 - bottom_inset],
+                    [x1, band_top, z1 - top_inset],
+                    [x1 - top_inset, band_top, z1],
+                    [x1 - bottom_inset, band_bottom, z1],
                 ]);
             }
         }
@@ -5463,6 +10423,159 @@ mod tests {
     }
 
     #[test]
+    fn player_bedroom_wall_stays_at_compact_house_height() {
+        let mut sources = Vec::new();
+        for row in 0..2 {
+            for column in 0..16 {
+                sources.push(source_for_tileset(
+                    "players_room",
+                    0x04,
+                    (column % 4) as u8,
+                    row as u8,
+                    0x01,
+                ));
+            }
+        }
+        let frame = frame(16, 2, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let shapes = vec![CellShape::Flat; cells.len()];
+        let geometry = GridGeometry {
+            width: 16,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let mut mesh = TerrainMeshData::default();
+        let mut claimed = vec![false; cells.len()];
+        append_player_room_wall(&mut mesh, &cells, &shapes, &geometry, &mut claimed)
+            .expect("complete player-room wall course should mesh");
+
+        let max_height = mesh
+            .textured
+            .positions
+            .iter()
+            .map(|position| position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert_eq!(max_height, 32.0);
+        assert_eq!(mesh.textured.quad_count(), 16 * 4);
+    }
+
+    #[test]
+    fn traditional_gift_shop_shelf_uses_two_top_rows_and_two_front_rows() {
+        let drawing = [
+            [0x06, 0x07, 0x07, 0x20],
+            [0x16, 0x17, 0x17, 0x30],
+            [0x21, 0x27, 0x27, 0x28],
+            [0x31, 0x37, 0x37, 0x38],
+        ];
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                sources.push(source_for_tileset(
+                    "traditional_house",
+                    0x02,
+                    column,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+        }
+        // The dedicated mesher needs one faithful floor sample outside the
+        // shelf drawing. Use a fifth column without changing shelf topology.
+        let mut expanded = Vec::new();
+        for row in 0..4 {
+            expanded.extend(
+                sources[usize::from(row) * 4..usize::from(row) * 4 + 4]
+                    .iter()
+                    .cloned(),
+            );
+            expanded.push(source_for_tileset("traditional_house", 0x20, 0, row, 0x50));
+        }
+        let shelf_frame = frame(5, 4, expanded);
+        let cells = shelf_frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 5,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placement = traditional_gift_shop_shelf_placements("MahoganyMart1F", &cells, &geometry)
+            .into_iter()
+            .next()
+            .expect("complete shelf placement");
+        let mut mesh = TerrainMeshData::default();
+        let mut claimed = vec![false; cells.len()];
+        let mut samples = TerrainImageSamples::default();
+        for tile in &shelf_frame.tiles {
+            let mut rgba = [210, 210, 210, 255].repeat(64);
+            if tile.source.subtile_row >= 2 {
+                // A small framed display field exercises the same measured
+                // relief path as the live shelf art.
+                for y in 2..6 {
+                    for x in 2..6 {
+                        let offset = (y * 8 + x) * 4;
+                        let value = if x == 2 || x == 5 || y == 2 || y == 5 {
+                            0
+                        } else {
+                            120
+                        };
+                        rgba[offset..offset + 3].fill(value);
+                    }
+                }
+            }
+            samples
+                .pixels
+                .insert(tile.texture.id(), TileImageSample::Rgba(rgba));
+        }
+        append_traditional_gift_shop_shelf(
+            &mut mesh,
+            &samples,
+            &cells,
+            &vec![CellShape::Flat; cells.len()],
+            &geometry,
+            placement,
+            &mut claimed,
+        )
+        .expect("gift-shop shelf should mesh");
+        let max_height = mesh
+            .textured
+            .positions
+            .iter()
+            .map(|position| position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert_eq!(max_height, 16.0);
+        assert!(mesh.textured.quad_count() > 32);
+        assert!(
+            mesh.textured
+                .positions
+                .iter()
+                .any(|position| position[2] < 16.0),
+            "enclosed merchandise fields sit behind their proud frames"
+        );
+        assert_eq!(claimed.iter().filter(|claimed| **claimed).count(), 16);
+    }
+
+    #[test]
+    fn cave_keeps_a_continuous_faithful_floor_below_raised_geometry() {
+        let mesh = build_terrain_mesh(&frame(
+            1,
+            1,
+            vec![source_for_tileset("cave", 0x01, 0, 0, 0x16)],
+        ))
+        .expect("cave floor should mesh");
+        assert_eq!(
+            mesh.textured.quad_count(),
+            2,
+            "one faithful cave underlay plus the visible authored cell"
+        );
+        assert_eq!(mesh.solid.quad_count(), 0);
+    }
+
+    #[test]
     fn game_corner_stool_is_recognized_only_as_a_complete_two_by_two_drawing() {
         let sources = vec![
             source_for_tileset("game_corner", 0x05, 2, 0, 0x0a),
@@ -5493,6 +10606,543 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_house_stool_is_not_mistaken_for_a_partial_table() {
+        let sources = vec![
+            source_for_tileset("house", 0x01, 0, 2, 0x02),
+            source_for_tileset("house", 0x01, 1, 2, 0x03),
+            source_for_tileset("house", 0x01, 2, 2, 0x26),
+            source_for_tileset("house", 0x01, 3, 2, 0x27),
+            source_for_tileset("house", 0x01, 0, 3, 0x12),
+            source_for_tileset("house", 0x01, 1, 3, 0x13),
+            source_for_tileset("house", 0x01, 2, 3, 0x36),
+            source_for_tileset("house", 0x01, 3, 3, 0x2f),
+        ];
+        let frame = frame(4, 2, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            house_furniture_placements(&cells, &geometry),
+            vec![HouseFurniturePlacement {
+                column: 0,
+                row: 0,
+                kind: crate::house::FurnitureKind::Stool,
+            }]
+        );
+        assert!(house_table_placements(&cells, &geometry).is_empty());
+    }
+
+    #[test]
+    fn ordinary_house_table_is_one_complete_four_by_four_drawing() {
+        let drawing = [
+            [0x26, 0x27, 0x27, 0x29],
+            [0x36, 0x2f, 0x2f, 0x39],
+            [0x36, 0x2f, 0x2f, 0x39],
+            [0x3c, 0x3a, 0x3a, 0x3b],
+        ];
+        let sources = drawing
+            .into_iter()
+            .enumerate()
+            .flat_map(|(row, tiles)| {
+                tiles.into_iter().enumerate().map(move |(column, tile)| {
+                    source_for_tileset("house", 0x01, column as u8, row as u8, tile)
+                })
+            })
+            .collect();
+        let complete = frame(4, 4, sources);
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            house_table_placements(&cells, &geometry),
+            vec![HouseTablePlacement {
+                column: 0,
+                row: 0,
+                ground_tile_index: crate::house::HOUSE_FLOOR_TILE,
+                height_pixels: 6.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn player_family_table_is_one_complete_four_by_four_drawing() {
+        let drawing = [
+            [0x23, 0x22, 0x22, 0x24],
+            [0x25, 0x15, 0x15, 0x35],
+            [0x25, 0x15, 0x15, 0x35],
+            [0x33, 0x32, 0x32, 0x34],
+        ];
+        let sources = drawing
+            .into_iter()
+            .enumerate()
+            .flat_map(|(row, tiles)| {
+                tiles.into_iter().enumerate().map(move |(column, tile)| {
+                    source_for_tileset("players_house", 0x08, column as u8, row as u8, tile)
+                })
+            })
+            .collect();
+        let complete = frame(4, 4, sources);
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            house_table_placements(&cells, &geometry),
+            vec![HouseTablePlacement {
+                column: 0,
+                row: 0,
+                ground_tile_index: crate::house::HOUSE_FLOOR_TILE,
+                height_pixels: 6.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn traditional_low_table_is_one_complete_four_by_four_drawing() {
+        let drawing = [
+            [0x23, 0x22, 0x22, 0x24],
+            [0x42, 0x15, 0x15, 0x43],
+            [0x42, 0x15, 0x15, 0x43],
+            [0x33, 0x32, 0x32, 0x34],
+        ];
+        let sources = drawing
+            .into_iter()
+            .enumerate()
+            .flat_map(|(row, tiles)| {
+                tiles.into_iter().enumerate().map(move |(column, tile)| {
+                    source_for_tileset("traditional_house", 0x1c, column as u8, row as u8, tile)
+                })
+            })
+            .collect();
+        let complete = frame(4, 4, sources);
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            house_table_placements(&cells, &geometry),
+            vec![HouseTablePlacement {
+                column: 0,
+                row: 0,
+                ground_tile_index: crate::house::TRADITIONAL_HOUSE_FLOOR_TILE,
+                height_pixels: 4.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn dark_cave_diagonal_is_one_complete_corner_not_four_tile_boxes() {
+        let sources = vec![
+            source_for_tileset("dark_cave", 0x10, 2, 2, 0x0a),
+            source_for_tileset("dark_cave", 0x10, 3, 2, 0x26),
+            source_for_tileset("dark_cave", 0x10, 2, 3, 0x17),
+            source_for_tileset("dark_cave", 0x10, 3, 3, 0x0a),
+        ];
+        let complete = frame(2, 2, sources.clone());
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 2,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            diagonal_cave_corner_placements(&cells, &geometry),
+            vec![DiagonalCaveCornerPlacement {
+                column: 0,
+                row: 0,
+                corner: crate::cave::DiagonalCorner::SouthEast,
+            }]
+        );
+
+        let mut incomplete_sources = sources;
+        incomplete_sources[3].tile_index = 0x16;
+        let incomplete = frame(2, 2, incomplete_sources);
+        let incomplete_cells: Vec<_> = incomplete.tiles.iter().collect();
+        assert!(diagonal_cave_corner_placements(&incomplete_cells, &geometry).is_empty());
+    }
+
+    #[test]
+    fn cave_diagonal_corner_is_a_closed_rock_prism() {
+        let complete = frame(
+            3,
+            2,
+            vec![
+                source_for_tileset("cave", 0x10, 2, 2, 0x0a),
+                source_for_tileset("cave", 0x10, 3, 2, 0x26),
+                source_for_tileset("cave", 0x01, 0, 0, 0x16),
+                source_for_tileset("cave", 0x10, 2, 3, 0x17),
+                source_for_tileset("cave", 0x10, 3, 3, 0x0a),
+                source_for_tileset("cave", 0x01, 1, 0, 0x16),
+            ],
+        );
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 3,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placement = diagonal_cave_corner_placements(&cells, &geometry)[0];
+        let mut mesh = TerrainMeshData::default();
+        let shapes = vec![CellShape::Flat; cells.len()];
+        let mut claimed = vec![false; cells.len()];
+
+        append_diagonal_cave_corner(
+            &mut mesh,
+            &cells,
+            &shapes,
+            &geometry,
+            placement,
+            &mut claimed,
+        )
+        .expect("a complete cave corner with a ground sample should mesh");
+
+        assert_eq!(
+            mesh.solid.quad_count(),
+            0,
+            "diagonal closures must use live cave art, not solid-color fins"
+        );
+        assert_eq!(
+            mesh.textured.indices.len() / 3,
+            16,
+            "ground, cap, diagonal face, and two live edge-strip closures"
+        );
+        assert_eq!(&claimed[..2], &[true, true]);
+        assert_eq!(&claimed[3..5], &[true, true]);
+    }
+
+    #[test]
+    fn coverage_auditor_reports_game_corner_stools_as_cutout_cards() {
+        let sources = vec![
+            source_for_tileset("game_corner", 0x05, 2, 0, 0x0a),
+            source_for_tileset("game_corner", 0x05, 3, 0, 0x0b),
+            source_for_tileset("game_corner", 0x05, 2, 1, 0x1a),
+            source_for_tileset("game_corner", 0x05, 3, 1, 0x1b),
+        ];
+        let frame = frame(2, 2, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("GoldenrodGameCorner", &frame.tiles, 2, 2)
+                .expect("complete casino stool should audit"),
+            vec![CellCoverageKind::Cutout; 4]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_player_house_bookcases_as_cutout_geometry() {
+        let drawing = [
+            [0x0e, 0x0f, 0x0e, 0x0f],
+            [0x1e, 0x1f, 0x2e, 0x2f],
+            [0x2e, 0x2f, 0x08, 0x09],
+            [0x18, 0x19, 0x3a, 0x3b],
+        ];
+        let mut sources = Vec::new();
+        for row in 0..4_u8 {
+            for column in 0..4_u8 {
+                sources.push(source_for_tileset(
+                    "players_house",
+                    0x1b,
+                    column,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+        }
+        let frame = frame(4, 4, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("CopycatsHouse1F", &frame.tiles, 4, 4)
+                .expect("complete paired player-house bookcases should audit"),
+            vec![CellCoverageKind::Cutout; 16]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_player_bedroom_fixture_bank_as_cutout_geometry() {
+        let drawing = [[0x05, 0x06], [0x15, 0x16], [0x25, 0x26], [0x35, 0x36]];
+        let mut sources = Vec::new();
+        for row in 0..4_u8 {
+            for column in 0..2_u8 {
+                sources.push(source_for_tileset(
+                    "players_room",
+                    0x03,
+                    column + 2,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+        }
+        let frame = frame(2, 4, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("PlayersHouse2F", &frame.tiles, 2, 4)
+                .expect("complete player-room fixture bank should audit"),
+            vec![CellCoverageKind::Cutout; 8]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_complete_player_house_wall_course_as_facade() {
+        let blocks = [0x07, 0x0f, 0x11, 0x05, 0x0a];
+        let mut sources = Vec::new();
+        for row in 0..4_u8 {
+            for block in blocks {
+                for column in 0..4_u8 {
+                    let tile = if block == 0x0f && column < 2 && (1..3).contains(&row) {
+                        [[0x0a, 0x0b], [0x1a, 0x1b]][usize::from(row - 1)][usize::from(column)]
+                    } else {
+                        0x11
+                    };
+                    sources.push(source_for_tileset(
+                        "players_house",
+                        block,
+                        column,
+                        row,
+                        tile,
+                    ));
+                }
+            }
+        }
+        let frame = frame(20, 4, sources);
+        let coverage = audit_cell_coverage_on_map("PlayersHouse1F", &frame.tiles, 20, 4)
+            .expect("complete player-house wall course should audit");
+        for row in 0..4 {
+            for column in 0..20 {
+                let expected = if (4..6).contains(&column) && (1..3).contains(&row) {
+                    CellCoverageKind::Ramp
+                } else {
+                    CellCoverageKind::Facade
+                };
+                assert_eq!(coverage[row * 20 + column], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn coverage_auditor_reports_wise_trio_divider_as_one_cutout_group() {
+        let mut sources = Vec::new();
+        for row in 0..2_u8 {
+            for column in 0..4_u8 {
+                sources.push(source_for_tileset(
+                    "traditional_house",
+                    0x28,
+                    column,
+                    row,
+                    if row == 0 { 0x40 } else { 0x41 },
+                ));
+            }
+        }
+        let frame = frame(4, 2, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("WiseTriosRoom", &frame.tiles, 4, 2)
+                .expect("complete Wise Trio divider should audit"),
+            vec![CellCoverageKind::Cutout; 8]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_mr_pokemon_work_counter_as_one_raised_surface() {
+        let drawing = [[0x02, 0x03, 0x04, 0x05], [0x12, 0x13, 0x14, 0x15]];
+        let mut sources = Vec::new();
+        for row in 0..2_u8 {
+            for column in 0..4_u8 {
+                sources.push(source_for_tileset(
+                    "facility",
+                    0x28,
+                    column,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+        }
+        let frame = frame(4, 2, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("MrPokemonsHouse", &frame.tiles, 4, 2)
+                .expect("complete work counter should audit"),
+            vec![CellCoverageKind::Raised; 8]
+        );
+    }
+
+    #[test]
+    fn trainer_house_basement_stair_uses_eight_treads_over_faithful_floor() {
+        let sources = vec![
+            source_for_tileset("facility", 0x04, 2, 0, 0x10),
+            source_for_tileset("facility", 0x04, 3, 0, 0x11),
+            source_for_tileset("facility", 0x04, 2, 1, 0x20),
+            source_for_tileset("facility", 0x04, 3, 1, 0x21),
+            source_for_tileset("facility", 0x00, 0, 0, 0x26),
+            source_for_tileset("facility", 0x00, 1, 0, 0x26),
+        ];
+        let frame = frame(2, 3, sources);
+        let cells = frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 2,
+            height: 3,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let mut mesh = TerrainMeshData::default();
+        let mut claimed = vec![false; 6];
+        append_house_stairs(
+            &mut mesh,
+            "TrainerHouseB1F",
+            &cells,
+            &geometry,
+            &mut claimed,
+        );
+        assert_eq!(&claimed[..4], &[true; 4]);
+        assert_eq!(
+            mesh.textured.quad_count(),
+            20,
+            "four faithful floor cells plus eight two-row stair treads"
+        );
+    }
+
+    #[test]
+    fn player_bed_is_one_level_mattress_not_a_sloped_card() {
+        let drawing = [[0x03, 0x04], [0x13, 0x14], [0x23, 0x24], [0x33, 0x34]];
+        let mut sources = Vec::new();
+        for row in 0..4_u8 {
+            for column in 0..2_u8 {
+                sources.push(source_for_tileset(
+                    "players_room",
+                    0x1b,
+                    column,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+            sources.push(source_for_tileset("players_room", 0x01, 3, row, 0x01));
+        }
+        let frame = frame(3, 4, sources);
+        let cells = frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 3,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placement = player_bed_placements(&cells, &geometry)
+            .into_iter()
+            .next()
+            .expect("complete bedroom bed placement");
+        let mut mesh = TerrainMeshData::default();
+        let mut claimed = vec![false; cells.len()];
+        append_player_bed_card(
+            &mut mesh,
+            &cells,
+            &vec![CellShape::Flat; cells.len()],
+            &geometry,
+            placement,
+            &mut claimed,
+        )
+        .expect("bed should mesh");
+        let raised_heights = mesh
+            .textured
+            .positions
+            .iter()
+            .map(|position| position[1])
+            .filter(|height| *height > 0.0)
+            .collect::<Vec<_>>();
+        assert!(!raised_heights.is_empty());
+        assert!(raised_heights.iter().all(|height| *height == 7.0));
+        for row in 0..4 {
+            for column in 0..2 {
+                assert_eq!(mesh.footing_heights[row * 3 + column], 7.0);
+            }
+        }
+        assert_eq!(mesh.textured.quad_count(), 18);
+        assert_eq!(
+            mesh.solid.quad_count(),
+            3,
+            "only the hidden head and narrow flanks use neutral structure; the visible foot is source art"
+        );
+        assert_eq!(claimed.iter().filter(|claimed| **claimed).count(), 8);
+    }
+
+    #[test]
+    fn player_family_table_exports_its_six_pixel_visual_support() {
+        let drawing = [
+            [0x23, 0x22, 0x22, 0x24],
+            [0x25, 0x15, 0x15, 0x35],
+            [0x25, 0x15, 0x15, 0x35],
+            [0x33, 0x32, 0x32, 0x34],
+        ];
+        let mut sources = Vec::new();
+        for row in 0..4_u8 {
+            for column in 0..4_u8 {
+                sources.push(source_for_tileset(
+                    "players_house",
+                    0x25,
+                    column,
+                    row,
+                    drawing[usize::from(row)][usize::from(column)],
+                ));
+            }
+            sources.push(source_for_tileset("players_house", 0x03, 0, row, 0x01));
+        }
+        let frame = frame(5, 4, sources);
+        let cells = frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 5,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placement = house_table_placements(&cells, &geometry)
+            .into_iter()
+            .next()
+            .expect("complete player-family table placement");
+        let mut mesh = TerrainMeshData::default();
+        let mut claimed = vec![false; cells.len()];
+        append_house_table(
+            &mut mesh,
+            &cells,
+            &vec![CellShape::Flat; cells.len()],
+            &geometry,
+            placement,
+            &mut claimed,
+        )
+        .expect("table should mesh");
+        for row in 0..4 {
+            for column in 0..4 {
+                assert_eq!(mesh.footing_heights[row * 5 + column], 6.0);
+            }
+        }
+        assert_eq!(mesh.footing_heights[4], 0.0);
+    }
+
+    #[test]
     fn coverage_auditor_reports_ice_path_boulders_as_props_not_trees() {
         let sources = vec![
             source_for_tileset("ice_path", 0x1a, 2, 0, 0x82),
@@ -5506,6 +11156,97 @@ mod tests {
                 .expect("complete Ice Path boulder should audit"),
             vec![CellCoverageKind::Cutout; 4]
         );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_ice_path_edge_rocks_as_complete_props() {
+        let sources = vec![
+            source_for_tileset("ice_path", 0x14, 0, 0, 0xc4),
+            source_for_tileset("ice_path", 0x14, 1, 0, 0xc5),
+            source_for_tileset("ice_path", 0x14, 0, 1, 0xd4),
+            source_for_tileset("ice_path", 0x14, 1, 1, 0xd5),
+        ];
+        let frame = frame(2, 2, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("IcePathB2FBlackthornSide", &frame.tiles, 2, 2)
+                .expect("complete Ice Path edge rock should audit"),
+            vec![CellCoverageKind::Cutout; 4]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_complete_ice_mass_as_one_raised_platform() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                sources.push(source_for_tileset(
+                    "ice_path",
+                    0x19,
+                    column,
+                    row,
+                    0x84 + u16::from(row) * 0x10 + u16::from(column),
+                ));
+            }
+        }
+        let frame = frame(4, 4, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("IcePath1F", &frame.tiles, 4, 4)
+                .expect("complete Ice Path mass should audit"),
+            vec![CellCoverageKind::Raised; 16]
+        );
+    }
+
+    #[test]
+    fn coverage_auditor_reports_each_complete_cave_rock_as_a_prop() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                let drawing = [[0x0c, 0x0d], [0x1c, 0x1d]];
+                sources.push(source_for_tileset(
+                    "dark_cave",
+                    0x1d,
+                    column,
+                    row,
+                    drawing[usize::from(row % 2)][usize::from(column % 2)],
+                ));
+            }
+        }
+        let frame = frame(4, 4, sources);
+        assert_eq!(
+            audit_cell_coverage_on_map("DarkCaveBlackthornEntrance", &frame.tiles, 4, 4)
+                .expect("four complete cave rocks should audit"),
+            vec![CellCoverageKind::Cutout; 16]
+        );
+    }
+
+    #[test]
+    fn complete_cave_rock_is_a_flat_card_on_the_shelf_datum() {
+        let complete = frame(
+            3,
+            2,
+            vec![
+                source_for_tileset("cave", 0x1d, 0, 0, 0x0c),
+                source_for_tileset("cave", 0x1d, 1, 0, 0x0d),
+                source_for_tileset("cave", 0x01, 0, 0, 0x01),
+                source_for_tileset("cave", 0x1d, 0, 1, 0x1c),
+                source_for_tileset("cave", 0x1d, 1, 1, 0x1d),
+                source_for_tileset("cave", 0x01, 1, 0, 0x01),
+            ],
+        );
+        let cells: Vec<_> = complete.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 3,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placement = cave_small_rock_placements(&cells, &geometry)[0];
+        assert_eq!(placement.width, 2);
+        assert_eq!(placement.height, 2);
+        assert_eq!(placement.base_height, crate::cave::CAVE_SHELF_HEIGHT);
+        assert!(!placement.rounded, "cave rocks must not grow a voxel hull");
     }
 
     #[test]
@@ -5568,7 +11309,7 @@ mod tests {
     }
 
     #[test]
-    fn waterfall_uses_each_source_row_once_on_one_vertical_plane() {
+    fn waterfall_uses_each_source_row_once_on_one_bounded_cave_slope() {
         let mut sources = Vec::new();
         for row in 0..2 {
             for column in 0..3 {
@@ -5584,24 +11325,26 @@ mod tests {
         let mesh = build_terrain_mesh(&frame(3, 2, sources))
             .expect("waterfall and its authored water replacement should mesh");
 
-        assert_eq!(mesh.textured.quad_count(), 10);
-        let waterfall_vertices = &mesh.textured.positions[6 * 4..10 * 4];
-        let plane_z = waterfall_vertices[0][2];
-        for quad in waterfall_vertices.chunks_exact(4) {
-            assert!(
-                quad.iter()
-                    .all(|position| (position[2] - plane_z).abs() < f32::EPSILON)
-            );
-            let min_y = quad
-                .iter()
-                .map(|position| position[1])
-                .fold(f32::INFINITY, f32::min);
-            let max_y = quad
-                .iter()
-                .map(|position| position[1])
-                .fold(f32::NEG_INFINITY, f32::max);
-            assert!((max_y - min_y - 8.0).abs() < f32::EPSILON);
-        }
+        assert_eq!(mesh.textured.quad_count(), 11);
+        let waterfall_vertices = &mesh.textured.positions[7 * 4..11 * 4];
+        let min_y = waterfall_vertices
+            .iter()
+            .map(|position| position[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = waterfall_vertices
+            .iter()
+            .map(|position| position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_z = waterfall_vertices
+            .iter()
+            .map(|position| position[2])
+            .fold(f32::INFINITY, f32::min);
+        let max_z = waterfall_vertices
+            .iter()
+            .map(|position| position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_y - min_y - crate::cave::CAVE_ROCK_HEIGHT).abs() < f32::EPSILON);
+        assert!((max_z - min_z - 16.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -5754,16 +11497,68 @@ mod tests {
     }
 
     #[test]
-    fn only_authored_rock_platform_and_kanto_mound_families_taper() {
+    fn authored_rock_platform_cave_and_kanto_mound_families_taper() {
         assert_eq!(
-            bank_taper(&source_with_tile(0x0a, 0, 0, 0)),
-            Some([10.0, 4.0])
+            bank_taper(
+                &source_with_tile(0x0a, 0, 0, 0),
+                CellShape::RaisedTop {
+                    height: crate::profile::MOUNTAIN_LEDGE_HEIGHT,
+                    solid: SolidKind::Bank,
+                },
+            ),
+            Some([2.0, 0.0])
         );
         let mut mound = source_with_tile(0x3e, 0, 0, 0);
         mound.tileset_id = Arc::from("kanto");
-        assert_eq!(bank_taper(&mound), Some([16.0, 8.0]));
+        assert_eq!(
+            bank_taper(
+                &mound,
+                CellShape::RaisedTop {
+                    height: crate::profile::MOUNTAIN_CLIFF_HEIGHT,
+                    solid: SolidKind::Bank,
+                },
+            ),
+            Some([2.0, 0.0])
+        );
         mound.metatile_id = 0x01;
-        assert_eq!(bank_taper(&mound), None);
+        assert_eq!(bank_taper(&mound, CellShape::Flat), None);
+        let mut ice_mass = source_with_tile(0x19, 0, 0, 0x84);
+        ice_mass.tileset_id = Arc::from("ice_path");
+        assert_eq!(
+            bank_taper(
+                &ice_mass,
+                CellShape::RaisedTop {
+                    height: crate::profile::MOUNTAIN_LEDGE_HEIGHT,
+                    solid: SolidKind::Bank,
+                },
+            ),
+            Some([2.0, 0.0])
+        );
+        ice_mass.metatile_id = 0x18;
+        assert_eq!(bank_taper(&ice_mass, CellShape::Flat), None);
+        let mut cave_rock = source_with_tile(0x04, 0, 0, 0x01);
+        cave_rock.tileset_id = Arc::from("cave");
+        assert_eq!(
+            bank_taper(
+                &cave_rock,
+                CellShape::RaisedTop {
+                    height: crate::cave::CAVE_ROCK_HEIGHT,
+                    solid: SolidKind::Bank,
+                },
+            ),
+            Some([2.0, 0.0])
+        );
+        cave_rock.tileset_id = Arc::from("dark_cave");
+        assert_eq!(
+            bank_taper(
+                &cave_rock,
+                CellShape::RaisedTop {
+                    height: crate::cave::CAVE_ROCK_HEIGHT,
+                    solid: SolidKind::Bank,
+                },
+            ),
+            Some([2.0, 0.0])
+        );
     }
 
     #[test]
@@ -5791,7 +11586,7 @@ mod tests {
             .chunks_exact(4)
             .zip(mesh.textured.normals.chunks_exact(4))
             .zip(mesh.textured.uvs.chunks_exact(4))
-            .filter(|((_, normal), _)| normal[0] == [0.0, 0.0, 1.0])
+            .filter(|((_, normal), _)| normal[0][2] > 0.5)
             .map(|((positions, _), uvs)| (positions, uvs))
             .collect();
         assert!(!south_faces.is_empty());
@@ -5835,13 +11630,13 @@ mod tests {
             .textured
             .normals
             .chunks_exact(4)
-            .filter(|normal| normal[0] == [0.0, 0.0, 1.0])
+            .filter(|normal| normal[0][2] > 0.5)
             .count();
         let east_faces = mesh
             .textured
             .normals
             .chunks_exact(4)
-            .filter(|normal| normal[0] == [1.0, 0.0, 0.0])
+            .filter(|normal| normal[0][0] > 0.5)
             .count();
         assert!(south_faces > 0);
         assert!(east_faces > 0);
@@ -5864,8 +11659,7 @@ mod tests {
             .chunks_exact(4)
             .zip(mesh.textured.normals.chunks_exact(4))
             .filter(|(positions, normals)| {
-                normals[0] == [1.0, 0.0, 0.0]
-                    && positions.iter().all(|position| position[0] == 12.0)
+                normals[0][0] > 0.5 && positions.iter().all(|position| position[0] > 8.0)
             })
             .count();
         let solid_east_faces = mesh
@@ -5874,11 +11668,10 @@ mod tests {
             .chunks_exact(4)
             .zip(mesh.solid.normals.chunks_exact(4))
             .filter(|(positions, normals)| {
-                normals[0] == [1.0, 0.0, 0.0]
-                    && positions.iter().all(|position| position[0] == 12.0)
+                normals[0][0] > 0.5 && positions.iter().all(|position| position[0] > 8.0)
             })
             .count();
-        assert_eq!(textured_east_courses, 4);
+        assert_eq!(textured_east_courses, 2);
         assert_eq!(solid_east_faces, 0);
     }
 
@@ -5902,9 +11695,7 @@ mod tests {
             .chunks_exact(4)
             .zip(mesh.textured.normals.chunks_exact(4))
             .zip(mesh.textured.uvs.chunks_exact(4))
-            .filter(|((positions, normals), _)| {
-                normals[0] == [1.0, 0.0, 0.0] && positions.iter().all(|position| position[0] == 0.0)
-            })
+            .filter(|((_, normals), _)| normals[0][0] > 0.5)
             .map(|(_, uvs)| {
                 let min = uvs.iter().map(|uv| uv[1]).fold(f32::INFINITY, f32::min);
                 let max = uvs.iter().map(|uv| uv[1]).fold(f32::NEG_INFINITY, f32::max);
@@ -5980,11 +11771,11 @@ mod tests {
             .filter(|normals| normals[0][1] > 0.0 && normals[0][1] < 1.0)
             .count();
         assert_eq!(
-            tapered_faces, 32,
-            "four textured sides use two 8px tapered courses"
+            tapered_faces, 36,
+            "four meeting sides and their chamfers use native tapered courses"
         );
         let chamfered_faces = mesh
-            .solid
+            .textured
             .normals
             .chunks_exact(4)
             .filter(|normals| {
@@ -5995,8 +11786,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            chamfered_faces, 8,
-            "four neutral chamfer faces use two 8px courses"
+            chamfered_faces, 4,
+            "visible textured chamfers close the widened exposed corners"
         );
 
         let tapered_vertices: Vec<_> = mesh
@@ -6021,7 +11812,7 @@ mod tests {
             .fold(f32::INFINITY, f32::min);
         assert_eq!(
             cap_min_x - base_min_x,
-            10.0,
+            2.0,
             "the base spreads beyond the cap"
         );
     }
@@ -6110,6 +11901,26 @@ mod tests {
             mesh.footing_heights[6 * 6 + 2],
             crate::profile::MOUNTAIN_LEDGE_HEIGHT,
             "the southern copy remains on the same platform course"
+        );
+    }
+
+    #[test]
+    fn jump_ledge_does_not_invent_a_plateau_in_neighboring_flat_ground() {
+        let mut sources = vec![flat_source(); 5];
+        for row in 0..3 {
+            sources[row + 1] = source_with_tile(0x57, 1, row as u8, 0x05);
+        }
+        sources[4] = source_with_tile(0x57, 1, 3, 0x4c);
+
+        let mesh = build_terrain_mesh(&frame(1, 5, sources)).expect("exact jump ledge meshes");
+        assert_eq!(
+            mesh.footing_heights[0], 0.0,
+            "ordinary ground north of the exact ledge drawing must remain flat"
+        );
+        assert_eq!(
+            mesh.footing_heights[1],
+            crate::profile::JUMP_LEDGE_HEIGHT,
+            "the authored ledge cap retains its single level"
         );
     }
 
@@ -6354,7 +12165,7 @@ mod tests {
                 row: 2,
                 width: 12,
                 height: 6,
-                roof_rows: 2,
+                roof_rows: 4,
                 ground_tile_index: 0x06,
             }]
         );
@@ -6483,7 +12294,7 @@ mod tests {
                 row: 0,
                 width: 12,
                 height: 16,
-                roof_rows: 4,
+                roof_rows: 2,
                 ground_tile_index: 0x06,
             }]
         );
@@ -6606,6 +12417,178 @@ mod tests {
     }
 
     #[test]
+    fn blackthorn_closed_mound_is_one_object_not_six_cliff_blocks() {
+        let metatiles = [[0x6a, 0x70, 0x6b], [0x6c, 0x72, 0x6d]];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..12 {
+                sources.push(source(
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                ));
+            }
+        }
+        let frame = frame(12, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 12,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(johto_closed_mound_origins(&cells, 12, 8), vec![(0, 0)]);
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 12,
+                height: 8,
+                roof_rows: 6,
+                ground_tile_index: 0x01,
+            }]
+        );
+    }
+
+    #[test]
+    fn ice_path_closed_plateau_reuses_the_complete_mound_object() {
+        let metatiles = [[0x04, 0x05, 0x06], [0x0c, 0x0d, 0x0e]];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..12 {
+                let mut tile = source(
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                );
+                tile.tileset_id = Arc::from("ice_path");
+                tile.tile_index = 0x9a;
+                sources.push(tile);
+            }
+        }
+        let frame = frame(12, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 12,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(ice_path_plateau_origins(&cells, 12, 8), vec![(0, 0, 12)]);
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 12,
+                height: 8,
+                roof_rows: 6,
+                ground_tile_index: 0x9a,
+            }]
+        );
+
+        let mut wrong_sources = frame.tiles.clone();
+        for row in 4..8 {
+            for column in 8..12 {
+                wrong_sources[row * 12 + column].source.metatile_id = 0x1f;
+            }
+        }
+        let wrong_cells: Vec<_> = wrong_sources.iter().collect();
+        assert!(ice_path_plateau_origins(&wrong_cells, 12, 8).is_empty());
+    }
+
+    #[test]
+    fn ice_path_two_block_island_is_one_trapezoid() {
+        let metatiles = [[0x04, 0x06], [0x10, 0x3a]];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..8 {
+                let mut tile = source(
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                );
+                tile.tileset_id = Arc::from("ice_path");
+                tile.tile_index = 0x9a;
+                sources.push(tile);
+            }
+        }
+        let frame = frame(8, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 8,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(ice_path_plateau_origins(&cells, 8, 8), vec![(0, 0, 8)]);
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 8,
+                height: 8,
+                roof_rows: 6,
+                ground_tile_index: 0x9a,
+            }]
+        );
+    }
+
+    #[test]
+    fn ice_path_long_plateau_keeps_transition_blocks_inside_one_object() {
+        let north = [0x04, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x06];
+        let south = [0x09, 0x10, 0x0d, 0x3e, 0x0d, 0x3e, 0x0d, 0x12, 0x0e];
+        let mut sources = Vec::new();
+        for row in 0..8 {
+            for column in 0..36 {
+                let metatile = if row < 4 {
+                    north[column / 4]
+                } else {
+                    south[column / 4]
+                };
+                let mut tile = source(metatile, (column % 4) as u8, (row % 4) as u8);
+                tile.tileset_id = Arc::from("ice_path");
+                tile.tile_index = 0x9a;
+                sources.push(tile);
+            }
+        }
+        let frame = frame(36, 8, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 36,
+            height: 8,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(ice_path_plateau_origins(&cells, 36, 8), vec![(0, 0, 36)]);
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 36,
+                height: 8,
+                roof_rows: 6,
+                ground_tile_index: 0x9a,
+            }]
+        );
+    }
+
+    #[test]
     fn olivine_lighthouse_is_detected_as_one_tall_door_anchored_tower() {
         let block_rows: [[u16; 2]; 7] = [
             [0x08, 0x09],
@@ -6682,6 +12665,96 @@ mod tests {
                 row: 0,
                 width: 12,
                 height: 8,
+                roof_rows: 4,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+            }]
+        );
+    }
+
+    #[test]
+    fn celadon_department_store_claims_its_roof_and_every_window_course() {
+        let metatiles = [
+            [0x20, 0x54, 0x21],
+            [0x68, 0x7f, 0x69],
+            [0x68, 0x7f, 0x69],
+            [0x37, 0x3a, 0x73],
+        ];
+        let mut sources = Vec::new();
+        for row in 0..16 {
+            for column in 0..12 {
+                sources.push(source_for_tileset(
+                    "kanto",
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                    0x30,
+                ));
+            }
+        }
+        let frame = frame(12, 16, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 12,
+            height: 16,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 12,
+                height: 16,
+                roof_rows: 4,
+                ground_tile_index: KANTO_GROUND_TILE_INDEX,
+            }]
+        );
+    }
+
+    #[test]
+    fn saffron_silph_claims_its_cap_before_all_four_window_courses() {
+        let metatiles = [
+            [0x20, 0x54, 0x54, 0x21],
+            [0x68, 0x7f, 0x7f, 0x69],
+            [0x68, 0x7f, 0x7f, 0x69],
+            [0x68, 0x7f, 0x7f, 0x69],
+            [0x68, 0x7f, 0x7f, 0x69],
+            [0x37, 0x3a, 0x7d, 0x7e],
+        ];
+        let mut sources = Vec::new();
+        for row in 0..24 {
+            for column in 0..16 {
+                sources.push(source_for_tileset(
+                    "kanto",
+                    metatiles[row / 4][column / 4],
+                    (column % 4) as u8,
+                    (row % 4) as u8,
+                    0x30,
+                ));
+            }
+        }
+        let frame = frame(16, 24, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 16,
+            height: 24,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        assert_eq!(
+            outdoor_building_placements(&cells, &geometry),
+            vec![BuildingPlacement {
+                column: 0,
+                row: 0,
+                width: 16,
+                height: 24,
                 roof_rows: 4,
                 ground_tile_index: KANTO_GROUND_TILE_INDEX,
             }]
@@ -6946,6 +13019,44 @@ mod tests {
     }
 
     #[test]
+    fn house_bookcase_recess_starts_below_the_lid_and_keeps_frame_proud() {
+        let width = 16;
+        let height = 32;
+        let mut inside = vec![true; width * height];
+        let mut luminance = vec![300_u16; width * height];
+        // A dark rectangular frame around one shelf opening. The opening is
+        // deliberately below source row 9, where the authored lid folds.
+        for y in 11..18 {
+            for x in 3..13 {
+                if x == 3 || x == 12 || y == 11 || y == 17 {
+                    luminance[y * width + x] = 0;
+                }
+            }
+        }
+        // Transparent pixels are outside the drawing and cannot be panels.
+        inside[31 * width] = false;
+
+        let recessed = facade_recess_mask(&inside, &luminance, width, height, 9, 0);
+
+        assert!(
+            recessed[14 * width + 8],
+            "the enclosed shelf field recesses"
+        );
+        assert!(
+            !recessed[11 * width + 8],
+            "the dark shelf frame stays proud"
+        );
+        assert!(
+            recessed[..9 * width].iter().all(|pixel| !pixel),
+            "the cabinet lid is outside the facade relief pass"
+        );
+        assert!(
+            !recessed[31 * width],
+            "transparent background never recesses"
+        );
+    }
+
+    #[test]
     fn facade_side_course_ignores_outline_and_uses_dominant_row_paint() {
         let inside = vec![true; 8];
         // Black outline at both edges, one window pixel, and a repeated
@@ -7008,6 +13119,80 @@ mod tests {
     }
 
     #[test]
+    fn house_appliance_cards_gain_shallow_casings_but_tree_cards_stay_flat() {
+        let drawing = [
+            [0x11, 0x11, 0x11, 0x11],
+            [0x06, 0x07, 0x11, 0x11],
+            [0x16, 0x17, 0x0e, 0x0f],
+            [0x08, 0x09, 0x3a, 0x3b],
+        ];
+        let house_tiles = (0..4)
+            .flat_map(|row| {
+                (0..4).map(move |column| {
+                    source_for_tileset(
+                        "players_house",
+                        0x11,
+                        column as u8,
+                        row as u8,
+                        drawing[row][column],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let frame = frame(4, 4, house_tiles);
+        let cells = frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 4,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let fixtures = players_house_upright_fixture_placements(&cells, &geometry);
+        assert_eq!(fixtures.len(), 2);
+        assert!(fixtures.iter().all(|fixture| fixture.card_thickness == 1.0));
+
+        let generic = grouped_flat_card_placements(
+            &cells,
+            &geometry,
+            0x11,
+            false,
+            crate::players_house::upright_fixture_local,
+        );
+        assert!(generic.iter().all(|fixture| fixture.card_thickness == 0.0));
+    }
+
+    #[test]
+    fn trainer_house_open_book_keeps_the_complete_page_drawing() {
+        let book = [
+            source_for_tileset("house", 0x14, 2, 3, 0x46),
+            source_for_tileset("house", 0x14, 3, 3, 0x47),
+            source_for_tileset("house", 0x18, 2, 0, 0x56),
+            source_for_tileset("house", 0x18, 3, 0, 0x57),
+        ];
+        let frame = frame(2, 2, book.into());
+        let cells = frame.tiles.iter().collect::<Vec<_>>();
+        let geometry = GridGeometry {
+            width: 2,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+
+        let placements = house_open_book_placements(&cells, &geometry);
+        assert_eq!(placements.len(), 1);
+        assert_eq!((placements[0].column, placements[0].row), (0, 0));
+        assert_eq!((placements[0].width, placements[0].height), (2, 2));
+        assert!(
+            !placements[0].outline_mask,
+            "the light pages touch the drawing boundary, so a dark-outline mask drops them"
+        );
+    }
+
+    #[test]
     fn repeated_tree_metatile_becomes_two_complete_two_tile_tall_sprites() {
         let mut sources = Vec::new();
         for row in 0..4 {
@@ -7038,9 +13223,12 @@ mod tests {
                     width: 2,
                     height: 4,
                     ground_tile_index: 0x05,
+                    ground_metatile_id: None,
                     base_height: 0.0,
                     rounded: false,
                     outline_mask: false,
+                    remove_all_ground: false,
+                    card_thickness: 0.0,
                 },
                 TreePlacement {
                     column: 2,
@@ -7048,9 +13236,12 @@ mod tests {
                     width: 2,
                     height: 4,
                     ground_tile_index: 0x05,
+                    ground_metatile_id: None,
                     base_height: 0.0,
                     rounded: false,
                     outline_mask: false,
+                    remove_all_ground: false,
+                    card_thickness: 0.0,
                 },
             ]
         );
@@ -7058,22 +13249,17 @@ mod tests {
         let mut samples = TerrainImageSamples::default();
         for tile in &frame.tiles {
             let rgba = if tile.source.metatile_id == 0x05 {
-                let mut rgba = [0, 80, 0, 255].repeat(64);
-                let at_left = tile.source.subtile_column % 2 == 0;
-                let at_right = tile.source.subtile_column % 2 == 1;
-                let at_top = tile.source.subtile_row == 0;
-                let at_bottom = tile.source.subtile_row == 3;
-                for (x, y) in [
-                    (0, 0, at_left && at_top),
-                    (7, 0, at_right && at_top),
-                    (0, 7, at_left && at_bottom),
-                    (7, 7, at_right && at_bottom),
-                ]
-                .into_iter()
-                .filter_map(|(x, y, outer_corner)| outer_corner.then_some((x, y)))
-                {
-                    let offset = (y * SOURCE_TILE_PIXELS + x) * 4;
-                    rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+                // Model the authored drawing: boundary-connected light
+                // ground surrounds a darker canopy that continues through
+                // all four source rows. Painting the corners canopy-colored
+                // would correctly classify the entire synthetic image as
+                // background and would not represent a real tree sprite.
+                let mut rgba = [255, 255, 255, 255].repeat(64);
+                for y in 0..SOURCE_TILE_PIXELS {
+                    for x in 1..SOURCE_TILE_PIXELS - 1 {
+                        let offset = (y * SOURCE_TILE_PIXELS + x) * 4;
+                        rgba[offset..offset + 4].copy_from_slice(&[0, 80, 0, 255]);
+                    }
                 }
                 rgba
             } else {
@@ -7085,25 +13271,150 @@ mod tests {
         }
         let mesh = build_terrain_mesh_with_samples(&frame, &samples)
             .expect("complete repeated tree drawing should mesh as upright sprites");
-        let (min_y, max_y) = mesh.textured.positions.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(min, max), position| (min.min(position[1]), max.max(position[1])),
-        );
+        let is_tree_card_normal = |normal: [f32; 3]| {
+            normal[0].abs() < 0.000_001
+                && normal[1] > 0.0
+                && normal[2] > 0.0
+                && (normal[1] - normal[2]).abs() < 0.000_001
+        };
+        let (min_y, max_y) = mesh
+            .textured
+            .positions
+            .chunks_exact(4)
+            .zip(mesh.textured.normals.chunks_exact(4))
+            .filter(|(_, normals)| is_tree_card_normal(normals[0]))
+            .flat_map(|(positions, _)| positions)
+            .fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(min, max), position| (min.min(position[1]), max.max(position[1])),
+            );
         let expected_world_y_span = 32.0 * std::f32::consts::FRAC_1_SQRT_2;
+        let normal_samples: Vec<_> = mesh
+            .textured
+            .normals
+            .chunks_exact(4)
+            .map(|quad| quad[0])
+            .collect();
         assert!(
             (max_y - min_y - expected_world_y_span).abs() < 0.001,
-            "headbutt trees are two map tiles tall"
+            "headbutt trees are two map tiles tall: measured {}..{} (span {}), expected {}; normals {:?}",
+            min_y,
+            max_y,
+            max_y - min_y,
+            expected_world_y_span,
+            normal_samples,
         );
+        assert!(!normal_samples.is_empty());
         let (min_z, max_z) = mesh
             .textured
             .positions
-            .iter()
-            .filter(|position| position[1] > 0.0)
+            .chunks_exact(4)
+            .zip(mesh.textured.normals.chunks_exact(4))
+            .filter(|(_, normals)| is_tree_card_normal(normals[0]))
+            .flat_map(|(positions, _)| positions)
             .fold(
                 (f32::INFINITY, f32::NEG_INFINITY),
                 |(min, max), position| (min.min(position[2]), max.max(position[2])),
             );
         assert!(max_z > min_z, "isolated canopies must have real depth");
+    }
+
+    #[test]
+    fn headbutt_tree_block_becomes_four_independent_two_by_two_cards() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..5 {
+                sources.push(if column < 4 {
+                    source_for_tileset(
+                        "johto",
+                        0x61,
+                        column,
+                        row,
+                        if row % 2 == 0 {
+                            if column % 2 == 0 { 0x1e } else { 0x1f }
+                        } else if column % 2 == 0 {
+                            0x3e
+                        } else {
+                            0x3f
+                        },
+                    )
+                } else {
+                    source_with_tile(0x01, 0, 0, 0x05)
+                });
+            }
+        }
+        let frame = frame(5, 4, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 5,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        let placements = complete_tree_placements(&cells, &geometry);
+        assert_eq!(placements.len(), 4);
+        assert_eq!(
+            placements
+                .iter()
+                .map(|placement| (
+                    placement.column,
+                    placement.row,
+                    placement.width,
+                    placement.height
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 2, 2), (2, 0, 2, 2), (0, 2, 2, 2), (2, 2, 2, 2)]
+        );
+    }
+
+    #[test]
+    fn mixed_headbutt_block_claims_two_trees_but_not_its_ground_rows() {
+        let mut sources = Vec::new();
+        for row in 0..2 {
+            for column in 0..5 {
+                sources.push(if column < 4 {
+                    source_for_tileset(
+                        "johto",
+                        0x5d,
+                        column,
+                        row,
+                        if row == 0 {
+                            if column % 2 == 0 { 0x1e } else { 0x1f }
+                        } else if column % 2 == 0 {
+                            0x3e
+                        } else {
+                            0x3f
+                        },
+                    )
+                } else {
+                    source_with_tile(0x01, 0, 0, 0x05)
+                });
+            }
+        }
+        let frame = frame(5, 2, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 5,
+            height: 2,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: 0.0,
+            origin_z: 0.0,
+        };
+        assert_eq!(
+            complete_tree_placements(&cells, &geometry)
+                .iter()
+                .map(|placement| (
+                    placement.column,
+                    placement.row,
+                    placement.width,
+                    placement.height
+                ))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 2, 2), (2, 0, 2, 2)]
+        );
     }
 
     #[test]
@@ -7140,9 +13451,12 @@ mod tests {
                     width: 2,
                     height: 4,
                     ground_tile_index: 0x06,
+                    ground_metatile_id: None,
                     base_height: 0.0,
                     rounded: false,
                     outline_mask: false,
+                    remove_all_ground: false,
+                    card_thickness: 0.0,
                 },
                 TreePlacement {
                     column: 2,
@@ -7150,9 +13464,12 @@ mod tests {
                     width: 2,
                     height: 4,
                     ground_tile_index: 0x06,
+                    ground_metatile_id: None,
                     base_height: 0.0,
                     rounded: false,
                     outline_mask: false,
+                    remove_all_ground: false,
+                    card_thickness: 0.0,
                 },
             ]
         );
@@ -7192,9 +13509,12 @@ mod tests {
                 width: 2,
                 height: 2,
                 ground_tile_index: 0x05,
+                ground_metatile_id: None,
                 base_height: 0.0,
                 rounded: false,
                 outline_mask: false,
+                remove_all_ground: false,
+                card_thickness: 0.0,
             }]
         );
 
@@ -7227,11 +13547,42 @@ mod tests {
                 width: 4,
                 height: 4,
                 ground_tile_index: 0x05,
+                ground_metatile_id: None,
                 base_height: 0.0,
                 rounded: false,
                 outline_mask: false,
+                remove_all_ground: false,
+                card_thickness: 0.0,
             }]
         );
+    }
+
+    #[test]
+    fn saffron_gym_planter_stays_a_flat_masked_card() {
+        let mut sources = Vec::new();
+        for row in 0..4 {
+            for column in 0..2 {
+                let mut source = source_with_tile(0x36, column, row, 0x20);
+                source.tileset_id = Arc::from("underground");
+                sources.push(source);
+            }
+        }
+        let frame = frame(2, 4, sources);
+        let cells: Vec<_> = frame.tiles.iter().collect();
+        let geometry = GridGeometry {
+            width: 2,
+            height: 4,
+            tile_width: 8.0,
+            tile_height: 8.0,
+            origin_x: -8.0,
+            origin_z: -16.0,
+        };
+
+        let placements = saffron_gym_planter_placements(&cells, &geometry);
+        assert_eq!(placements.len(), 1);
+        assert_eq!((placements[0].width, placements[0].height), (2, 4));
+        assert!(!placements[0].rounded);
+        assert!(placements[0].outline_mask);
     }
 
     #[test]

@@ -3928,18 +3928,20 @@ fn settle_visible_overworld_travel(runtime_shell: &mut BevyRuntimeShell) -> Resu
 fn suppress_visible_map_name_sign_for_current_map(
     runtime_shell: &mut BevyRuntimeShell,
 ) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
+    let map_name = runtime_shell.shell.current_map_name();
     runtime_shell.previous_map_sign_landmark = if matches!(
-        snapshot.overworld.map_name.as_str(),
+        map_name,
         "Route35NationalParkGate" | "Route36NationalParkGate"
     ) {
         Some("__MAP_NAME_SIGN_SENTINEL__".to_string())
     } else {
-        snapshot
-            .presentation
+        runtime_shell
+            .shell
+            .runtime()
+            .data()
             .pokegear_landmarks
             .map_to_landmark
-            .get(&snapshot.overworld.map_name)
+            .get(map_name)
             .cloned()
     };
     runtime_shell.visible_map_name_sign = None;
@@ -4241,8 +4243,9 @@ fn load_visible_runtime_save(
             .shell
             .snapshot()?
             .spawn_points
-            .into_iter()
+            .iter()
             .find(|spawn| spawn.identifier == spawn_identifier)
+            .cloned()
             .with_context(|| {
                 format!("compiled pack is missing post-credits spawn {spawn_identifier}")
             })?;

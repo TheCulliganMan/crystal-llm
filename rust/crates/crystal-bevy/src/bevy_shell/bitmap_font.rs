@@ -107,13 +107,13 @@ fn load_window_frame_art(
     let frame_path = asset_root
         .runtime_assets()
         .join(format!("gfx/frames/{frame_id}.png"));
-    let source = image::open(&frame_path)
+    let source = crate::open_runtime_image(&frame_path)
         .with_context(|| format!("load battle window frame {}", frame_path.display()))?
         .to_rgba8();
     let palette_path = asset_root
         .runtime_assets()
         .join("gfx/stats/party_menu_bg.pal");
-    let palette_source = std::fs::read_to_string(&palette_path)
+    let palette_source = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read textbox palette {}", palette_path.display()))?;
     let palette = parse_palette_file(&palette_source, None)?
         .into_iter()
@@ -295,16 +295,26 @@ fn compose_viewport_tiles(
     existing: Option<Handle<Image>>,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
-    const SCALE: usize = TILE_SIZE as usize / SOURCE_TILE_SIZE;
-    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE * SCALE;
-    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE * SCALE;
-    let mut data = vec![0_u8; width * height * 4];
+    // Keep the retained LCD at its native 160x144 resolution. The sprite is
+    // displayed at PLAYFIELD_WIDTH x PLAYFIELD_HEIGHT with nearest sampling,
+    // so expanding every source texel 4x4 on the CPU only creates sixteen
+    // times more composition and upload work without changing a visible pixel.
+    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE;
+    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE;
+    let data_len = width * height * 4;
+    let mut data = existing
+        .as_ref()
+        .and_then(|handle| images.get_mut(handle))
+        .map(|image| std::mem::take(&mut image.data))
+        .unwrap_or_default();
+    data.resize(data_len, 0);
+    data.fill(0);
     for (tile_index, handle) in tile_handles.iter().enumerate() {
         let Some(tile) = images.get(handle) else {
             continue;
         };
-        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
-        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
+        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
+        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
         for source_y in 0..SOURCE_TILE_SIZE {
             let source_row_start = source_y * SOURCE_TILE_SIZE * 4;
             let source_row_end = source_row_start + SOURCE_TILE_SIZE * 4;
@@ -312,29 +322,9 @@ fn compose_viewport_tiles(
                 continue;
             }
 
-            // Expand the complete source row once, then copy it into the
-            // four destination rows.  The previous implementation repeated
-            // bounds checks and slice construction for every pixel and every
-            // scale tap (about 1.5M tiny copies per 20x18 viewport).  This is
-            // the same nearest-neighbour output with one linear pass over
-            // each source row and four contiguous copies.
-            let mut expanded_row = [0_u8; SOURCE_TILE_SIZE * SCALE * 4];
-            for (source_x, pixel) in tile.data[source_row_start..source_row_end]
-                .chunks_exact(4)
-                .enumerate()
-            {
-                let destination_start = source_x * SCALE * 4;
-                for repeat in 0..SCALE {
-                    let destination = destination_start + repeat * 4;
-                    expanded_row[destination..destination + 4].copy_from_slice(pixel);
-                }
-            }
-            for repeat_y in 0..SCALE {
-                let destination_y = tile_y + source_y * SCALE + repeat_y;
-                let destination_offset = (destination_y * width + tile_x) * 4;
-                data[destination_offset..destination_offset + expanded_row.len()]
-                    .copy_from_slice(&expanded_row);
-            }
+            let destination_offset = ((tile_y + source_y) * width + tile_x) * 4;
+            data[destination_offset..destination_offset + SOURCE_TILE_SIZE * 4]
+                .copy_from_slice(&tile.data[source_row_start..source_row_end]);
         }
     }
     if let Some(handle) = existing {
@@ -369,7 +359,18 @@ fn compose_visual_world_tiles(
 ) -> Handle<Image> {
     let width = grid_width * SOURCE_TILE_SIZE;
     let height = grid_height * SOURCE_TILE_SIZE;
-    let mut data = vec![0_u8; width * height * 4];
+    let data_len = width * height * 4;
+    let mut data = existing
+        .as_ref()
+        .and_then(|handle| images.get_mut(handle))
+        .filter(|image| {
+            image.texture_descriptor.size.width == width as u32
+                && image.texture_descriptor.size.height == height as u32
+        })
+        .map(|image| std::mem::take(&mut image.data))
+        .unwrap_or_default();
+    data.resize(data_len, 0);
+    data.fill(0);
     for (tile_index, handle) in tile_handles.iter().enumerate() {
         let Some(tile) = images.get(handle) else {
             continue;
@@ -417,10 +418,16 @@ fn compose_priority_viewport_tiles(
     existing: Option<Handle<Image>>,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
-    const SCALE: usize = TILE_SIZE as usize / SOURCE_TILE_SIZE;
-    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE * SCALE;
-    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE * SCALE;
-    let mut data = vec![0_u8; width * height * 4];
+    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE;
+    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE;
+    let data_len = width * height * 4;
+    let mut data = existing
+        .as_ref()
+        .and_then(|handle| images.get_mut(handle))
+        .map(|image| std::mem::take(&mut image.data))
+        .unwrap_or_default();
+    data.resize(data_len, 0);
+    data.fill(0);
     for (tile_index, spec) in tile_specs.iter().enumerate() {
         let Some((handle, clip_top)) = spec else {
             continue;
@@ -428,30 +435,17 @@ fn compose_priority_viewport_tiles(
         let Some(tile) = images.get(handle) else {
             continue;
         };
-        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
-        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE * SCALE;
+        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
+        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
         for source_y in (*clip_top).min(SOURCE_TILE_SIZE)..SOURCE_TILE_SIZE {
             let source_row_start = source_y * SOURCE_TILE_SIZE * 4;
             let source_row_end = source_row_start + SOURCE_TILE_SIZE * 4;
             if source_row_end > tile.data.len() {
                 continue;
             }
-            let mut expanded_row = [0_u8; SOURCE_TILE_SIZE * SCALE * 4];
-            for (source_x, pixel) in tile.data[source_row_start..source_row_end]
-                .chunks_exact(4)
-                .enumerate()
-            {
-                for repeat in 0..SCALE {
-                    let destination = (source_x * SCALE + repeat) * 4;
-                    expanded_row[destination..destination + 4].copy_from_slice(pixel);
-                }
-            }
-            for repeat_y in 0..SCALE {
-                let destination_y = tile_y + source_y * SCALE + repeat_y;
-                let destination_offset = (destination_y * width + tile_x) * 4;
-                data[destination_offset..destination_offset + expanded_row.len()]
-                    .copy_from_slice(&expanded_row);
-            }
+            let destination_offset = ((tile_y + source_y) * width + tile_x) * 4;
+            data[destination_offset..destination_offset + SOURCE_TILE_SIZE * 4]
+                .copy_from_slice(&tile.data[source_row_start..source_row_end]);
         }
     }
     if let Some(handle) = existing {
@@ -490,7 +484,7 @@ fn load_tileset_art(
     let image_path = runtime_assets
         .join("gfx/tilesets")
         .join(format!("{tileset_id}.png"));
-    let metatile_layout = std::fs::read(&metatile_path)
+    let metatile_layout = crate::read_runtime_asset(&metatile_path)
         .with_context(|| format!("read tileset metatile layout {}", metatile_path.display()))?;
     if metatile_layout.len() % METATILE_TILE_COUNT != 0 {
         anyhow::bail!(
@@ -500,7 +494,7 @@ fn load_tileset_art(
             METATILE_TILE_COUNT
         );
     }
-    let mut source = image::open(&image_path)
+    let mut source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode tileset PNG {}", image_path.display()))?
         .to_rgba8();
     if tileset_id == "battle_tower_outside" {
@@ -595,7 +589,7 @@ fn apply_battle_tower_outside_roof(
     const FIRST_ROOF_TILE: u32 = 0x0a;
     const ROOF_TILE_COUNT: u32 = 9;
     let roof_path = runtime_assets.join("gfx/tilesets/roofs/olivine.png");
-    let roof = image::open(&roof_path)
+    let roof = crate::open_runtime_image(&roof_path)
         .with_context(|| format!("decode Battle Tower map-group roof {}", roof_path.display()))?
         .to_rgba8();
     if roof.width() * roof.height()
@@ -964,7 +958,7 @@ fn load_2bpp_animation_frames(
     palette: Option<&Palette>,
     images: &mut Assets<Image>,
 ) -> Result<Vec<Handle<Image>>> {
-    let bytes = std::fs::read(path)
+    let bytes = crate::read_runtime_asset(path)
         .with_context(|| format!("read tileset animation {}", path.display()))?;
     let expected = frame_count * SOURCE_TILE_SIZE * 2;
     if bytes.len() != expected {
@@ -1114,8 +1108,8 @@ fn load_tileset_palette_bank(
     let tileset_palette_path = runtime_assets
         .join("gfx/tilesets")
         .join(format!("{tileset_id}.pal"));
-    if tileset_palette_path.exists() {
-        let content = std::fs::read_to_string(&tileset_palette_path)
+    if crate::runtime_asset_exists(&tileset_palette_path) {
+        let content = crate::read_runtime_asset_to_string(&tileset_palette_path)
             .with_context(|| format!("read tileset palette {}", tileset_palette_path.display()))?;
         let palettes = parse_palette_file(&content, None)?;
         if !palettes.is_empty() {
@@ -1123,10 +1117,10 @@ fn load_tileset_palette_bank(
         }
     }
     let bg_palette_path = runtime_assets.join("gfx/tilesets/bg_tiles.pal");
-    if !bg_palette_path.exists() {
+    if !crate::runtime_asset_exists(&bg_palette_path) {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&bg_palette_path)
+    let content = crate::read_runtime_asset_to_string(&bg_palette_path)
         .with_context(|| format!("read bg tiles palette {}", bg_palette_path.display()))?;
     let normalized = normalize_tileset_time_of_day(time_of_day);
     for group in [normalized.as_str(), "day", "morn", "indoor"] {
@@ -1245,7 +1239,7 @@ fn intro_scene_frame_for_art(
     let path = asset_root
         .runtime_assets()
         .join("data/sprite_anim_bundle.json");
-    let sprite_anim_bundle = std::fs::read_to_string(&path).ok()?;
+    let sprite_anim_bundle = crate::read_runtime_asset_to_string(&path).ok()?;
     intro_scene_frame_for_art_with_bundle(
         rendered_art,
         asset_root,
@@ -1377,9 +1371,9 @@ fn draw_intro_tilemap(
     let tilemap_path = intro_root.join(format!("{map_name}.tilemap"));
     let attrmap_path = intro_root.join(format!("{map_name}.attrmap"));
     let tilemap =
-        std::fs::read(&tilemap_path).with_context(|| format!("read {}", tilemap_path.display()))?;
+        crate::read_runtime_asset(&tilemap_path).with_context(|| format!("read {}", tilemap_path.display()))?;
     let attrmap =
-        std::fs::read(&attrmap_path).with_context(|| format!("read {}", attrmap_path.display()))?;
+        crate::read_runtime_asset(&attrmap_path).with_context(|| format!("read {}", attrmap_path.display()))?;
     let tile_count = tilemap
         .len()
         .min(attrmap.len())
@@ -1571,7 +1565,7 @@ fn draw_intro_sprite_tile(
     let image_path = intro_root.join(format!("{graphic_name}.png"));
     let source_key = graphic_name.to_string();
     if !rendered_art.intro_source_cache.contains_key(&source_key) {
-        let source = image::open(&image_path)
+        let source = crate::open_runtime_image(&image_path)
             .with_context(|| format!("decode intro PNG {}", image_path.display()))?
             .to_rgba8();
         rendered_art
@@ -1728,7 +1722,7 @@ fn draw_intro_tile(
     let image_path = intro_root.join(format!("{graphic_name}.png"));
     let source_key = graphic_name.to_string();
     if !rendered_art.intro_source_cache.contains_key(&source_key) {
-        let source = image::open(&image_path)
+        let source = crate::open_runtime_image(&image_path)
             .with_context(|| format!("decode intro PNG {}", image_path.display()))?
             .to_rgba8();
         rendered_art
@@ -1974,7 +1968,7 @@ fn resolve_intro_tile_index(
 #[cfg(test)]
 fn load_intro_palette_bank(intro_root: &Path, palette_name: &str) -> Result<Vec<Palette>> {
     let palette_path = intro_root.join(format!("{palette_name}.pal"));
-    let content = std::fs::read_to_string(&palette_path)
+    let content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read intro palette {}", palette_path.display()))?;
     let palettes = parse_palette_file(&content, None)?;
     if palettes.is_empty() {
@@ -1992,7 +1986,7 @@ fn load_intro_palette_bank_for_kind(
     transparent_zero: bool,
 ) -> Result<Vec<Palette>> {
     let palette_path = intro_root.join(format!("{palette_name}.pal"));
-    let content = std::fs::read_to_string(&palette_path)
+    let content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read intro palette {}", palette_path.display()))?;
     let palettes = parse_palette_file(&content, None)?;
     let selected = if transparent_zero && palettes.len() >= 16 {
@@ -2136,7 +2130,7 @@ fn load_title_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let image_path = title_asset_path(asset_root, asset_id);
-    let source = image::open(&image_path)
+    let source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode title PNG {}", image_path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2215,13 +2209,13 @@ fn load_title_screen_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let title_root = asset_root.runtime_assets().join("gfx/title");
-    let logo = image::open(title_root.join("logo.png"))
+    let logo = crate::open_runtime_image(title_root.join("logo.png"))
         .context("decode native title logo PNG")?
         .to_rgba8();
-    let suicune = image::open(title_root.join("suicune.png"))
+    let suicune = crate::open_runtime_image(title_root.join("suicune.png"))
         .context("decode native title Suicune PNG")?
         .to_rgba8();
-    let crystal = image::open(title_root.join("crystal.png"))
+    let crystal = crate::open_runtime_image(title_root.join("crystal.png"))
         .context("decode native title crystal PNG")?
         .to_rgba8();
     let palette_bank = load_title_palette_bank(asset_root)?;
@@ -2495,7 +2489,7 @@ fn title_asset_path(asset_root: &AssetRoot, asset_id: &str) -> PathBuf {
 
 fn load_title_palette_bank(asset_root: &AssetRoot) -> Result<Vec<Palette>> {
     let palette_path = asset_root.runtime_assets().join("gfx/title/title.pal");
-    let content = std::fs::read_to_string(&palette_path)
+    let content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read title palette {}", palette_path.display()))?;
     let palettes = parse_palette_file(&content, None)?;
     if palettes.is_empty() {
@@ -2659,7 +2653,7 @@ fn load_oak_intro_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let (image_path, palette_path, player_palette) = oak_intro_asset_paths(asset_root, asset_id)?;
-    let source = image::open(&image_path)
+    let source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode Oak intro PNG {}", image_path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2788,7 +2782,7 @@ fn load_pokemon_animation_frame(
 ) -> Result<SpriteFrame> {
     let species_id = normalize_pokemon_asset_id(species_id);
     let image_path = pokemon_asset_path(asset_root, &species_id, side, "png");
-    let source = image::open(&image_path)
+    let source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode Pokemon sprite PNG {}", image_path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2870,8 +2864,8 @@ fn load_pokemon_palette(
             .join("gfx/pokemon")
             .join(species_id)
             .join("shiny.pal");
-        if palette_path.exists() {
-            let content = std::fs::read_to_string(&palette_path).with_context(|| {
+        if crate::runtime_asset_exists(&palette_path) {
+            let content = crate::read_runtime_asset_to_string(&palette_path).with_context(|| {
                 format!("read shiny Pokemon palette {}", palette_path.display())
             })?;
             if let Some(palette) = parse_palette_file(&content, None)?.into_iter().next() {
@@ -2880,7 +2874,7 @@ fn load_pokemon_palette(
         }
     }
     let side_palette_path = pokemon_asset_path(asset_root, species_id, side, "gbcpal");
-    if side_palette_path.exists() {
+    if crate::runtime_asset_exists(&side_palette_path) {
         return load_pokemon_gbcpal(&side_palette_path);
     }
     let normal_palette_path = asset_root
@@ -2897,7 +2891,7 @@ fn load_pokemon_gbcpal(path: &Path) -> Result<Palette> {
 
 fn load_gbcpal_palette(path: &Path) -> Result<Palette> {
     let bytes =
-        std::fs::read(path).with_context(|| format!("read GBC palette {}", path.display()))?;
+        crate::read_runtime_asset(path).with_context(|| format!("read GBC palette {}", path.display()))?;
     if bytes.len() < 8 {
         anyhow::bail!(
             "GBC palette {} has {} bytes; expected at least 8",
@@ -3093,7 +3087,7 @@ fn load_town_map_frame(
     const TILE_PIXELS: usize = 8;
     let root = asset_root.runtime_assets().join("gfx/pokegear");
     let source_path = root.join("town_map.png");
-    let source = image::open(&source_path)
+    let source = crate::open_runtime_image(&source_path)
         .with_context(|| format!("decode Town Map tiles {}", source_path.display()))?
         .to_rgba8();
     anyhow::ensure!(
@@ -3113,12 +3107,12 @@ fn load_town_map_frame(
     } else {
         "pokegear_f.pal"
     });
-    let palette_source = std::fs::read_to_string(&palette_path)
+    let palette_source = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read Town Map palette {}", palette_path.display()))?;
     let palettes = parse_palette_file(&palette_source, None)?;
     anyhow::ensure!(palettes.len() >= 6, "Town Map palette bank is incomplete");
     let tilemap_path = root.join(format!("{region}.bin"));
-    let mut tilemap = std::fs::read(&tilemap_path)
+    let mut tilemap = crate::read_runtime_asset(&tilemap_path)
         .with_context(|| format!("read Town Map tilemap {}", tilemap_path.display()))?;
     if tilemap.last() == Some(&0xff) {
         tilemap.pop();
@@ -3231,7 +3225,7 @@ fn load_sprite_art(
     images: &mut Assets<Image>,
 ) -> Result<SpriteArt> {
     let sprite_path = sprite_asset_path(asset_root, sprite_id);
-    let source = image::open(&sprite_path)
+    let source = crate::open_runtime_image(&sprite_path)
         .with_context(|| format!("decode overworld sprite PNG {}", sprite_path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -3308,7 +3302,7 @@ fn emote_frame_for_art(
             .join("gfx/emotes")
             .join(format!("{asset_name}.png"));
         let loaded = (|| -> Result<SpriteFrame> {
-            let mut source = image::open(&path)
+            let mut source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode emote PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
@@ -3366,7 +3360,7 @@ fn ledge_shadow_frame_for_art(
     if rendered_art.ledge_shadow.is_none() && rendered_art.ledge_shadow_error.is_none() {
         let path = asset_root.runtime_assets().join("gfx/overworld/shadow.png");
         let loaded = (|| -> Result<SpriteFrame> {
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode ledge shadow PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
@@ -3446,7 +3440,7 @@ fn grass_rustle_frames_for_art(
             .runtime_assets()
             .join("gfx/overworld/grass_rustle.png");
         let loaded = (|| -> Result<[SpriteFrame; 2]> {
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode grass rustle PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
@@ -3522,7 +3516,7 @@ fn boulder_dust_frames_for_art(
             .runtime_assets()
             .join("gfx/overworld/boulder_dust.png");
         let loaded = (|| -> Result<[SpriteFrame; 2]> {
-            let source = image::open(&path)
+            let source = crate::open_runtime_image(&path)
                 .with_context(|| format!("decode boulder dust PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
@@ -3622,7 +3616,7 @@ fn resolve_visible_object_sprite_asset_id(
     }
     candidates
         .into_iter()
-        .find(|candidate| sprite_asset_path(asset_root, candidate).is_file())
+        .find(|candidate| crate::runtime_asset_exists(sprite_asset_path(asset_root, candidate)))
         .unwrap_or_else(|| normalized.replace('-', "_"))
 }
 
@@ -3662,7 +3656,7 @@ fn load_npc_sprite_palette_bank(asset_root: &AssetRoot, time_of_day: &str) -> Re
     let palette_path = asset_root
         .runtime_assets()
         .join("gfx/overworld/npc_sprites.pal");
-    let content = std::fs::read_to_string(&palette_path)
+    let content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read NPC sprite palette {}", palette_path.display()))?;
     let normalized = normalize_tileset_time_of_day(time_of_day);
     for group in [normalized.as_str(), "day", "morn", "nite", "dark"] {

@@ -29,8 +29,18 @@ fn publish_visual_world_frame(
     fullscreen_entities: Query<(), Or<(With<TitleScreenMarker>, With<VisibleIntroSurface>)>>,
     mut published: ResMut<crystal_render_api::VisualWorldFrame>,
 ) {
-    // Clearing first is deliberate: consumers must never keep drawing a stale
-    // overworld behind a title, battle, or malformed/incomplete render frame.
+    // These short effects are still authored in classic screen coordinates.
+    // Keep the last complete optional-renderer frame underneath them instead
+    // of clearing it: clearing deactivates the optional world and visibly
+    // interrupts a manually selected 2.5D view for the duration of an
+    // emote, jump, fishing motion, or dust puff. The screen-space effect still
+    // composites above the retained world through the normal layer-0 camera.
+    if !voxel_spatial_effects_supported(&runtime_shell) {
+        return;
+    }
+
+    // Full-screen modes and genuinely incomplete world renders must not leave
+    // a stale overworld behind a title, battle, naming screen, or map handoff.
     *published = crystal_render_api::VisualWorldFrame::default();
 
     if rendered.title_active
@@ -40,7 +50,6 @@ fn publish_visual_world_frame(
         // can draw the overworld over the naming LCD.
         || naming_screen_blocks_world_presentation(runtime_shell.pending_name_input.as_ref())
         || runtime_shell.battle_lcd_animation_active
-        || !voxel_spatial_effects_supported(&runtime_shell)
         || battle_entities.iter().next().is_some()
         || fullscreen_entities.iter().next().is_some()
         || rendered.map_name.is_none()
@@ -182,11 +191,10 @@ fn naming_screen_blocks_world_presentation(input: Option<&PendingNameInput>) -> 
 }
 
 /// Effects in this list are still authored in classic screen coordinates.
-/// Publishing the displaced actor together with an undisplaced ground point
-/// would turn a jump into motion across the pitched floor, while leaving the
-/// classic overlay above a 3D world would visibly detach it. Keep the exact 2D
-/// renderer on screen for those short sequences until the render API exposes
-/// explicit world anchors/elevation for them.
+/// Publishing a displaced actor against an undisplaced ground point would
+/// turn a jump into motion across the pitched floor. Callers retain the last
+/// complete world frame while these screen-space overlays run; they must not
+/// change the user's manually selected presentation mode.
 fn voxel_spatial_effects_supported(runtime_shell: &BevyRuntimeShell) -> bool {
     let scripted_actor_displacement =
         runtime_shell
@@ -265,7 +273,7 @@ fn visual_terrain_revision(
     // Geometry is selected by stable source identity, not by the current
     // animation-frame image handle. Hashing live handles here caused water
     // animation to replace the async mesh request every frame, so a cave with
-    // animated water could remain on the classic view forever.
+    // animated water could keep the selected 2.5D renderer inactive forever.
     for tile in tiles {
         tile.column.hash(&mut hasher);
         tile.row.hash(&mut hasher);
@@ -318,11 +326,13 @@ mod render_mod_tests {
 
     #[test]
     fn fully_clipped_actor_is_not_published_to_renderer_mod() {
+        let grid_size = UVec2::new(40, 36);
+        let half_grid_width = grid_size.x as f32 * TILE_SIZE * 0.5;
         let actor = crystal_render_api::VisualActor {
             id: crystal_render_api::VisualActorId::Object(1),
             source_id: Arc::from("edge_npc"),
             texture: Handle::weak_from_u128(7),
-            center: Vec2::new(500.0, 0.0),
+            center: Vec2::new(half_grid_width + 17.0, 0.0),
             size: Vec2::splat(16.0),
             flip_x: false,
             above_priority: false,
@@ -330,17 +340,17 @@ mod render_mod_tests {
         assert!(!visual_actor_intersects_grid(
             &actor,
             Vec2::ZERO,
-            UVec2::new(40, 36)
+            grid_size
         ));
 
         let touching = crystal_render_api::VisualActor {
-            center: Vec2::new(168.0, 0.0),
+            center: Vec2::new(half_grid_width + 8.0, 0.0),
             ..actor
         };
         assert!(visual_actor_intersects_grid(
             &touching,
             Vec2::ZERO,
-            UVec2::new(40, 36)
+            grid_size
         ));
     }
 

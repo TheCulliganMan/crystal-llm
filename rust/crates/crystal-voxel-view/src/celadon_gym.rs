@@ -5,6 +5,23 @@ use crystal_render_api::VisualTileSource;
 use crate::profile::{CellShape, SolidKind};
 
 pub(crate) const GROUND_TILE: u16 = 0x57;
+pub(crate) const STATUE_FLOOR_TILE: u16 = 0x56;
+
+/// The train-station atlas stores the two entrance-statue orientations in
+/// opposite halves of blocks `$1d/$1e`. Each is one 16x32 face-on drawing.
+pub(crate) fn statue_local(map_id: &str, source: &VisualTileSource) -> Option<(u8, u8)> {
+    if map_id != "CeladonGym" || source.tileset_id.as_ref() != "train_station" {
+        return None;
+    }
+    let local_column = match source.metatile_id {
+        0x1d if source.subtile_column < 2 => source.subtile_column,
+        0x1e if source.subtile_column >= 2 => source.subtile_column - 2,
+        _ => return None,
+    };
+    let expected = [[0x48, 0x49], [0x58, 0x59], [0x4a, 0x4b], [0x5a, 0x5b]]
+        [usize::from(source.subtile_row)][usize::from(local_column)];
+    (source.tile_index == expected).then_some((local_column, source.subtile_row))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HedgeGroup {
@@ -83,5 +100,20 @@ mod tests {
             })
         ));
         assert_eq!(shape("GoldenrodStation", &source(0x1a, 0, 0)), None);
+    }
+
+    #[test]
+    fn split_statue_blocks_resolve_complete_two_by_four_cards() {
+        let drawing = [[0x48, 0x49], [0x58, 0x59], [0x4a, 0x4b], [0x5a, 0x5b]];
+        for (block, offset) in [(0x1d, 0), (0x1e, 2)] {
+            for row in 0..4 {
+                for column in 0..2 {
+                    let mut cell = source(block, column + offset, row);
+                    cell.tile_index = drawing[row as usize][column as usize];
+                    assert_eq!(statue_local("CeladonGym", &cell), Some((column, row)));
+                    assert_eq!(statue_local("GoldenrodStation", &cell), None);
+                }
+            }
+        }
     }
 }

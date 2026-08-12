@@ -7436,7 +7436,7 @@
             Some(&1)
         );
         assert_eq!(
-            initial.playability,
+            *initial.playability,
             crystal_assets::PlayabilityRules::default()
         );
         assert_eq!(initial.storage.current_pc_box, 0);
@@ -7515,6 +7515,13 @@
         shell.session_mut().state.script_runtime.pending_text_label =
             Some("RuntimeText".to_string());
         let inventory = shell.snapshot().expect("inventory snapshot");
+        assert!(std::sync::Arc::ptr_eq(&initial.items, &inventory.items));
+        assert!(std::sync::Arc::ptr_eq(&initial.pokemon, &inventory.pokemon));
+        assert!(std::sync::Arc::ptr_eq(&initial.trainers, &inventory.trainers));
+        assert!(std::sync::Arc::ptr_eq(
+            &initial.presentation,
+            &inventory.presentation
+        ));
         assert_eq!(inventory.phase, RuntimeShellPhase::Text);
         assert_eq!(inventory.trainer.money, 3000);
         assert_eq!(inventory.trainer.coins, 12);

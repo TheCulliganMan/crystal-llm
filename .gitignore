@@ -206,3 +206,4 @@ packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-shm
 packages/agents/packages/agents/.mastra/pokemon-crystal-memory.db-wal
 apps/web/.next-desktop/*
 tmp/external/*
+rust/web-dist/

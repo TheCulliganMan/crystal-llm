@@ -961,13 +961,13 @@ fn assert_base_map_surface_is_fully_opaque(world: &World, surfaces: &RetainedMap
     let size = image.texture_descriptor.size;
     assert_eq!(
         (size.width, size.height),
-        (PLAYFIELD_WIDTH as u32, PLAYFIELD_HEIGHT as u32),
-        "base map image must contain the complete 640x576 playfield"
+        (VIEWPORT_TILES_X as u32 * SOURCE_TILE_SIZE as u32, VIEWPORT_TILES_Y as u32 * SOURCE_TILE_SIZE as u32),
+        "base map image must contain the complete native 160x144 LCD"
     );
     assert_eq!(
         image.data.len(),
-        PLAYFIELD_WIDTH as usize * PLAYFIELD_HEIGHT as usize * 4,
-        "base map image must contain one RGBA texel for every playfield pixel"
+        VIEWPORT_TILES_X as usize * VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE * SOURCE_TILE_SIZE * 4,
+        "base map image must contain one RGBA texel for every native LCD pixel"
     );
     assert!(
         image.data.chunks_exact(4).all(|pixel| pixel[3] == 255),
@@ -1029,6 +1029,14 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .add_systems(
             Update,
             drain_unused_runtime_ticks.after(apply_runtime_hotkeys),
+        )
+        .add_systems(
+            Update,
+            sync_visible_player_sprite.after(drain_unused_runtime_ticks),
+        )
+        .add_systems(
+            Update,
+            sync_visible_object_sprites.after(drain_unused_runtime_ticks),
         )
         .add_systems(
             Update,

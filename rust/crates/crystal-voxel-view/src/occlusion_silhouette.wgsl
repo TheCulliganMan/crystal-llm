@@ -14,5 +14,5 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if source.a < 0.5 {
         discard;
     }
-    return material.color;
+    return vec4<f32>(source.rgb * material.color.rgb, source.a * material.color.a);
 }

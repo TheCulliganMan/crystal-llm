@@ -49,6 +49,25 @@ inventory, battle, or other state-mutation command line.
 Keyboard controls are arrows for the D-pad, `Z` for A, `X` for B, `Enter` for
 Start, and Right Shift for Select.
 
+### Browser build
+
+Build the WASM game with the optional 2.5D renderer, generate its JavaScript
+bindings, and serve `rust/web-dist` with the Rust server:
+
+```sh
+cd rust
+rustup target add wasm32-unknown-unknown
+cargo build -p crystal-bevy --target wasm32-unknown-unknown --release --features voxel-view
+wasm-bindgen --target web --out-dir web-dist --out-name crystal-bevy \
+  target/wasm32-unknown-unknown/release/crystal-bevy.wasm
+cargo run -p crystal-web-server -- --dir web-dist --port 8080
+```
+
+Open `http://127.0.0.1:8080`, click the game canvas, and press `F3` to switch
+between the classic 2D renderer and the optional 2.5D renderer. Browser audio
+is not enabled yet. The canonical compiled game pack is embedded in the WASM
+binary, and browser saves are disabled until persistent web storage is wired.
+
 ### Optional 2.5D overworld mod
 
 The normal build keeps the original 2D Game Boy presentation. To opt into the
@@ -65,8 +84,10 @@ The mod consumes a read-only render snapshot. It does not change movement,
 collision, scripts, random state, battles, saves, or replay checksums. Menus,
 dialog, fades, and battles continue to use the faithful 2D compositor. Its
 clean-room shape profile is keyed by stable tileset/metatile artwork identity,
-never gameplay collision. Unsupported maps, incomplete frames, and renderer
-errors leave the normal 2D world visible.
+never gameplay collision. The startup setting and `F3` are the only ways to
+change between 2D and 2.5D. Unsupported maps, incomplete frames, terrain
+builds, and renderer errors report 2.5D as inactive without exposing the 2D
+overworld.
 
 For repeatable map screenshots and side-by-side 2D/2.5D inspection, see
 [RENDER_AT_LOCATION.md](RENDER_AT_LOCATION.md).

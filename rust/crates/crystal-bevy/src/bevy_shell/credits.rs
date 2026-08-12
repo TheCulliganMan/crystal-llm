@@ -89,7 +89,7 @@ fn append_visible_credits_text_tiles(target: &mut Vec<u16>, text: &str) -> Resul
 
 fn load_visible_credits_script(asset_root: &AssetRoot) -> Result<Vec<VisibleCreditsOp>> {
     let path = asset_root.resolve_vendor("data/credits_script.asm");
-    let content = std::fs::read_to_string(&path)
+    let content = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read credits script {}", path.display()))?;
     let mut tokens = Vec::new();
     for raw_line in content.lines() {

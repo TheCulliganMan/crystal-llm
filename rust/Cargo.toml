@@ -7,6 +7,7 @@ members = [
     "crates/crystal-net",
     "crates/crystal-render-api",
     "crates/crystal-voxel-view",
+    "crates/crystal-web-server",
 ]
 resolver = "2"
 
@@ -53,3 +54,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+web-time = "1"

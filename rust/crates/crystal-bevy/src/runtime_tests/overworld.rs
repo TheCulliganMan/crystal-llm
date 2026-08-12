@@ -1652,6 +1652,63 @@
                 command_index: 3,
             },
         ];
+        for (source_script, terminal_command) in [
+            ("RuntimePromptScript", "promptbutton"),
+            ("RuntimeYesNoTextScript", "yesorno"),
+        ] {
+            map.scripts.insert(
+                source_script.to_string(),
+                serde_json::json!([
+                    {"command": "opentext", "args": []},
+                    {"command": "writetext", "args": ["RuntimeGreetingText"]},
+                    {"command": terminal_command, "args": []}
+                ]),
+            );
+            map.script_text_commands.extend([
+                ScriptTextCommand {
+                    command: "opentext".to_string(),
+                    text_label: None,
+                    source_script: source_script.to_string(),
+                    command_index: 0,
+                },
+                ScriptTextCommand {
+                    command: "writetext".to_string(),
+                    text_label: Some("RuntimeGreetingText".to_string()),
+                    source_script: source_script.to_string(),
+                    command_index: 1,
+                },
+                ScriptTextCommand {
+                    command: terminal_command.to_string(),
+                    text_label: None,
+                    source_script: source_script.to_string(),
+                    command_index: 2,
+                },
+            ]);
+        }
+        map.scripts.insert(
+            "RuntimeReloadScript".to_string(),
+            serde_json::json!([
+                {"command": "reloadmap", "args": []},
+                {"command": "setval", "args": ["77"]}
+            ]),
+        );
+        map.script_map_commands.push(ScriptMapCommand {
+            command: "reloadmap".to_string(),
+            target_map: None,
+            x: None,
+            y: None,
+            facing: None,
+            map_setup: None,
+            source_script: "RuntimeReloadScript".to_string(),
+            command_index: 0,
+        });
+        map.script_variable_commands.push(ScriptVariableCommand {
+            command: "setval".to_string(),
+            target: None,
+            value_tokens: vec!["77".to_string()],
+            source_script: "RuntimeReloadScript".to_string(),
+            command_index: 1,
+        });
         map.script_menu_definitions.insert(
             "RuntimeMenu".to_string(),
             ScriptMenuDefinition {
@@ -1832,6 +1889,69 @@
         assert_eq!(open.boundary, None);
         assert!(!open.ended);
 
+        let prompt_run = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: "RuntimeMap".to_string(),
+                    source_script: "RuntimePromptScript".to_string(),
+                    command_index: 0,
+                },
+                8,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("run writetext through promptbutton");
+        assert_eq!(
+            prompt_run
+                .steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opentext", "writetext", "promptbutton"]
+        );
+        assert!(matches!(
+            prompt_run.boundary,
+            Some(RuntimeCompiledScriptBoundary::TextWait(ScriptTextWait {
+                ref command,
+                ref source_script,
+                command_index: 2,
+            })) if command == "promptbutton" && source_script == "RuntimePromptScript"
+        ));
+        shell
+            .advance_pending_text_wait()
+            .expect("clear promptbutton test boundary");
+
+        let yes_no_run = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: "RuntimeMap".to_string(),
+                    source_script: "RuntimeYesNoTextScript".to_string(),
+                    command_index: 0,
+                },
+                8,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("run writetext through yesorno");
+        assert_eq!(
+            yes_no_run
+                .steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opentext", "writetext", "yesorno"]
+        );
+        assert!(matches!(
+            yes_no_run.boundary,
+            Some(RuntimeCompiledScriptBoundary::YesNo(ScriptYesNoPrompt {
+                ref source_script,
+                command_index: 2,
+            })) if source_script == "RuntimeYesNoTextScript"
+        ));
+        shell
+            .resolve_pending_yes_no(true)
+            .expect("clear yes/no test boundary");
+
         let run = shell
             .run_compiled_script_until_boundary(
                 RuntimeCompiledScriptCursor {
@@ -1907,8 +2027,16 @@
             )
             .expect("resolve yes/no and continue to menu");
         assert!(resumed_yes_no.resolution.accepted);
-        assert_eq!(resumed_yes_no.run.steps.len(), 1);
-        assert_eq!(resumed_yes_no.run.steps[0].command, "loadmenu");
+        assert_eq!(
+            resumed_yes_no
+                .run
+                .steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["loadmenu", "verticalmenu"],
+            "ASM loadmenu prepares the header; verticalmenu owns the input boundary"
+        );
         assert_eq!(
             resumed_yes_no.run.boundary,
             Some(RuntimeCompiledScriptBoundary::ActiveMenu(
@@ -1988,6 +2116,54 @@
         assert_eq!(
             shell.session.state().script_runtime.script_value.as_deref(),
             Some("9")
+        );
+
+        let reload_run = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: "RuntimeMap".to_string(),
+                    source_script: "RuntimeReloadScript".to_string(),
+                    command_index: 0,
+                },
+                4,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("run only through the blocking reloadmap command");
+        assert_eq!(
+            reload_run
+                .steps
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reloadmap"],
+            "commands after ASM StopScript must not execute before map reload completes"
+        );
+        assert!(matches!(
+            reload_run.boundary,
+            Some(RuntimeCompiledScriptBoundary::PendingMapLoad(ScriptMapLoadRequest {
+                ref command,
+                ref source_script,
+                command_index: 0,
+                ..
+            })) if command == "reloadmap" && source_script == "RuntimeReloadScript"
+        ));
+        shell
+            .take_pending_script_request(RuntimePendingScriptRequestKind::MapLoad)
+            .expect("complete pending map reload");
+        let after_reload = shell
+            .run_compiled_script_until_boundary(
+                reload_run.next_cursor.expect("reload continuation cursor"),
+                4,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("continue only after map reload completion");
+        assert_eq!(after_reload.steps.len(), 1);
+        assert_eq!(after_reload.steps[0].command, "setval");
+        assert_eq!(
+            shell.session.state().script_runtime.script_value.as_deref(),
+            Some("77")
         );
 
         let max_steps_error = shell
@@ -2236,6 +2412,138 @@
                 .and_then(|event| event.text_label.as_deref()),
             Some("PokecenterSignText")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compiled_runner_returns_through_nested_local_and_far_script_calls() {
+        let root = temp_repository_root("compiled-nested-script-calls");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_text_variable_and_control_commands();
+        let map = data.maps.get_mut("RuntimeMap").expect("runtime map");
+        map.scripts.insert(
+            "RuntimeCallScript".to_string(),
+            serde_json::json!([
+                {"command": "farscall", "args": ["RuntimeCalledScript"]},
+                {"command": "setval", "args": ["33"]},
+                {"command": "end", "args": []}
+            ]),
+        );
+        map.scripts.insert(
+            "RuntimeCalledScript".to_string(),
+            serde_json::json!([
+                {"command": "scall", "args": ["RuntimeNestedScript"]},
+                {"command": "setval", "args": ["22"]},
+                {"command": "end", "args": []}
+            ]),
+        );
+        map.scripts.insert(
+            "RuntimeNestedScript".to_string(),
+            serde_json::json!([
+                {"command": "setval", "args": ["11"]},
+                {"command": "end", "args": []}
+            ]),
+        );
+        map.script_control_commands.extend([
+            ScriptControlCommand {
+                command: "farscall".to_string(),
+                compare_value: None,
+                target_label: Some("RuntimeCalledScript".to_string()),
+                resolved_target_script: Some("RuntimeCalledScript".to_string()),
+                source_script: "RuntimeCallScript".to_string(),
+                command_index: 0,
+            },
+            ScriptControlCommand {
+                command: "end".to_string(),
+                compare_value: None,
+                target_label: None,
+                resolved_target_script: None,
+                source_script: "RuntimeCallScript".to_string(),
+                command_index: 2,
+            },
+            ScriptControlCommand {
+                command: "scall".to_string(),
+                compare_value: None,
+                target_label: Some("RuntimeNestedScript".to_string()),
+                resolved_target_script: Some("RuntimeNestedScript".to_string()),
+                source_script: "RuntimeCalledScript".to_string(),
+                command_index: 0,
+            },
+            ScriptControlCommand {
+                command: "end".to_string(),
+                compare_value: None,
+                target_label: None,
+                resolved_target_script: None,
+                source_script: "RuntimeCalledScript".to_string(),
+                command_index: 2,
+            },
+            ScriptControlCommand {
+                command: "end".to_string(),
+                compare_value: None,
+                target_label: None,
+                resolved_target_script: None,
+                source_script: "RuntimeNestedScript".to_string(),
+                command_index: 1,
+            },
+        ]);
+        for (source_script, command_index, value) in [
+            ("RuntimeCallScript", 1, "33"),
+            ("RuntimeCalledScript", 1, "22"),
+            ("RuntimeNestedScript", 0, "11"),
+        ] {
+            map.script_variable_commands.push(ScriptVariableCommand {
+                command: "setval".to_string(),
+                target: None,
+                value_tokens: vec![value.to_string()],
+                source_script: source_script.to_string(),
+                command_index,
+            });
+        }
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
+        shell.session_mut().state.script_runtime.player_input_locked = true;
+
+        let run = shell
+            .run_compiled_script_until_boundary(
+                RuntimeCompiledScriptCursor {
+                    origin_map_name: "RuntimeMap".to_string(),
+                    source_script: "RuntimeCallScript".to_string(),
+                    command_index: 0,
+                },
+                16,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("nested compiled calls return to their exact callers");
+        assert_eq!(
+            run.steps
+                .iter()
+                .map(|step| (step.source_script.as_str(), step.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("RuntimeCallScript", "farscall"),
+                ("RuntimeCalledScript", "scall"),
+                ("RuntimeNestedScript", "setval"),
+                ("RuntimeNestedScript", "end"),
+                ("RuntimeCalledScript", "setval"),
+                ("RuntimeCalledScript", "end"),
+                ("RuntimeCallScript", "setval"),
+                ("RuntimeCallScript", "end"),
+            ]
+        );
+        assert!(run.ended);
+        assert!(shell.session().state().script_runtime.call_stack.is_empty());
+        assert_eq!(
+            shell.session().state().script_runtime.script_value.as_deref(),
+            Some("33")
+        );
+        assert!(!shell.session().state().script_runtime.player_input_locked);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2995,6 +3303,8 @@
                 ("TestPhoneCallerScript", "readvar"),
                 ("TestPhoneCallerScript", "ifequal"),
                 (".Gift@TestPhoneCallerScript", "farwritetext"),
+                (".Gift@TestPhoneCallerScript", "specialphonecall"),
+                (".Gift@TestPhoneCallerScript", "end"),
             ]
         );
         assert_eq!(
@@ -3003,18 +3313,11 @@
                 "TestGiftText".to_string()
             ))
         );
+        assert!(caller.run.ended);
+        assert_eq!(caller.run.next_cursor, None);
         shell
             .take_pending_script_request(RuntimePendingScriptRequestKind::TextLabel)
             .expect("display caller text");
-        let caller_finish = shell
-            .run_compiled_script_until_boundary(
-                caller.run.next_cursor.expect("caller resume cursor"),
-                4,
-                ScriptRuntimeInputs::default(),
-                ScriptPhoneInputs::default(),
-            )
-            .expect("finish global caller");
-        assert!(caller_finish.ended);
         assert!(shell
             .session()
             .state

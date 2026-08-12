@@ -1,4 +1,86 @@
 #[test]
+fn battle_dialogue_uses_player_input_drains_once_and_returns_menu_control() {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.visible_battle_transition = None;
+    runtime_shell.battle_entry_messages_remaining = 0;
+    runtime_shell.battle_enemy_send_out_pending = false;
+    runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_messages.clear();
+    runtime_shell.battle_message_scenes.clear();
+    runtime_shell.battle_text_reveal = None;
+    sync_visible_battle_action_cursor(&mut runtime_shell);
+
+    let original_cursor = runtime_shell
+        .battle_action_cursor
+        .clone()
+        .expect("active battle action cursor");
+    let messages = [
+        "CYNDAQUIL used\nTACKLE!".to_string(),
+        "A deliberately long battle message that occupies more than two native textbox lines and must advance through every page exactly once.".to_string(),
+        "It's not very\neffective...".to_string(),
+    ];
+    runtime_shell.battle_messages = messages.clone().into_iter().collect();
+    runtime_shell.battle_message_scene = Some(Box::new(
+        runtime_shell.shell.snapshot().expect("battle dialogue scene"),
+    ));
+
+    dispatch_visible_ui_direction(&mut runtime_shell, GameButton::Down);
+    assert_eq!(
+        runtime_shell.battle_action_cursor.as_ref(),
+        Some(&original_cursor),
+        "directional input during battle text must not navigate the hidden command menu"
+    );
+
+    let mut dismissed = Vec::new();
+    for step in 0..64 {
+        let Some(message) = runtime_shell.battle_messages.front().cloned() else {
+            break;
+        };
+        let snapshot = runtime_shell
+            .shell
+            .presentation_snapshot()
+            .expect("battle dialogue presentation snapshot");
+        while !visible_battle_message_is_complete(&runtime_shell, &message) {
+            assert!(
+                advance_visible_battle_text_reveal(&mut runtime_shell, &snapshot, true),
+                "battle dialogue reveal stalled at step {step}: {message:?}"
+            );
+        }
+        let page_before = runtime_shell
+            .battle_text_reveal
+            .as_ref()
+            .expect("completed battle text reveal")
+            .page_index;
+        press_visible_a_button(&mut runtime_shell).expect("player A advances battle dialogue");
+        if runtime_shell.battle_messages.front() != Some(&message) {
+            dismissed.push(message);
+        } else {
+            let page_after = runtime_shell
+                .battle_text_reveal
+                .as_ref()
+                .expect("next battle text page reveal")
+                .page_index;
+            assert_eq!(
+                page_after,
+                page_before + 1,
+                "A on complete battle text must advance a page or consume the message"
+            );
+        }
+    }
+
+    assert_eq!(dismissed, messages, "battle messages repeated or changed order");
+    assert!(runtime_shell.battle_messages.is_empty());
+    assert!(runtime_shell.battle_text_reveal.is_none());
+    assert!(runtime_shell.battle_message_scene.is_none());
+    sync_visible_battle_action_cursor(&mut runtime_shell);
+    assert!(
+        runtime_shell.battle_action_cursor.is_some(),
+        "closing the last battle message must return command-menu control"
+    );
+    assert_eq!(runtime_shell.last_error, None);
+}
+
+#[test]
 fn b_cancels_visible_evolution_before_success_and_restores_exact_pokemon() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell

@@ -229,7 +229,7 @@ fn battle_tower_outside_applies_the_cianwood_olivine_roof_tiles() {
 }
 
 #[test]
-fn viewport_tile_composite_preserves_scaled_tile_grid() {
+fn viewport_tile_composite_preserves_native_tile_grid_for_gpu_scaling() {
     let mut images = Assets::<Image>::default();
     let tile = images.add(Image::new(
         Extent3d {
@@ -253,10 +253,10 @@ fn viewport_tile_composite_preserves_scaled_tile_grid() {
     assert_eq!(reused, composite);
     assert_eq!(images.len(), image_count);
     let image = images.get(&composite).expect("composited viewport image");
-    assert_eq!(image.texture_descriptor.size.width, 640);
-    assert_eq!(image.texture_descriptor.size.height, 576);
+    assert_eq!(image.texture_descriptor.size.width, 160);
+    assert_eq!(image.texture_descriptor.size.height, 144);
     assert_eq!(&image.data[0..4], &[0xff, 0x00, 0x00, 0xff]);
-    let last = (576 * 640 - 1) * 4;
+    let last = (144 * 160 - 1) * 4;
     assert_eq!(&image.data[last..last + 4], &[0xff, 0x00, 0x00, 0xff]);
 }
 
@@ -351,16 +351,16 @@ fn field_dialogue_wraps_pokegear_text_inside_the_four_row_box() {
 }
 
 #[test]
-fn player_walk_stride_alternates_on_consecutive_steps() {
+fn player_walk_foot_phase_alternates_on_consecutive_steps() {
     let first = next_player_walk_stride(0, false);
     let second = next_player_walk_stride(WALK_FRAME_HOLD_TICKS, first);
     let third = next_player_walk_stride(WALK_FRAME_HOLD_TICKS, second);
 
-    assert!(first, "the first step starts on the walking frame");
-    assert!(!second, "the second consecutive step returns to standing");
+    assert!(first, "the first step uses the first walking foot");
+    assert!(!second, "the second consecutive step uses the mirrored foot");
     assert!(
         third,
-        "the third consecutive step resumes the walking frame"
+        "the third consecutive step returns to the first walking foot"
     );
 }
 
@@ -411,6 +411,37 @@ fn walking_camera_scroll_is_interpolated_with_the_player() {
     assert_eq!(initial, Vec2::new(TILE_SIZE * 2.0, 0.0));
     assert_eq!(middle, Vec2::new(TILE_SIZE, 0.0));
     assert_eq!(final_offset, Vec2::ZERO);
+}
+
+#[test]
+fn camera_following_walk_keeps_player_screen_position_exactly_stable() {
+    let rendered = RenderedViewport {
+        walk_viewport_origin: Some((10, 10)),
+        viewport_origin: Some((12, 12)),
+        ..default()
+    };
+    let from = TilePosition { x: 10, y: 10 };
+    let to = TilePosition { x: 11, y: 11 };
+    let positions = (0..=WALK_FRAME_HOLD_TICKS)
+        .rev()
+        .map(|remaining| {
+            let player = visible_player_playfield_position(
+                to,
+                Some(from),
+                remaining,
+                12,
+                12,
+            )
+            .expect("camera-following player position");
+            let camera = overworld_walk_camera_offset(&rendered, remaining);
+            Vec2::new(player.0, player.1) + camera
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        positions.windows(2).all(|pair| pair[0] == pair[1]),
+        "player must not drift against the viewport during a camera-following step: {positions:?}"
+    );
 }
 
 #[test]
@@ -600,6 +631,17 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         for frame in 0..12 {
             app.update();
             let world = app.world_mut();
+            let walking = world
+                .resource::<BevyRuntimeShell>()
+                .player_walk_frame_ticks
+                > 0;
+            if walking {
+                assert_eq!(
+                    world.resource::<RenderedViewport>().player_sprite_walking,
+                    Some(true),
+                    "step {step} frame {frame} must never show standing art while translating"
+                );
+            }
             let player_count = world
                 .query_filtered::<Entity, With<PlayerMarker>>()
                 .iter(world)
@@ -739,6 +781,12 @@ fn buffered_reversal_refreshes_facing_on_the_next_step_without_replacing_the_lcd
         keys.clear_just_pressed(KeyCode::ArrowRight);
         keys.press(KeyCode::ArrowLeft);
     }
+    // The press edge itself owns the queued turn. Releasing before the prior
+    // tile lands must not throw it away and leave stale facing at a wall.
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ArrowLeft);
     for _ in 0..=usize::from(WALK_FRAME_HOLD_TICKS) + 4 {
         app.update();
         let shell = app.world().resource::<BevyRuntimeShell>();

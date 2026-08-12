@@ -4,7 +4,7 @@
 //! another raised region is therefore another level, not the same absolute
 //! height. Water and ordinary ground never participate in this solver.
 
-use crate::profile::{CellShape, JUMP_LEDGE_HEIGHT, LedgeFace, MOUNTAIN_CLIFF_HEIGHT, SolidKind};
+use crate::profile::{CellShape, LedgeFace, MOUNTAIN_CLIFF_HEIGHT, SolidKind};
 
 pub(crate) fn resolve_authored_mountain_tiers(
     shapes: &mut [CellShape],
@@ -12,46 +12,6 @@ pub(crate) fn resolve_authored_mountain_tiers(
     height: usize,
 ) {
     resolve_mountain_tiers(shapes, width, height);
-}
-
-/// Extend an authored one-way ledge's raised cap into the ordinary ground
-/// immediately north of it. The source block only contains the lip and a
-/// short cap sample; leaving the adjacent map cells at zero makes that cap a
-/// painted stripe instead of a real level change.
-pub(crate) fn resolve_jump_ledge_ground(shapes: &mut [CellShape], width: usize, height: usize) {
-    if width == 0 || height == 0 || shapes.len() != width * height {
-        return;
-    }
-    for column in 0..width {
-        for row in 1..height {
-            let lip = shapes[row * width + column];
-            let CellShape::LedgeBand {
-                face: LedgeFace::South,
-                height: ledge_height,
-                ..
-            } = lip
-            else {
-                continue;
-            };
-            if (ledge_height - JUMP_LEDGE_HEIGHT).abs() >= f32::EPSILON {
-                continue;
-            }
-            for north_row in (0..row).rev() {
-                let index = north_row * width + column;
-                match shapes[index] {
-                    CellShape::Flat => {
-                        shapes[index] = CellShape::RaisedTop {
-                            height: JUMP_LEDGE_HEIGHT,
-                            solid: SolidKind::Bank,
-                        };
-                    }
-                    CellShape::RaisedTop { height, .. }
-                        if (height - JUMP_LEDGE_HEIGHT).abs() < f32::EPSILON => {}
-                    _ => break,
-                }
-            }
-        }
-    }
 }
 
 pub(crate) fn resolve_mountain_tiers(shapes: &mut [CellShape], width: usize, height: usize) {
@@ -123,20 +83,7 @@ pub(crate) fn resolve_mountain_tiers(shapes: &mut [CellShape], width: usize, hei
             datum_edges.push((lower, upper));
         }
     }
-    let mut datum_tiers = vec![1_u8; datum_count];
-    for _ in 0..datum_count {
-        let mut changed = false;
-        for &(lower, upper) in &datum_edges {
-            let next = datum_tiers[lower].saturating_add(1);
-            if next > datum_tiers[upper] {
-                datum_tiers[upper] = next;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let datum_tiers = exact_datum_tiers(datum_count, &datum_edges);
     let tiers: Vec<_> = components
         .iter()
         .zip(&mountain)
@@ -166,6 +113,58 @@ pub(crate) fn resolve_mountain_tiers(shapes: &mut [CellShape], width: usize, hei
             _ => {}
         }
     }
+}
+
+/// Solve every authored face as an exact one-level transition. A longest-path
+/// solver only treated faces as lower bounds, so alternate paths could make a
+/// neighboring shelf jump two or more levels. Contradictory drawings are
+/// deliberately conservative: that connected group remains on one level
+/// rather than synthesizing topology absent from Crystal's map art.
+fn exact_datum_tiers(datum_count: usize, edges: &[(usize, usize)]) -> Vec<u8> {
+    let mut adjacency = vec![Vec::new(); datum_count];
+    for &(lower, upper) in edges {
+        adjacency[lower].push((upper, 1_i16));
+        adjacency[upper].push((lower, -1_i16));
+    }
+    let mut levels = vec![None; datum_count];
+    let mut tiers = vec![1_u8; datum_count];
+    for start in 0..datum_count {
+        if levels[start].is_some() {
+            continue;
+        }
+        levels[start] = Some(0);
+        let mut queue = std::collections::VecDeque::from([start]);
+        let mut members = Vec::new();
+        let mut consistent = true;
+        while let Some(node) = queue.pop_front() {
+            members.push(node);
+            let level = levels[node].expect("queued datum has a level");
+            for &(next, delta) in &adjacency[node] {
+                let expected = level + delta;
+                match levels[next] {
+                    Some(actual) if actual != expected => consistent = false,
+                    Some(_) => {}
+                    None => {
+                        levels[next] = Some(expected);
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+        if !consistent {
+            continue;
+        }
+        let minimum = members
+            .iter()
+            .filter_map(|&datum| levels[datum])
+            .min()
+            .unwrap_or(0);
+        for datum in members {
+            let normalized = levels[datum].unwrap_or(minimum) - minimum + 1;
+            tiers[datum] = u8::try_from(normalized).unwrap_or(u8::MAX);
+        }
+    }
+    tiers
 }
 
 fn strongly_connected_datums(graph: &[Vec<usize>], reverse: &[Vec<usize>]) -> Vec<usize> {
@@ -235,10 +234,9 @@ fn is_mountain(shape: CellShape) -> bool {
 }
 
 /// Identifies which of two adjacent cells is the upper side of an authored
-/// cliff seam. Every direction establishes a level: a west/east course is
-/// still a vertical mountain face, not merely a component separator. Treating
-/// only south-facing art as a height edge collapsed connected corner shelves
-/// back onto the same datum.
+/// back-to-front cliff seam. Crystal's south-facing ledge course establishes
+/// the terrace step. West/east courses close that terrace's sides but do not
+/// independently invent a new elevation.
 fn directed_face_relation(
     first: CellShape,
     second: CellShape,
@@ -278,8 +276,7 @@ fn bottom_face_points_to(
     }
     let points_to_neighbor = match face {
         LedgeFace::South => neighbor_column == column && neighbor_row == row + 1,
-        LedgeFace::West => neighbor_column + 1 == column && neighbor_row == row,
-        LedgeFace::East => neighbor_column == column + 1 && neighbor_row == row,
+        LedgeFace::West | LedgeFace::East => false,
     };
     points_to_neighbor.then_some(face)
 }
@@ -296,33 +293,11 @@ mod tests {
     }
 
     #[test]
-    fn jump_ledge_raises_connected_plain_ground_north_of_its_lip() {
-        let lip = CellShape::LedgeBand {
-            face: LedgeFace::South,
-            plane_subtile: 4,
-            band_from_top: 0,
-            band_count: 1,
-            top_tile_index: 0x05,
-            height: JUMP_LEDGE_HEIGHT,
-        };
-        let mut shapes = vec![CellShape::Flat, CellShape::Flat, lip, CellShape::Flat];
-        resolve_jump_ledge_ground(&mut shapes, 1, 4);
-        assert!(matches!(
-            shapes[0],
-            CellShape::RaisedTop { height, solid: SolidKind::Bank }
-                if height == JUMP_LEDGE_HEIGHT
-        ));
-        assert!(matches!(shapes[1], CellShape::RaisedTop { .. }));
-        assert_eq!(shapes[2], lip);
-        assert_eq!(shapes[3], CellShape::Flat);
-    }
-
-    #[test]
     fn identical_authored_shelves_use_the_same_tier_solver_without_map_context() {
         let mut shapes = vec![top(), south_face(0), south_face(1), top()];
         resolve_authored_mountain_tiers(&mut shapes, 1, 4);
-        assert_eq!(shapes[0].surface_height(8.0), 64.0);
-        assert_eq!(shapes[3].surface_height(8.0), 32.0);
+        assert_eq!(shapes[0].surface_height(8.0), 32.0);
+        assert_eq!(shapes[3].surface_height(8.0), 16.0);
     }
 
     fn south_face(band: u8) -> CellShape {
@@ -352,10 +327,10 @@ mod tests {
         // Upper shelf, its two-band face, then a lower shelf.
         let mut shapes = vec![top(), south_face(0), south_face(1), top()];
         resolve_mountain_tiers(&mut shapes, 1, 4);
-        assert_eq!(shapes[0].surface_height(8.0), 64.0);
-        assert_eq!(shapes[1].surface_height(8.0), 64.0);
-        assert_eq!(shapes[2].surface_height(8.0), 64.0);
-        assert_eq!(shapes[3].surface_height(8.0), 32.0);
+        assert_eq!(shapes[0].surface_height(8.0), 32.0);
+        assert_eq!(shapes[1].surface_height(8.0), 32.0);
+        assert_eq!(shapes[2].surface_height(8.0), 32.0);
+        assert_eq!(shapes[3].surface_height(8.0), 16.0);
     }
 
     #[test]
@@ -370,32 +345,45 @@ mod tests {
             top(),
         ];
         resolve_mountain_tiers(&mut shapes, 1, 7);
-        assert_eq!(shapes[0].surface_height(8.0), 96.0);
-        assert_eq!(shapes[3].surface_height(8.0), 64.0);
-        assert_eq!(shapes[6].surface_height(8.0), 32.0);
+        assert_eq!(shapes[0].surface_height(8.0), 48.0);
+        assert_eq!(shapes[3].surface_height(8.0), 32.0);
+        assert_eq!(shapes[6].surface_height(8.0), 16.0);
+    }
+
+    #[test]
+    fn authored_stack_adds_exactly_one_level_per_connected_face() {
+        assert_eq!(exact_datum_tiers(3, &[(0, 1), (1, 2)]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn contradictory_face_graph_stays_on_one_level() {
+        assert_eq!(
+            exact_datum_tiers(3, &[(0, 1), (1, 2), (0, 2)]),
+            vec![1, 1, 1]
+        );
     }
 
     #[test]
     fn water_does_not_raise_or_propagate_a_mountain_tier() {
         let mut shapes = vec![south_face(1), CellShape::Water];
         resolve_mountain_tiers(&mut shapes, 1, 2);
-        assert_eq!(shapes[0].surface_height(8.0), 32.0);
+        assert_eq!(shapes[0].surface_height(8.0), 16.0);
         assert!(shapes[1].surface_height(8.0) < 0.0);
     }
 
     #[test]
-    fn west_face_raises_the_shelf_above_its_west_neighbor() {
+    fn west_face_does_not_invent_a_terrace_level() {
         let mut shapes = vec![top(), side_face(LedgeFace::West)];
         resolve_mountain_tiers(&mut shapes, 2, 1);
-        assert_eq!(shapes[0].surface_height(8.0), 32.0);
-        assert_eq!(shapes[1].surface_height(8.0), 64.0);
+        assert_eq!(shapes[0].surface_height(8.0), 16.0);
+        assert_eq!(shapes[1].surface_height(8.0), 16.0);
     }
 
     #[test]
-    fn east_face_raises_the_shelf_above_its_east_neighbor() {
+    fn east_face_does_not_invent_a_terrace_level() {
         let mut shapes = vec![side_face(LedgeFace::East), top()];
         resolve_mountain_tiers(&mut shapes, 2, 1);
-        assert_eq!(shapes[0].surface_height(8.0), 64.0);
-        assert_eq!(shapes[1].surface_height(8.0), 32.0);
+        assert_eq!(shapes[0].surface_height(8.0), 16.0);
+        assert_eq!(shapes[1].surface_height(8.0), 16.0);
     }
 }

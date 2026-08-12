@@ -310,11 +310,11 @@ pub fn apply_script_control_action_to_state(
             source_script,
             command_index,
         } => {
-            if !callback {
+            if !callback && state.script_runtime.call_stack.is_empty() {
                 // Crystal's ordinary `end` returns control to the overworld
-                // joypad. Coordinate and interaction scripts are entered
-                // with input locked even when their command stream contains
-                // no explicit `release` (for example MeetMomScript).
+                // joypad only when ExitScriptSubroutine has no parent frame.
+                // A called script's `end` resumes its caller without briefly
+                // unlocking player input.
                 state.script_runtime.player_input_locked = false;
                 state.script_runtime.all_input_locked = false;
                 state.script_runtime.script_stop_requested = false;

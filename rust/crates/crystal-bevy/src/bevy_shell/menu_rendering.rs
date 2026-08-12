@@ -22,14 +22,14 @@ fn load_visible_title_main_menu_frame(
     let assets = runtime_shell.asset_root.runtime_assets();
     if rendered_art.title_menu_font_source.is_none() {
         rendered_art.title_menu_font_source = Some(
-            image::open(assets.join("gfx/font/font.png"))
+            crate::open_runtime_image(assets.join("gfx/font/font.png"))
                 .context("decode title main-menu font PNG")?
                 .to_rgba8(),
         );
     }
     if rendered_art.title_menu_frame_source.is_none() {
         rendered_art.title_menu_frame_source = Some(
-            image::open(assets.join("gfx/frames/1.png"))
+            crate::open_runtime_image(assets.join("gfx/frames/1.png"))
                 .context("decode title main-menu textbox frame PNG")?
                 .to_rgba8(),
         );
@@ -158,14 +158,14 @@ fn load_visible_continue_screen_frame(
     let assets = runtime_shell.asset_root.runtime_assets();
     if rendered_art.title_menu_font_source.is_none() {
         rendered_art.title_menu_font_source = Some(
-            image::open(assets.join("gfx/font/font.png"))
+            crate::open_runtime_image(assets.join("gfx/font/font.png"))
                 .context("decode Continue-screen font PNG")?
                 .to_rgba8(),
         );
     }
     if rendered_art.title_menu_frame_source.is_none() {
         rendered_art.title_menu_frame_source = Some(
-            image::open(assets.join("gfx/frames/1.png"))
+            crate::open_runtime_image(assets.join("gfx/frames/1.png"))
                 .context("decode Continue-screen frame PNG")?
                 .to_rgba8(),
         );
@@ -364,10 +364,10 @@ fn load_delete_save_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode delete-save font PNG")?
         .to_rgba8();
-    let frame = image::open(assets.join("gfx/frames/1.png"))
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode delete-save textbox frame PNG")?
         .to_rgba8();
 
@@ -441,10 +441,10 @@ fn load_mystery_gift_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode Mystery Gift font PNG")?
         .to_rgba8();
-    let frame = image::open(assets.join("gfx/frames/1.png"))
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode Mystery Gift textbox frame PNG")?
         .to_rgba8();
 
@@ -604,10 +604,10 @@ fn load_trainer_card_frame(
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
     let trainer_card_dir = assets.join("gfx/trainer_card");
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode Trainer Card font PNG")?
         .to_rgba8();
-    let full_font = image::open(assets.join("gfx/font/english.png"))
+    let full_font = crate::open_runtime_image(assets.join("gfx/font/english.png"))
         .context("decode Trainer Card full font PNG")?
         .to_rgba8();
     let portrait_stem = if snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE {
@@ -615,21 +615,21 @@ fn load_trainer_card_frame(
     } else {
         "chris_card"
     };
-    let portrait = image::open(trainer_card_dir.join(format!("{portrait_stem}.png")))
+    let portrait = crate::open_runtime_image(trainer_card_dir.join(format!("{portrait_stem}.png")))
         .with_context(|| format!("decode Trainer Card portrait PNG {portrait_stem}"))?
         .to_rgba8();
-    let trainer_tiles = image::open(trainer_card_dir.join("trainer_card.png"))
+    let trainer_tiles = crate::open_runtime_image(trainer_card_dir.join("trainer_card.png"))
         .context("decode Trainer Card tiles PNG")?
         .to_rgba8();
-    let right_corner = image::open(trainer_card_dir.join("card_right_corner.png"))
+    let right_corner = crate::open_runtime_image(trainer_card_dir.join("card_right_corner.png"))
         .context("decode Trainer Card right-corner PNG")?
         .to_rgba8();
-    let status_tiles = image::open(trainer_card_dir.join("card_status.png"))
+    let status_tiles = crate::open_runtime_image(trainer_card_dir.join("card_status.png"))
         .context("decode Trainer Card status PNG")?
         .to_rgba8();
     let leaders = if page == VisibleTrainerCardPage::JohtoBadges {
         Some(
-            image::open(trainer_card_dir.join("leaders.png"))
+            crate::open_runtime_image(trainer_card_dir.join("leaders.png"))
                 .context("decode Trainer Card leader portraits PNG")?
                 .to_rgba8(),
         )
@@ -638,7 +638,7 @@ fn load_trainer_card_frame(
     };
     let badges = if page == VisibleTrainerCardPage::JohtoBadges {
         Some(
-            image::open(trainer_card_dir.join("badges.png"))
+            crate::open_runtime_image(trainer_card_dir.join("badges.png"))
                 .context("decode Trainer Card badge sprites PNG")?
                 .to_rgba8(),
         )
@@ -1301,7 +1301,7 @@ fn load_trainer_card_palettes(asset_root: &AssetRoot) -> Result<Vec<Palette>> {
 
 fn load_trainer_card_badge_palette(asset_root: &AssetRoot) -> Result<Palette> {
     let path = asset_root.runtime_assets().join("gfx/sgb/predef.pal");
-    let text = std::fs::read_to_string(&path)
+    let text = crate::read_runtime_asset_to_string(&path)
         .with_context(|| format!("read Trainer Card badge palette {}", path.display()))?;
     let line = text
         .lines()
@@ -1372,10 +1372,10 @@ fn load_clock_reset_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode clock-reset font PNG")?
         .to_rgba8();
-    let frame = image::open(assets.join("gfx/frames/1.png"))
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode clock-reset textbox frame PNG")?
         .to_rgba8();
 
@@ -1557,10 +1557,10 @@ fn load_gender_selection_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode gender-selection font PNG")?
         .to_rgba8();
-    let frame = image::open(assets.join("gfx/frames/1.png"))
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode gender-selection textbox frame PNG")?
         .to_rgba8();
     let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
@@ -1627,7 +1627,7 @@ fn load_gender_selection_background(
     palette_path: &Path,
     tile_path: &Path,
 ) -> Result<[[u8; 4]; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE]> {
-    let text = std::fs::read_to_string(palette_path)
+    let text = crate::read_runtime_asset_to_string(palette_path)
         .with_context(|| format!("read {}", palette_path.display()))?;
     let mut colors = Vec::new();
     for raw in text.lines() {
@@ -1657,7 +1657,7 @@ fn load_gender_selection_background(
             colors.len()
         )
     })?;
-    let tile = std::fs::read(tile_path).with_context(|| format!("read {}", tile_path.display()))?;
+    let tile = crate::read_runtime_asset(tile_path).with_context(|| format!("read {}", tile_path.display()))?;
     if tile.len() != SOURCE_TILE_SIZE * 2 {
         anyhow::bail!(
             "gender background tile {} must contain exactly {} bytes, found {}",
@@ -1779,16 +1779,16 @@ fn load_time_set_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode time-set font PNG")?
         .to_rgba8();
-    let frame = image::open(assets.join("gfx/frames/1.png"))
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode time-set textbox frame PNG")?
         .to_rgba8();
-    let up_arrow = image::open(assets.join("gfx/new_game/up_arrow.png"))
+    let up_arrow = crate::open_runtime_image(assets.join("gfx/new_game/up_arrow.png"))
         .context("decode time-set up arrow PNG")?
         .to_rgba8();
-    let down_arrow = image::open(assets.join("gfx/new_game/down_arrow.png"))
+    let down_arrow = crate::open_runtime_image(assets.join("gfx/new_game/down_arrow.png"))
         .context("decode time-set down arrow PNG")?
         .to_rgba8();
 
@@ -2426,13 +2426,13 @@ fn load_oak_intro_screen_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = image::open(assets.join("gfx/font/font.png"))
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode Oak intro font PNG")?
         .to_rgba8();
-    let textbox_frame = image::open(assets.join("gfx/frames/1.png"))
+    let textbox_frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
         .context("decode Oak intro textbox frame PNG")?
         .to_rgba8();
-    let down_arrow = image::open(assets.join("gfx/new_game/down_arrow.png"))
+    let down_arrow = crate::open_runtime_image(assets.join("gfx/new_game/down_arrow.png"))
         .context("decode Oak intro down-arrow PNG")?
         .to_rgba8();
     let width = TIME_SET_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
@@ -2678,7 +2678,7 @@ fn load_visible_credits_sources(asset_root: &AssetRoot) -> Result<CreditsRenderS
 
 fn load_credits_palette_sets(asset_root: &AssetRoot) -> Result<Vec<[Palette; 3]>> {
     let palette_path = asset_root.runtime_assets().join("gfx/credits/credits.pal");
-    let content = std::fs::read_to_string(&palette_path)
+    let content = crate::read_runtime_asset_to_string(&palette_path)
         .with_context(|| format!("read credits palette {}", palette_path.display()))?;
     let palettes = parse_palette_file(&content, None)?;
     if palettes.len() % 3 != 0 {
@@ -2767,7 +2767,7 @@ fn load_visible_credits_mon_frame_levels(
         .runtime_assets()
         .join("gfx/credits")
         .join(format!("{mon}.png"));
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode credits mon frame {}", path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2817,7 +2817,7 @@ fn draw_visible_credits_border_rows(
 
 fn load_visible_credits_border_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<u8>>> {
     let path = asset_root.runtime_assets().join("gfx/credits/border.png");
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode credits border {}", path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2938,7 +2938,7 @@ fn draw_visible_credits_copyright(
 
 fn load_visible_credits_copyright_tiles(asset_root: &AssetRoot) -> Result<Vec<Vec<u8>>> {
     let path = asset_root.runtime_assets().join("gfx/splash/copyright.png");
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode credits copyright {}", path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -2982,7 +2982,7 @@ fn draw_visible_credits_the_end(
 
 fn load_visible_credits_the_end_levels(asset_root: &AssetRoot) -> Result<Vec<u8>> {
     let path = asset_root.runtime_assets().join("gfx/credits/theend.png");
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode credits The End {}", path.display()))?
         .to_rgba8();
     extract_visible_credits_levels(&source, 0, 0, 64, 16)
@@ -3012,7 +3012,7 @@ fn load_visible_credits_font_png_tiles(
     store_zero_based_aliases: bool,
     target: &mut BTreeMap<u16, Vec<u8>>,
 ) -> Result<()> {
-    let source = image::open(path)
+    let source = crate::open_runtime_image(path)
         .with_context(|| format!("decode credits font tiles {}", path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -3046,7 +3046,7 @@ fn load_visible_credits_font_extra_tiles(
     path: &Path,
     target: &mut BTreeMap<u16, Vec<u8>>,
 ) -> Result<()> {
-    let source = image::open(path)
+    let source = crate::open_runtime_image(path)
         .with_context(|| format!("decode credits font extra {}", path.display()))?
         .to_rgba8();
     let (width, height) = source.dimensions();
@@ -3078,7 +3078,7 @@ fn load_visible_credits_single_font_tile(
     tile_id: u16,
     target: &mut BTreeMap<u16, Vec<u8>>,
 ) -> Result<()> {
-    let source = image::open(path)
+    let source = crate::open_runtime_image(path)
         .with_context(|| format!("decode credits font tile {}", path.display()))?
         .to_rgba8();
     let levels = extract_visible_credits_levels(&source, 0, 0, SOURCE_TILE_SIZE, SOURCE_TILE_SIZE)?;
@@ -3091,7 +3091,7 @@ fn load_visible_credits_frame_tiles(
     target: &mut BTreeMap<u16, Vec<u8>>,
 ) -> Result<()> {
     let path = asset_root.runtime_assets().join("gfx/frames/1.png");
-    let source = image::open(&path)
+    let source = crate::open_runtime_image(&path)
         .with_context(|| format!("decode credits frame tiles {}", path.display()))?
         .to_rgba8();
     let tile_ids = [0x79_u16, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e];
@@ -4186,7 +4186,7 @@ fn render_playfield(
         );
         return;
     }
-    let snapshot = if retained_battle_presentation
+    let mut snapshot = if retained_battle_presentation
         || matches!(
             runtime_shell.visible_blackout_phase,
             Some(VisibleBlackoutPhase::FadeOut | VisibleBlackoutPhase::WhiteHold { .. })
@@ -4199,6 +4199,14 @@ fn render_playfield(
     } else {
         field_snapshot
     };
+    if !runtime_shell.follower_visible_tile_overrides.is_empty() {
+        let snapshot = Arc::make_mut(&mut snapshot);
+        for (object_id, tile) in &runtime_shell.follower_visible_tile_overrides {
+            snapshot
+                .visible_object_runtime_tiles
+                .insert(object_id.clone(), *tile);
+        }
+    }
     tileset_art.selected_window_frame_id = textbox_frame_id(snapshot.trainer.options.frame);
     if rendered
         .map_name
@@ -5133,6 +5141,39 @@ fn render_playfield(
         }
     }
     let previous_viewport_origin = rendered.viewport_origin;
+    let tile_frame_key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for handle in &viewport_tile_handles {
+            handle.id().hash(&mut hasher);
+        }
+        for spec in &priority_viewport_tiles {
+            spec.as_ref().map(|(handle, clip_top)| (handle.id(), *clip_top)).hash(&mut hasher);
+        }
+        #[cfg(feature = "voxel-view")]
+        for handle in &visual_world_tile_handles {
+            handle.id().hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    let ambient_tile_frame_due = runtime_shell.ambient_tileset_animation_active
+        && runtime_shell
+            .ambient_tileset_animation_schedule
+            .iter()
+            .any(|(period, offset)| {
+                runtime_shell.lcd_animation_frame >= *offset
+                    && (runtime_shell.lcd_animation_frame - *offset) % (*period).max(1) == 0
+            });
+    let facing_only_redraw = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
+        && previous_viewport_origin == Some((start_x, start_y))
+        && rendered.map_visual_key == Some(map_visual_key)
+        && rendered.position_key == Some(position_key)
+        && rendered.appearance_key == Some(appearance_key)
+        && rendered.player_sprite_mode == Some(snapshot.overworld.mode)
+        && rendered.player_sprite_facing != Some(snapshot.overworld.facing)
+        && !ambient_tile_frame_due;
+    let retained_texture_content = rendered.map_texture.is_some()
+        && rendered.map_priority_texture.is_some()
+        && rendered.tile_frame_key == Some(tile_frame_key);
     let origin_changing_walk = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && (runtime_shell.player_walk_frame_ticks > 0
             || runtime_shell.visible_ledge_jump.is_some())
@@ -5150,27 +5191,43 @@ fn render_playfield(
     // active handle and then mutated it for later camera positions, so every
     // cached entry silently aliased and returned whichever viewport was drawn
     // last. Recompose into the sole active image instead of caching aliases.
-    let viewport_texture = compose_viewport_tiles(
-        &viewport_tile_handles,
-        rendered.map_texture.clone(),
-        &mut images,
-    );
-    let priority_viewport_texture = compose_priority_viewport_tiles(
-        &priority_viewport_tiles,
-        rendered.map_priority_texture.clone(),
-        &mut images,
-    );
+    let viewport_texture = if facing_only_redraw || retained_texture_content {
+        rendered
+            .map_texture
+            .clone()
+            .expect("facing-only redraw retains an initialized base texture")
+    } else {
+        compose_viewport_tiles(
+            &viewport_tile_handles,
+            rendered.map_texture.clone(),
+            &mut images,
+        )
+    };
+    let priority_viewport_texture = if facing_only_redraw || retained_texture_content {
+        rendered
+            .map_priority_texture
+            .clone()
+            .expect("facing-only redraw retains an initialized priority texture")
+    } else {
+        compose_priority_viewport_tiles(
+            &priority_viewport_tiles,
+            rendered.map_priority_texture.clone(),
+            &mut images,
+        )
+    };
     rendered.map_texture = Some(viewport_texture.clone());
     rendered.map_priority_texture = Some(priority_viewport_texture.clone());
     #[cfg(feature = "voxel-view")]
     {
-        rendered.visual_world_texture = Some(compose_visual_world_tiles(
-            &visual_world_tile_handles,
-            VISUAL_WORLD_TILES_X as usize,
-            VISUAL_WORLD_TILES_Y as usize,
-            rendered.visual_world_texture.clone(),
-            &mut images,
-        ));
+        if !facing_only_redraw && !retained_texture_content {
+            rendered.visual_world_texture = Some(compose_visual_world_tiles(
+                &visual_world_tile_handles,
+                VISUAL_WORLD_TILES_X as usize,
+                VISUAL_WORLD_TILES_Y as usize,
+                rendered.visual_world_texture.clone(),
+                &mut images,
+            ));
+        }
         rendered.visual_world_grid_size =
             UVec2::new(VISUAL_WORLD_TILES_X as u32, VISUAL_WORLD_TILES_Y as u32);
     }
@@ -5187,6 +5244,7 @@ fn render_playfield(
         sync_overworld_map_backing(&mut rendered, &mut images);
     }
     rendered.map_visual_key = Some(map_visual_key);
+    rendered.tile_frame_key = Some(tile_frame_key);
     let mut visible_tileset_art_keys = vec![tileset_art_key.clone()];
     for connection in &map.attributes.connections {
         if let Some(target_map) = snapshot
@@ -6093,7 +6151,6 @@ fn render_playfield(
             })
             && (runtime_shell.visible_ledge_jump.is_some()
                 || runtime_shell.player_walk_frame_ticks > 0)
-            && runtime_shell.player_walk_stride
         {
             walking_frame.as_ref().unwrap_or(&standing_frame)
         } else {
@@ -6168,8 +6225,7 @@ fn render_playfield(
         }
         let player_flip_x = (runtime_shell.player_walk_frame_ticks > 0
             || runtime_shell.visible_ledge_jump.is_some())
-            && runtime_shell.player_walk_stride
-            && runtime_shell.player_walk_mirror_stride
+            && !runtime_shell.player_walk_stride
             && matches!(snapshot.overworld.facing, Direction::Up | Direction::Down);
         if retain_player_sprite && runtime_shell.visible_fly_animation.is_none() {
             if let Ok((mut texture, mut transform, mut sprite, mut frames)) =
@@ -6943,7 +6999,7 @@ fn visible_whirlpool_tile_frame(
         .runtime_assets()
         .join("gfx/tilesets/whirlpool")
         .join(format!("{source_number}.2bpp"));
-    let data = std::fs::read(&path)
+    let data = crate::read_runtime_asset(&path)
         .with_context(|| format!("read WHIRLPOOL animation tile {}", path.display()))?;
     let offset = usize::from(phase) * 16;
     let tile = data
@@ -7317,7 +7373,7 @@ fn visible_field_move_tile_frame(
         .runtime_assets()
         .join("gfx/overworld")
         .join(format!("{graphic}.2bpp"));
-    let data = std::fs::read(&path)
+    let data = crate::read_runtime_asset(&path)
         .with_context(|| format!("read field-move graphics {}", path.display()))?;
     let offset = usize::from(tile_index)
         .checked_mul(16)
