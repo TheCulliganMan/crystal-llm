@@ -78,11 +78,47 @@ impl PcBox {
     }
 
     pub fn add_pokemon(&mut self, pokemon: Pokemon) -> bool {
-        let Some(slot) = self.next_open_slot() else {
-            return false;
-        };
-        self.set_slot(slot, Some(pokemon));
-        true
+        self.insert_pokemon(self.count, pokemon).is_ok()
+    }
+
+    /// Insert before `index`, matching `InsertPokemonIntoBox`'s counted-list
+    /// layout. The end index is valid and appends the Pokemon.
+    pub fn insert_pokemon(&mut self, index: usize, pokemon: Pokemon) -> Result<(), String> {
+        if self.count >= MAX_BOX_MONS {
+            return Err("PC box is full".to_string());
+        }
+        if index > self.count {
+            return Err(format!(
+                "box insertion slot {index} is outside compact range 0..={}",
+                self.count
+            ));
+        }
+        for slot in (index..self.count).rev() {
+            let shifted = self.pokemon[slot].clone();
+            self.set_slot(slot + 1, shifted);
+        }
+        self.set_slot(index, Some(pokemon));
+        Ok(())
+    }
+
+    /// Remove one entry and shift every following entry left, matching
+    /// `RemoveMonFromPartyOrBox`.
+    pub fn remove_pokemon(&mut self, index: usize) -> Result<Pokemon, String> {
+        if index >= self.count {
+            return Err(format!(
+                "box removal slot {index} is outside compact range 0..{}",
+                self.count
+            ));
+        }
+        let removed = self.pokemon[index]
+            .clone()
+            .ok_or_else(|| format!("box removal slot {index} is empty"))?;
+        for slot in index..self.count - 1 {
+            let shifted = self.pokemon[slot + 1].clone();
+            self.set_slot(slot, shifted);
+        }
+        self.set_slot(self.count - 1, None);
+        Ok(removed)
     }
 
     pub fn compact(&mut self) {
@@ -135,9 +171,15 @@ impl PcBox {
                 self.slot_species[MAX_BOX_MONS]
             ));
         }
+        let mut first_empty_slot = None;
         for index in 0..MAX_BOX_MONS {
             match &self.pokemon[index] {
                 Some(pokemon) => {
+                    if let Some(empty_index) = first_empty_slot {
+                        return Err(format!(
+                            "box slot {index} is filled after empty slot {empty_index}"
+                        ));
+                    }
                     pokemon
                         .validate_saved_state()
                         .map_err(|error| format!("slot {index}: {error}"))?;
@@ -159,6 +201,7 @@ impl PcBox {
                     }
                 }
                 None => {
+                    first_empty_slot.get_or_insert(index);
                     if !self.nicknames[index].is_empty()
                         || !self.original_trainer_names[index].is_empty()
                         || self.original_trainer_ids[index] != 0
@@ -353,6 +396,48 @@ mod tests {
             storage.validate_metadata(),
             Err("pc_boxes[0] box name has invalid text ' BOX 01'".to_string())
         );
+
+        let mut storage = PokemonStorage::default();
+        let mut pc_box = PcBox::new(0);
+        pc_box.set_slot(1, Some(pokemon("CHIKORITA", 152)));
+        storage.pc_boxes.push(pc_box);
+        assert_eq!(
+            storage.validate_metadata(),
+            Err("pc_boxes[0] box slot 1 is filled after empty slot 0".to_string())
+        );
+    }
+
+    #[test]
+    fn box_insertion_and_removal_keep_the_asm_counted_list_compact() {
+        let mut pc_box = PcBox::new(0);
+        assert!(pc_box.add_pokemon(pokemon("A", 1)));
+        assert!(pc_box.add_pokemon(pokemon("C", 3)));
+
+        pc_box
+            .insert_pokemon(1, pokemon("B", 2))
+            .expect("insert before the selected boxed Pokemon");
+        assert_eq!(
+            pc_box
+                .pokemon
+                .iter()
+                .flatten()
+                .map(|pokemon| pokemon.species.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
+
+        let removed = pc_box.remove_pokemon(1).expect("remove the middle Pokemon");
+        assert_eq!(removed.species.id, "B");
+        assert_eq!(
+            pc_box
+                .pokemon
+                .iter()
+                .flatten()
+                .map(|pokemon| pokemon.species.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "C"]
+        );
+        pc_box.validate_metadata().expect("compact box metadata");
     }
 
     #[test]

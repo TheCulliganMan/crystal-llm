@@ -2091,6 +2091,87 @@
     }
 
     #[test]
+    fn move_pokemon_without_mail_inserts_at_the_asm_box_cursor() {
+        fn named_pokemon(name: &str) -> crystal_core::models::Pokemon {
+            let mut pokemon = crystal_core::models::Pokemon::new_for_tests(
+                species(),
+                20,
+                crystal_core::models::Dv::default(),
+            );
+            pokemon.nickname = name.to_string();
+            pokemon
+        }
+
+        let data = GameDataSet::default();
+        let mut state = GameState::default();
+        let mut source = PcBox::new(0);
+        assert!(source.add_pokemon(named_pokemon("A")));
+        assert!(source.add_pokemon(named_pokemon("B")));
+        let mut target = PcBox::new(1);
+        assert!(target.add_pokemon(named_pokemon("C")));
+        assert!(target.add_pokemon(named_pokemon("D")));
+        state.storage.pc_boxes = vec![source, target];
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "PcMoveTest".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+
+        let applied = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::MovePcPokemonWithoutMail(RuntimePcMoveCommand {
+                    source_box: 0,
+                    source_slot: 0,
+                    target_box: 1,
+                    target_slot: 1,
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("move inserts before the selected destination");
+        let RuntimeMutationResult::PcPokemonMoved(outcome) = applied.result else {
+            panic!("expected PC Pokemon move result");
+        };
+        assert_eq!(outcome.target_slot, 1);
+        assert_eq!(
+            state.storage.pc_boxes[0]
+                .pokemon
+                .iter()
+                .flatten()
+                .map(|pokemon| pokemon.nickname.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B"]
+        );
+        assert_eq!(
+            state.storage.pc_boxes[1]
+                .pokemon
+                .iter()
+                .flatten()
+                .map(|pokemon| pokemon.nickname.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C", "A", "D"]
+        );
+        state.storage.validate_metadata().expect("compact moved boxes");
+    }
+
+    #[test]
     fn deferred_level_evolution_rejects_existing_pending_move_learn_before_mutation() {
         let mut data = GameDataSet::default();
         let mut mon = species();

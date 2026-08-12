@@ -3338,7 +3338,7 @@ fn execute_visible_battle_animation_script(
                 }
             }
             "anim_ret" => return Some(()),
-            _ => {}
+            _ => return None,
         }
     }
     Some(())

@@ -7,6 +7,11 @@ pub enum BattleAnimationCatalogIssue {
     InvalidAnimation {
         label: String,
     },
+    InvalidCommand {
+        label: String,
+        index: usize,
+        command: String,
+    },
     InvalidTableEntry {
         index: usize,
     },
@@ -32,6 +37,15 @@ pub fn battle_animation_catalog_issues(
             issues.push(BattleAnimationCatalogIssue::InvalidAnimation {
                 label: label.clone(),
             });
+        }
+        for (index, command) in commands.iter().enumerate() {
+            if !is_canonical_battle_animation_command(command) {
+                issues.push(BattleAnimationCatalogIssue::InvalidCommand {
+                    label: label.clone(),
+                    index,
+                    command: command.clone(),
+                });
+            }
         }
     }
     for (index, label) in animation_table.iter().enumerate() {
@@ -80,9 +94,9 @@ impl<'de> Deserialize<'de> for BattleAnimationCommandTable {
                 )));
             }
             for command in commands {
-                if !is_exact_nonempty_battle_animation_command(command) {
+                if !is_canonical_battle_animation_command(command) {
                     return Err(D::Error::custom(format!(
-                        "battle animation command for {label:?} must be exact nonempty text, found {command:?}"
+                        "battle animation command for {label:?} is not a canonical ASM command, found {command:?}"
                     )));
                 }
             }
@@ -126,6 +140,32 @@ fn is_exact_nonempty_battle_animation_token(value: &str) -> bool {
 fn is_exact_nonempty_battle_animation_command(value: &str) -> bool {
     !value.is_empty() && value.trim() == value && !has_reserved_pack_prefix(value)
 }
+
+fn is_canonical_battle_animation_command(value: &str) -> bool {
+    if !is_exact_nonempty_battle_animation_command(value) {
+        return false;
+    }
+    if value.starts_with('.') && !value.contains(char::is_whitespace) {
+        return value
+            .bytes()
+            .skip(1)
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    }
+    let opcode = value
+        .split_once(char::is_whitespace)
+        .map_or(value, |(opcode, _)| opcode);
+    CANONICAL_BATTLE_ANIMATION_OPCODES.binary_search(&opcode).is_ok()
+}
+
+const CANONICAL_BATTLE_ANIMATION_OPCODES: &[&str] = &[
+    "anim_1gfx", "anim_2gfx", "anim_3gfx", "anim_battlergfx_1row",
+    "anim_battlergfx_2row", "anim_beatup", "anim_bgeffect", "anim_bgp", "anim_call",
+    "anim_checkpokeball", "anim_clearobjs", "anim_cry", "anim_dropsub", "anim_if_param_and",
+    "anim_if_param_equal", "anim_if_var_equal", "anim_incbgeffect", "anim_incobj", "anim_incvar",
+    "anim_jump", "anim_jumpuntil", "anim_keepsprites", "anim_loop", "anim_minimize", "anim_obj",
+    "anim_obp0", "anim_obp1", "anim_raisesub", "anim_resetobp0", "anim_ret", "anim_setobj",
+    "anim_setvar", "anim_sound", "anim_transform", "anim_updateactorpic", "anim_wait",
+];
 
 fn has_reserved_pack_prefix(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
@@ -216,6 +256,31 @@ mod tests {
                 },
                 BattleAnimationCatalogIssue::InvalidTableEntry { index: 0 },
             ],
+        );
+    }
+
+    #[test]
+    fn battle_animation_catalog_rejects_unknown_opcodes_instead_of_treating_them_as_noops() {
+        let animations = [(
+            "BattleAnim_Tackle".to_string(),
+            vec![
+                "anim_1gfx BATTLE_ANIM_GFX_HIT".to_string(),
+                ".loop".to_string(),
+                "anim_wait 1".to_string(),
+                "anim_invented 4".to_string(),
+                "anim_ret".to_string(),
+            ],
+        )]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            battle_animation_catalog_issues(&animations, &[], 0),
+            vec![BattleAnimationCatalogIssue::InvalidCommand {
+                label: "BattleAnim_Tackle".to_string(),
+                index: 3,
+                command: "anim_invented 4".to_string(),
+            }]
         );
     }
 }

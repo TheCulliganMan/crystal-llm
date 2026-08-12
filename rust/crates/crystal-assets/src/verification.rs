@@ -5878,6 +5878,15 @@ fn battle_animation_catalog_issue_diagnostic(
             &label,
             "battle animation labels must be exact non-empty values and command lists must be non-empty",
         ),
+        BattleAnimationCatalogIssue::InvalidCommand {
+            label,
+            index,
+            command,
+        } => VerificationError::error(
+            "invalid_battle_animation_command",
+            format!("{label}:{index}"),
+            format!("battle animation command is not canonical ASM: {command:?}"),
+        ),
         BattleAnimationCatalogIssue::InvalidTableEntry { index } => VerificationError::error(
             "invalid_battle_animation_table_entry",
             index.to_string(),
