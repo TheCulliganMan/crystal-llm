@@ -11,8 +11,6 @@ use crystal_render_api::VisualTileSource;
 const METATILE: u16 = 0x36;
 pub(crate) const FLOOR_TILE: u16 = 0x01;
 pub(crate) const WALL_HEIGHT: f32 = 16.0;
-/// Preserve the authored one-subtile footprint exactly.
-pub(crate) const WALL_DEPTH: f32 = 8.0;
 
 pub(crate) fn supports_map(map_id: &str) -> bool {
     matches!(
@@ -77,10 +75,8 @@ mod tests {
     }
 
     #[test]
-    fn divider_is_one_gameplay_tile_high_and_has_real_depth() {
+    fn divider_is_one_gameplay_tile_high() {
         assert_eq!(WALL_HEIGHT, 2.0 * 8.0);
-        assert_eq!(WALL_DEPTH, 8.0);
-        assert!(WALL_DEPTH > 1.0);
     }
 
     #[test]

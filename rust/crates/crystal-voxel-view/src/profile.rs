@@ -17,6 +17,7 @@ use crate::interior::interior_fixture_shape;
 use crate::johto_fence::johto_fence_shape;
 use crate::kanto_cliff::kanto_cliff_shape;
 use crate::kanto_post::kanto_post_shape;
+use crate::lab::lab_shape;
 use crate::modern_route::modern_route_shape;
 use crate::park::park_shape;
 use crate::port::port_shape;
@@ -211,6 +212,9 @@ fn jump_ledge_top_tile(source: &VisualTileSource) -> Option<u16> {
 }
 
 pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
+    if let Some(shape) = lab_shape(source) {
+        return shape;
+    }
     if let Some(shape) = sign_shape(source) {
         return shape;
     }
@@ -257,6 +261,9 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
         return shape;
     }
     if let Some(shape) = tower_shape(source) {
+        return shape;
+    }
+    if let Some(shape) = crate::ruins_of_alph::boundary_plane(source) {
         return shape;
     }
     if let Some(shape) = crate::house::shape(source) {
@@ -521,7 +528,9 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
             solid: SolidKind::Prop,
         };
     }
-    if matches!(source.metatile_id, 0x42 | 0x44) && source.tile_index == 0x4a {
+    if matches!(source.metatile_id, 0x40 | 0x42 | 0x44 | 0x46 | 0x48 | 0x4a)
+        && source.tile_index == 0x4a
+    {
         return CellShape::FacadeBand {
             plane_subtile_row: source.subtile_row + 1,
             band_from_top: 0,
@@ -774,7 +783,16 @@ pub fn shape_for_source(source: &VisualTileSource) -> CellShape {
 /// interiors reuse an atlas for unrelated objects (notably Game Corners and
 /// Vermilion Gym), so tileset identity alone is not sufficient evidence.
 pub(crate) fn shape_for_source_on_map(map_id: &str, source: &VisualTileSource) -> CellShape {
+    // Map-aware Center structures must win over the atlas-wide generic
+    // interior relief rules. The same source tiles are walls, counters, and
+    // grouped machines here, not anonymous low fixtures.
+    if let Some(shape) = crate::pokecenter::shape(map_id, source) {
+        return shape;
+    }
     if let Some(shape) = crate::interior::trainer_house_b1f_stair_shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::facility::shape(source) {
         return shape;
     }
     if let Some(shape) = crate::dance_theater::shape(map_id, source) {
@@ -796,9 +814,6 @@ pub(crate) fn shape_for_source_on_map(map_id: &str, source: &VisualTileSource) -
         return shape;
     }
     if let Some(shape) = crate::ship::shape(map_id, source) {
-        return shape;
-    }
-    if let Some(shape) = crate::pokecenter::shape(map_id, source) {
         return shape;
     }
     if let Some(shape) = crate::mart::department_store_wall_shape(map_id, source) {
@@ -853,6 +868,9 @@ pub(crate) fn shape_for_source_on_map(map_id: &str, source: &VisualTileSource) -
         return shape;
     }
     if let Some(shape) = crate::goldenrod_underground::shape(map_id, source) {
+        return shape;
+    }
+    if let Some(shape) = crate::underground_boundary::shape(map_id, source) {
         return shape;
     }
     if let Some(shape) = crate::underground_path::shape(map_id, source) {
@@ -1083,7 +1101,7 @@ mod tests {
             CellShape::Waterfall
         );
         assert_eq!(
-            shape_for_source(&source_for_tileset("cave", 0x2d, 1, 2, 0x40)),
+            shape_for_source(&source_for_tileset("cave", 0x2b, 1, 2, 0x40)),
             CellShape::Flat,
             "shared art outside the authored waterfall block stays flat"
         );
@@ -1259,6 +1277,24 @@ mod tests {
                 ground_tile_index: 0x06,
                 solid: SolidKind::Prop,
             }
+        );
+        for metatile in [0x40, 0x42, 0x44, 0x46, 0x48, 0x4a] {
+            assert_eq!(
+                shape_for_source(&source_for_tileset(JOHTO_TILESET, metatile, 3, 1, 0x4a)),
+                CellShape::FacadeBand {
+                    plane_subtile_row: 2,
+                    band_from_top: 0,
+                    band_count: 1,
+                    ground_tile_index: 0x06,
+                    solid: SolidKind::Prop,
+                },
+                "the shared north-south post must stand in metatile ${metatile:02x}"
+            );
+        }
+        assert_eq!(
+            shape_for_source(&source_for_tileset(JOHTO_TILESET, 0x46, 2, 1, 0x06)),
+            CellShape::Flat,
+            "adjacent ground in the mixed block must remain flat"
         );
     }
 

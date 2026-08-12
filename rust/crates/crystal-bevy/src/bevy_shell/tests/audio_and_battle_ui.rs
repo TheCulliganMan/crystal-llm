@@ -1,3 +1,23 @@
+#[test]
+fn battle_animation_cry_selectors_choose_exact_species_variants() {
+    assert_eq!(
+        visible_pokemon_animation_cry_id("SANDSHREW", 0),
+        "CRY_MON_SANDSHREW_GROWL"
+    );
+    assert_eq!(
+        visible_pokemon_animation_cry_id("SANDSHREW", 1),
+        "CRY_MON_SANDSHREW_ROAR"
+    );
+    assert_eq!(
+        visible_pokemon_animation_cry_id("SANDSHREW", 2),
+        "CRY_MON_SANDSHREW"
+    );
+    assert_eq!(
+        visible_pokemon_animation_cry_id("SANDSHREW", 3),
+        "CRY_MON_SANDSHREW"
+    );
+}
+
 fn assert_audio_sources_contain_non_silent_wav(world: &World, expected_count: usize) {
     let audio_sources = world.resource::<Assets<AudioSource>>();
     assert_eq!(audio_sources.len(), expected_count);

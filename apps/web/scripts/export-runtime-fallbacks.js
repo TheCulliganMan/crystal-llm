@@ -351,6 +351,7 @@ const parseBattleAnimOamFlags = (raw) => {
   return {
     xflip: tokens.includes("OAM_XFLIP"),
     yflip: tokens.includes("OAM_YFLIP"),
+    obp: tokens.includes("OAM_PAL1") ? 1 : 0,
   };
 };
 const TILESET_PALETTE_LABELS = {
@@ -600,13 +601,14 @@ const parseBattleAnimOamSets = (filePath) => {
       if (args.length < 6) {
         continue;
       }
-      const { xflip, yflip } = parseBattleAnimOamFlags(args[5]);
+      const { xflip, yflip, obp } = parseBattleAnimOamFlags(args[5]);
       ensureLabel(currentLabel).push({
         x: parseIntToken(args[0]) * 8 + parseIntToken(args[2]),
         y: parseIntToken(args[1]) * 8 + parseIntToken(args[3]),
         tile_id: parseIntToken(args[4]),
         xflip,
         yflip,
+        obp,
       });
       continue;
     }
@@ -624,13 +626,14 @@ const parseBattleAnimOamSets = (filePath) => {
     if (args.length < 4) {
       continue;
     }
-    const { xflip, yflip } = parseBattleAnimOamFlags(args[3]);
+    const { xflip, yflip, obp } = parseBattleAnimOamFlags(args[3]);
     ensureLabel(currentLabel).push({
       x: parseIntToken(args[0]),
       y: parseIntToken(args[1]),
       tile_id: parseIntToken(args[2]),
       xflip,
       yflip,
+      obp,
     });
   }
 

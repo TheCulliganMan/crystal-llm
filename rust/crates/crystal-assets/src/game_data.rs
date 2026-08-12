@@ -3672,16 +3672,13 @@ impl GameDataSet {
         traded.original_trainer_name = rule.original_trainer_name.clone();
         traded.original_trainer_id = rule.original_trainer_id;
         traded.caught_data = Some(crystal_core::models::pokemon::CaughtData {
-            level,
+            level: 0,
+            time_of_day: None,
             // SetGiftPartyMonCaughtData writes LANDMARK_GIFT ($7e); the
-            // girl trade variant carries the CAUGHT_BY_GIRL bit in the
-            // high bit of the caught-location byte.
-            ball: 0,
-            location: if rule.dialog_set.ends_with("GIRL") {
-                0xfe
-            } else {
-                0x7e
-            },
+            // girl trade variant carries the CAUGHT_BY_GIRL bit separately
+            // in the high bit of the packed caught-location byte.
+            original_trainer_gender: u8::from(rule.dialog_set.ends_with("GIRL")),
+            location: 0x7e,
         });
         let last_party_index = state
             .storage
@@ -7069,10 +7066,27 @@ impl GameDataSet {
                 {
                     anyhow::bail!("cannot deposit a Pokemon holding mail");
                 }
+                if !state
+                    .storage
+                    .party
+                    .pokemon
+                    .iter()
+                    .enumerate()
+                    .any(|(index, candidate)| {
+                        index != command.party_index
+                            && candidate
+                                .as_ref()
+                                .is_some_and(|pokemon| !pokemon.is_egg && pokemon.hp > 0)
+                    })
+                {
+                    anyhow::bail!("cannot deposit the last usable party Pokemon");
+                }
+                let mut pokemon = pokemon.clone();
+                restore_deposited_pokemon_pp(&self.moves, &mut pokemon)?;
                 let box_slot = state.storage.pc_boxes[state.current_pc_box]
                     .next_open_slot()
                     .with_context(|| format!("PC box {} is full", state.current_pc_box))?;
-                let pokemon = take_party_pokemon_compact(state, command.party_index)
+                take_party_pokemon_compact(state, command.party_index)
                     .with_context(|| format!("deposit party index {}", command.party_index))?;
                 state.storage.pc_boxes[state.current_pc_box]
                     .set_slot(box_slot, Some(pokemon.clone()));
@@ -7142,69 +7156,84 @@ impl GameDataSet {
                 })
             }
             RuntimeMutationCommand::MovePcPokemonWithoutMail(command) => {
-                for (box_index, pc_box) in state.storage.pc_boxes.iter().enumerate() {
-                    if pc_box.pokemon.iter().flatten().any(|pokemon| {
-                        pokemon
+                let mut staged = state.clone();
+                let source = command.source.clone();
+                let target = command.target.clone();
+                prepare_pc_move_locations(&mut staged, &source, &target)?;
+
+                let mut pokemon = match source {
+                    RuntimePokemonStorageLocation::Party { slot } => {
+                        let selected = staged.storage.party.pokemon[slot]
+                            .as_ref()
+                            .context("validated party source is empty")?;
+                        if selected
                             .item
                             .as_deref()
                             .is_some_and(crystal_core::models::item::is_mail_item_id)
-                    }) {
-                        anyhow::bail!("cannot move Pokemon while box {box_index} contains mail");
+                        {
+                            anyhow::bail!("cannot move a party Pokemon holding mail");
+                    }
+                        if staged.storage.party.filled_slots() <= 1 {
+                            anyhow::bail!("cannot move the last party Pokemon");
+                }
+                        if !staged.storage.party.pokemon.iter().enumerate().any(
+                            |(index, candidate)| {
+                                index != slot
+                                    && candidate
+                                        .as_ref()
+                                        .is_some_and(|pokemon| !pokemon.is_egg && pokemon.hp > 0)
+                            },
+                        ) {
+                            anyhow::bail!("cannot move the last usable party Pokemon");
+                }
+                        take_party_pokemon_compact(&mut staged, slot)
+                            .context("remove party Pokemon for PC move")?
+                }
+                    RuntimePokemonStorageLocation::Box { box_index, slot } => {
+                        staged.storage.pc_boxes[box_index]
+                            .remove_pokemon(slot)
+                            .map_err(anyhow::Error::msg)?
+                }
+                };
+
+                let adjusted_target = adjust_pc_move_target_after_removal(&command.source, target);
+                match adjusted_target.clone() {
+                    RuntimePokemonStorageLocation::Party { slot } => {
+                        insert_party_pokemon(&mut staged.storage.party, slot, pokemon)?;
+                        staged.sync_party_from_storage();
+                }
+                    RuntimePokemonStorageLocation::Box { box_index, slot } => {
+                        restore_deposited_pokemon_pp(&self.moves, &mut pokemon)?;
+                        staged.storage.pc_boxes[box_index]
+                            .insert_pokemon(slot, pokemon)
+                            .map_err(anyhow::Error::msg)?;
+                        staged.current_pc_box = box_index;
                     }
                 }
-                if state.storage.party.pokemon.iter().flatten().any(|pokemon| {
-                    pokemon
-                        .item
-                        .as_deref()
-                        .is_some_and(crystal_core::models::item::is_mail_item_id)
-                }) {
-                    anyhow::bail!("cannot move Pokemon while the party contains mail");
-                }
-                if command.source_box >= MAX_PC_BOXES || command.target_box >= MAX_PC_BOXES {
-                    anyhow::bail!("PC move box index is outside 0..{MAX_PC_BOXES}");
-                }
-                while state.storage.pc_boxes.len() <= command.source_box.max(command.target_box) {
-                    let next = state.storage.pc_boxes.len();
-                    state.storage.pc_boxes.push(PcBox::new(next));
-                }
-                if command.source_slot >= MAX_BOX_MONS || command.target_slot >= MAX_BOX_MONS {
-                    anyhow::bail!("PC move slot is outside 0..{MAX_BOX_MONS}");
-                }
-                let pokemon = state.storage.pc_boxes[command.source_box].pokemon
-                    [command.source_slot]
-                    .clone()
-                    .context("PC move source slot is empty")?;
-                let target =
-                    state.storage.pc_boxes[command.target_box].pokemon[command.target_slot].clone();
-                state.storage.pc_boxes[command.target_box]
-                    .set_slot(command.target_slot, Some(pokemon));
-                state.storage.pc_boxes[command.source_box]
-                    .set_slot(command.source_slot, target.clone());
-                if target.is_none() {
-                    state.storage.pc_boxes[command.source_box].compact();
-                }
-                state.current_pc_box = command.target_box;
+                *state = staged;
                 RuntimeMutationResult::PcPokemonMoved(RuntimeStorageMoveOutcome {
-                    source_box: command.source_box,
-                    source_slot: command.source_slot,
-                    target_box: command.target_box,
-                    target_slot: command.target_slot,
-                    swapped: target.is_some(),
+                    source: command.source,
+                    target: adjusted_target,
                 })
             }
             RuntimeMutationCommand::DepositBagItemToPc(command) => {
+                let mut staged = state.clone();
                 let item = self
                     .items
                     .get(&command.item_id)
                     .with_context(|| format!("unknown item {}", command.item_id))?;
-                if state.bag.quantity(item) < command.quantity {
+                let removed = staged
+                    .bag
+                    .remove_item_at(item, command.stack_index, command.quantity)
+                    .map_err(|error| anyhow::anyhow!("remove bag item for PC deposit: {error}"))?;
+                if !removed {
                     anyhow::bail!(
-                        "bag does not contain {} x{} for PC deposit",
+                        "bag does not contain a single {} stack with quantity {}",
                         command.item_id,
                         command.quantity
                     );
                 }
-                let added = state
+                let added = staged
                     .bag
                     .add_pc_item(item, command.quantity)
                     .map_err(|error| anyhow::anyhow!("add PC item: {error}"))?;
@@ -7215,10 +7244,7 @@ impl GameDataSet {
                         command.quantity
                     );
                 }
-                state
-                    .bag
-                    .remove_item(item, command.quantity)
-                    .map_err(|error| anyhow::anyhow!("remove bag item for PC deposit: {error}"))?;
+                *state = staged;
                 RuntimeMutationResult::BagItemDepositedToPc(RuntimePcItemTransferOutcome {
                     item_id: command.item_id,
                     quantity: command.quantity,
@@ -7227,28 +7253,30 @@ impl GameDataSet {
                 })
             }
             RuntimeMutationCommand::WithdrawPcItemToBag(command) => {
+                let mut staged = state.clone();
                 let item = self
                     .items
                     .get(&command.item_id)
                     .with_context(|| format!("unknown item {}", command.item_id))?;
-                if state.bag.pc_item_quantity(item) < command.quantity {
+                let removed = staged
+                    .bag
+                    .remove_pc_item_at(item, command.stack_index, command.quantity)
+                    .map_err(|error| anyhow::anyhow!("remove PC item: {error}"))?;
+                if !removed {
                     anyhow::bail!(
-                        "PC item storage does not contain {} x{}",
+                        "PC item storage does not contain a single {} stack with quantity {}",
                         command.item_id,
                         command.quantity
                     );
                 }
-                let added = state
+                let added = staged
                     .bag
                     .add_item(item, command.quantity)
                     .map_err(|error| anyhow::anyhow!("add bag item from PC: {error}"))?;
                 if !added {
                     anyhow::bail!("bag rejected {} x{}", command.item_id, command.quantity);
                 }
-                state
-                    .bag
-                    .remove_pc_item(item, command.quantity)
-                    .map_err(|error| anyhow::anyhow!("remove PC item: {error}"))?;
+                *state = staged;
                 RuntimeMutationResult::PcItemWithdrawnToBag(RuntimePcItemTransferOutcome {
                     item_id: command.item_id,
                     quantity: command.quantity,
@@ -7270,7 +7298,7 @@ impl GameDataSet {
                 }
                 let removed = state
                     .bag
-                    .remove_pc_item(item, command.quantity)
+                    .remove_pc_item_at(item, command.stack_index, command.quantity)
                     .map_err(|error| anyhow::anyhow!("toss PC item: {error}"))?;
                 if !removed {
                     anyhow::bail!(
@@ -12211,6 +12239,14 @@ impl GameDataSet {
         item_id: &str,
         party_index: usize,
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
+        let x_accuracy = self.item(item_id)?.script_name == "X_ACCURACY";
+        if x_accuracy {
+            let combat = active_battle_combat_state(state)
+                .context("use X Accuracy in active battle")?;
+            if combat.player_x_accuracy {
+                anyhow::bail!("use battle item {item_id}: X Accuracy is already active");
+            }
+        }
         let mut preview = clone_active_battle_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
         self.apply_active_battle_item_effect(&mut preview, item_id, false)?;
@@ -12221,6 +12257,12 @@ impl GameDataSet {
         let battle_item =
             self.apply_active_battle_item_effect(pokemon, item_id, item_use.consumed)?;
         state.sync_party_from_storage();
+        if x_accuracy {
+            let mut combat = active_battle_combat_state(state)
+                .context("apply X Accuracy to active battle")?;
+            combat.player_x_accuracy = true;
+            state.script_runtime.active_battle_combat = Some(combat);
+        }
         Ok((item_use, battle_item))
     }
 

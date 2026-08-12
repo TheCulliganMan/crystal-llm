@@ -94,4 +94,37 @@ describe("PcmClip rendering", () => {
     expect(clip.priorityClass).toBe("priority");
     expect(clip.loopStartSample).toBeNull();
   });
+
+  it("passes exact cry pitch and length parameters into PCM rendering", () => {
+    const musicData: ParsedMusicData = {
+      channel_count: 1,
+      channels: {
+        Cry_Test_Ch5: {
+          number: 5,
+          commands: [
+            { command: "square_note", args: ["0", "15", "0", "1024"] },
+          ],
+        },
+      },
+      subroutines: {},
+    };
+    const base = renderPcmClip({
+      kind: "cry",
+      token: "CRY_TEST",
+      musicData,
+      context: { drumkits: {}, waveSamples },
+      cryPitch: 0,
+      cryLength: 0x100,
+    });
+    const long = renderPcmClip({
+      kind: "cry",
+      token: "CRY_TEST",
+      musicData,
+      context: { drumkits: {}, waveSamples },
+      cryPitch: 0,
+      cryLength: 0x200,
+    });
+
+    expect(long.pcm.length).toBe(base.pcm.length * 2);
+  });
 });

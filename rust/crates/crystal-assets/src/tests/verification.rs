@@ -133,6 +133,10 @@
                     vec!["anim_wait 1".to_string()],
                 ),
                 ("BattleAnim_Tackle".to_string(), Vec::new()),
+                (
+                    "BattleAnim_Branch".to_string(),
+                    vec!["anim_jump .missing".to_string()],
+                ),
             ]
             .into_iter()
             .collect(),
@@ -174,6 +178,11 @@
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "battle_animation_table_count_mismatch"
                 && diagnostic.subject == "battle_animation_table"
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_battle_animation_command_target"
+                && diagnostic.subject == "BattleAnim_Branch:0"
+                && diagnostic.message.contains(".missing")
         }));
     }
 

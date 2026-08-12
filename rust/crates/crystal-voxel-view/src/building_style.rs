@@ -25,6 +25,42 @@ pub(crate) fn uses_center_ridge_roof(
     first.tileset_id.as_ref() == "johto" && matches!(first.metatile_id, 0x2a | 0x2c | 0x2d)
 }
 
+/// Pewter Museum is the one Kanto civic landmark whose authored deep roof
+/// band is a pitched hall rather than a flat plan slab.  Match the complete
+/// catalogued drawing dimensions and its stable west-cap metatile; ordinary
+/// marts, gyms, stations, and compact houses keep their existing roof form.
+pub(crate) fn uses_kanto_museum_ridge(
+    width: usize,
+    height: usize,
+    roof_rows: usize,
+    source: &VisualTileSource,
+) -> bool {
+    source.tileset_id.as_ref() == "kanto"
+        && source.metatile_id == 0x75
+        && width == 16
+        && height == 8
+        && roof_rows == 4
+}
+
+/// Celadon's department store is a 12x16-tile landmark: four native roof
+/// rows followed by twelve upright rows (six two-row window courses plus the
+/// entrance/sign course). Its generated sides must carry the outer frame,
+/// not turn the broad front window fields around the upper corners.
+pub(crate) fn is_celadon_department_store(
+    map_id: &str,
+    width: usize,
+    height: usize,
+    roof_rows: usize,
+    source: &VisualTileSource,
+) -> bool {
+    map_id == "CeladonCity"
+        && width == 12
+        && height == 16
+        && roof_rows == 4
+        && source.tileset_id.as_ref() == "kanto"
+        && source.metatile_id == 0x20
+}
+
 /// Burned Tower's exterior is an 8x8-tile drawing: four roof rows over four
 /// facade rows. Its matched footprint is the four roof rows (32 pixels), not
 /// the generic expanded depth used to give ordinary compact houses body.
@@ -192,5 +228,32 @@ mod tests {
             &source("johto_modern", 0x25)
         ));
         assert!(!uses_center_ridge_roof(8, 4, &source("johto", 0x20)));
+    }
+
+    #[test]
+    fn only_the_complete_pewter_museum_uses_the_kanto_hall_ridge() {
+        assert!(uses_kanto_museum_ridge(16, 8, 4, &source("kanto", 0x75)));
+        assert!(!uses_kanto_museum_ridge(12, 8, 4, &source("kanto", 0x75)));
+        assert!(!uses_kanto_museum_ridge(16, 8, 4, &source("kanto", 0x20)));
+    }
+
+    #[test]
+    fn celadon_store_keeps_twelve_upright_rows_below_its_true_cap() {
+        let first = source("kanto", 0x20);
+        assert!(is_celadon_department_store(
+            "CeladonCity",
+            12,
+            16,
+            4,
+            &first
+        ));
+        assert_eq!(16 - 4, 12, "all six window courses stay upright");
+        assert!(!is_celadon_department_store(
+            "SaffronCity",
+            12,
+            16,
+            4,
+            &first
+        ));
     }
 }

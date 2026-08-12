@@ -944,7 +944,14 @@ pub fn calculate_damage(
         )
     };
     let attack_value = apply_burn_attack_penalty(attacker, physical, attack_value);
-    let attack_value = apply_species_held_attack_boost(attacker, physical, attack_value);
+    // HitSelfInConfusion loads the current battle Attack directly and skips
+    // DamageStats, so Thick Club/Light Ball stat boosts are not applied. The
+    // later DamageCalc type-item lookup still uses the selected move type.
+    let attack_value = if context.is_confusion_damage {
+        attack_value
+    } else {
+        apply_species_held_attack_boost(attacker, physical, attack_value)
+    };
     let mut defense_value = if critical_ignores_stages {
         clamp_stat(base_defense)
     } else {

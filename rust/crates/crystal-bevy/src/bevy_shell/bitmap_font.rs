@@ -1674,7 +1674,12 @@ fn visible_intro_graphic_name(map_name: &str) -> &str {
 }
 
 fn visible_intro_palette_name(graphic_name: &str) -> &str {
-    if graphic_name.starts_with("unown") || graphic_name == "pulse" {
+    if graphic_name == "suicune_close" {
+        // IntroScene17 loads IntroSuicuneClosePalette, whose banks 2-4
+        // provide the light-blue and purple shading for the close-up.  The
+        // generic Suicune palette intentionally leaves those banks orange.
+        "suicune_close"
+    } else if graphic_name.starts_with("unown") || graphic_name == "pulse" {
         "unowns"
     } else if graphic_name.starts_with("suicune") {
         "suicune"

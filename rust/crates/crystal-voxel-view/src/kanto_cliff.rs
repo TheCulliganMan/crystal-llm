@@ -70,6 +70,17 @@ pub(crate) fn kanto_cliff_shape(source: &VisualTileSource) -> Option<CellShape> 
     }
 
     match source.metatile_id {
+        // `$2a/$2b` are Crystal's mirrored southwest/southeast cliff-corner
+        // transitions. Twelve `$11` cells carry plateau paint and one lower
+        // 2x2 corner carries directional boundary ink. Each block is one
+        // continuous level: those corner pixels describe the exposed edge,
+        // not a separate four-cell obstacle. Raising the complete authored
+        // block lets the neighbour mesher close only the exposed L edge and
+        // prevents either corner drawing from becoming a vertical fin.
+        0x2a | 0x2b => Some(CellShape::RaisedTop {
+            height: KANTO_CLIFF_HEIGHT,
+            solid: SolidKind::Bank,
+        }),
         // Kanto block `$07` is the region's canonical south-facing jump
         // ledge: three rows of the same `$2c` upper surface and one native
         // `$37` front course. It uses the same universal ledge elevation as
@@ -78,6 +89,20 @@ pub(crate) fn kanto_cliff_shape(source: &VisualTileSource) -> Option<CellShape> 
             height: JUMP_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
         }),
+        // `$2f` is the authored half-width termination of `$07`: its west
+        // two columns carry the same three-row cap and one-row south face,
+        // while its east two columns are ordinary `$2c/$04` ground. Keep
+        // the transition half-width instead of extending the ledge through
+        // the walkable half of the metatile.
+        0x2f if source.subtile_column < 2
+            && source.subtile_row < 3
+            && source.tile_index == 0x2c =>
+        {
+            Some(CellShape::RaisedTop {
+                height: JUMP_LEDGE_HEIGHT,
+                solid: SolidKind::Bank,
+            })
+        }
         0x1a if source.subtile_row < 3 && source.tile_index == 0x39 => Some(CellShape::RaisedTop {
             height: JUMP_LEDGE_HEIGHT,
             solid: SolidKind::Bank,
@@ -94,6 +119,19 @@ pub(crate) fn kanto_cliff_shape(source: &VisualTileSource) -> Option<CellShape> 
                 band_from_top: 0,
                 band_count: 1,
                 top_tile_index,
+                height: JUMP_LEDGE_HEIGHT,
+            })
+        }
+        0x2f if source.subtile_column < 2
+            && source.subtile_row == 3
+            && matches!(source.tile_index, 0x37 | 0x34) =>
+        {
+            Some(CellShape::LedgeBand {
+                face: LedgeFace::South,
+                plane_subtile: 4,
+                band_from_top: 0,
+                band_count: 1,
+                top_tile_index: 0x2c,
                 height: JUMP_LEDGE_HEIGHT,
             })
         }
@@ -208,6 +246,45 @@ mod tests {
     }
 
     #[test]
+    fn mirrored_corner_blocks_are_each_one_continuous_level() {
+        for (metatile, drawing) in [
+            (
+                0x2a,
+                [
+                    [0x11, 0x11, 0x11, 0x11],
+                    [0x11, 0x11, 0x11, 0x11],
+                    [0x37, 0x13, 0x11, 0x11],
+                    [0x13, 0x27, 0x11, 0x11],
+                ],
+            ),
+            (
+                0x2b,
+                [
+                    [0x11, 0x11, 0x11, 0x11],
+                    [0x11, 0x11, 0x11, 0x11],
+                    [0x11, 0x11, 0x35, 0x37],
+                    [0x11, 0x11, 0x24, 0x35],
+                ],
+            ),
+        ] {
+            for (row, tiles) in drawing.into_iter().enumerate() {
+                for (column, tile_index) in tiles.into_iter().enumerate() {
+                    let mut cell = source(metatile, row as u8);
+                    cell.subtile_column = column as u8;
+                    cell.tile_index = tile_index;
+                    assert_eq!(
+                        kanto_cliff_shape(&cell),
+                        Some(CellShape::RaisedTop {
+                            height: KANTO_CLIFF_HEIGHT,
+                            solid: SolidKind::Bank,
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mound_corner_slope_art_folds_onto_its_directional_side() {
         let mut west = source(0x3e, 1);
         west.subtile_column = 0;
@@ -280,6 +357,48 @@ mod tests {
                 height: JUMP_LEDGE_HEIGHT,
             })
         );
+    }
+
+    #[test]
+    fn half_width_jump_ledge_preserves_its_flat_east_half() {
+        for row in 0..3 {
+            for column in 0..2 {
+                let mut top = source(0x2f, row);
+                top.subtile_column = column;
+                top.tile_index = 0x2c;
+                assert_eq!(
+                    kanto_cliff_shape(&top),
+                    Some(CellShape::RaisedTop {
+                        height: JUMP_LEDGE_HEIGHT,
+                        solid: SolidKind::Bank,
+                    })
+                );
+            }
+        }
+        for (column, tile_index) in [(0, 0x37), (1, 0x34)] {
+            let mut face = source(0x2f, 3);
+            face.subtile_column = column;
+            face.tile_index = tile_index;
+            assert_eq!(
+                kanto_cliff_shape(&face),
+                Some(CellShape::LedgeBand {
+                    face: LedgeFace::South,
+                    plane_subtile: 4,
+                    band_from_top: 0,
+                    band_count: 1,
+                    top_tile_index: 0x2c,
+                    height: JUMP_LEDGE_HEIGHT,
+                })
+            );
+        }
+        for row in 0..4 {
+            for column in 2..4 {
+                let mut flat = source(0x2f, row);
+                flat.subtile_column = column;
+                flat.tile_index = if row == 3 { 0x04 } else { 0x2c };
+                assert_eq!(kanto_cliff_shape(&flat), None);
+            }
+        }
     }
 
     #[test]

@@ -2136,10 +2136,8 @@
                 &mut state,
                 &mut session,
                 RuntimeMutationCommand::MovePcPokemonWithoutMail(RuntimePcMoveCommand {
-                    source_box: 0,
-                    source_slot: 0,
-                    target_box: 1,
-                    target_slot: 1,
+                    source: RuntimePokemonStorageLocation::Box { box_index: 0, slot: 0 },
+                    target: RuntimePokemonStorageLocation::Box { box_index: 1, slot: 1 },
                 }),
                 &audio_ids,
                 &audio_ids,
@@ -2149,7 +2147,10 @@
         let RuntimeMutationResult::PcPokemonMoved(outcome) = applied.result else {
             panic!("expected PC Pokemon move result");
         };
-        assert_eq!(outcome.target_slot, 1);
+        assert_eq!(
+            outcome.target,
+            RuntimePokemonStorageLocation::Box { box_index: 1, slot: 1 }
+        );
         assert_eq!(
             state.storage.pc_boxes[0]
                 .pokemon
@@ -2168,7 +2169,109 @@
                 .collect::<Vec<_>>(),
             vec!["C", "A", "D"]
         );
+        let applied = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::MovePcPokemonWithoutMail(RuntimePcMoveCommand {
+                    source: RuntimePokemonStorageLocation::Box { box_index: 1, slot: 0 },
+                    target: RuntimePokemonStorageLocation::Box { box_index: 1, slot: 2 },
+                }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect("same-box insertion adjusts the destination after removal");
+        let RuntimeMutationResult::PcPokemonMoved(outcome) = applied.result else {
+            panic!("expected same-box PC Pokemon move result");
+        };
+        assert_eq!(
+            outcome.target,
+            RuntimePokemonStorageLocation::Box { box_index: 1, slot: 1 }
+        );
+        assert_eq!(
+            state.storage.pc_boxes[1].pokemon.iter().flatten()
+                .map(|pokemon| pokemon.nickname.as_str()).collect::<Vec<_>>(),
+            vec!["A", "C", "D"]
+        );
         state.storage.validate_metadata().expect("compact moved boxes");
+    }
+
+    #[test]
+    fn move_pokemon_without_mail_supports_every_asm_party_box_path() {
+        fn named_pokemon(name: &str) -> crystal_core::models::Pokemon {
+            let mut pokemon = crystal_core::models::Pokemon::new_for_tests(
+                species(),
+                20,
+                crystal_core::models::Dv::default(),
+            );
+            pokemon.nickname = name.to_string();
+            pokemon
+        }
+
+        let mut data = GameDataSet::default();
+        data.moves.insert("TACKLE".to_string(), test_move("TACKLE"));
+        let mut state = GameState::default();
+        let mut first = named_pokemon("PARTY_A");
+        first.moves.push(crystal_core::models::LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 1,
+            pp_ups: 1,
+        });
+        assert!(state.storage.party.add_pokemon(first));
+        assert!(state.storage.party.add_pokemon(named_pokemon("PARTY_B")));
+        let mut pc_box = PcBox::new(0);
+        assert!(pc_box.add_pokemon(named_pokemon("BOX_A")));
+        state.storage.pc_boxes = vec![pc_box];
+        state.sync_party_from_storage();
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "PcPartyMoveTest".to_string(), width: 1, height: 1, border_block: 0,
+                connections: Vec::new(), metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision { metatiles: vec![MetatileCollision { collision: [permissions::FLOOR; 4] }] },
+            TilePosition::new(0, 0),
+        );
+        let audio_ids = BTreeSet::new();
+        let mut apply_move = |state: &mut GameState, source, target| {
+            data.apply_runtime_mutation_command(
+                state,
+                &mut session,
+                RuntimeMutationCommand::MovePcPokemonWithoutMail(RuntimePcMoveCommand { source, target }),
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+        };
+
+        apply_move(
+            &mut state,
+            RuntimePokemonStorageLocation::Party { slot: 0 },
+            RuntimePokemonStorageLocation::Box { box_index: 0, slot: 1 },
+        ).expect("party to box");
+        assert_eq!(state.storage.party.pokemon[0].as_ref().unwrap().nickname, "PARTY_B");
+        let deposited = state.storage.pc_boxes[0].pokemon[1].as_ref().unwrap();
+        assert_eq!(deposited.nickname, "PARTY_A");
+        assert_eq!(deposited.moves[0].current_pp, 42);
+
+        apply_move(
+            &mut state,
+            RuntimePokemonStorageLocation::Box { box_index: 0, slot: 0 },
+            RuntimePokemonStorageLocation::Party { slot: 1 },
+        ).expect("box to party");
+        apply_move(
+            &mut state,
+            RuntimePokemonStorageLocation::Party { slot: 0 },
+            RuntimePokemonStorageLocation::Party { slot: 2 },
+        ).expect("party to party");
+        assert_eq!(
+            state.storage.party.pokemon.iter().flatten()
+                .map(|pokemon| pokemon.nickname.as_str()).collect::<Vec<_>>(),
+            vec!["BOX_A", "PARTY_B"]
+        );
+        state.storage.validate_metadata().expect("compact party and box");
     }
 
     #[test]

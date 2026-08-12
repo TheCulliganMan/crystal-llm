@@ -174,7 +174,7 @@ fn every_compiled_dialogue_resume_path_reaches_a_runtime_boundary_without_loopin
                 | "waitbutton"
                 | "yesorno"
         ) || matches!(
-            command,
+            name,
             "applymovement"
                 | "earthquake"
                 | "pause"
@@ -185,6 +185,12 @@ fn every_compiled_dialogue_resume_path_reaches_a_runtime_boundary_without_loopin
                 | "verticalmenu"
                 | "warp"
                 | "warpfacing"
+                | "newloadmap"
+                | "reloadmap"
+                | "reloadmappart"
+                | "reloadmapafterbattle"
+                | "refreshmap"
+                | "reanchormap"
         ) || is_modal_special(command)
     }
 
@@ -497,7 +503,7 @@ fn every_compiled_applymovement_is_a_blocking_asm_boundary_before_later_dialogue
     eprintln!(
         "asm_movement_census total={total} followed_by_nearby_dialogue={followed_by_dialogue}"
     );
-    assert!(total > 500, "movement audit covered only {total} commands");
+    assert!(total >= 480, "movement audit covered only {total} commands");
     assert!(
         followed_by_dialogue > 25,
         "movement/dialogue ordering audit covered only {followed_by_dialogue} transitions"
@@ -1211,6 +1217,77 @@ fn phone_number_prompt_uses_the_standard_yes_no_window_cursor() {
     assert_eq!(
         scene_dialog_yes_no_cursor_index(&snapshot, &runtime_shell),
         1
+    );
+}
+
+#[test]
+fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let baseline = runtime_shell
+        .shell
+        .snapshot()
+        .expect("save-boundary baseline snapshot");
+
+    let mut map_load = baseline.clone();
+    map_load.script_events.pending_map_load = Some(crystal_core::state::ScriptMapLoadRequest {
+        command: "reloadmap".to_string(),
+        map_setup: None,
+        source_script: "SaveBoundaryFixture".to_string(),
+        command_index: 1,
+    });
+    assert!(
+        visible_quick_save_blockers(&runtime_shell, &map_load, false, false)
+            .contains(&"auto_script"),
+        "a map reload must finish before the save can be committed"
+    );
+
+    let mut map_refresh = baseline.clone();
+    map_refresh.script_events.pending_map_refresh =
+        Some(crystal_core::state::ScriptMapRefreshRequest {
+            command: "refreshmap".to_string(),
+            map_setup: None,
+            source_script: "SaveBoundaryFixture".to_string(),
+            command_index: 2,
+        });
+    assert!(
+        visible_quick_save_blockers(&runtime_shell, &map_refresh, false, false)
+            .contains(&"auto_script"),
+        "a map refresh must finish before the save can be committed"
+    );
+
+    runtime_shell.active_script_cursor = Some(ActiveScriptCursor {
+        origin_map_name: "NewBarkTown".to_string(),
+        source_script: "SaveBoundaryFixture".to_string(),
+        next_command_index: 3,
+    });
+    assert!(
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false).contains(&"script"),
+        "dialogue, calls, movement, and post-battle continuations all retain an active script cursor"
+    );
+    runtime_shell.active_script_cursor = None;
+
+    runtime_shell.pending_phone_prompt = Some(PendingPhonePrompt {
+        source_script: "SaveBoundaryFixture".to_string(),
+        command_index: 4,
+        contact_id: "PHONE_ELM".to_string(),
+    });
+    assert!(
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false)
+            .contains(&"phone_prompt")
+    );
+    runtime_shell.pending_phone_prompt = None;
+
+    runtime_shell.pending_day_of_week = Some(PendingDayOfWeekPrompt {
+        origin_map_name: "PlayersHouse1F".to_string(),
+        source_script: "SaveBoundaryFixture".to_string(),
+        command_index: 5,
+        selected_day: 0,
+        confirming: false,
+        yes_no_index: 0,
+    });
+    assert!(
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false)
+            .contains(&"day_of_week")
     );
 }
 

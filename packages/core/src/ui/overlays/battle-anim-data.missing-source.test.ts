@@ -112,7 +112,7 @@ describe('BattleAnimData required source files', () => {
             BATTLE_ANIM_OAMSET_TEST: {
               name: 'BATTLE_ANIM_OAMSET_TEST',
               tile_offset: 0,
-              entries: [{ x: 0, y: 0, tile_id: 0, xflip: false, yflip: false }],
+              entries: [{ x: 0, y: 0, tile_id: 0, xflip: false, yflip: false, obp: 0 }],
             },
           },
           gfx_table: {

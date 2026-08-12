@@ -62,6 +62,69 @@ pub(crate) fn tower_shape(source: &VisualTileSource) -> Option<CellShape> {
         return Some(CellShape::PlaneAt { height: 0.0 });
     }
 
+    // These exact tower fields are authored horizontal depth/background,
+    // despite containing blocked quadrants. They were verified as planes in
+    // paired 2D/2.5D tower views; collision must never turn them into walls.
+    // Keep the source matrices explicit so similarly numbered object art is
+    // not flattened by tile id alone.
+    let intentional_plane = match source.metatile_id {
+        0x04 => {
+            source.subtile_row >= 2
+                && source.subtile_column < 2
+                && matches!(source.tile_index, 0x41 | 0x31)
+        }
+        0x06 => {
+            source.subtile_row >= 2
+                && source.subtile_column >= 2
+                && matches!(source.tile_index, 0x41 | 0x31)
+        }
+        0x07 => matches!(
+            (source.subtile_column, source.subtile_row, source.tile_index),
+            (0, 0, 0x0a) | (1..=3, 0, 0x0b) | (0, 1..=3, 0x1a) | (1..=3, 1..=3, 0x1b)
+        ),
+        0x08 => source.subtile_column < 2 && matches!(source.tile_index, 0x41 | 0x31),
+        0x0a => source.subtile_column >= 2 && matches!(source.tile_index, 0x41 | 0x31),
+        0x0f => matches!(
+            (source.subtile_row, source.tile_index),
+            (0, 0x0b) | (1..=3, 0x1b)
+        ),
+        0x1c => matches!(
+            (source.subtile_column, source.tile_index),
+            (0, 0x16) | (1, 0x24) | (2, 0x16) | (3, 0x06)
+        ),
+        0x23 => matches!(
+            (source.subtile_column, source.tile_index),
+            (0, 0x25) | (1, 0x35) | (2, 0x34) | (3, 0x35)
+        ),
+        0x2b => matches!(
+            (source.subtile_column, source.subtile_row, source.tile_index),
+            (0, 0, 0x1b)
+                | (1, 0, 0x46)
+                | (2..=3, 0, 0x02)
+                | (0, 1, 0x1b)
+                | (1, 1, 0x56)
+                | (2..=3, 1, 0x02)
+                | (0, 2..=3, 0x1b)
+                | (1..=3, 2, 0x0b)
+                | (1..=3, 3, 0x1b)
+        ),
+        0x2c => matches!(
+            (source.subtile_column, source.subtile_row, source.tile_index),
+            (0..=1, 0..=1, 0x02)
+                | (2, 0, 0x47)
+                | (3, 0, 0x1a)
+                | (2, 1, 0x57)
+                | (3, 1, 0x1a)
+                | (0..=2, 2, 0x0b)
+                | (3, 2, 0x1b)
+                | (0..=3, 3, 0x1b)
+        ),
+        _ => false,
+    };
+    if intentional_plane {
+        return Some(CellShape::PlaneAt { height: 0.0 });
+    }
+
     let north_wall = matches!(source.metatile_id, 0x04..=0x06)
         && source.subtile_row < 2
         && matches!(source.tile_index, 0x11 | 0x20..=0x23 | 0x40);
@@ -164,5 +227,25 @@ mod tests {
             }
         }
         assert_eq!(tower_shape(&source(0x0b, 0, 0, 0x1b)), None);
+    }
+
+    #[test]
+    fn verified_depth_fields_are_explicit_planes() {
+        for cell in [
+            source(0x04, 0, 2, 0x41),
+            source(0x06, 3, 3, 0x31),
+            source(0x07, 0, 0, 0x0a),
+            source(0x08, 1, 3, 0x31),
+            source(0x0a, 2, 1, 0x41),
+            source(0x0f, 3, 3, 0x1b),
+            source(0x1c, 1, 2, 0x24),
+            source(0x23, 2, 1, 0x34),
+            source(0x2b, 1, 1, 0x56),
+            source(0x2c, 2, 1, 0x57),
+        ] {
+            assert_eq!(tower_shape(&cell), Some(CellShape::PlaneAt { height: 0.0 }));
+        }
+        assert_eq!(tower_shape(&source(0x08, 2, 0, TOWER_FLOOR_TILE)), None);
+        assert_eq!(tower_shape(&source(0x23, 2, 0, 0x35)), None);
     }
 }

@@ -25,11 +25,43 @@ pub(crate) fn supports_wall_map(map_id: &str) -> bool {
     )
 }
 
+fn supports_block_15_wall(map_id: &str) -> bool {
+    matches!(
+        map_id,
+        "VioletGym" | "WillsRoom" | "KogasRoom" | "BrunosRoom" | "KarensRoom"
+    )
+}
+
 /// Block $2a is the repeated facility wall module: two horizontal cap rows
 /// over two native front courses. Keep the cap top-facing and fold each front
 /// row once onto the shared south plane.
 pub(crate) fn shape(map_id: &str, source: &VisualTileSource) -> Option<CellShape> {
-    if !supports_wall_map(map_id) || source.tileset_id.as_ref() != "elite_four_room" {
+    if source.tileset_id.as_ref() != "elite_four_room" {
+        return None;
+    }
+    if source.metatile_id == 0x15 && supports_block_15_wall(map_id) {
+        if source.subtile_row >= 2 {
+            return Some(CellShape::PlaneAt { height: 0.0 });
+        }
+        return (source.tile_index == 0x10).then_some(CellShape::FacadeBand {
+            plane_subtile_row: 2,
+            band_from_top: source.subtile_row,
+            band_count: 2,
+            ground_tile_index: FLOOR_TILE,
+            solid: SolidKind::FlatCard,
+        });
+    }
+    // `$2b/$2c` are the invisible-maze fields shared by Bruno's room and
+    // Blackthorn Gym. Their sparse marks are drawn in the surrounding
+    // floor/carpet vocabulary; WALL permission supplies gameplay topology,
+    // not visible masonry. The actual rock piles are separate grouped
+    // drawings, so keep every exact source cell on the presentation plane.
+    if matches!(map_id, "BrunosRoom" | "BlackthornGym1F")
+        && matches!(source.metatile_id, 0x2b | 0x2c)
+    {
+        return Some(CellShape::PlaneAt { height: 0.0 });
+    }
+    if !supports_wall_map(map_id) {
         return None;
     }
     let raised_cap = || CellShape::RaisedTop {
@@ -45,6 +77,14 @@ pub(crate) fn shape(map_id: &str, source: &VisualTileSource) -> Option<CellShape
         height: WALL_HEIGHT,
     };
     match source.metatile_id {
+        // `$14` is the complete braided north apron used across the Elite
+        // Four rooms and the Underground switch room. All sixteen source
+        // cells are drawn from above and tile as one boundary surface; the
+        // WALL permission keeps actors out but is not visual elevation.
+        // Preserve the exact artwork on the room plane instead of creating
+        // sixteen false blocks across doors and stairs.
+        0x14 => Some(CellShape::PlaneAt { height: 0.0 }),
+
         // Shared straight wall module.
         0x2a if source.subtile_row < 2 => Some(raised_cap()),
         0x2a => Some(south_face()),
@@ -170,6 +210,111 @@ mod tests {
         }
         let mut unrelated = source(0x25);
         unrelated.metatile_id = 0x2a;
+        assert_eq!(shape("AzaleaGym", &unrelated), None);
+    }
+
+    #[test]
+    fn block_15_folds_only_its_two_authored_wall_courses() {
+        for map_id in [
+            "VioletGym",
+            "WillsRoom",
+            "KogasRoom",
+            "BrunosRoom",
+            "KarensRoom",
+        ] {
+            for row in 0..4 {
+                let mut cell = source(if row < 2 {
+                    0x10
+                } else if row == 2 {
+                    0x11
+                } else {
+                    0x01
+                });
+                cell.metatile_id = 0x15;
+                cell.subtile_row = row;
+                let expected = if row < 2 {
+                    CellShape::FacadeBand {
+                        plane_subtile_row: 2,
+                        band_from_top: row,
+                        band_count: 2,
+                        ground_tile_index: FLOOR_TILE,
+                        solid: SolidKind::FlatCard,
+                    }
+                } else {
+                    CellShape::PlaneAt { height: 0.0 }
+                };
+                assert_eq!(shape(map_id, &cell), Some(expected));
+            }
+        }
+        let mut unrelated = source(0x10);
+        unrelated.metatile_id = 0x15;
+        assert_eq!(shape("AzaleaGym", &unrelated), None);
+    }
+
+    #[test]
+    fn invisible_maze_blocks_preserve_floor_topology_without_visible_walls() {
+        let block_2b = [
+            [0x02, 0x02, 0x38, 0x02],
+            [0x38, 0x02, 0x5b, 0x02],
+            [0x02, 0x02, 0x02, 0x02],
+            [0x02, 0x5b, 0x02, 0x02],
+        ];
+        let block_2c = [
+            [0x39, 0x39, 0x39, 0x39],
+            [0x39, 0x39, 0x39, 0x39],
+            [0x02, 0x02, 0x02, 0x5b],
+            [0x02, 0x38, 0x02, 0x02],
+        ];
+        for (metatile, drawing) in [(0x2b, block_2b), (0x2c, block_2c)] {
+            for map_id in ["BrunosRoom", "BlackthornGym1F"] {
+                for (row, tiles) in drawing.into_iter().enumerate() {
+                    for (column, tile) in tiles.into_iter().enumerate() {
+                        let mut cell = source(tile);
+                        cell.metatile_id = metatile;
+                        cell.subtile_column = column as u8;
+                        cell.subtile_row = row as u8;
+                        assert_eq!(
+                            shape(map_id, &cell),
+                            Some(CellShape::PlaneAt { height: 0.0 })
+                        );
+                    }
+                }
+            }
+        }
+        let mut unrelated = source(0x02);
+        unrelated.metatile_id = 0x2b;
+        assert_eq!(shape("VioletGym", &unrelated), None);
+    }
+
+    #[test]
+    fn braided_north_apron_remains_one_floor_parallel_drawing() {
+        let drawing = [
+            [0x27, 0x26, 0x25, 0x27],
+            [0x37, 0x36, 0x35, 0x37],
+            [0x25, 0x27, 0x27, 0x26],
+            [0x35, 0x37, 0x37, 0x36],
+        ];
+        for map_id in [
+            "BrunosRoom",
+            "KogasRoom",
+            "KarensRoom",
+            "GoldenrodUndergroundSwitchRoomEntrances",
+        ] {
+            for (row, tiles) in drawing.into_iter().enumerate() {
+                for (column, tile) in tiles.into_iter().enumerate() {
+                    let mut cell = source(tile);
+                    cell.metatile_id = 0x14;
+                    cell.subtile_column = column as u8;
+                    cell.subtile_row = row as u8;
+                    assert_eq!(
+                        shape(map_id, &cell),
+                        Some(CellShape::PlaneAt { height: 0.0 })
+                    );
+                }
+            }
+        }
+        let mut unrelated = source(0x27);
+        unrelated.metatile_id = 0x14;
         assert_eq!(shape("AzaleaGym", &unrelated), None);
     }
 

@@ -186,6 +186,10 @@ pub struct BattleCombatState {
     pub enemy_escape_trap: Option<BattleEscapeTrapState>,
     pub player_lock_on_target: bool,
     pub enemy_lock_on_target: bool,
+    #[serde(default)]
+    pub player_x_accuracy: bool,
+    #[serde(default)]
+    pub enemy_x_accuracy: bool,
     pub player_attracted_by: Option<BattleSide>,
     pub enemy_attracted_by: Option<BattleSide>,
     pub player_recharge_move: Option<String>,
@@ -315,6 +319,8 @@ impl BattleCombatState {
             enemy_escape_trap: None,
             player_lock_on_target: false,
             enemy_lock_on_target: false,
+            player_x_accuracy: false,
+            enemy_x_accuracy: false,
             player_attracted_by: None,
             enemy_attracted_by: None,
             player_recharge_move: None,
@@ -1225,6 +1231,11 @@ pub enum BattleEvent {
         side: BattleSide,
         source: BattleSide,
         damage: u16,
+        stored_damage: u16,
+    },
+    BideUnleashed {
+        side: BattleSide,
+        move_name: String,
         stored_damage: u16,
     },
     BideReleased {
@@ -2832,6 +2843,39 @@ pub fn determine_turn_order(
         items,
         move_priorities,
     )?;
+    if state.link_battle && matches!(input.enemy, BattleAction::Switch { .. }) {
+        if matches!(input.player, BattleAction::Switch { .. }) {
+            let first_roll_wins = rng.battle_random_byte() < 128;
+            let internal_clock = matches!(
+                state.serial_connection_status,
+                LinkSerialConnectionStatus::UsingInternalClock
+            );
+            let player_first = if internal_clock {
+                !first_roll_wins
+            } else {
+                first_roll_wins
+            };
+            return Ok(if player_first {
+                vec![BattleSide::Player, BattleSide::Enemy]
+            } else {
+                vec![BattleSide::Enemy, BattleSide::Player]
+            });
+        }
+        return Ok(vec![BattleSide::Enemy, BattleSide::Player]);
+    }
+    if !matches!(
+        input.player,
+        BattleAction::Move { .. } | BattleAction::MoveSwitch { .. }
+    ) {
+        // Player menu actions normally execute before the enemy move, but
+        // PursuitSwitch explicitly runs the enemy's selected Pursuit against
+        // the departing player battler before RecallPlayerMon.
+        return Ok(if enemy_priority == 11 {
+            vec![BattleSide::Enemy, BattleSide::Player]
+        } else {
+            vec![BattleSide::Player, BattleSide::Enemy]
+        });
+    }
     if player_priority != enemy_priority {
         return Ok(if player_priority > enemy_priority {
             vec![BattleSide::Player, BattleSide::Enemy]
@@ -2840,16 +2884,44 @@ pub fn determine_turn_order(
         });
     }
 
-    let player_quick_claw =
-        quick_claw_activates(state, BattleSide::Player, &input.player, items, rng)?;
-    let enemy_quick_claw =
-        quick_claw_activates(state, BattleSide::Enemy, &input.enemy, items, rng)?;
-    if player_quick_claw != enemy_quick_claw {
-        return Ok(if player_quick_claw {
-            vec![BattleSide::Player, BattleSide::Enemy]
-        } else {
-            vec![BattleSide::Enemy, BattleSide::Player]
-        });
+    let player_quick_claw = quick_claw_parameter(state, BattleSide::Player, items)?;
+    let enemy_quick_claw = quick_claw_parameter(state, BattleSide::Enemy, items)?;
+    match (player_quick_claw, enemy_quick_claw) {
+        (Some(player_parameter), None) => {
+            if rng.battle_random_byte() < player_parameter {
+                return Ok(vec![BattleSide::Player, BattleSide::Enemy]);
+            }
+        }
+        (None, Some(enemy_parameter)) => {
+            if rng.battle_random_byte() < enemy_parameter {
+                return Ok(vec![BattleSide::Enemy, BattleSide::Player]);
+            }
+        }
+        (Some(player_parameter), Some(enemy_parameter)) => {
+            // Crystal samples the external-clock side first. Ordinary local
+            // battles share the external-clock branch, while an internal-
+            // clock link player samples itself first.
+            let player_first_sample = matches!(
+                state.serial_connection_status,
+                LinkSerialConnectionStatus::UsingInternalClock
+            );
+            if player_first_sample {
+                if rng.battle_random_byte() < player_parameter {
+                    return Ok(vec![BattleSide::Player, BattleSide::Enemy]);
+                }
+                if rng.battle_random_byte() < enemy_parameter {
+                    return Ok(vec![BattleSide::Enemy, BattleSide::Player]);
+                }
+            } else {
+                if rng.battle_random_byte() < enemy_parameter {
+                    return Ok(vec![BattleSide::Enemy, BattleSide::Player]);
+                }
+                if rng.battle_random_byte() < player_parameter {
+                    return Ok(vec![BattleSide::Player, BattleSide::Enemy]);
+                }
+            }
+        }
+        (None, None) => {}
     }
 
     let player_speed = battle_speed(state, BattleSide::Player, stat_multipliers)?;
@@ -3249,16 +3321,13 @@ fn obedience_result(
     }
 }
 
-fn quick_claw_activates(
+fn quick_claw_parameter(
     state: &BattleCombatState,
     side: BattleSide,
-    action: &BattleAction,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
-) -> Result<bool, BattleTurnError> {
-    let _ = action;
+) -> Result<Option<u8>, BattleTurnError> {
     let Some(item_id) = state.pokemon(side).item.as_deref() else {
-        return Ok(false);
+        return Ok(None);
     };
     let item = items
         .get(item_id)
@@ -3267,9 +3336,9 @@ fn quick_claw_activates(
             item_id: item_id.to_string(),
         })?;
     if item.held_effect != "HELD_QUICK_CLAW" {
-        return Ok(false);
+        return Ok(None);
     }
-    if !(1..=255).contains(&item.parameter) {
+    if !(0..=255).contains(&item.parameter) {
         return Err(BattleTurnError::InvalidHeldItemParameter {
             side,
             item_id: item_id.to_string(),
@@ -3277,7 +3346,7 @@ fn quick_claw_activates(
             parameter: item.parameter,
         });
     }
-    Ok((rng.battle_random_byte() as i16) < item.parameter)
+    Ok(Some(item.parameter as u8))
 }
 
 fn execute_item(
@@ -3304,7 +3373,42 @@ fn execute_item(
         side,
         item_id: item_id.to_string(),
     });
-    let outcome = if item.battle_stat_drop_guard == Some(true) {
+    let outcome = if item.script_name == "X_ACCURACY" {
+        if x_accuracy_active(state, side) {
+            return Err(BattleTurnError::BattleItem {
+                side,
+                item_id: item_id.to_string(),
+                error: "X Accuracy is already active".to_string(),
+            });
+        }
+        let pokemon = state.pokemon(side);
+        let outcome = BattleItemOutcome {
+            item_id: item.script_name.clone(),
+            hp_before: pokemon.hp,
+            hp_after: pokemon.hp,
+            level_before: pokemon.level,
+            level_after: pokemon.level,
+            experience_before: pokemon.experience,
+            experience_after: pokemon.experience,
+            status_before: pokemon.status.clone(),
+            status_after: pokemon.status.clone(),
+            confusion_turns_before: pokemon.confusion_turns,
+            confusion_turns_after: pokemon.confusion_turns,
+            focus_energy_before: pokemon.focus_energy,
+            focus_energy_after: pokemon.focus_energy,
+            pp_changes: Vec::new(),
+            stat_changes: Vec::new(),
+            battle_stat_stage_changes: Vec::new(),
+            learned_moves: Vec::new(),
+            pending_move_learns: Vec::new(),
+            deferred_level_evolution: false,
+            evolution_target: None,
+            evolution_cancel_snapshot: None,
+            consumed: false,
+        };
+        set_x_accuracy_active(state, side, true);
+        outcome
+    } else if item.battle_stat_drop_guard == Some(true) {
         let pokemon = state.pokemon(side);
         let outcome = BattleItemOutcome {
             item_id: item.script_name.clone(),
@@ -3936,9 +4040,48 @@ fn execute_move_effect(
             return Ok(());
         }
     }
+    let bide_release_damage = if direct_bide_effect(move_data) {
+        match advance_bide_effect(state, side, move_name, rng, events) {
+            BideAdvance::Handled => return Ok(()),
+            BideAdvance::Release { stored_damage } => Some(stored_damage),
+        }
+    } else {
+        None
+    };
+    // `BattleCommand_CheckHit` performs these gates before Lock-On is
+    // consumed, accuracy is calculated, or BattleRandom is sampled.
+    if bide_release_damage.is_some() || move_effect_uses_check_hit(&move_data.effect) {
+        if dream_eater_fails(state, side, move_data) {
+            events.push(BattleEvent::NoEffect {
+                side,
+                move_name: move_name.to_string(),
+            });
+            return Ok(());
+        }
+        if protect_active(state, side.other()) {
+            events.push(BattleEvent::MoveProtected {
+                side,
+                move_name: move_name.to_string(),
+                target: side.other(),
+            });
+            if move_data.effect == "SELFDESTRUCT" {
+                // Selfdestruct follows `checkhit` in its effect stream and
+                // therefore still executes after the protected miss.
+                apply_selfdestruct_effect(state, side, move_name, events);
+            }
+            apply_jump_kick_crash_effect(state, side, move_name, move_data, events);
+            return Ok(());
+        }
+        if matches!(move_data.effect.as_str(), "LEECH_HIT" | "DREAM_EATER")
+            && move_blocked_by_substitute(state, side, move_name, side.other(), events)
+        {
+            return Ok(());
+        }
+    }
     let lock_on_active = lock_on_target_state(state, side) && !direct_lock_on_effect(move_data);
+    let x_accuracy_active = x_accuracy_active(state, side);
     let mut ordinary_accuracy = u8::MAX;
-    if !lock_on_active || move_checks_accuracy_per_hit(move_data) {
+    if !x_accuracy_active && (!lock_on_active || move_checks_accuracy_per_hit(move_data)) {
         let (attacker, defender) = match side {
             BattleSide::Player => (&state.player, &state.enemy),
             BattleSide::Enemy => (&state.enemy, &state.player),
@@ -3950,13 +4093,14 @@ fn execute_move_effect(
             defender,
             stat_multipliers,
             state.weather,
+            identified_state(state, side.other()),
         )?;
         if ordinary_accuracy < u8::MAX {
             ordinary_accuracy =
                 apply_brightpowder_accuracy(state, side.other(), items, ordinary_accuracy)?;
         }
     }
-    let accuracy = if lock_on_active {
+    let accuracy = if lock_on_active || x_accuracy_active {
         u8::MAX
     } else {
         ordinary_accuracy
@@ -4005,21 +4149,8 @@ fn execute_move_effect(
             return Ok(());
         }
     }
-    if dream_eater_fails(state, side, move_data) {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
+    // Dream Eater's `checkhit` gate was handled before Lock-On/accuracy above.
     if snore_fails(state, side, move_data) {
-        events.push(BattleEvent::NoEffect {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
-    if sleep_talk_fails(state, side, move_data) {
         events.push(BattleEvent::NoEffect {
             side,
             move_name: move_name.to_string(),
@@ -4281,8 +4412,18 @@ fn execute_move_effect(
         )?;
         return Ok(());
     }
-    if direct_bide_effect(move_data) {
-        apply_bide_effect(state, side, move_name, rng, events);
+    if let Some(stored_damage) = bide_release_damage {
+        apply_bide_release_effect(
+            state,
+            side,
+            move_name,
+            move_data,
+            stored_damage,
+            type_categories,
+            items,
+            rng,
+            events,
+        )?;
         return Ok(());
     }
     if direct_encore_effect(move_data) {
@@ -5072,28 +5213,54 @@ fn apply_kings_rock_flinch(
 }
 
 fn move_has_kings_rock_command(move_data: &Move) -> bool {
-    !matches!(
+    matches!(
         move_data.effect.as_str(),
-        "ALL_UP_HIT"
-            | "ATTACK_DOWN_HIT"
-            | "ATTACK_UP_HIT"
-            | "ACCURACY_DOWN_HIT"
-            | "BURN_HIT"
-            | "CONFUSE_HIT"
-            | "DEFENSE_DOWN_HIT"
-            | "DEFENSE_UP_HIT"
-            | "DREAM_EATER"
-            | "EVASION_DOWN_HIT"
-            | "FLAME_WHEEL"
-            | "FREEZE_HIT"
-            | "PARALYZE_HIT"
-            | "POISON_HIT"
-            | "SACRED_FIRE"
-            | "SPECIAL_ATTACK_DOWN_HIT"
-            | "SPECIAL_DEFENSE_DOWN_HIT"
-            | "SPEED_DOWN_HIT"
-            | "TRAP_TARGET"
-            | "TRI_ATTACK"
+        "NORMAL_HIT"
+            | "LEECH_HIT"
+            | "SELFDESTRUCT"
+            | "ALWAYS_HIT"
+            | "BIDE"
+            | "RAMPAGE"
+            | "MULTI_HIT"
+            | "PAY_DAY"
+            | "UNUSED_25"
+            | "RAZOR_WIND"
+            | "SUPER_FANG"
+            | "STATIC_DAMAGE"
+            | "UNUSED_2B"
+            | "DOUBLE_HIT"
+            | "JUMP_KICK"
+            | "RECOIL_HIT"
+            | "SKY_ATTACK"
+            | "POISON_MULTI_HIT"
+            | "UNUSED_4E"
+            | "RAGE"
+            | "LEVEL_DAMAGE"
+            | "PSYWAVE"
+            | "COUNTER"
+            | "SNORE"
+            | "REVERSAL"
+            | "FALSE_SWIPE"
+            | "PRIORITY_HIT"
+            | "TRIPLE_KICK"
+            | "THIEF"
+            | "UNUSED_6E"
+            | "ROLLOUT"
+            | "FURY_CUTTER"
+            | "RETURN"
+            | "PRESENT"
+            | "FRUSTRATION"
+            | "MAGNITUDE"
+            | "PURSUIT"
+            | "RAPID_SPIN"
+            | "UNUSED_82"
+            | "UNUSED_83"
+            | "HIDDEN_POWER"
+            | "MIRROR_COAT"
+            | "SKULL_BASH"
+            | "SOLARBEAM"
+            | "BEAT_UP"
+            | "FLY"
     )
 }
 
@@ -5581,21 +5748,24 @@ fn apply_ohko_effect(
         && !airborne_move
             .as_deref()
             .is_some_and(|airborne| airborne == "FLY" && move_name == "FISSURE");
-    let roll =
-        if lock_on_guarantees_hit {
+    let x_accuracy_guarantees_hit = x_accuracy_active(state, side);
+    let roll = if lock_on_guarantees_hit {
+        0
+    } else {
+        if let Some(airborne_move) = airborne_move {
+            if !move_hits_airborne_target(move_data, &airborne_move) {
+                events.push(BattleEvent::AirborneAvoided {
+                    side,
+                    move_name: move_name.to_string(),
+                    target,
+                    airborne_move,
+                });
+                return Ok(());
+            }
+        }
+        if x_accuracy_guarantees_hit {
             0
         } else {
-            if let Some(airborne_move) = airborne_move {
-                if !move_hits_airborne_target(move_data, &airborne_move) {
-                    events.push(BattleEvent::AirborneAvoided {
-                        side,
-                        move_name: move_name.to_string(),
-                        target,
-                        airborne_move,
-                    });
-                    return Ok(());
-                }
-            }
             let attacker_accuracy = *attacker.stat_boosts.get(&Stat::Accuracy).ok_or(
                 BattleTurnError::MissingStatStage {
                     side,
@@ -5608,10 +5778,12 @@ fn apply_ohko_effect(
                     stat: Stat::Evasion,
                 },
             )?;
-            let stage = (attacker_accuracy - defender_evasion).clamp(-6, 6);
-            let multiplier = accuracy_stage_multiplier(stat_multipliers, stage)
-                .ok_or(BattleTurnError::MissingAccuracyMultiplier { stage })?;
-            accuracy = multiplier.multiply_floor(i32::from(accuracy)).clamp(1, 255) as u8;
+            if !(identified_state(state, target) && defender_evasion >= attacker_accuracy) {
+                let stage = (attacker_accuracy - defender_evasion).clamp(-6, 6);
+                let multiplier = accuracy_stage_multiplier(stat_multipliers, stage)
+                    .ok_or(BattleTurnError::MissingAccuracyMultiplier { stage })?;
+                accuracy = multiplier.multiply_floor(i32::from(accuracy)).clamp(1, 255) as u8;
+            }
             accuracy = apply_brightpowder_accuracy(state, target, items, accuracy)?;
             let roll = rng.battle_random_byte();
             if roll >= accuracy {
@@ -5623,7 +5795,8 @@ fn apply_ohko_effect(
                 return Ok(());
             }
             roll
-        };
+        }
+    };
 
     let defender_hp_before = state.pokemon(target).hp;
     if apply_substitute_damage(state, side, move_name, u16::MAX, events).is_some() {
@@ -7279,6 +7452,111 @@ fn direct_foresight_effect(move_data: &Move) -> bool {
 
 fn direct_beat_up_effect(move_data: &Move) -> bool {
     move_data.effect == "BEAT_UP"
+}
+
+/// Exact `MoveEffects` entries whose source command stream contains
+/// `checkhit`. This boundary owns Dream Eater, Protect, draining-Substitute,
+/// Lock-On, airborne, weather/X Accuracy, and ordinary accuracy ordering.
+fn move_effect_uses_check_hit(effect: &str) -> bool {
+    matches!(
+        effect,
+        "NORMAL_HIT"
+            | "SLEEP"
+            | "POISON_HIT"
+            | "LEECH_HIT"
+            | "BURN_HIT"
+            | "FREEZE_HIT"
+            | "PARALYZE_HIT"
+            | "SELFDESTRUCT"
+            | "DREAM_EATER"
+            | "ALWAYS_HIT"
+            | "ATTACK_DOWN"
+            | "DEFENSE_DOWN"
+            | "SPEED_DOWN"
+            | "SPECIAL_ATTACK_DOWN"
+            | "SPECIAL_DEFENSE_DOWN"
+            | "ACCURACY_DOWN"
+            | "EVASION_DOWN"
+            | "RAMPAGE"
+            | "FORCE_SWITCH"
+            | "MULTI_HIT"
+            | "FLINCH_HIT"
+            | "TOXIC"
+            | "PAY_DAY"
+            | "TRI_ATTACK"
+            | "RAZOR_WIND"
+            | "SUPER_FANG"
+            | "STATIC_DAMAGE"
+            | "TRAP_TARGET"
+            | "DOUBLE_HIT"
+            | "JUMP_KICK"
+            | "RECOIL_HIT"
+            | "CONFUSE"
+            | "ATTACK_DOWN_2"
+            | "DEFENSE_DOWN_2"
+            | "SPEED_DOWN_2"
+            | "SPECIAL_ATTACK_DOWN_2"
+            | "SPECIAL_DEFENSE_DOWN_2"
+            | "ACCURACY_DOWN_2"
+            | "EVASION_DOWN_2"
+            | "POISON"
+            | "PARALYZE"
+            | "ATTACK_DOWN_HIT"
+            | "DEFENSE_DOWN_HIT"
+            | "SPEED_DOWN_HIT"
+            | "SPECIAL_ATTACK_DOWN_HIT"
+            | "SPECIAL_DEFENSE_DOWN_HIT"
+            | "ACCURACY_DOWN_HIT"
+            | "EVASION_DOWN_HIT"
+            | "SKY_ATTACK"
+            | "CONFUSE_HIT"
+            | "POISON_MULTI_HIT"
+            | "HYPER_BEAM"
+            | "RAGE"
+            | "MIMIC"
+            | "LEECH_SEED"
+            | "DISABLE"
+            | "LEVEL_DAMAGE"
+            | "PSYWAVE"
+            | "ENCORE"
+            | "PAIN_SPLIT"
+            | "SNORE"
+            | "CONVERSION2"
+            | "LOCK_ON"
+            | "REVERSAL"
+            | "SPITE"
+            | "FALSE_SWIPE"
+            | "PRIORITY_HIT"
+            | "TRIPLE_KICK"
+            | "THIEF"
+            | "FLAME_WHEEL"
+            | "FORESIGHT"
+            | "ROLLOUT"
+            | "SWAGGER"
+            | "FURY_CUTTER"
+            | "ATTRACT"
+            | "RETURN"
+            | "PRESENT"
+            | "FRUSTRATION"
+            | "SACRED_FIRE"
+            | "MAGNITUDE"
+            | "PURSUIT"
+            | "RAPID_SPIN"
+            | "HIDDEN_POWER"
+            | "DEFENSE_UP_HIT"
+            | "ATTACK_UP_HIT"
+            | "ALL_UP_HIT"
+            | "SKULL_BASH"
+            | "TWISTER"
+            | "EARTHQUAKE"
+            | "FUTURE_SIGHT"
+            | "GUST"
+            | "STOMP"
+            | "SOLARBEAM"
+            | "THUNDER"
+            | "BEAT_UP"
+            | "FLY"
+    )
 }
 
 fn move_checks_accuracy_per_hit(move_data: &Move) -> bool {
@@ -9031,6 +9309,7 @@ fn clear_side_volatile_conditions(state: &mut BattleCombatState, side: BattleSid
     clear_escape_traps_sourced_by(state, side);
     set_lock_on_target_state(state, side, false);
     set_lock_on_target_state(state, side.other(), false);
+    set_x_accuracy_active(state, side, false);
     set_attracted_by_state(state, side, None);
     clear_attracted_by_source(state, side);
     set_recharge_move_state(state, side, None);
@@ -10491,13 +10770,18 @@ fn conversion2_type_slot(slot: u8) -> Option<PokemonType> {
     )
 }
 
-fn apply_bide_effect(
+enum BideAdvance {
+    Handled,
+    Release { stored_damage: u16 },
+}
+
+fn advance_bide_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
     rng: &mut Random,
     events: &mut Vec<BattleEvent>,
-) {
+) -> BideAdvance {
     let turns_remaining = bide_turns(state, side);
     if turns_remaining == 0 {
         let roll = rng.battle_random_byte();
@@ -10510,7 +10794,7 @@ fn apply_bide_effect(
             turns,
             roll,
         });
-        return;
+        return BideAdvance::Handled;
     }
 
     if turns_remaining > 1 {
@@ -10522,22 +10806,89 @@ fn apply_bide_effect(
             turns_remaining: next_turns,
             stored_damage: bide_damage(state, side),
         });
-        return;
+        return BideAdvance::Handled;
     }
 
     let stored_damage = bide_damage(state, side);
     reset_bide_state(state, side);
+    events.push(BattleEvent::BideUnleashed {
+        side,
+        move_name: move_name.to_string(),
+        stored_damage,
+    });
+    BideAdvance::Release { stored_damage }
+}
+
+fn apply_bide_release_effect(
+    state: &mut BattleCombatState,
+    side: BattleSide,
+    move_name: &str,
+    move_data: &Move,
+    stored_damage: u16,
+    type_categories: &TypeCategories,
+    items: &BTreeMap<String, Item>,
+    rng: &mut Random,
+    events: &mut Vec<BattleEvent>,
+) -> Result<(), BattleTurnError> {
     if stored_damage == 0 {
         events.push(BattleEvent::BideFailed {
             side,
             move_name: move_name.to_string(),
         });
-        return;
+        return Ok(());
     }
     let target = side.other();
     let target_hp_before = state.pokemon(target).hp;
-    let damage = stored_damage.saturating_mul(2).min(target_hp_before);
+    let raw_damage = stored_damage.saturating_mul(2);
+    if apply_substitute_damage(state, side, move_name, raw_damage, events).is_some() {
+        events.push(BattleEvent::BideReleased {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            stored_damage,
+            damage: 0,
+            target_hp_before,
+            target_hp_after: target_hp_before,
+        });
+        apply_rage_counter_increment(state, target, events)?;
+        if state.pokemon(target).hp != 0 && state.pokemon(side).hp != 0 {
+            apply_kings_rock_flinch(
+                state, side, move_name, move_data, raw_damage, items, rng, events,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let mut damage = raw_damage.min(target_hp_before);
+    if endure_active(state, target) && target_hp_before > 1 {
+        let lethal_damage = damage;
+        damage = damage.min(target_hp_before - 1);
+        if damage != lethal_damage {
+            events.push(BattleEvent::EnduredHit {
+                side,
+                move_name: move_name.to_string(),
+                target,
+                raw_damage: lethal_damage,
+                held_item: None,
+            });
+        }
+    }
+    if damage >= target_hp_before
+        && target_hp_before > 1
+        && focus_band_survives(state, target, items, rng)?
+    {
+        let lethal_damage = damage;
+        damage = target_hp_before - 1;
+        events.push(BattleEvent::EnduredHit {
+            side,
+            move_name: move_name.to_string(),
+            target,
+            raw_damage: lethal_damage,
+            held_item: state.pokemon(target).item.clone(),
+        });
+    }
     state.pokemon_mut(target).hp = target_hp_before.saturating_sub(damage);
+    let target_hp_after = state.pokemon(target).hp;
     events.push(BattleEvent::BideReleased {
         side,
         move_name: move_name.to_string(),
@@ -10545,11 +10896,29 @@ fn apply_bide_effect(
         stored_damage,
         damage,
         target_hp_before,
-        target_hp_after: state.pokemon(target).hp,
+        target_hp_after,
     });
-    if state.pokemon(target).hp == 0 {
-        events.push(BattleEvent::Fainted { side: target });
+    if damage != 0 {
+        record_last_damage(
+            state,
+            target,
+            BattleLastDamageState {
+                source: side,
+                move_name: move_name.to_string(),
+                category: damage_category(type_categories, move_data)?,
+                damage,
+            },
+        );
+        apply_rage_counter_increment(state, target, events)?;
+        apply_bide_damage_storage(state, side, target, damage, events);
     }
+    apply_direct_damage_faint_events(state, side, target, move_name, events);
+    if state.pokemon(target).hp != 0 && state.pokemon(side).hp != 0 {
+        apply_kings_rock_flinch(
+            state, side, move_name, move_data, damage, items, rng, events,
+        )?;
+    }
+    Ok(())
 }
 
 fn apply_encore_effect(
@@ -11631,10 +12000,6 @@ fn snore_fails(state: &BattleCombatState, side: BattleSide, move_data: &Move) ->
     move_data.effect == "SNORE" && state.pokemon(side).status.as_deref() != Some("SLEEP")
 }
 
-fn sleep_talk_fails(state: &BattleCombatState, side: BattleSide, move_data: &Move) -> bool {
-    move_data.effect == "SLEEP_TALK" && state.pokemon(side).status.as_deref() != Some("SLEEP")
-}
-
 fn pokemon_is_sandstorm_immune(state: &BattleCombatState, side: BattleSide) -> bool {
     airborne_move_state(state, side).is_some_and(|move_name| move_name == "DIG")
         || effective_pokemon_types(state, side)
@@ -11701,6 +12066,20 @@ fn lock_on_target_state(state: &BattleCombatState, side: BattleSide) -> bool {
     match side {
         BattleSide::Player => state.player_lock_on_target,
         BattleSide::Enemy => state.enemy_lock_on_target,
+    }
+}
+
+fn x_accuracy_active(state: &BattleCombatState, side: BattleSide) -> bool {
+    match side {
+        BattleSide::Player => state.player_x_accuracy,
+        BattleSide::Enemy => state.enemy_x_accuracy,
+    }
+}
+
+fn set_x_accuracy_active(state: &mut BattleCombatState, side: BattleSide, active: bool) {
+    match side {
+        BattleSide::Player => state.player_x_accuracy = active,
+        BattleSide::Enemy => state.enemy_x_accuracy = active,
     }
 }
 
@@ -12047,6 +12426,7 @@ fn accuracy_byte(
         defender,
         stat_multipliers,
         Weather::None,
+        false,
     )
 }
 
@@ -12057,6 +12437,7 @@ fn accuracy_byte_with_weather(
     defender: &Pokemon,
     stat_multipliers: &BattleStatMultiplierTables,
     weather: Weather,
+    defender_identified: bool,
 ) -> Result<u8, BattleTurnError> {
     if move_data.effect == "ALWAYS_HIT"
         || (move_data.effect == "THUNDER" && weather == Weather::Rain)
@@ -12086,10 +12467,16 @@ fn accuracy_byte_with_weather(
                 side: defender_side,
                 stat: Stat::Evasion,
             })?;
+    let base = ((move_data.accuracy as i32 * 255) / 100).clamp(1, 255);
+    // `CheckHit.StatModifiers` returns before both multiplier lookups when
+    // Foresight identifies a target whose Evasion level is at least the
+    // user's Accuracy level. The move therefore retains its base byte.
+    if defender_identified && defender_evasion >= attacker_accuracy {
+        return Ok(base as u8);
+    }
     let stage = (attacker_accuracy - defender_evasion).clamp(-6, 6);
     let multiplier = accuracy_stage_multiplier(stat_multipliers, stage)
         .ok_or(BattleTurnError::MissingAccuracyMultiplier { stage })?;
-    let base = ((move_data.accuracy as i32 * 255) / 100).clamp(1, 255);
     Ok(multiplier.multiply_floor(base).clamp(1, 255) as u8)
 }
 

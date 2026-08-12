@@ -4740,6 +4740,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         return press_visible_battle_a_button(runtime_shell);
     }
+    if runtime_shell.pack_item_switch_origin.is_some() {
+        return switch_visible_pack_item(runtime_shell);
+    }
     if runtime_shell.pc_item_action == Some(VisiblePlayerPcAction::DepositItem)
         && visible_field_pack_is_open(runtime_shell)
     {
@@ -5471,6 +5474,10 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return close_active_runtime_surface(runtime_shell);
     }
     if snapshot.battle.is_none() && visible_field_pack_is_open(runtime_shell) {
+        if runtime_shell.pack_item_switch_origin.take().is_some() {
+            set_shell_action_status(runtime_shell, "MOVE CANCELLED");
+            return Ok(());
+        }
         if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
             runtime_shell.tmhm_teach_prompt_cursor = None;
             record_visible_runtime_action(runtime_shell, "pack:tmhm:teach:b")?;
@@ -6151,17 +6158,8 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    if runtime_shell.bag_cursor.is_some()
-        || runtime_shell.ball_cursor.is_some()
-        || matches!(
-            runtime_shell.field_pack_pocket.as_ref(),
-            Some(FieldPackPocket::Custom(_))
-        )
-    {
-        return open_visible_field_pack_target(runtime_shell, FieldPackTargetMode::HeldItem);
-    }
-    if runtime_shell.key_item_cursor.is_some() {
-        return register_selected_visible_key_item(runtime_shell);
+    if visible_field_pack_is_open(runtime_shell) {
+        return switch_visible_pack_item(runtime_shell);
     }
     if runtime_shell.tmhm_cursor.is_some() {
         return open_visible_tmhm_teach_prompt(runtime_shell);
@@ -6195,6 +6193,72 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     }
     record_visible_runtime_action(runtime_shell, format!("pack:key_item:select:{item_id}"))?;
     use_visible_field_bag_item_by_id(runtime_shell, item_id)
+}
+
+fn switch_visible_pack_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let pocket = active_visible_field_pack_pocket(runtime_shell);
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let pocket_len = match &pocket {
+        FieldPackPocket::Items => carried_item_count(&snapshot.bag.items),
+        FieldPackPocket::Balls => carried_item_count(&snapshot.bag.balls),
+        FieldPackPocket::KeyItems => carried_item_count(&snapshot.bag.key_items),
+        FieldPackPocket::TmHm => snapshot.bag.tm_hm.len(),
+        FieldPackPocket::Custom(pocket_id) => snapshot
+            .bag
+            .custom_pockets
+            .get(pocket_id)
+            .map_or(0, |items| carried_item_count(items)),
+    };
+    let (cursor, pocket_id) = match &pocket {
+        FieldPackPocket::Items => (
+            runtime_shell.bag_cursor.as_ref(),
+            crate::core::models::ITEM_POCKET_ITEM,
+        ),
+        FieldPackPocket::Balls => (
+            runtime_shell.ball_cursor.as_ref(),
+            crate::core::models::ITEM_POCKET_BALL,
+        ),
+        FieldPackPocket::KeyItems => (
+            runtime_shell.key_item_cursor.as_ref(),
+            crate::core::models::ITEM_POCKET_KEY_ITEM,
+        ),
+        FieldPackPocket::TmHm | FieldPackPocket::Custom(_) => {
+            record_visible_runtime_action(runtime_shell, "pack:item_switch:unavailable")?;
+            return Ok(());
+        }
+    };
+    let selected = cursor
+        .context("Pack item switching requires a pocket cursor")?
+        .option_index;
+    if selected >= pocket_len {
+        runtime_shell.pack_item_switch_origin = None;
+        set_shell_action_status(runtime_shell, "MOVE CANCELLED");
+        return Ok(());
+    }
+    let Some((origin_pocket, origin)) = runtime_shell.pack_item_switch_origin.take() else {
+        runtime_shell.pack_item_switch_origin = Some((pocket, selected));
+        set_shell_action_status(runtime_shell, "MOVE ITEM WHERE?");
+        return Ok(());
+    };
+    if origin_pocket != pocket {
+        runtime_shell.pack_item_switch_origin = Some((pocket, selected));
+        set_shell_action_status(runtime_shell, "MOVE ITEM WHERE?");
+        return Ok(());
+    }
+    let target = runtime_shell
+        .shell
+        .switch_bag_item_stacks(pocket_id, origin, selected)?;
+    match pocket {
+        FieldPackPocket::Items => runtime_shell.bag_cursor.as_mut().unwrap().option_index = target,
+        FieldPackPocket::Balls => runtime_shell.ball_cursor.as_mut().unwrap().option_index = target,
+        FieldPackPocket::KeyItems => {
+            runtime_shell.key_item_cursor.as_mut().unwrap().option_index = target
+        }
+        FieldPackPocket::TmHm | FieldPackPocket::Custom(_) => unreachable!(),
+    }
+    mark_runtime_snapshot_dirty(runtime_shell);
+    set_shell_action_status(runtime_shell, "ITEM MOVED");
+    Ok(())
 }
 
 fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {

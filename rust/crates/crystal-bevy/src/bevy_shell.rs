@@ -755,6 +755,7 @@ struct BevyRuntimeShell {
     visible_script_delay_frames: Option<u16>,
     poison_flash_frames_remaining: u8,
     field_pack_pocket: Option<FieldPackPocket>,
+    pack_item_switch_origin: Option<(FieldPackPocket, usize)>,
     last_field_pack_pocket: FieldPackPocket,
     field_pack_cursor_positions: [usize; 4],
     field_pack_action_cursor: Option<MenuCursor>,
@@ -804,7 +805,8 @@ struct BevyRuntimeShell {
     bill_pc_action_cursor: Option<MenuCursor>,
     bill_pc_box_cursor: Option<MenuCursor>,
     bill_pc_move_open: bool,
-    bill_pc_move_source: Option<(usize, usize)>,
+    bill_pc_move_party_open: bool,
+    bill_pc_move_source: Option<crystal_assets::RuntimePokemonStorageLocation>,
     bill_pc_pokemon_action_cursor: Option<MenuCursor>,
     bill_pc_box_summary: Option<VisiblePcBoxSummary>,
     pending_pc_release: Option<VisiblePcReleasePrompt>,
@@ -1902,14 +1904,44 @@ impl VisibleCaptureAnimation {
         self.throw_active() || (self.complete && !self.sprites_cleared)
     }
 
+    fn shake_entry_frame(&self) -> u16 {
+        if self.ball_id.eq_ignore_ascii_case("MASTER_BALL") {
+            156
+        } else {
+            68
+        }
+    }
+
     fn shake_setup_frame(&self) -> u16 {
-        // Ordinary branches enter .Shake at 68. Master Ball waits another
-        // 24 frames before its 64-frame sparkle branch, entering at 140.
+        // Ordinary branches enter .Shake at 68. Master Ball then waits 24,
+        // creates its sparkles at 92, and waits another 64, entering at 156.
         // .Shake then spends 160 frames before the first 48-frame check loop.
         if self.ball_id.eq_ignore_ascii_case("MASTER_BALL") {
-            300
+            316
         } else {
             228
+        }
+    }
+
+    fn master_ball_special_frame(&self) -> Option<u16> {
+        self.ball_id
+            .eq_ignore_ascii_case("MASTER_BALL")
+            .then_some(92)
+    }
+
+    fn change_dex_sound_frame(&self) -> u16 {
+        if self.ball_id.eq_ignore_ascii_case("MASTER_BALL") {
+            180
+        } else {
+            92
+        }
+    }
+
+    fn bounce_sound_frame(&self) -> u16 {
+        if self.ball_id.eq_ignore_ascii_case("MASTER_BALL") {
+            212
+        } else {
+            124
         }
     }
 
@@ -1928,18 +1960,21 @@ impl VisibleCaptureAnimation {
     }
 
     fn enemy_hidden(&self) -> bool {
-        if (!self.started && !self.complete) || self.blocked || self.frame < 76 {
+        let hidden_frame = self.shake_entry_frame().saturating_add(8);
+        if (!self.started && !self.complete) || self.blocked || self.frame < hidden_frame {
             return false;
         }
         self.caught || self.frame + 32 < self.total_frames()
     }
 
     fn enemy_clip_tiles(&self) -> Option<u8> {
-        if (!self.started && !self.complete) || self.blocked || self.frame < 68 {
+        let shake_entry = self.shake_entry_frame();
+        let hidden_frame = shake_entry.saturating_add(8);
+        if (!self.started && !self.complete) || self.blocked || self.frame < shake_entry {
             return None;
         }
-        if self.frame < 76 {
-            return match self.frame - 68 {
+        if self.frame < hidden_frame {
+            return match self.frame - shake_entry {
                 0 => Some(7),
                 1 => Some(5),
                 _ => Some(3),
@@ -2122,6 +2157,7 @@ enum VisiblePlayerPcAction {
 enum VisiblePcConfirmation {
     TossItem {
         item_id: String,
+        stack_index: usize,
         quantity: u16,
     },
     PutMailInPack(usize),
@@ -2151,6 +2187,7 @@ enum VisiblePcConfirmation {
 struct VisiblePcItemQuantity {
     action: VisiblePlayerPcAction,
     item_id: String,
+    stack_index: usize,
     quantity: u16,
     maximum: u16,
 }
@@ -2620,6 +2657,7 @@ struct RenderedTilesetArt {
     battle_anim_object_cache: HashMap<String, BattleAnimRenderedFrame>,
     battle_anim_object_errors: HashMap<String, String>,
     battle_battler_overlay_cache: HashMap<(AssetId<Image>, [u8; 3]), SpriteFrame>,
+    battle_battler_bgp_cache: HashMap<(AssetId<Image>, u8), SpriteFrame>,
     fishing_rod_cache: Option<[SpriteFrame; 3]>,
     fishing_rod_error: Option<String>,
     fishing_player_cache: HashMap<String, SpriteFrame>,
@@ -5170,6 +5208,7 @@ fn initialize_bevy_runtime_shell(
         visible_script_delay_frames: None,
         poison_flash_frames_remaining: 0,
         field_pack_pocket: None,
+        pack_item_switch_origin: None,
         last_field_pack_pocket: FieldPackPocket::Items,
         field_pack_cursor_positions: [0; 4],
         field_pack_action_cursor: None,
@@ -5219,6 +5258,7 @@ fn initialize_bevy_runtime_shell(
         bill_pc_action_cursor: None,
         bill_pc_box_cursor: None,
         bill_pc_move_open: false,
+        bill_pc_move_party_open: false,
         bill_pc_move_source: None,
         bill_pc_pokemon_action_cursor: None,
         bill_pc_box_summary: None,

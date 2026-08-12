@@ -60,6 +60,11 @@ export type PcmRenderContext = {
   waveInstrumentMap?: Record<number, number>;
 };
 
+export type CryRenderParameters = {
+  cryPitch: number;
+  cryLength: number;
+};
+
 type RenderClipOptions = {
   kind: PcmClipKind;
   token: string;
@@ -68,6 +73,8 @@ type RenderClipOptions = {
   soloChannel?: number | null;
   priorityClass?: PcmPriorityClass;
   ownedChannels?: number[];
+  cryPitch?: number | null;
+  cryLength?: number | null;
 };
 
 export function inferPcmPriorityClass(token: string, kind: PcmClipKind | "cries" | "sfx"): PcmPriorityClass {
@@ -107,6 +114,8 @@ export function renderPcmClip({
   soloChannel = null,
   priorityClass,
   ownedChannels,
+  cryPitch = null,
+  cryLength = null,
 }: RenderClipOptions): PcmClip {
   const converter = new WavConverter(
     musicData,
@@ -116,6 +125,8 @@ export function renderPcmClip({
       waveInstrumentMap: context.waveInstrumentMap,
       loopedMusicExportSeconds: null,
       soloChannel,
+      cryPitch,
+      cryLength,
     },
   );
   const rendered = converter.convert("pcm");
@@ -223,6 +234,7 @@ export function renderPcmClipFromAsm(
   kind: AsmAudioProgramKind,
   stem: string,
   token: string,
+  cryParameters?: CryRenderParameters,
 ): PcmClip | null {
   const program = buildAsmAudioProgram(audioRoot, kind, stem);
   if (!program) {
@@ -236,6 +248,8 @@ export function renderPcmClipFromAsm(
     musicData,
     context,
     priorityClass: inferPcmPriorityClass(token, kind),
+    cryPitch: cryParameters?.cryPitch,
+    cryLength: cryParameters?.cryLength,
   });
 }
 

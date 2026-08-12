@@ -76,7 +76,7 @@ fn prepare_visible_battle_entry_with_music_reset(
                     .iter()
                     .any(|candidate| environment.eq_ignore_ascii_case(candidate)),
                 trainer_battle: matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. }),
-            });
+                    });
             let (player_hp, player_max_hp, player_pixels) = (
                 active_player.pokemon.hp,
                 active_player.pokemon.max_hp,
@@ -523,12 +523,11 @@ fn advance_visible_capture_animation(runtime_shell: &mut BevyRuntimeShell) -> Re
     let shakes = animation.animation_shakes;
     let total_frames = animation.total_frames();
 
-    let master_ball = animation.ball_id.eq_ignore_ascii_case("MASTER_BALL");
     let shake_start = animation.shake_setup_frame();
     let first_check = animation.first_shake_check_frame();
-    let change_dex_frame = if master_ball { 164 } else { 92 };
-    let bounce_frame = if master_ball { 196 } else { 124 };
-    let sound = if !blocked && master_ball && frame == 76 {
+    let change_dex_frame = animation.change_dex_sound_frame();
+    let bounce_frame = animation.bounce_sound_frame();
+    let sound = if !blocked && animation.master_ball_special_frame() == Some(frame) {
         Some("SFX_MASTER_BALL")
     } else if !blocked && frame == 52 {
         Some("SFX_BALL_POOF")
@@ -610,10 +609,10 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
         let species = visible_move_animation_user_species(runtime_shell, player_move)
             .context("battle animation cry has no visible user species")?;
         for selector in due_cries {
-            queue_visible_pokemon_cry(
+            queue_visible_pokemon_animation_cry(
                 runtime_shell,
                 &species,
-                &format!("battle_move_animation_{selector}"),
+                selector,
             )?;
         }
     }
@@ -1654,6 +1653,9 @@ fn switch_visible_pc_box_by_delta(
     runtime_shell: &mut BevyRuntimeShell,
     delta: isize,
 ) -> Result<()> {
+    if runtime_shell.bill_pc_move_open {
+        return switch_visible_pc_move_container(runtime_shell, delta);
+    }
     ensure_no_visible_special_boundary(runtime_shell)?;
     let snapshot = runtime_shell.shell.snapshot()?;
     let box_count = crate::core::models::MAX_PC_BOXES;
@@ -1682,6 +1684,38 @@ fn switch_visible_pc_box_by_delta(
             switched.box_index_before, switched.box_index_after
         ),
     );
+    Ok(())
+}
+
+fn switch_visible_pc_move_container(
+    runtime_shell: &mut BevyRuntimeShell,
+    delta: isize,
+) -> Result<()> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let container_count = crate::core::models::MAX_PC_BOXES + 1;
+    let current = if runtime_shell.bill_pc_move_party_open {
+        0
+    } else {
+        snapshot.storage.current_pc_box + 1
+    };
+    let next = wrapped_index(current, container_count, delta);
+    if next == 0 {
+        runtime_shell.bill_pc_move_party_open = true;
+        runtime_shell.storage_cursor = Some(MenuCursor {
+            surface_id: pc_move_party_surface_id().to_string(),
+            option_index: 0,
+        });
+        set_shell_action_status(runtime_shell, "PARTY");
+        return Ok(());
+    }
+    let switched = runtime_shell.shell.switch_current_pc_box(next - 1)?;
+    runtime_shell.bill_pc_move_party_open = false;
+    runtime_shell.storage_cursor = Some(MenuCursor {
+        surface_id: storage_cursor_surface_id(switched.box_index_after),
+        option_index: 0,
+    });
+    mark_runtime_snapshot_dirty(runtime_shell);
+    set_shell_action_status(runtime_shell, format!("BOX {}", switched.box_index_after + 1));
     Ok(())
 }
 
@@ -1885,12 +1919,21 @@ fn withdraw_visible_pc_pokemon(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     Ok(())
 }
 
-fn deposit_visible_selected_pack_item_to_pc(runtime_shell: &mut BevyRuntimeShell, quantity: u16) -> Result<()> {
+fn deposit_visible_selected_pack_item_to_pc(
+    runtime_shell: &mut BevyRuntimeShell,
+    stack_index: usize,
+    quantity: u16,
+) -> Result<()> {
     ensure_no_visible_special_boundary(runtime_shell)?;
     let item_id = selected_field_pack_item_id(runtime_shell)?;
     let item_name = item_display_name(&runtime_shell.shell.snapshot()?, &item_id);
-    record_visible_runtime_action(runtime_shell, format!("pc:deposit_item:{item_id}:{quantity}"))?;
-    let transfer = runtime_shell.shell.deposit_bag_item_to_pc(&item_id, quantity)?;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("pc:deposit_item:{item_id}:{quantity}"),
+    )?;
+    let transfer = runtime_shell
+        .shell
+        .deposit_bag_item_to_pc(&item_id, stack_index, quantity)?;
     runtime_shell.last_audio_events.push(format!(
         "pc item deposit item={} quantity={} bag_after={} pc_after={} checksum={:?}",
         transfer.item_id,
@@ -1925,12 +1968,21 @@ fn deposit_visible_selected_pack_item_to_pc(runtime_shell: &mut BevyRuntimeShell
     Ok(())
 }
 
-fn withdraw_visible_pc_item_to_bag(runtime_shell: &mut BevyRuntimeShell, quantity: u16) -> Result<()> {
+fn withdraw_visible_pc_item_to_bag(
+    runtime_shell: &mut BevyRuntimeShell,
+    stack_index: usize,
+    quantity: u16,
+) -> Result<()> {
     ensure_no_visible_special_boundary(runtime_shell)?;
     let item_id = selected_pc_item_id(runtime_shell)?;
     let item_name = item_display_name(&runtime_shell.shell.snapshot()?, &item_id);
-    record_visible_runtime_action(runtime_shell, format!("pc:withdraw_item:{item_id}:{quantity}"))?;
-    let transfer = runtime_shell.shell.withdraw_pc_item_to_bag(&item_id, quantity)?;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("pc:withdraw_item:{item_id}:{quantity}"),
+    )?;
+    let transfer = runtime_shell
+        .shell
+        .withdraw_pc_item_to_bag(&item_id, stack_index, quantity)?;
     runtime_shell.last_audio_events.push(format!(
         "pc item withdraw item={} quantity={} bag_after={} pc_after={} checksum={:?}",
         transfer.item_id,
@@ -2007,22 +2059,44 @@ fn begin_visible_pc_item_quantity(runtime_shell: &mut BevyRuntimeShell) -> Resul
             return Ok(());
         }
     }
-    let available = if action == VisiblePlayerPcAction::DepositItem {
-        carried_item_quantity(&snapshot, &item_id)
+    let (stack_index, available) = if action == VisiblePlayerPcAction::DepositItem {
+        if active_visible_field_pack_pocket(runtime_shell) != FieldPackPocket::Items {
+            anyhow::bail!("Player PC deposit requires the ITEM pocket");
+        }
+        let stack_index = runtime_shell
+            .bag_cursor
+            .as_ref()
+            .context("Player PC deposit has no ITEM-pocket cursor")?
+            .option_index;
+        let quantity = snapshot
+            .bag
+            .items
+            .get(stack_index)
+            .filter(|item| item.item_id == item_id)
+            .map(|item| item.quantity);
+        (stack_index, quantity)
     } else {
-        snapshot
+        let stack_index = runtime_shell
+            .pc_item_cursor
+            .as_ref()
+            .context("Player PC item action has no PC-item cursor")?
+            .option_index;
+        let quantity = snapshot
             .bag
             .pc_items
-            .iter()
-            .find(|item| item.item_id == item_id)
-            .map(|item| item.quantity)
-    }
-    .filter(|quantity| *quantity > 0)
-    .with_context(|| format!("Player PC item {item_id} has no selectable quantity"))?;
+            .get(stack_index)
+            .filter(|item| item.item_id == item_id)
+            .map(|item| item.quantity);
+        (stack_index, quantity)
+    };
+    let available = available
+        .filter(|quantity| *quantity > 0)
+        .with_context(|| format!("Player PC item {item_id} has no selectable quantity"))?;
     let maximum = available;
     runtime_shell.pc_item_quantity = Some(VisiblePcItemQuantity {
         action,
         item_id: item_id.clone(),
+        stack_index,
         quantity: 1,
         maximum,
     });
@@ -2062,42 +2136,16 @@ fn commit_visible_pc_item_quantity(runtime_shell: &mut BevyRuntimeShell) -> Resu
     runtime_shell.pc_notice = None;
     let snapshot = runtime_shell.shell.snapshot()?;
     let destination_capacity = match pending.action {
-        VisiblePlayerPcAction::DepositItem => {
-            let stored = snapshot
-                .bag
-                .pc_items
-                .iter()
-                .find(|item| item.item_id == pending.item_id)
-                .map(|item| item.quantity)
-                .unwrap_or(0);
-            if stored > 0 {
-                crate::core::models::MAX_ITEM_STACK.saturating_sub(stored)
-            } else if carried_item_count(&snapshot.bag.pc_items)
-                < crate::core::models::PC_ITEM_CAPACITY
-            {
-                crate::core::models::MAX_ITEM_STACK
-            } else {
-                0
-            }
-        }
-        VisiblePlayerPcAction::WithdrawItem => {
-            let carried = snapshot
-                .bag
-                .items
-                .iter()
-                .find(|item| item.item_id == pending.item_id)
-                .map(|item| item.quantity)
-                .unwrap_or(0);
-            if carried > 0 {
-                crate::core::models::MAX_ITEM_STACK.saturating_sub(carried)
-            } else if carried_item_count(&snapshot.bag.items)
-                < crate::core::models::ITEM_POCKET_CAPACITY
-            {
-                crate::core::models::MAX_ITEM_STACK
-            } else {
-                0
-            }
-        }
+        VisiblePlayerPcAction::DepositItem => visible_item_pocket_free_capacity(
+            &snapshot.bag.pc_items,
+            &pending.item_id,
+            crate::core::models::PC_ITEM_CAPACITY,
+        ),
+        VisiblePlayerPcAction::WithdrawItem => visible_item_pocket_free_capacity(
+            &snapshot.bag.items,
+            &pending.item_id,
+            crate::core::models::ITEM_POCKET_CAPACITY,
+        ),
         _ => pending.quantity,
     };
     if pending.quantity > destination_capacity {
@@ -2110,15 +2158,18 @@ fn commit_visible_pc_item_quantity(runtime_shell: &mut BevyRuntimeShell) -> Resu
         return Ok(());
     }
     match pending.action {
-        VisiblePlayerPcAction::DepositItem => {
-            deposit_visible_selected_pack_item_to_pc(runtime_shell, pending.quantity)
-        }
+        VisiblePlayerPcAction::DepositItem => deposit_visible_selected_pack_item_to_pc(
+            runtime_shell,
+            pending.stack_index,
+            pending.quantity,
+        ),
         VisiblePlayerPcAction::WithdrawItem => {
-            withdraw_visible_pc_item_to_bag(runtime_shell, pending.quantity)
+            withdraw_visible_pc_item_to_bag(runtime_shell, pending.stack_index, pending.quantity)
         }
         VisiblePlayerPcAction::TossItem => {
             runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::TossItem {
                 item_id: pending.item_id.clone(),
+                stack_index: pending.stack_index,
                 quantity: pending.quantity,
             });
             runtime_shell.yes_no_cursor = Some(MenuCursor {
@@ -2134,6 +2185,25 @@ fn commit_visible_pc_item_quantity(runtime_shell: &mut BevyRuntimeShell) -> Resu
         }
         _ => anyhow::bail!("Player PC quantity is invalid for {pending:?}"),
     }
+}
+
+fn visible_item_pocket_free_capacity(
+    items: &[RuntimeBagItemSnapshot],
+    item_id: &str,
+    slot_capacity: usize,
+) -> u16 {
+    let matching_space = items
+        .iter()
+        .filter(|item| item.item_id == item_id)
+        .map(|item| u32::from(crate::core::models::MAX_ITEM_STACK - item.quantity))
+        .sum::<u32>();
+    let empty_slots = slot_capacity.saturating_sub(items.len());
+    let empty_space = u32::try_from(empty_slots)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(u32::from(crate::core::models::MAX_ITEM_STACK));
+    matching_space
+        .saturating_add(empty_space)
+        .min(u32::from(u16::MAX)) as u16
 }
 
 fn request_visible_current_box_pokemon_release(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -4262,14 +4332,38 @@ fn visible_poke_seer_messages(
             ],
         )];
     };
-    let caught_level = caught.level.max(1);
-    let location = snapshot
+    if caught.location == 0x7e {
+        return vec![display(
+            "SeerCantTellAThingText",
+            vec![
+                "Whaaaat? I can't\ntell a thing!".to_string(),
+                String::new(),
+                "How could I not\nknow of this?".to_string(),
+            ],
+        )];
+    }
+    let caught_level_value = match caught.level {
+        0 => 0,
+        1 => 5,
+        level => level,
+    };
+    let caught_level = if caught_level_value == 0 {
+        "???".to_string()
+    } else {
+        caught_level_value.to_string()
+    };
+    let location = match caught.location {
+        0x7f => None,
+        0 => Some("Unknown"),
+        location => snapshot
         .presentation
         .pokegear_landmarks
         .landmarks
         .iter()
-        .find(|landmark| landmark.id == caught.location as u16)
-        .map(|landmark| landmark.name.as_str());
+            .find(|landmark| landmark.id == location as u16)
+            .map(|landmark| landmark.name.as_str())
+            .or(Some("Unknown")),
+    };
     let mut messages = if let Some(location) = location {
         if pokemon.original_trainer_id == snapshot.trainer.player_id {
             vec![display(
@@ -4294,14 +4388,20 @@ fn visible_poke_seer_messages(
         )]
     };
     if location.is_some() {
+        let caught_time = match caught.time_of_day {
+            Some(crate::core::world::encounters::TimeOfDay::Morning) => "Morning",
+            Some(crate::core::world::encounters::TimeOfDay::Day) => "Day",
+            Some(crate::core::world::encounters::TimeOfDay::Night) => "Night",
+            None => "Unknown",
+        };
         messages.push(display(
             "SeerTimeLevelText",
             vec![format!(
-                "The time was\nUnknown!\n\nIts level was {caught_level}!\n\nAm I good or what?"
+                "The time was\n{caught_time}!\n\nIts level was {caught_level}!\n\nAm I good or what?"
             )],
         ));
     }
-    let gained = pokemon.level.saturating_sub(caught_level);
+    let gained = pokemon.level.saturating_sub(caught_level_value);
     let (label, text) = match gained {
         0..=9 => (
             "SeerMoreCareText",
@@ -5464,7 +5564,10 @@ fn queue_visible_pokemon_cry(
         .pokemon_cries
         .get(species_id)
         .with_context(|| format!("Pokemon species {species_id} has no pack cry metadata"))?;
-    let cry_id = cry.cry.clone();
+    // Pokemon metadata's CRY_* token identifies the source cry program. The
+    // core exporter renders that program with this species' exact pitch and
+    // length under its species-specific runtime id.
+    let cry_id = visible_pokemon_animation_cry_id(species_id, 2);
     let state_checksum = snapshot.state_checksum.clone();
     let playback = runtime_shell
         .shell
@@ -5472,7 +5575,10 @@ fn queue_visible_pokemon_cry(
         .audio()
         .require_playback_entry(AudioKind::Cry, &cry_id)
         .with_context(|| {
-            format!("Pokemon species {species_id} cry {cry_id} failed pack playback lookup")
+            format!(
+                "Pokemon species {species_id} source cry {} failed exact species variant lookup {cry_id}",
+                cry.cry
+            )
         })?;
     let playback_mode = playback.mode;
     let looped = matches!(
@@ -5496,6 +5602,63 @@ fn queue_visible_pokemon_cry(
     runtime_shell
         .last_audio_events
         .push(format!("queued {reason} cry {cry_id} species={species_id}"));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    Ok(())
+}
+
+fn visible_pokemon_animation_cry_id(species_id: &str, selector: u8) -> String {
+    let suffix = match selector & 0x03 {
+        0 => "_GROWL",
+        1 => "_ROAR",
+        2 | 3 => "",
+        _ => unreachable!(),
+    };
+    format!("CRY_MON_{species_id}{suffix}")
+}
+
+fn queue_visible_pokemon_animation_cry(
+    runtime_shell: &mut BevyRuntimeShell,
+    species_id: &str,
+    selector: u8,
+) -> Result<()> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    snapshot
+        .presentation
+        .pokemon_cries
+        .get(species_id)
+        .with_context(|| format!("Pokemon species {species_id} has no pack cry metadata"))?;
+    let cry_id = visible_pokemon_animation_cry_id(species_id, selector);
+    let state_checksum = snapshot.state_checksum.clone();
+    let playback = runtime_shell
+        .shell
+        .runtime()
+        .audio()
+        .require_playback_entry(AudioKind::Cry, &cry_id)
+        .with_context(|| {
+            format!(
+                "Pokemon species {species_id} animation cry selector {selector} failed exact variant lookup {cry_id}"
+            )
+        })?;
+    enqueue_bevy_audio_command(
+        &mut runtime_shell.pending_audio,
+        BevyAudioCommand {
+            audio_id: cry_id.clone(),
+            kind: ModpackAudioKind::Cry,
+            mode: playback.mode,
+            looped: matches!(
+                playback.loop_policy,
+                crate::assets::ModpackAudioLoopPolicy::Loop
+            ),
+        },
+    );
+    set_visible_runtime_action_from_checksum(
+        runtime_shell,
+        format!("audio:cry:battle_move_animation_{selector}:{species_id}:{cry_id}"),
+        &state_checksum,
+    );
+    runtime_shell.last_audio_events.push(format!(
+        "queued battle_move_animation_{selector} cry {cry_id} species={species_id}"
+    ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
 }
@@ -5825,6 +5988,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pending_battle_exp_tweens.hash(&mut hasher);
     runtime_shell.battle_level_stats.hash(&mut hasher);
     runtime_shell.bill_pc_move_open.hash(&mut hasher);
+    runtime_shell.bill_pc_move_party_open.hash(&mut hasher);
     runtime_shell.bill_pc_move_source.hash(&mut hasher);
     runtime_shell.party_summary_open.hash(&mut hasher);
     runtime_shell.party_summary_page.hash(&mut hasher);
@@ -5867,6 +6031,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pending_special_cry.hash(&mut hasher);
     runtime_shell.pending_special_sound.hash(&mut hasher);
     runtime_shell.field_pack_pocket.hash(&mut hasher);
+    runtime_shell.pack_item_switch_origin.hash(&mut hasher);
     runtime_shell.last_field_pack_pocket.hash(&mut hasher);
     runtime_shell.field_pack_cursor_positions.hash(&mut hasher);
     runtime_shell.field_pack_target_mode.hash(&mut hasher);

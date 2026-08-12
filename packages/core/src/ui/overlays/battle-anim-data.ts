@@ -156,6 +156,7 @@ export interface OamEntry {
   tile_id: number;
   xflip: boolean;
   yflip: boolean;
+  obp: number;
 }
 
 export interface BattleAnimOAMSet {
@@ -338,6 +339,7 @@ export class BattleAnimData {
           tile_id: Number(entry.tile_id ?? 0),
           xflip: Boolean(entry.xflip),
           yflip: Boolean(entry.yflip),
+          obp: Number(entry.obp),
         })),
       });
     }

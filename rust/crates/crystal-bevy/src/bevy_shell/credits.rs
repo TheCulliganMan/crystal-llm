@@ -2318,6 +2318,20 @@ fn move_visible_custom_item_cursor(
 
 fn move_visible_storage_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isize) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
+    if runtime_shell.bill_pc_move_open && runtime_shell.bill_pc_move_party_open {
+        let count = snapshot.party.slots.len();
+        return move_visible_cursor_slot(
+            &mut runtime_shell.storage_cursor,
+            pc_move_party_surface_id().to_string(),
+            if runtime_shell.bill_pc_move_source.is_some() {
+                count + 1
+            } else {
+                count.max(1)
+            },
+            delta,
+            &mut runtime_shell.last_audio_events,
+        );
+    }
     let current_box = current_storage_box(&snapshot)?;
     if current_box.slots.is_empty() && !runtime_shell.bill_pc_move_open {
         runtime_shell.storage_cursor = Some(MenuCursor {
@@ -2335,7 +2349,11 @@ fn move_visible_storage_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
         &mut runtime_shell.storage_cursor,
         storage_cursor_surface_id(snapshot.storage.current_pc_box),
         if runtime_shell.bill_pc_move_open {
-            crate::core::models::MAX_BOX_MONS
+            if runtime_shell.bill_pc_move_source.is_some() {
+                current_box.slots.len() + 1
+            } else {
+                current_box.slots.len().max(1)
+            }
         } else {
             current_box.slots.len()
         },
@@ -2557,7 +2575,11 @@ fn selected_current_box_slot_index(runtime_shell: &mut BevyRuntimeShell) -> Resu
     }
     let surface_id = storage_cursor_surface_id(snapshot.storage.current_pc_box);
     let option_count = if runtime_shell.bill_pc_move_open {
-        crate::core::models::MAX_BOX_MONS
+        if runtime_shell.bill_pc_move_source.is_some() {
+            current_box.slots.len() + 1
+        } else {
+            current_box.slots.len().max(1)
+        }
     } else {
         current_box.slots.len()
     };
@@ -2571,6 +2593,24 @@ fn selected_current_box_slot_index(runtime_shell: &mut BevyRuntimeShell) -> Resu
     } else {
         Ok(current_box.slots[slot_offset].index)
     }
+}
+
+fn selected_pc_move_slot_index(runtime_shell: &mut BevyRuntimeShell) -> Result<usize> {
+    if !runtime_shell.bill_pc_move_party_open {
+        return selected_current_box_slot_index(runtime_shell);
+    }
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let count = snapshot.party.slots.len();
+    let option_count = if runtime_shell.bill_pc_move_source.is_some() {
+        count + 1
+    } else {
+        count.max(1)
+    };
+    Ok(visible_cursor_index(
+        &mut runtime_shell.storage_cursor,
+        pc_move_party_surface_id(),
+        option_count,
+    ))
 }
 
 fn current_storage_box(snapshot: &RuntimeShellSnapshot) -> Result<&crate::RuntimePcBoxSnapshot> {
@@ -2589,6 +2629,10 @@ fn current_storage_box(snapshot: &RuntimeShellSnapshot) -> Result<&crate::Runtim
 
 fn storage_cursor_surface_id(box_index: usize) -> String {
     format!("pc:box:{box_index}")
+}
+
+fn pc_move_party_surface_id() -> &'static str {
+    "pc:move:party"
 }
 
 fn party_move_cursor_surface_id(party_index: usize) -> String {

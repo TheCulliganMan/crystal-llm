@@ -10,6 +10,7 @@ use crate::profile::{CellShape, SolidKind};
 
 const DECK_TILE: u16 = 0x04;
 const VOID_TILE: u16 = 0x01;
+const BULKHEAD_HEIGHT: f32 = 16.0;
 pub(crate) const CABIN_FLOOR_TILE: u16 = 0x0d;
 
 fn is_cabin_map(map_id: &str) -> bool {
@@ -168,6 +169,26 @@ pub(crate) fn shape(map_id: &str, source: &VisualTileSource) -> Option<CellShape
         });
     }
 
+    // Cabin block $0a is two authored wall courses followed by two checker
+    // floor courses. Fold only the porthole/trim drawing at their shared
+    // south seam; the lower checker cells remain the native deck surface.
+    if is_cabin_map(map_id) && source.metatile_id == 0x0a && source.subtile_row < 2 {
+        let expected = match source.subtile_row {
+            0 => [0x02, 0x03, 0x10, 0x10],
+            1 => [0x12, 0x12, 0x12, 0x12],
+            _ => unreachable!(),
+        };
+        return (source.tile_index == expected[usize::from(source.subtile_column)]).then_some(
+            CellShape::FacadeBand {
+                plane_subtile_row: 2,
+                band_from_top: source.subtile_row,
+                band_count: 2,
+                ground_tile_index: CABIN_FLOOR_TILE,
+                solid: SolidKind::FlatCard,
+            },
+        );
+    }
+
     // Block $1a's west half is the dark flight used at both 1F deck warps.
     // Its treads descend toward the west, so the continuous surface rises
     // east across the two authored columns. Both native rows share the same
@@ -195,7 +216,14 @@ pub(crate) fn shape(map_id: &str, source: &VisualTileSource) -> Option<CellShape
             return None;
         };
     if source.subtile_row < 2 {
-        return None;
+        let expected = if source.subtile_row == 0 { 0x01 } else { 0x11 };
+        return (source.tile_index == expected).then_some(CellShape::PlaneAt {
+            height: if source.subtile_row == 0 {
+                0.0
+            } else {
+                BULKHEAD_HEIGHT
+            },
+        });
     }
 
     Some(CellShape::FacadeBand {
@@ -226,8 +254,12 @@ mod tests {
     #[test]
     fn corridor_bulkhead_folds_exactly_two_face_rows() {
         for block in [0x05, 0x0f, 0x13, 0x19] {
-            assert_eq!(shape("FastShip1F", &source(block, 0, 0, 0x01)), None);
-            assert_eq!(shape("FastShip1F", &source(block, 0, 1, 0x11)), None);
+            for (row, tile, height) in [(0, 0x01, 0.0), (1, 0x11, BULKHEAD_HEIGHT)] {
+                assert_eq!(
+                    shape("FastShip1F", &source(block, 0, row, tile)),
+                    Some(CellShape::PlaneAt { height })
+                );
+            }
             for row in 2..4 {
                 assert_eq!(
                     shape("FastShip1F", &source(block, 0, row, 0x10)),
@@ -250,7 +282,13 @@ mod tests {
             None
         );
         for row in 0..2 {
-            assert_eq!(shape("FastShipB1F", &source(0x05, 0, row, 0x01)), None);
+            let tile = if row == 0 { 0x01 } else { 0x11 };
+            assert_eq!(
+                shape("FastShipB1F", &source(0x05, 0, row, tile)),
+                Some(CellShape::PlaneAt {
+                    height: if row == 0 { 0.0 } else { BULKHEAD_HEIGHT },
+                })
+            );
         }
         for row in 2..4 {
             assert_eq!(
@@ -265,6 +303,40 @@ mod tests {
             );
         }
         assert_eq!(shape("FastShipB1F", &source(0x0f, 0, 2, 0x10)), None);
+    }
+
+    #[test]
+    fn cabin_block_0a_folds_only_two_wall_rows_over_checker_floor() {
+        let upper = [[0x02, 0x03, 0x10, 0x10], [0x12, 0x12, 0x12, 0x12]];
+        for row in 0..2 {
+            for column in 0..4 {
+                assert_eq!(
+                    shape(
+                        "FastShipCabins_NNW_NNE_NE",
+                        &source(
+                            0x0a,
+                            column,
+                            row,
+                            upper[usize::from(row)][usize::from(column)]
+                        ),
+                    ),
+                    Some(CellShape::FacadeBand {
+                        plane_subtile_row: 2,
+                        band_from_top: row,
+                        band_count: 2,
+                        ground_tile_index: CABIN_FLOOR_TILE,
+                        solid: SolidKind::FlatCard,
+                    })
+                );
+            }
+        }
+        for (row, tile) in [(2, 0x0d), (3, 0x1d)] {
+            assert_eq!(
+                shape("FastShipCabins_NNW_NNE_NE", &source(0x0a, 0, row, tile)),
+                None
+            );
+        }
+        assert_eq!(shape("FastShip1F", &source(0x0a, 0, 0, 0x02)), None);
     }
 
     #[test]

@@ -235,6 +235,32 @@ pub(crate) fn shape(source: &VisualTileSource) -> Option<CellShape> {
     if source.tileset_id.as_ref() != "mart" {
         return None;
     }
+    // Every standard Mart places the same compact checkout end in block
+    // `$22`: `$20/$21` are its top surface and `$30/$31` its native south
+    // face. Keep the adjacent three quarters of the block as ordinary shop
+    // floor and build this exact 16x16 drawing as one half-cell counter.
+    if source.metatile_id == 0x22 && source.subtile_column < 2 && source.subtile_row < 2 {
+        let expected = [[0x20, 0x21], [0x30, 0x31]];
+        if source.tile_index
+            == expected[usize::from(source.subtile_row)][usize::from(source.subtile_column)]
+        {
+            return if source.subtile_row == 0 {
+                Some(CellShape::RaisedTop {
+                    height: 8.0,
+                    solid: SolidKind::Prop,
+                })
+            } else {
+                Some(CellShape::LedgeBand {
+                    face: LedgeFace::South,
+                    plane_subtile: 2,
+                    band_from_top: 0,
+                    band_count: 1,
+                    top_tile_index: expected[0][usize::from(source.subtile_column)],
+                    height: 8.0,
+                })
+            };
+        }
+    }
     // These blocks are complete four-row merchandise shelves. Their source
     // drawing describes a tall front, not four shallow objects lying on the
     // floor. Fold every native row exactly once onto one zero-depth plane and
@@ -345,6 +371,38 @@ mod tests {
         }
         assert_eq!(display_rack_local(&source(2, 0, FLOOR_TILE)), None);
         assert_eq!(display_rack_local(&source(0, 0, FLOOR_TILE)), None);
+    }
+
+    #[test]
+    fn standard_mart_checkout_end_is_one_half_cell_counter() {
+        for (column, tile) in [(0, 0x20), (1, 0x21)] {
+            let mut top = source(column, 0, tile);
+            top.metatile_id = 0x22;
+            assert_eq!(
+                shape(&top),
+                Some(CellShape::RaisedTop {
+                    height: 8.0,
+                    solid: SolidKind::Prop,
+                })
+            );
+
+            let mut front = source(column, 1, 0x30 + column as u16);
+            front.metatile_id = 0x22;
+            assert_eq!(
+                shape(&front),
+                Some(CellShape::LedgeBand {
+                    face: LedgeFace::South,
+                    plane_subtile: 2,
+                    band_from_top: 0,
+                    band_count: 1,
+                    top_tile_index: tile,
+                    height: 8.0,
+                })
+            );
+        }
+        let mut floor = source(2, 0, STANDARD_MART_FLOOR_TILE);
+        floor.metatile_id = 0x22;
+        assert_eq!(shape(&floor), None);
     }
 
     #[test]

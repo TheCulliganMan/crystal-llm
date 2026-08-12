@@ -14,7 +14,8 @@ pub mod trainer;
 
 pub use bag::{
     BALL_POCKET_CAPACITY, Bag, BagSaveError, ITEM_POCKET_CAPACITY, KEY_ITEM_POCKET_CAPACITY,
-    MAX_ITEM_STACK, PC_ITEM_CAPACITY, validate_saved_bag_pocket_references,
+    MAX_ITEM_STACK, PC_ITEM_CAPACITY, PocketInventory, PocketStack,
+    validate_saved_bag_pocket_references,
 };
 pub use battle_animation::{
     BattleAnimationCatalogIssue, BattleAnimationCommandTable, BattleAnimationTable,

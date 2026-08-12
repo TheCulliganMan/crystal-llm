@@ -1777,11 +1777,8 @@ pub struct RuntimeStorageRelease {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStorageMove {
-    pub source_box: usize,
-    pub source_slot: usize,
-    pub target_box: usize,
-    pub target_slot: usize,
-    pub swapped: bool,
+    pub source: crystal_assets::RuntimePokemonStorageLocation,
+    pub target: crystal_assets::RuntimePokemonStorageLocation,
     pub state_checksum: StateChecksum,
 }
 
@@ -9318,21 +9315,15 @@ impl RuntimeGameShell {
         })
     }
 
-    pub fn move_pc_pokemon_without_mail(
+    pub fn move_pokemon_without_mail(
         &mut self,
-        source_box: usize,
-        source_slot: usize,
-        target_box: usize,
-        target_slot: usize,
+        source: crystal_assets::RuntimePokemonStorageLocation,
+        target: crystal_assets::RuntimePokemonStorageLocation,
     ) -> Result<RuntimeStorageMove> {
-        let mutation = self.apply_runtime_mutation_command(
-            RuntimeMutationCommand::MovePcPokemonWithoutMail(RuntimePcMoveCommand {
-                source_box,
-                source_slot,
-                target_box,
-                target_slot,
-            }),
-        )?;
+        let mutation =
+            self.apply_runtime_mutation_command(RuntimeMutationCommand::MovePcPokemonWithoutMail(
+                RuntimePcMoveCommand { source, target },
+            ))?;
         let RuntimeMutationResult::PcPokemonMoved(outcome) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-PC-move result");
         };
@@ -9340,11 +9331,8 @@ impl RuntimeGameShell {
             .validate_save_state_for_runtime_pack(&self.session.state)
             .context("validate runtime state after PC move")?;
         Ok(RuntimeStorageMove {
-            source_box: outcome.source_box,
-            source_slot: outcome.source_slot,
-            target_box: outcome.target_box,
-            target_slot: outcome.target_slot,
-            swapped: outcome.swapped,
+            source: outcome.source,
+            target: outcome.target,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -9352,11 +9340,13 @@ impl RuntimeGameShell {
     pub fn deposit_bag_item_to_pc(
         &mut self,
         item_id: &str,
+        stack_index: usize,
         quantity: u16,
     ) -> Result<RuntimePcItemTransfer> {
         let mutation = self.apply_runtime_mutation_command(
             RuntimeMutationCommand::DepositBagItemToPc(RuntimePcItemCommand {
                 item_id: item_id.to_string(),
+                stack_index,
                 quantity,
             }),
         )?;
@@ -9378,11 +9368,13 @@ impl RuntimeGameShell {
     pub fn withdraw_pc_item_to_bag(
         &mut self,
         item_id: &str,
+        stack_index: usize,
         quantity: u16,
     ) -> Result<RuntimePcItemTransfer> {
         let mutation = self.apply_runtime_mutation_command(
             RuntimeMutationCommand::WithdrawPcItemToBag(RuntimePcItemCommand {
                 item_id: item_id.to_string(),
+                stack_index,
                 quantity,
             }),
         )?;
@@ -9401,10 +9393,16 @@ impl RuntimeGameShell {
         })
     }
 
-    pub fn toss_pc_item(&mut self, item_id: &str, quantity: u16) -> Result<RuntimePcItemTransfer> {
+    pub fn toss_pc_item(
+        &mut self,
+        item_id: &str,
+        stack_index: usize,
+        quantity: u16,
+    ) -> Result<RuntimePcItemTransfer> {
         let mutation = self.apply_runtime_mutation_command(RuntimeMutationCommand::TossPcItem(
             RuntimePcItemCommand {
                 item_id: item_id.to_string(),
+                stack_index,
                 quantity,
             },
         ))?;
@@ -9692,11 +9690,15 @@ impl RuntimeGameShell {
             .cloned()
             .with_context(|| format!("unknown bag item {item_id}"))?;
         let quantity_before = self.session.state.bag.quantity(&item);
-        self.session
+        let removed = self
+            .session
             .state
             .bag
             .remove_item(&item, quantity)
             .map_err(anyhow::Error::msg)?;
+        if !removed {
+            anyhow::bail!("bag does not contain a single {item_id} stack with quantity {quantity}");
+        }
         self.runtime
             .validate_save_state_for_runtime_pack(&self.session.state)
             .context("validate runtime state after bag item remove")?;
@@ -9709,6 +9711,24 @@ impl RuntimeGameShell {
             quantity_after: self.session.state.bag.quantity(&item),
             state_checksum: game_state_checksum(&self.session.state)?,
         })
+    }
+
+    pub fn switch_bag_item_stacks(
+        &mut self,
+        pocket: &str,
+        source_index: usize,
+        target_index: usize,
+    ) -> Result<usize> {
+        let target_index = self
+            .session
+            .state
+            .bag
+            .switch_item_stacks(pocket, source_index, target_index)
+            .map_err(anyhow::Error::msg)?;
+        self.runtime
+            .validate_save_state_for_runtime_pack(&self.session.state)
+            .context("validate runtime state after item-stack switch")?;
+        Ok(target_index)
     }
 
     pub fn record_link_battle_result(
@@ -11452,9 +11472,11 @@ impl RuntimePcBoxSnapshot {
 }
 
 impl RuntimeBagSnapshot {
-    fn inventory(inventory: &BTreeMap<String, u16>) -> Vec<RuntimeBagItemSnapshot> {
+    fn inventory<'a>(
+        inventory: impl IntoIterator<Item = (&'a String, &'a u16)>,
+    ) -> Vec<RuntimeBagItemSnapshot> {
         inventory
-            .iter()
+            .into_iter()
             .map(|(item_id, quantity)| RuntimeBagItemSnapshot {
                 item_id: item_id.clone(),
                 quantity: *quantity,

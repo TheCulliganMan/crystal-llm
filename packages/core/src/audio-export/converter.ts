@@ -63,6 +63,10 @@ interface WavConverterOptions {
   infiniteLoopRepeatLimit?: number;
   loopedMusicExportSeconds?: number | null;
   soloChannel?: number | null;
+  /** Exact wCryPitch value installed by _PlayCry. */
+  cryPitch?: number | null;
+  /** Exact wCryLength value installed as tempo on every non-noise cry channel. */
+  cryLength?: number | null;
 }
 
 export class WavConverter {
@@ -82,6 +86,8 @@ export class WavConverter {
   private readonly infiniteLoopRepeatLimit: number;
   private readonly loopedMusicExportSeconds: number | null;
   private readonly soloChannel: number | null;
+  private readonly cryPitch: number | null;
+  private readonly cryLength: number | null;
   private sharedTempoEvents: Array<{ frame: number; tempo: number; remainder: number }> = [];
   private sharedTrackTempo: number | null = null;
   private tempoSourceChannel: number | null = null;
@@ -112,6 +118,8 @@ export class WavConverter {
         ? options.loopedMusicExportSeconds ?? null
         : DEFAULT_LOOPED_MUSIC_EXPORT_SECONDS;
     this.soloChannel = options?.soloChannel ?? null;
+    this.cryPitch = options?.cryPitch == null ? null : options.cryPitch & 0xffff;
+    this.cryLength = options?.cryLength == null ? null : options.cryLength & 0xffff;
     this.nextWaveSampleIndex = Math.max(0x10, maxObjectKey(this.waveSamples, -1) + 1);
     this.nextWaveInstrumentId = Math.max(0x10, maxObjectKey(this.waveInstrumentMap, -1) + 1);
   }
@@ -206,6 +214,14 @@ export class WavConverter {
     const isPulseChannel = channelNumber === 1 || channelNumber === 2 || channelNumber === 5 || channelNumber === 6;
     const isWaveChannel = channelNumber === 3 || channelNumber === 7;
     const isNoiseChannel = channelNumber === 4 || channelNumber === 8;
+
+    if (this.cryPitch != null) {
+      state.pitch_offset = this.cryPitch;
+    }
+    if (this.cryLength != null && !isNoiseChannel) {
+      state.tempo = this.cryLength;
+      state.duration_modifier = 0;
+    }
 
     if (this.perfectPitchEnabled) {
       state.instrument_pitch_offset = 1;
@@ -612,7 +628,7 @@ export class WavConverter {
         const rawLength = parseNumber(args[0]);
         const volume = parseNumber(args[1]);
         const fade = parseNumber(args[2]);
-        const register = parseNumber(args[3]);
+        const register = this.applyPitchOffset(parseNumber(args[3]), state);
         const [frames, nextMod] = this.computeNoteFrames(
           this.setNoteDurationTicks(rawLength),
           state.note_length,
@@ -670,7 +686,10 @@ export class WavConverter {
         state.duration_modifier = nextMod;
         const samples = this.framesToSamplesPrecise(frames);
         const semitone = parseNumber(args[2] ?? "0");
-        const reg = FREQUENCY_TABLE[Math.max(0, Math.min(FREQUENCY_TABLE.length - 1, semitone))] & 0x7ff;
+        const reg = this.applyPitchOffset(
+          FREQUENCY_TABLE[Math.max(0, Math.min(FREQUENCY_TABLE.length - 1, semitone))],
+          state,
+        );
         const freq = regToFreqWave(reg) * WAVE_NOTE_FREQUENCY_SCALAR;
         const instrument = parseNumber(args[0] ?? String(state.wave_instrument ?? CHANNEL3_DEFAULT_INSTRUMENT));
         let [audio] = this.renderWave(samples, freq, instrument, state.wave_volume);
@@ -1356,7 +1375,12 @@ export class WavConverter {
 
   private noteToRegisterPulse(name: string, st: ChannelState): number {
     const reg = this.registerFromNote(name, st);
-    return Math.max(0, Math.min(2047, reg + st.pitch_offset + st.instrument_pitch_offset));
+    return this.applyPitchOffset(reg, st);
+  }
+
+  private applyPitchOffset(register: number, st: ChannelState): number {
+    // The engine performs a 16-bit add and the APU consumes the low 11 bits.
+    return (register + st.pitch_offset + st.instrument_pitch_offset) & 0x7ff;
   }
 
   private noteToRegisterWave(name: string, st: ChannelState): number {

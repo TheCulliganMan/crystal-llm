@@ -644,6 +644,43 @@ fn intro_scene_renderer_uses_real_asm_tilemap_art_not_debug_text() {
 }
 
 #[test]
+fn intro_suicune_close_head_uses_its_asm_palette_banks() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 17;
+    intro.scroll_x = 0x60;
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+
+    let frame = intro_scene_frame_for_art(&mut rendered_art, &asset_root, &intro, &mut images)
+        .expect("render Suicune close-up head frame");
+    let image = images.get(&frame.handle).expect("Suicune close-up image");
+    let colors = image
+        .data
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] != 0)
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect::<BTreeSet<_>>();
+
+    // `IntroScene17` loads IntroSuicuneClosePalette. These two colors come
+    // from its palette banks 2-4 and do not exist in IntroSuicunePalette.
+    // Their presence proves that the colored head is not flattened into the
+    // generic orange Suicune background palette.
+    assert!(
+        colors.contains(&[99, 165, 255]),
+        "Suicune's head must contain the close-up palette's light blue"
+    );
+    assert!(
+        colors.contains(&[156, 66, 255]),
+        "Suicune's head must contain the close-up palette's purple"
+    );
+}
+
+#[test]
 fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

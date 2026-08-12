@@ -1066,6 +1066,7 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.tmhm_cursor = None;
     runtime_shell.custom_item_cursor = None;
     runtime_shell.field_pack_pocket = None;
+    runtime_shell.pack_item_switch_origin = None;
     runtime_shell.field_pack_target_mode = None;
     runtime_shell.tmhm_teach_prompt_cursor = None;
     runtime_shell.pending_tmhm_teach_prompt_after_boot = false;
@@ -3395,6 +3396,9 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
         return Ok(());
     }
     if visible_field_pack_is_open(runtime_shell) {
+        if runtime_shell.pack_item_switch_origin.is_some() {
+            return Ok(());
+        }
         if runtime_shell.field_pack_target_mode.is_some() {
             return move_visible_field_pack_target_secondary_cursor(runtime_shell, -1);
         }
@@ -3620,6 +3624,9 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
         return Ok(());
     }
     if visible_field_pack_is_open(runtime_shell) {
+        if runtime_shell.pack_item_switch_origin.is_some() {
+            return Ok(());
+        }
         if runtime_shell.field_pack_target_mode.is_some() {
             return move_visible_field_pack_target_secondary_cursor(runtime_shell, 1);
         }

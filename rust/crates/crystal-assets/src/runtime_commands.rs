@@ -2061,19 +2061,25 @@ pub struct RuntimePcReleaseCommand {
     pub box_slot: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimePokemonStorageLocation {
+    Party { slot: usize },
+    Box { box_index: usize, slot: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimePcMoveCommand {
-    pub source_box: usize,
-    pub source_slot: usize,
-    pub target_box: usize,
-    pub target_slot: usize,
+    pub source: RuntimePokemonStorageLocation,
+    pub target: RuntimePokemonStorageLocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimePcItemCommand {
     pub item_id: String,
+    pub stack_index: usize,
     pub quantity: u16,
 }
 
@@ -2937,11 +2943,8 @@ pub struct RuntimeStorageReleaseOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStorageMoveOutcome {
-    pub source_box: usize,
-    pub source_slot: usize,
-    pub target_box: usize,
-    pub target_slot: usize,
-    pub swapped: bool,
+    pub source: RuntimePokemonStorageLocation,
+    pub target: RuntimePokemonStorageLocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3155,6 +3158,151 @@ fn take_party_pokemon_compact(state: &mut GameState, party_index: usize) -> Resu
     }
     state.sync_party_from_storage();
     Ok(pokemon)
+}
+
+fn prepare_pc_move_locations(
+    state: &mut GameState,
+    source: &RuntimePokemonStorageLocation,
+    target: &RuntimePokemonStorageLocation,
+) -> Result<()> {
+    let highest_box = [source, target]
+        .into_iter()
+        .filter_map(|location| match location {
+            RuntimePokemonStorageLocation::Party { .. } => None,
+            RuntimePokemonStorageLocation::Box { box_index, .. } => Some(*box_index),
+        })
+        .max();
+    if highest_box.is_some_and(|box_index| box_index >= MAX_PC_BOXES) {
+        anyhow::bail!("PC move box index is outside 0..{MAX_PC_BOXES}");
+    }
+    if let Some(highest_box) = highest_box {
+        while state.storage.pc_boxes.len() <= highest_box {
+            let next = state.storage.pc_boxes.len();
+            state.storage.pc_boxes.push(PcBox::new(next));
+        }
+    }
+
+    let source_count = pc_move_location_count(state, source);
+    let source_slot = pc_move_location_slot(source);
+    if source_slot >= source_count {
+        anyhow::bail!(
+            "PC move source slot {source_slot} is outside compact source count {source_count}"
+        );
+    }
+    let target_count = pc_move_location_count(state, target);
+    let target_slot = pc_move_location_slot(target);
+    if target_slot > target_count {
+        anyhow::bail!(
+            "PC move target insertion slot {target_slot} is outside compact range 0..={target_count}"
+        );
+    }
+    if !pc_move_locations_share_container(source, target) {
+        match target {
+            RuntimePokemonStorageLocation::Party { .. }
+                if target_count >= crystal_core::models::PARTY_SIZE =>
+            {
+                anyhow::bail!("PC move destination party is full");
+            }
+            RuntimePokemonStorageLocation::Box { .. } if target_count >= MAX_BOX_MONS => {
+                anyhow::bail!("PC move destination box is full");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn pc_move_location_count(state: &GameState, location: &RuntimePokemonStorageLocation) -> usize {
+    match location {
+        RuntimePokemonStorageLocation::Party { .. } => state.storage.party.filled_slots(),
+        RuntimePokemonStorageLocation::Box { box_index, .. } => {
+            state.storage.pc_boxes[*box_index].count
+        }
+    }
+}
+
+fn pc_move_location_slot(location: &RuntimePokemonStorageLocation) -> usize {
+    match location {
+        RuntimePokemonStorageLocation::Party { slot }
+        | RuntimePokemonStorageLocation::Box { slot, .. } => *slot,
+    }
+}
+
+fn pc_move_locations_share_container(
+    source: &RuntimePokemonStorageLocation,
+    target: &RuntimePokemonStorageLocation,
+) -> bool {
+    match (source, target) {
+        (
+            RuntimePokemonStorageLocation::Party { .. },
+            RuntimePokemonStorageLocation::Party { .. },
+        ) => true,
+        (
+            RuntimePokemonStorageLocation::Box {
+                box_index: source_box,
+                ..
+            },
+            RuntimePokemonStorageLocation::Box {
+                box_index: target_box,
+                ..
+            },
+        ) => source_box == target_box,
+        _ => false,
+    }
+}
+
+fn adjust_pc_move_target_after_removal(
+    source: &RuntimePokemonStorageLocation,
+    target: RuntimePokemonStorageLocation,
+) -> RuntimePokemonStorageLocation {
+    if pc_move_locations_share_container(source, &target)
+        && pc_move_location_slot(source) < pc_move_location_slot(&target)
+    {
+        match target {
+            RuntimePokemonStorageLocation::Party { slot } => {
+                RuntimePokemonStorageLocation::Party { slot: slot - 1 }
+            }
+            RuntimePokemonStorageLocation::Box { box_index, slot } => {
+                RuntimePokemonStorageLocation::Box {
+                    box_index,
+                    slot: slot - 1,
+                }
+            }
+        }
+    } else {
+        target
+    }
+}
+
+fn insert_party_pokemon(party: &mut Party, slot: usize, pokemon: Pokemon) -> Result<()> {
+    let count = party.filled_slots();
+    if count >= crystal_core::models::PARTY_SIZE {
+        anyhow::bail!("PC move destination party is full");
+    }
+    if slot > count {
+        anyhow::bail!("party insertion slot {slot} is outside compact range 0..={count}");
+    }
+    for index in (slot..count).rev() {
+        party.pokemon[index + 1] = party.pokemon[index].take();
+    }
+    party.pokemon[slot] = Some(pokemon);
+    Ok(())
+}
+
+fn restore_deposited_pokemon_pp(
+    moves: &BTreeMap<String, Move>,
+    pokemon: &mut Pokemon,
+) -> Result<()> {
+    for learned in &mut pokemon.moves {
+        let move_data = moves.get(&learned.name).with_context(|| {
+            format!(
+                "deposited Pokemon {} knows missing move {}",
+                pokemon.species.id, learned.name
+            )
+        })?;
+        learned.current_pp = crystal_core::models::max_move_pp(move_data.pp, learned.pp_ups);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -360,11 +360,11 @@
         data.move_names = move_ids.clone();
         data.battle_animations
             .entry("ANIM_NULL".to_string())
-            .or_insert_with(|| vec!["BATTLE_ANIM_END".to_string()]);
+            .or_insert_with(|| vec!["anim_ret".to_string()]);
         for move_id in &move_ids {
             data.battle_animations
                 .entry(move_id.clone())
-                .or_insert_with(|| vec!["BATTLE_ANIM_END".to_string()]);
+                .or_insert_with(|| vec!["anim_ret".to_string()]);
         }
         data.battle_animation_table = std::iter::once("ANIM_NULL".to_string())
             .chain(move_ids)
@@ -7278,7 +7278,7 @@
         );
         assert_eq!(
             initial.presentation.battle_animations.get("TACKLE"),
-            Some(&vec!["BATTLE_ANIM_END".to_string()])
+            Some(&vec!["anim_ret".to_string()])
         );
         assert!(
             initial

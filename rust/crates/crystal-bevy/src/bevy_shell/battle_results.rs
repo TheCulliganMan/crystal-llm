@@ -1651,6 +1651,7 @@ fn activate_visible_special_routine_boundary(
                 runtime_shell.bill_pc_action_cursor = None;
                 runtime_shell.bill_pc_box_cursor = None;
                 runtime_shell.bill_pc_move_open = false;
+                runtime_shell.bill_pc_move_party_open = false;
                 runtime_shell.bill_pc_move_source = None;
                 runtime_shell.storage_cursor = None;
                 runtime_shell.pc_item_cursor = None;
@@ -1666,6 +1667,7 @@ fn activate_visible_special_routine_boundary(
             runtime_shell.bill_pc_action_cursor = None;
             runtime_shell.bill_pc_box_cursor = None;
             runtime_shell.bill_pc_move_open = false;
+            runtime_shell.bill_pc_move_party_open = false;
             runtime_shell.bill_pc_move_source = None;
             runtime_shell.pc_hub_cursor = Some(MenuCursor {
                 surface_id: "pc:hub".to_string(),
@@ -1690,6 +1692,7 @@ fn activate_visible_special_routine_boundary(
             runtime_shell.bill_pc_action_cursor = None;
             runtime_shell.bill_pc_box_cursor = None;
             runtime_shell.bill_pc_move_open = false;
+            runtime_shell.bill_pc_move_party_open = false;
             runtime_shell.bill_pc_move_source = None;
             runtime_shell.player_pc_action_cursor = Some(MenuCursor {
                 surface_id: "pc:player-actions".to_string(),
@@ -4478,6 +4481,7 @@ fn reset_visible_selection_cursors(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;
     runtime_shell.field_pack_pocket = None;
+    runtime_shell.pack_item_switch_origin = None;
     runtime_shell.field_pack_action_cursor = None;
     runtime_shell.field_pack_target_mode = None;
     runtime_shell.battle_pack_target_mode = None;
@@ -4494,6 +4498,7 @@ fn reset_visible_selection_cursors(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.bill_pc_action_cursor = None;
     runtime_shell.bill_pc_box_cursor = None;
     runtime_shell.bill_pc_move_open = false;
+    runtime_shell.bill_pc_move_party_open = false;
     runtime_shell.bill_pc_move_source = None;
     runtime_shell.fly_cursor = None;
     reset_visible_battle_action_cursors(runtime_shell);

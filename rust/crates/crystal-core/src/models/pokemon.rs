@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use super::move_data::Move;
 use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_experience};
 use crate::systems::learnsets::{SpeciesLearnsets, default_moves_for_level};
+use crate::world::encounters::TimeOfDay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
@@ -478,8 +479,13 @@ pub enum PokemonBuildError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaughtData {
+    /// Low six bits of `MON_CAUGHTLEVEL`.
     pub level: u8,
-    pub ball: u8,
+    /// High two bits of `MON_CAUGHTLEVEL`; gift Pokemon store zero/None.
+    pub time_of_day: Option<TimeOfDay>,
+    /// High bit of `MON_CAUGHTLOCATION`.
+    pub original_trainer_gender: u8,
+    /// Low seven bits of `MON_CAUGHTLOCATION`.
     pub location: u8,
 }
 
@@ -710,10 +716,22 @@ impl Pokemon {
             validate_exact_token("pokemon.status", status)?;
         }
         if let Some(caught) = &self.caught_data {
-            if caught.level == 0 || caught.level > 100 {
+            if caught.level > 0x3f {
                 return Err(format!(
-                    "pokemon.caught_data.level {} is outside range 1..100",
+                    "pokemon.caught_data.level {} is outside six-bit range 0..63",
                     caught.level
+                ));
+            }
+            if caught.original_trainer_gender > 1 {
+                return Err(format!(
+                    "pokemon.caught_data.original_trainer_gender {} is outside Crystal gender range 0..1",
+                    caught.original_trainer_gender
+                ));
+            }
+            if caught.location > 0x7f {
+                return Err(format!(
+                    "pokemon.caught_data.location {} is outside seven-bit range 0..127",
+                    caught.location
                 ));
             }
         }
@@ -1444,7 +1462,8 @@ mod tests {
         pokemon.pokerus = 0xb4;
         pokemon.caught_data = Some(CaughtData {
             level: 5,
-            ball: 4,
+            time_of_day: Some(TimeOfDay::Day),
+            original_trainer_gender: 0,
             location: 18,
         });
         pokemon.mail = Some(MailData {

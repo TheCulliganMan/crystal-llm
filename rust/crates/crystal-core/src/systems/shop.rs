@@ -3,11 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-use crate::models::{
-    BALL_POCKET_CAPACITY, ITEM_POCKET_BALL, ITEM_POCKET_CAPACITY, ITEM_POCKET_ITEM,
-    ITEM_POCKET_KEY_ITEM, ITEM_POCKET_TM_HM, Item, ItemPocket, KEY_ITEM_POCKET_CAPACITY,
-    MAX_ITEM_STACK,
-};
+use crate::models::{Item, MAX_ITEM_STACK};
 use crate::state::{GameState, ScriptShopRequest, ScriptShopRuntimeEvent};
 use crate::systems::economy::CurrencyCatalog;
 
@@ -502,18 +498,15 @@ pub fn max_buy_quantity(state: &GameState, item: &Item) -> u16 {
     if item.price == 0 {
         return 0;
     }
-    let owned = state.bag.quantity(item);
-    if owned == 0 && pocket_is_full(state, &item.pocket) {
-        return 0;
-    }
-    let stack_limit = match item.pocket.as_str() {
-        ITEM_POCKET_KEY_ITEM | ITEM_POCKET_TM_HM => 1,
-        ITEM_POCKET_ITEM | ITEM_POCKET_BALL => MAX_ITEM_STACK,
-        _ => MAX_ITEM_STACK,
-    };
-    let capacity = stack_limit.saturating_sub(owned);
     let affordable = state.money / u32::from(item.price);
-    capacity.min(affordable.min(u32::from(u16::MAX)) as u16)
+    let maximum = affordable.min(u32::from(MAX_ITEM_STACK)) as u16;
+    (1..=maximum)
+        .rev()
+        .find(|quantity| {
+            let mut bag = state.bag.clone();
+            bag.add_item(item, *quantity).is_ok_and(|added| added)
+        })
+        .unwrap_or(0)
 }
 
 pub fn buy_active_shop_item(
@@ -681,24 +674,10 @@ pub enum SelectionDirection {
     Down,
 }
 
-fn pocket_is_full(state: &GameState, pocket: &ItemPocket) -> bool {
-    match pocket.as_str() {
-        ITEM_POCKET_ITEM => active_slots(&state.bag.items) >= ITEM_POCKET_CAPACITY,
-        ITEM_POCKET_BALL => active_slots(&state.bag.balls) >= BALL_POCKET_CAPACITY,
-        ITEM_POCKET_KEY_ITEM => active_slots(&state.bag.key_items) >= KEY_ITEM_POCKET_CAPACITY,
-        ITEM_POCKET_TM_HM => false,
-        _ => false,
-    }
-}
-
-fn active_slots(items: &BTreeMap<String, u16>) -> usize {
-    items.values().filter(|quantity| **quantity > 0).count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::item_pocket;
+    use crate::models::{ITEM_POCKET_CAPACITY, ItemPocket, item_pocket};
 
     fn item(id: &str, price: u16, pocket: ItemPocket) -> Item {
         Item {
@@ -1456,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn max_buy_quantity_respects_money_stack_and_full_pocket() {
+    fn max_buy_quantity_respects_money_and_available_stack_space() {
         let mut state = GameState {
             money: 1000,
             ..GameState::default()
@@ -1473,7 +1452,7 @@ mod tests {
             ..GameState::default()
         };
         stocked.bag.add_item(&potion, 98).expect("add potion");
-        assert_eq!(max_buy_quantity(&stocked, &potion), 1);
+        assert_eq!(max_buy_quantity(&stocked, &potion), 99);
     }
 
     #[test]

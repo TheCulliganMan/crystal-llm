@@ -5319,14 +5319,29 @@ fn spawn_field_storage_screen(
         }
         return Ok(());
     }
-    let option_count = if runtime_shell.bill_pc_move_open {
-        crate::core::models::MAX_BOX_MONS
+    let party_move_view = runtime_shell.bill_pc_move_open && runtime_shell.bill_pc_move_party_open;
+    let entries = if party_move_view {
+        snapshot.party.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
     } else {
-        pc_box.slots.len()
+        pc_box.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+    };
+    let option_count = if runtime_shell.bill_pc_move_open {
+        if runtime_shell.bill_pc_move_source.is_some() {
+            entries.len() + 1
+        } else {
+            entries.len().max(1)
+        }
+    } else {
+        entries.len()
+    };
+    let surface_id = if party_move_view {
+        pc_move_party_surface_id().to_string()
+    } else {
+        storage_cursor_surface_id(pc_box.index)
     };
     let selected = strict_readonly_cursor_index(
         &runtime_shell.storage_cursor,
-        &storage_cursor_surface_id(pc_box.index),
+        &surface_id,
         option_count,
     )
     .with_context(|| {
@@ -5338,9 +5353,9 @@ fn spawn_field_storage_screen(
     for (tile_x, text) in [
         (
             1.0,
-            format!("< {} >", compact_scene_label(&pc_box.name, 10)),
+            format!("< {} >", if party_move_view { "PARTY".to_string() } else { compact_scene_label(&pc_box.name, 10) }),
         ),
-        (14.0, format!("{:02}/20", pc_box.count)),
+        (14.0, format!("{:02}/{}", entries.len(), if party_move_view { 6 } else { 20 })),
     ] {
         let (x, y) = battle_hud_tile_origin(tile_x, 0.5);
         spawn_scene_dialog_bitmap_text(
@@ -5361,12 +5376,12 @@ fn spawn_field_storage_screen(
             break;
         }
         let row = 2.5 + visible_index as f32 * 1.5;
-        let slot = pc_box.slots.iter().find(|slot| slot.index == slot_index);
+        let slot = entries.iter().find(|(index, _)| *index == slot_index);
         let label = slot
-            .map(|slot| compact_scene_label(&slot.pokemon.nickname, 10))
+            .map(|(_, pokemon)| compact_scene_label(&pokemon.nickname, 10))
             .unwrap_or_else(|| "---".to_string());
         let level = slot
-            .map(|slot| format!("L{:02}", slot.pokemon.level))
+            .map(|(_, pokemon)| format!("L{:02}", pokemon.level))
             .unwrap_or_default();
         let (x, y) = battle_hud_tile_origin(1.0, row);
         spawn_scene_dialog_bitmap_text(
@@ -8148,11 +8163,23 @@ fn push_visible_storage_dialog_entries(
         ));
         return;
     };
-    let surface_id = storage_cursor_surface_id(box_snapshot.index);
+    let party_move_view = runtime_shell.bill_pc_move_open && runtime_shell.bill_pc_move_party_open;
+    let visible_slots = if party_move_view {
+        snapshot.party.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+    } else {
+        box_snapshot.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+    };
+    let surface_id = if party_move_view {
+        pc_move_party_surface_id().to_string()
+    } else {
+        storage_cursor_surface_id(box_snapshot.index)
+    };
     entries.push(compact_scene_label(
         &format!(
-            "BOX {} {} {}/{}",
-            box_snapshot.index, box_snapshot.name, box_snapshot.count, snapshot.storage.party_count
+            "{} {}/{}",
+            if party_move_view { "PARTY".to_string() } else { format!("BOX {} {}", box_snapshot.index, box_snapshot.name) },
+            visible_slots.len(),
+            if party_move_view { 6 } else { 20 }
         ),
         SCENE_DIALOG_TEXT_CHARS,
     ));
@@ -8164,14 +8191,18 @@ fn push_visible_storage_dialog_entries(
         },
         SCENE_DIALOG_TEXT_CHARS,
     ));
-    if box_snapshot.slots.is_empty() && !runtime_shell.bill_pc_move_open {
+    if visible_slots.is_empty() && !runtime_shell.bill_pc_move_open {
         entries.push("EMPTY".to_string());
         return;
     }
     let option_count = if runtime_shell.bill_pc_move_open {
-        crate::core::models::MAX_BOX_MONS
+        if runtime_shell.bill_pc_move_source.is_some() {
+            visible_slots.len() + 1
+        } else {
+            visible_slots.len().max(1)
+        }
     } else {
-        box_snapshot.slots.len()
+        visible_slots.len()
     };
     let cursor_index =
         strict_readonly_cursor_index(&runtime_shell.storage_cursor, &surface_id, option_count);
@@ -8185,14 +8216,13 @@ fn push_visible_storage_dialog_entries(
     entries.extend(
         windowed_index_range(cursor_index, option_count).map(|offset| {
             let marker = if offset == cursor_index { ">" } else { " " };
-            let Some(slot) = box_snapshot.slots.iter().find(|slot| slot.index == offset) else {
+            let Some((slot_index, pokemon)) = visible_slots.iter().find(|(index, _)| *index == offset) else {
                 return compact_scene_label(
                     &format!("{marker}{offset} EMPTY"),
                     SCENE_DIALOG_TEXT_CHARS,
                 );
             };
-            let held = slot
-                .pokemon
+            let held = pokemon
                 .item
                 .as_deref()
                 .map(|item| format!(" item={item}"))
@@ -8200,11 +8230,11 @@ fn push_visible_storage_dialog_entries(
             compact_scene_label(
                 &format!(
                     "{marker}{} {} L{} HP {}/{}{}",
-                    slot.index,
-                    slot.pokemon.species.id,
-                    slot.pokemon.level,
-                    slot.pokemon.hp,
-                    slot.pokemon.max_hp,
+                    slot_index,
+                    pokemon.species.id,
+                    pokemon.level,
+                    pokemon.hp,
+                    pokemon.max_hp,
                     held
                 ),
                 SCENE_DIALOG_TEXT_CHARS,

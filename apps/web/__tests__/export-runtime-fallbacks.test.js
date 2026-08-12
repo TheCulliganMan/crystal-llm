@@ -348,7 +348,7 @@ describe("export-runtime-fallbacks", () => {
           BATTLE_ANIM_OAMSET_HIT: {
             name: "BATTLE_ANIM_OAMSET_HIT",
             tile_offset: 0,
-            entries: [{ x: 0, y: 0, tile_id: 0, xflip: false, yflip: false }],
+            entries: [{ x: 0, y: 0, tile_id: 0, xflip: false, yflip: false, obp: 0 }],
           },
         },
         gfx_table: {
@@ -487,7 +487,7 @@ describe("export-runtime-fallbacks", () => {
           "battleanimoam 3, 1, .OAMData_Hit ; BATTLE_ANIM_OAMSET_HIT",
           ".OAMData_Hit:",
           "\tdb 1",
-          "\tdb -2, 5, $07, OAM_XFLIP | OAM_YFLIP",
+          "\tdb -2, 5, $07, OAM_XFLIP | OAM_YFLIP | OAM_PAL1",
           "",
         ].join("\n")
       );
@@ -511,6 +511,7 @@ describe("export-runtime-fallbacks", () => {
             tile_id: 7,
             xflip: true,
             yflip: true,
+            obp: 1,
           },
         ],
       });

@@ -17,6 +17,7 @@ mod cut_tree;
 mod dance_theater;
 mod elevation;
 mod elite_four_room;
+mod facility;
 mod facility_divider;
 mod flower;
 mod flower_shop;
@@ -33,6 +34,7 @@ mod interior;
 mod johto_fence;
 mod kanto_cliff;
 mod kanto_post;
+mod lab;
 mod mart;
 mod mesh;
 mod modern_route;
@@ -52,6 +54,7 @@ mod ship;
 mod sign;
 mod tower;
 mod train_station;
+mod underground_boundary;
 mod underground_path;
 mod vermilion;
 mod vermilion_gym;
@@ -581,9 +584,8 @@ fn voxel_clear_color(frame: &VisualWorldFrame) -> Color {
         // boundary is unlit void, never the outdoor horizon color.
         Color::srgb(0.035, 0.025, 0.065)
     } else if tileset.is_some_and(crate::interior::has_back_wall) {
-        // The recovered renderer treats every indoor scene as a room, not an
-        // outdoor diorama. Keep the generated architectural back wall, but
-        // clear anything beyond its finite edges to a neutral interior void.
+        // Authored wall courses define the room. Anything beyond their finite
+        // edges is neutral void; never synthesize a full-width gray backdrop.
         Color::srgb(0.055, 0.050, 0.045)
     } else {
         Color::srgb(0.72, 0.83, 0.78)

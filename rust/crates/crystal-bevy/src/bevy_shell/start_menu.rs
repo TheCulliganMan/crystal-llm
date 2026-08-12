@@ -1051,94 +1051,81 @@ fn visible_move_battler_offsets(
             .max()
             .unwrap_or(effect.frame);
         let age = animation.frame.saturating_sub(reset_frame);
-        let phase_age = animation.frame.saturating_sub(effect.frame);
         let source_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
         let (offset_x, offset_y, force_player) = match effect.effect_id.as_str() {
             "BATTLE_BG_EFFECT_TACKLE"
-            | "BATTLE_BG_EFFECT_BODY_SLAM"
-            | "BATTLE_BG_EFFECT_BETA_PURSUIT"
-            | "BATTLE_BG_EFFECT_ROLLOUT"
-            | "BATTLE_BG_EFFECT_VITAL_THROW" => {
-                let distance = match age {
-                    0 => 2,
-                    1 => 4,
-                    2 => 6,
-                    3 => 8,
-                    4 => 6,
-                    5 => 4,
-                    6 => 2,
-                    7 => 0,
-                    _ => continue,
+            | "BATTLE_BG_EFFECT_BODY_SLAM" => {
+                let Some(distance) = visible_tackle_lunge_offset(age) else {
+                    continue;
                 };
                 (if target_is_player { distance } else { -distance }, 0, false)
             }
-            "BATTLE_BG_EFFECT_WOBBLE_MON" | "BATTLE_BG_EFFECT_WAVE_DEFORM_MON" => {
-                let amplitude = if effect.param == 0 { 4 } else { effect.param };
-                let frequency = if effect.duration == 0 { 3 } else { effect.duration };
-                let lifetime = if effect.duration == 0 { frequency.saturating_mul(2) } else { effect.duration };
-                if age >= lifetime.max(1) { continue; }
-                let value = (f64::from(amplitude)
-                    * (f64::from(phase_age) * std::f64::consts::PI / f64::from(frequency.max(1))).sin())
-                    .round() as i32;
-                (0, value, false)
+            "BATTLE_BG_EFFECT_BETA_PURSUIT" => {
+                let Some(distance) = visible_beta_pursuit_offset(age) else {
+                    continue;
+                };
+                (if target_is_player { distance } else { -distance }, 0, false)
+            }
+            "BATTLE_BG_EFFECT_VITAL_THROW" => {
+                let increment_frame = animation.bg_events.iter().find(|candidate| {
+                    candidate.incremented
+                        && candidate.effect_id == effect.effect_id
+                        && candidate.frame >= effect.frame
+                }).map(|candidate| candidate.frame);
+                let Some(distance) = visible_vital_throw_offset(age, increment_frame.map(|frame| frame.saturating_sub(effect.frame))) else {
+                    continue;
+                };
+                (if target_is_player { distance } else { -distance }, 0, false)
+            }
+            "BATTLE_BG_EFFECT_WOBBLE_MON" => {
+                // The source ignores all script operands except the target.
+                // Its setup update holds at zero, then advances the exact
+                // BattleAnim sine phase by four with radius eight until the
+                // script increments the background-effect state.
+                let stopped = animation.bg_events.iter().any(|candidate| {
+                    candidate.incremented
+                        && candidate.effect_id == effect.effect_id
+                        && candidate.frame >= effect.frame
+                        && candidate.frame <= animation.frame
+                });
+                if age == 0 || stopped {
+                    continue;
+                }
+                let angle = ((age - 1) as u8).wrapping_mul(4);
+                (0, visible_battle_anim_sine(angle, 8), false)
             }
             "BATTLE_BG_EFFECT_WOBBLE_PLAYER" => {
-                let amplitude = if effect.param == 0 { 3 } else { effect.param };
-                let frequency = if effect.duration == 0 { 4 } else { effect.duration };
-                let lifetime = if effect.duration == 0 { frequency.saturating_mul(2) } else { effect.duration };
-                if age >= lifetime.max(1) { continue; }
-                let value = (f64::from(amplitude)
-                    * (f64::from(phase_age) * std::f64::consts::PI / f64::from(frequency.max(1))).sin())
-                    .round() as i32;
+                // BattleBGEffect_WobblePlayer always owns the player side and
+                // ignores all four script operands. After setup it advances a
+                // radius-six BattleAnim sine phase by two for $20 updates.
+                if age == 0 || age > 0x20 {
+                    continue;
+                }
+                let angle = ((age - 1) as u8).wrapping_mul(2);
+                let value = visible_battle_anim_sine(angle, 6);
                 (value, 0, true)
             }
             "BATTLE_BG_EFFECT_VIBRATE_MON" => {
-                let amplitude = if effect.param == 0 { 2 } else { effect.param };
-                let lifetime = effect.duration.max(2);
-                if age >= lifetime { continue; }
-                let value = (f64::from(amplitude)
-                    * (f64::from(phase_age) * std::f64::consts::PI).sin())
-                    .round() as i32;
+                // BattleBGEffect_VibrateMon ignores the script duration/param.
+                // Its setup frame has no displacement, then its fixed $20
+                // counter toggles a one-pixel SCX offset every two updates.
+                if age == 0 || age > 0x20 {
+                    continue;
+                }
+                let value = if ((age - 1) / 2) & 1 == 0 { -1 } else { 1 };
                 (value, 0, false)
             }
-            "BATTLE_BG_EFFECT_DIG" | "BATTLE_BG_EFFECT_FLAIL" | "BATTLE_BG_EFFECT_DOUBLE_TEAM" => {
-                let amplitude = if effect.param == 0 { 5 } else { effect.param };
-                let frequency = if effect.param == 0 { 3 } else { u16::from(effect.param) };
-                let lifetime = if effect.duration == 0 { frequency.saturating_mul(2) } else { effect.duration };
-                if age >= lifetime.max(1) { continue; }
-                let value = (f64::from(amplitude)
-                    * (f64::from(phase_age) * std::f64::consts::PI / f64::from(frequency.max(1))).sin())
-                    .round() as i32;
-                (0, value, false)
-            }
             "BATTLE_BG_EFFECT_BOUNCE_DOWN" => {
-                let Some(value) = visible_bounce_down_offset(animation, effect) else {
-                    continue;
-                };
-                (0, value, false)
+                continue;
             }
             "BATTLE_BG_EFFECT_REMOVE_MON" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                if age >= duration.saturating_sub(1) {
-                    continue;
-                }
-                let start = if effect.param == 0 { 80 } else { i32::from(effect.param) };
-                let value = (f64::from(start) * (f64::from(age) / f64::from(duration.max(1))))
-                    .round() as i32;
-                (if target_is_player { value } else { -value }, 0, false)
+                let (distance, _) = visible_remove_mon_state(age, target_is_player);
+                (distance, 0, false)
             }
-            "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" | "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON2" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                if age >= duration {
-                    continue;
-                }
-                let start = if effect.param == 0 { 80 } else { i32::from(effect.param) };
-                let numerator = duration.saturating_sub(age).saturating_sub(1);
-                let value = (f64::from(start)
-                    * (f64::from(numerator) / f64::from(duration.max(1))))
-                    .round() as i32;
-                (if target_is_player { value } else { -value }, 0, false)
+            "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" => {
+                continue;
             }
+            "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON2" => continue,
             "BATTLE_BG_EFFECT_FAINT_MON" => {
                 let duration = if effect.duration == 0 { 14 } else { effect.duration };
                 if age >= duration {
@@ -1168,6 +1155,83 @@ fn visible_move_battler_offsets(
     (player, enemy)
 }
 
+fn visible_tackle_lunge_offset(age: u16) -> Option<i32> {
+    const OFFSETS: [i32; 12] = [0, 0, 2, 4, 6, 8, 10, 8, 6, 4, 2, 0];
+    OFFSETS.get(usize::from(age)).copied()
+}
+
+fn visible_beta_pursuit_offset(age: u16) -> Option<i32> {
+    visible_tackle_lunge_offset(age).map(|offset| -offset)
+}
+
+fn visible_vital_throw_offset(age: u16, increment_age: Option<u16>) -> Option<i32> {
+    let backwards = [0_i32, 0, -2, -4, -6, -8, -10];
+    if age < backwards.len() as u16 {
+        return Some(backwards[usize::from(age)]);
+    }
+    let increment_age = increment_age?;
+    if age < increment_age {
+        return Some(-10);
+    }
+    let return_age = age.saturating_sub(increment_age);
+    const RETURN: [i32; 7] = [-10, -8, -6, -4, -2, 0, 0];
+    RETURN.get(usize::from(return_age)).copied()
+}
+
+fn visible_remove_mon_state(age: u16, player: bool) -> (i32, bool) {
+    // Setup occupies the first update. State 1 then shifts the battler's BG
+    // rectangle by one tile, states 2 and 3 are one-update pauses, and state 4
+    // either loops or ends. The player rectangle is nine tiles wide; the enemy
+    // rectangle is eight.
+    let shifts = if age == 0 {
+        0
+    } else {
+        ((age - 1) / 4 + 1).min(if player { 9 } else { 8 })
+    };
+    let removed = shifts == if player { 9 } else { 8 };
+    let distance = i32::from(shifts) * 8;
+    (if player { -distance } else { distance }, !removed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleRemoveMonClip {
+    source_pixels: u8,
+    crop_left: bool,
+}
+
+fn visible_remove_mon_clips(
+    animation: Option<&VisibleMoveAnimation>,
+) -> (Option<VisibleRemoveMonClip>, Option<VisibleRemoveMonClip>) {
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return (None, None);
+    };
+    let mut player = None;
+    let mut enemy = None;
+    for effect in animation.bg_events.iter().filter(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_REMOVE_MON"
+            && effect.frame <= animation.frame
+    }) {
+        let target_player = target_player_for_effect(animation, effect);
+        let age = animation.frame.saturating_sub(effect.frame);
+        let shifts = if age == 0 { 0 } else { (age - 1) / 4 + 1 };
+        // The 6x6 backpic starts two tiles inside its 9-column copy region;
+        // the 7x7 frontpic has one blank column at the right of its 8-column
+        // region. Cropping starts only after that padding has scrolled away.
+        let padding = if target_player { 2 } else { 1 };
+        let clip = VisibleRemoveMonClip {
+            source_pixels: shifts.saturating_sub(padding).saturating_mul(8) as u8,
+            crop_left: target_player,
+        };
+        if target_player {
+            player = Some(clip);
+        } else {
+            enemy = Some(clip);
+        }
+    }
+    (player, enemy)
+}
+
 fn visible_move_screen_offset(animation: Option<&VisibleMoveAnimation>) -> Vec3 {
     let Some(animation) = animation.filter(|animation| animation.started) else {
         return Vec3::ZERO;
@@ -1180,6 +1244,7 @@ fn visible_move_screen_offset(animation: Option<&VisibleMoveAnimation>) -> Vec3 
                 effect.effect_id.as_str(),
                 "BATTLE_BG_EFFECT_SHAKE_SCREEN_X"
                     | "BATTLE_BG_EFFECT_SHAKE_SCREEN_Y"
+                    | "BATTLE_BG_EFFECT_ROLLOUT"
                     | "BATTLE_BG_EFFECT_WOBBLE_SCREEN"
             )
     }) {
@@ -1204,51 +1269,29 @@ fn visible_move_screen_offset(animation: Option<&VisibleMoveAnimation>) -> Vec3 
             .max()
             .unwrap_or(effect.frame);
         let age = animation.frame.saturating_sub(reset_frame);
-        let phase_age = animation.frame.saturating_sub(effect.frame);
         let (screen_x, screen_y) = if effect.effect_id == "BATTLE_BG_EFFECT_WOBBLE_SCREEN" {
-            let amplitude = if effect.param == 0 { 3 } else { effect.param };
-            let frequency = if effect.duration == 0 { 4 } else { effect.duration };
-            let lifetime = if effect.duration == 0 {
-                frequency.saturating_mul(2)
-            } else {
-                effect.duration
-            };
-            if age >= lifetime.max(1) {
+            // BattleBGEffect_WobbleScreen starts immediately (there is no
+            // setup jumptable state), ignores every script operand, and
+            // writes a radius-six sine phase to hSCX for $20 updates.
+            if age >= 0x20 {
                 continue;
             }
-            let value = (f64::from(amplitude)
-                * (f64::from(phase_age) * std::f64::consts::PI
-                    / f64::from(frequency.max(1)))
-                .sin())
-                .round() as f32;
+            let value = visible_battle_anim_sine((age as u8).wrapping_mul(2), 6) as f32;
             (value, 0.0)
-        } else {
-            if age >= effect.duration.max(1) {
+        } else if effect.effect_id == "BATTLE_BG_EFFECT_ROLLOUT" {
+            let Some(value) = visible_bg_shake_amount(effect, age) else {
                 continue;
-            }
-            let amplitude = if let Some(value) =
-                parse_visible_battle_animation_int(&effect.target).filter(|value| *value > 0)
-            {
-                value as f32
-            } else if effect.param >> 4 == 0 {
-                4.0
-            } else {
-                f32::from(effect.param >> 4)
             };
-            let frequency = u16::from(if effect.param & 0x0f == 0 {
-                2
-            } else {
-                effect.param & 0x0f
-            });
-            let value = if (age / frequency) & 1 == 0 {
-                amplitude
-            } else {
-                -amplitude
+            let value = if value >= 0 { f32::from(value) } else { 0.0 };
+            (0.0, value)
+        } else {
+            let Some(value) = visible_bg_shake_amount(effect, age) else {
+                continue;
             };
             if effect.effect_id == "BATTLE_BG_EFFECT_SHAKE_SCREEN_X" {
-                (value, 0.0)
+                (f32::from(value), 0.0)
             } else {
-                (0.0, value)
+                (0.0, f32::from(value))
             }
         };
         let source_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
@@ -1259,6 +1302,40 @@ fn visible_move_screen_offset(animation: Option<&VisibleMoveAnimation>) -> Vec3 
         );
     }
     result
+}
+
+fn visible_bg_shake_amount(effect: &VisibleMoveBgEvent, age: u16) -> Option<i8> {
+    if age >= effect.duration {
+        return None;
+    }
+    let mut parameter = effect.param;
+    let mut displacement = parse_visible_battle_animation_int(&effect.target)? as u8;
+    for _ in 0..=age {
+        if parameter & 0x0f != 0 {
+            parameter = parameter.wrapping_sub(1);
+        } else {
+            parameter = parameter.rotate_left(4) | parameter;
+            displacement = 0_u8.wrapping_sub(displacement);
+        }
+    }
+    Some(displacement as i8)
+}
+
+fn visible_rollout_object_y_offset(animation: &VisibleMoveAnimation, slot_index: usize) -> i32 {
+    if slot_index != 0 {
+        return 0;
+    }
+    let Some(effect) = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_ROLLOUT"
+            && effect.frame <= animation.frame
+    }) else {
+        return 0;
+    };
+    let age = animation.frame.saturating_sub(effect.frame);
+    visible_bg_shake_amount(effect, age)
+        .filter(|displacement| *displacement >= 0)
+        .map_or(0, |displacement| -i32::from(displacement))
 }
 
 fn apply_visible_battle_screen_offset(
@@ -1287,34 +1364,20 @@ fn visible_bounce_down_offset(
     animation: &VisibleMoveAnimation,
     effect: &VisibleMoveBgEvent,
 ) -> Option<i32> {
-    let mut distance = 0_i32;
-    let mut returning = false;
-    let mut end_requested = false;
-    for frame in effect.frame..=animation.frame {
-        if animation.bg_events.iter().any(|candidate| {
-            candidate.incremented
-                && candidate.effect_id == effect.effect_id
-                && candidate.frame == frame
-        }) {
-            end_requested = true;
-        }
-        if !returning {
-            distance += 2;
-            if distance >= 8 {
-                distance = 8;
-                returning = true;
-            }
-        } else {
-            distance = (distance - 2).max(0);
-            if distance == 0 && !end_requested {
-                returning = false;
-            }
-        }
-        if end_requested && returning && distance == 0 {
-            return (frame == animation.frame).then_some(0);
-        }
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
     }
-    Some(distance)
+    let age = animation.frame.saturating_sub(effect.frame);
+    if age == 0 {
+        return Some(0);
+    }
+    let parameter = 0x20_u8.wrapping_add((age.saturating_sub(1) as u8).wrapping_mul(2));
+    Some(17 + visible_battle_anim_sine(parameter.wrapping_add(0x10), 16))
 }
 
 fn visible_move_battler_visibility(
@@ -1344,21 +1407,17 @@ fn visible_move_battler_visibility(
             .unwrap_or(effect.frame);
         let age = animation.frame.saturating_sub(reset_frame);
         let visible = match effect.effect_id.as_str() {
-            "BATTLE_BG_EFFECT_HIDE_MON" | "BATTLE_BG_EFFECT_WITHDRAW" => false,
+            "BATTLE_BG_EFFECT_HIDE_MON" => false,
             "BATTLE_BG_EFFECT_SHOW_MON" => true,
             "BATTLE_BG_EFFECT_REMOVE_MON" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                age < duration.saturating_sub(1)
+                visible_remove_mon_state(age, target_player_for_effect(animation, effect)).1
             }
             "BATTLE_BG_EFFECT_FAINT_MON" => {
                 let duration = if effect.duration == 0 { 14 } else { effect.duration };
                 age < duration
             }
             "BATTLE_BG_EFFECT_ENTER_MON" => true,
-            "BATTLE_BG_EFFECT_RETURN_MON" => {
-                let step_delay = effect.duration.max(1);
-                age < step_delay.saturating_mul(3)
-            }
+            "BATTLE_BG_EFFECT_RETURN_MON" => age < 12,
             _ => continue,
         };
         let target_player = match effect.target.as_str() {
@@ -1378,6 +1437,20 @@ fn visible_move_battler_visibility(
     (player_visible, enemy_visible)
 }
 
+fn target_player_for_effect(
+    animation: &VisibleMoveAnimation,
+    effect: &VisibleMoveBgEvent,
+) -> bool {
+    match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => matches!(
+            effect.effect_id.as_str(),
+            "BATTLE_BG_EFFECT_REMOVE_MON" | "BATTLE_BG_EFFECT_FAINT_MON"
+        ),
+    }
+}
+
 fn visible_move_controls_battler_visibility(
     animation: Option<&VisibleMoveAnimation>,
     player: bool,
@@ -1390,7 +1463,6 @@ fn visible_move_controls_battler_visibility(
             effect.effect_id.as_str(),
             "BATTLE_BG_EFFECT_HIDE_MON"
                 | "BATTLE_BG_EFFECT_SHOW_MON"
-                | "BATTLE_BG_EFFECT_WITHDRAW"
                 | "BATTLE_BG_EFFECT_REMOVE_MON"
                 | "BATTLE_BG_EFFECT_ENTER_MON"
                 | "BATTLE_BG_EFFECT_RETURN_MON"
@@ -1421,44 +1493,32 @@ fn visible_move_battler_clip_tiles(
     {
         if !matches!(
             effect.effect_id.as_str(),
-            "BATTLE_BG_EFFECT_ENTER_MON"
-                | "BATTLE_BG_EFFECT_RETURN_MON"
-                | "BATTLE_BG_EFFECT_BATTLEROBJ_1ROW"
-                | "BATTLE_BG_EFFECT_BATTLEROBJ_2ROW"
+            "BATTLE_BG_EFFECT_ENTER_MON" | "BATTLE_BG_EFFECT_RETURN_MON"
         ) {
             continue;
         }
         let age = animation.frame.saturating_sub(effect.frame);
-        let step = if matches!(
-            effect.effect_id.as_str(),
-            "BATTLE_BG_EFFECT_BATTLEROBJ_1ROW" | "BATTLE_BG_EFFECT_BATTLEROBJ_2ROW"
-        ) {
-            age
-        } else {
-            age / effect.duration.max(1)
-        };
+        let step = age / 4;
         let target_player = match effect.target.as_str() {
             "BG_EFFECT_USER" => animation.player_move,
             "BG_EFFECT_TARGET" => !animation.player_move,
             _ => true,
         };
         let clip_tiles = match (effect.effect_id.as_str(), target_player, step) {
+            ("BATTLE_BG_EFFECT_ENTER_MON", _, 3..) => None,
             ("BATTLE_BG_EFFECT_ENTER_MON", true, 0) => Some(2),
             ("BATTLE_BG_EFFECT_ENTER_MON", true, 1) => Some(4),
+            ("BATTLE_BG_EFFECT_ENTER_MON", true, 2) => Some(6),
             ("BATTLE_BG_EFFECT_ENTER_MON", false, 0) => Some(3),
             ("BATTLE_BG_EFFECT_ENTER_MON", false, 1) => Some(5),
+            ("BATTLE_BG_EFFECT_ENTER_MON", false, 2) => Some(7),
             ("BATTLE_BG_EFFECT_RETURN_MON", true, 0) => Some(6),
             ("BATTLE_BG_EFFECT_RETURN_MON", true, 1) => Some(4),
-            ("BATTLE_BG_EFFECT_RETURN_MON", true, _) => Some(2),
+            ("BATTLE_BG_EFFECT_RETURN_MON", true, 2) => Some(2),
             ("BATTLE_BG_EFFECT_RETURN_MON", false, 0) => Some(7),
             ("BATTLE_BG_EFFECT_RETURN_MON", false, 1) => Some(5),
-            ("BATTLE_BG_EFFECT_RETURN_MON", false, _) => Some(3),
-            ("BATTLE_BG_EFFECT_BATTLEROBJ_1ROW", true, value)
-            | ("BATTLE_BG_EFFECT_BATTLEROBJ_2ROW", true, value)
-                if value < 6 => Some((value + 1) as u8),
-            ("BATTLE_BG_EFFECT_BATTLEROBJ_1ROW", false, value)
-            | ("BATTLE_BG_EFFECT_BATTLEROBJ_2ROW", false, value)
-                if value < 6 => Some((value + 1) as u8),
+            ("BATTLE_BG_EFFECT_RETURN_MON", false, 2) => Some(3),
+            ("BATTLE_BG_EFFECT_RETURN_MON", _, 3..) => None,
             _ => None,
         };
         if target_player {
@@ -1470,9 +1530,61 @@ fn visible_move_battler_clip_tiles(
     (player, enemy)
 }
 
-fn visible_move_battler_overlays(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleBattlerRowExtraction {
+    rows: u8,
+    top: bool,
+    bg_rows_cleared: bool,
+}
+
+fn visible_move_battler_row_extractions(
     animation: Option<&VisibleMoveAnimation>,
-) -> (Option<([u8; 3], u8)>, Option<([u8; 3], u8)>) {
+) -> (
+    Option<VisibleBattlerRowExtraction>,
+    Option<VisibleBattlerRowExtraction>,
+) {
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return (None, None);
+    };
+    let mut player = None;
+    let mut enemy = None;
+    for effect in animation.bg_events.iter().filter(|effect| {
+        matches!(
+            effect.effect_id.as_str(),
+            "BATTLE_BG_EFFECT_BATTLEROBJ_1ROW" | "BATTLE_BG_EFFECT_BATTLEROBJ_2ROW"
+        ) && effect.frame <= animation.frame
+    }) {
+        if animation.object_events.iter().any(|event| {
+            event.frame >= effect.frame
+                && event.frame <= animation.frame
+                && matches!(&event.command, VisibleMoveObjectCommand::Clear)
+        }) {
+            continue;
+        }
+        let target_player = target_player_for_effect(animation, effect);
+        let redrawn = animation.bg_events.iter().any(|candidate| {
+            candidate.effect_id == "BATTLE_BG_EFFECT_SHOW_MON"
+                && candidate.frame > effect.frame
+                && candidate.frame <= animation.frame
+                && target_player_for_effect(animation, candidate) == target_player
+        });
+        let extraction = VisibleBattlerRowExtraction {
+            rows: if effect.effect_id.ends_with("2ROW") { 2 } else { 1 },
+            top: target_player,
+            bg_rows_cleared: animation.frame > effect.frame && !redrawn,
+        };
+        if target_player {
+            player = Some(extraction);
+        } else {
+            enemy = Some(extraction);
+        }
+    }
+    (player, enemy)
+}
+
+fn visible_move_battler_bgps(
+    animation: Option<&VisibleMoveAnimation>,
+) -> (Option<u8>, Option<u8>) {
     let Some(animation) = animation.filter(|animation| animation.started) else {
         return (None, None);
     };
@@ -1495,74 +1607,54 @@ fn visible_move_battler_overlays(
                 && candidate.frame >= effect.frame
                 && candidate.frame <= animation.frame
         });
-        let palette_step = u16::from((effect.param >> 4).max(1));
-        let overlay = match effect.effect_id.as_str() {
-            "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT" => {
-                let alpha = match age / palette_step {
-                    1 => 128,
-                    2 => 213,
-                    _ => 0,
-                };
-                (alpha != 0).then_some(([255, 255, 255], alpha))
-            }
-            "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT_REPEATING" if !stopped => {
-                let alpha = [0, 128, 213, 128][usize::from((age / palette_step) as u8 & 3)];
-                (alpha != 0).then_some(([255, 255, 255], alpha))
-            }
-            "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK" => {
-                let alpha = match age / palette_step {
-                    1 => 128,
-                    2 => 213,
-                    _ => 0,
-                };
-                (alpha != 0).then_some(([0, 0, 0], alpha))
-            }
+        let (table, repeating): (&[u8], bool) = match effect.effect_id.as_str() {
+            "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT" => (&[0xe4, 0x90, 0x40], false),
+            "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK" => (&[0xe4, 0xf8, 0xfc], false),
+            "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT_REPEATING" => (&[0xe4, 0x90, 0x40, 0x90], true),
             "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK_REPEATING"
-            | "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING" if !stopped => {
-                let alpha = [0, 128, 213, 128][usize::from((age / palette_step) as u8 & 3)];
-                (alpha != 0).then_some(([0, 0, 0], alpha))
+            | "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING" => (&[0xe4, 0xf8, 0xfc, 0xf8], true),
+            "BATTLE_BG_EFFECT_CYCLE_MON_LIGHT_DARK_REPEATING" => {
+                (&[0xe4, 0xf8, 0xfc, 0xf8, 0xe4, 0x90, 0x40, 0x90], true)
             }
-            "BATTLE_BG_EFFECT_FADE_MON_TO_WHITE_WAIT_FADE_BACK" => {
-                if stopped {
-                    None
-                } else {
-                    let step_delay = u16::from((effect.param >> 4).max(1));
-                    let initial_delay = u16::from(if effect.param & 0x0f == 0 {
-                        (effect.param >> 4).max(1)
-                    } else {
-                        effect.param & 0x0f
-                    });
-                    let index = if age < initial_delay {
-                        0
-                    } else {
-                        1 + (age - initial_delay) / step_delay
-                    };
-                    let alpha = match index {
-                        0 | 16 => 0,
-                        1 | 15 => 128,
-                        2 | 14 => 213,
-                        3..=13 => 255,
-                        _ => 0,
-                    };
-                    (alpha != 0).then_some(([255, 255, 255], alpha))
-                }
-            }
-            "BATTLE_BG_EFFECT_FADE_MON_FROM_WHITE" => {
-                let index = usize::from((age / 2).min(3));
-                let alpha = [255, 213, 128, 0][index];
-                (alpha != 0).then_some(([255, 255, 255], alpha))
-            }
-            _ => None,
+            "BATTLE_BG_EFFECT_FLASH_MON_REPEATING" => (&[0xe4, 0xfc, 0xe4, 0x00], true),
+            "BATTLE_BG_EFFECT_FADE_MON_TO_WHITE_WAIT_FADE_BACK" => (&[
+                0xe4, 0x90, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x40, 0x90, 0xe4,
+            ], false),
+            "BATTLE_BG_EFFECT_FADE_MON_FROM_WHITE" => (&[0x00, 0x40, 0x90, 0xe4], false),
+            _ => continue,
         };
-        if let Some(overlay) = overlay {
+        if stopped {
             if effect.effect_id == "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING" {
-                player = Some(overlay);
-                enemy = Some(overlay);
+                player = None;
+                enemy = None;
             } else if target_player {
-                player = Some(overlay);
+                player = None;
             } else {
-                enemy = Some(overlay);
+                enemy = None;
             }
+            continue;
+        }
+        let initial_delay = u16::from(effect.param & 0x0f).saturating_add(1);
+        let interval = u16::from(effect.param >> 4).saturating_add(1);
+        let value = if age < initial_delay {
+            0xe4
+        } else {
+            let index = usize::from((age - initial_delay) / interval);
+            if !repeating && index >= table.len() {
+                table[table.len() - 1]
+            } else {
+                table[index % table.len()]
+            }
+        };
+        let mapped = (value != 0xe4).then_some(value);
+        if effect.effect_id == "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING" {
+            player = mapped;
+            enemy = mapped;
+        } else if target_player {
+            player = mapped;
+        } else {
+            enemy = mapped;
         }
     }
     (player, enemy)
@@ -1588,13 +1680,31 @@ fn visible_move_battler_art_overrides(
     {
         let mut target_player = animation.player_move;
         let state = match event.effect_id.as_str() {
-            "BATTLE_ACTOR_TRANSFORM" => VisibleBattlerArtOverride::Transform,
+            // Transform and Minimize only load a picture into temporary vTiles0.
+            // The actor BG remains unchanged until UpdateActorPic copies it.
+            "BATTLE_ACTOR_TRANSFORM" | "BATTLE_ACTOR_MINIMIZE" => continue,
             "BATTLE_ACTOR_RAISESUB" => VisibleBattlerArtOverride::Substitute,
-            "BATTLE_ACTOR_DROPSUB" | "BATTLE_ACTOR_UPDATEACTORPIC" => {
-                VisibleBattlerArtOverride::Pokemon
+            "BATTLE_ACTOR_DROPSUB" => VisibleBattlerArtOverride::Pokemon,
+            "BATTLE_ACTOR_UPDATEACTORPIC" => {
+                let loaded_picture = animation
+                    .bg_events
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            candidate.effect_id.as_str(),
+                            "BATTLE_ACTOR_TRANSFORM" | "BATTLE_ACTOR_MINIMIZE"
+                        ) && candidate.frame < event.frame
+                            && target_player_for_effect(animation, candidate) == target_player
+                    })
+                    .max_by_key(|candidate| candidate.frame)
+                    .map(|candidate| candidate.effect_id.as_str());
+                match loaded_picture {
+                    Some("BATTLE_ACTOR_TRANSFORM") => VisibleBattlerArtOverride::Transform,
+                    Some("BATTLE_ACTOR_MINIMIZE") => VisibleBattlerArtOverride::Minimize,
+                    _ => VisibleBattlerArtOverride::Pokemon,
+                }
             }
             "BATTLE_ACTOR_BEATUP" => VisibleBattlerArtOverride::Pokemon,
-            "BATTLE_ACTOR_MINIMIZE" => VisibleBattlerArtOverride::Minimize,
             "BATTLE_ACTOR_MINIMIZEOPP" => {
                 target_player = !target_player;
                 VisibleBattlerArtOverride::Minimize
@@ -1669,10 +1779,17 @@ fn visible_surf_line_offsets(
     let VisibleMoveObjectCommand::Spawn { x, y, param, .. } = &spawn.command else {
         return None;
     };
+    let effect_age = animation.frame.saturating_sub(surf_effect.frame);
+    if effect_age == 0 {
+        return Some([0; 0x5f]);
+    }
+    // BG effects execute before animation objects. The copy therefore sees
+    // the scanline boundary written by Surf on the preceding update.
+    let object_frame = animation.frame.saturating_sub(1);
     let mut state = 0_u8;
     let mut state_frame = spawn.frame;
     for event in animation.object_events.iter().skip(spawn_index + 1) {
-        if event.frame > animation.frame {
+        if event.frame > object_frame {
             break;
         }
         match &event.command {
@@ -1688,8 +1805,8 @@ fn visible_surf_line_offsets(
             _ => {}
         }
     }
-    let age = animation.frame.saturating_sub(spawn.frame);
-    let state_age = animation.frame.saturating_sub(state_frame);
+    let age = object_frame.saturating_sub(spawn.frame);
+    let state_age = object_frame.saturating_sub(state_frame);
     let (_, animated_y) = visible_battle_anim_object_position(
         "BATTLE_ANIM_FUNC_SURF",
         i32::from(*x),
@@ -1710,13 +1827,812 @@ fn visible_surf_line_offsets(
         animated_y.saturating_sub(16)
     };
     let start = start_y.clamp(0, 0x5e) as usize;
-    let rotation = usize::from(animation.frame.saturating_sub(surf_effect.frame)) + 1;
+    let rotation = usize::from(effect_age);
     let mut offsets = [0_i8; 0x5f];
     for line in start.saturating_add(1)..=0x5e {
-        offsets[line] = visible_battle_anim_sine(((line + rotation) as u8).wrapping_mul(2), 2)
-            as i8;
+        let wave_index = (line + rotation) & 0x3f;
+        offsets[line] = visible_battle_anim_sine((wave_index as u8).wrapping_mul(2), 2) as i8;
     }
     Some(offsets)
+}
+
+fn visible_wave_deform_line_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_WAVE_DEFORM_MON"
+            && effect.frame <= animation.frame
+    })?;
+    let stop_frame = animation.bg_events.iter().find(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+    }).map(|candidate| candidate.frame);
+    let age = animation.frame.saturating_sub(effect.frame);
+    let amplitude = match stop_frame {
+        Some(stop) if animation.frame >= stop => {
+            31_u16.saturating_sub(animation.frame.saturating_sub(stop)) as u8
+        }
+        _ => age.saturating_sub(1).min(31) as u8,
+    };
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x30_usize, 0x5e_usize)
+    } else {
+        (0x01_usize, 0x36_usize)
+    };
+    let mut offsets = [0_i8; 0x5f];
+    for (line, offset) in offsets.iter_mut().enumerate().take(last_line + 1).skip(first_line) {
+        *offset = visible_battle_anim_sine((line as u8).wrapping_mul(4), amplitude) as i8;
+    }
+    Some(offsets)
+}
+
+fn visible_battle_line_x_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let sources = [
+        visible_surf_line_offsets(animation),
+        visible_wave_deform_line_offsets(animation),
+        visible_psychic_teleport_line_x_offsets(animation),
+        visible_beta_send_out_mon2_line_x_offsets(animation),
+        visible_flail_line_x_offsets(animation),
+        visible_double_team_line_x_offsets(animation),
+    ];
+    let mut combined = None::<[i8; 0x5f]>;
+    for source in sources.into_iter().flatten() {
+        let offsets = combined.get_or_insert([0; 0x5f]);
+        for (offset, source_offset) in offsets.iter_mut().zip(source) {
+            *offset = offset.wrapping_add(source_offset);
+        }
+    }
+    combined
+}
+
+fn visible_beta_send_out_mon2_line_x_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON2"
+            && effect.frame <= animation.frame
+    })?;
+    let age = animation.frame.saturating_sub(effect.frame);
+    if age >= 65 {
+        return None;
+    }
+    let mut offsets = [0_i8; 0x5f];
+    if age == 0 {
+        return Some(offsets);
+    }
+    let counter = 65_u16.saturating_sub(age) as u8;
+    let radius = (counter >> 3) & 0x0f;
+    let target_player = target_player_for_effect(animation, effect);
+    let (start, end) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    for (line, offset) in offsets.iter_mut().enumerate().take(end + 1).skip(start + 1) {
+        *offset = visible_battle_anim_sine((line as u8).wrapping_mul(radius), radius) as i8;
+    }
+    Some(offsets)
+}
+
+fn visible_wavy_screen_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+    effect_ids: &[&str],
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect_ids.contains(&effect.effect_id.as_str())
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let age = animation.frame.saturating_sub(effect.frame);
+    let rotations = match effect.effect_id.as_str() {
+        "BATTLE_BG_EFFECT_PSYCHIC" if age > 0 => 1 + (age - 1) / 4,
+        "BATTLE_BG_EFFECT_PSYCHIC" => 0,
+        _ => age,
+    } as usize;
+    let (phase_step, amplitude) = match effect.effect_id.as_str() {
+        "BATTLE_BG_EFFECT_NIGHT_SHADE" => (effect.param, 2),
+        _ => (6, 5),
+    };
+    let mut base = [0_i8; 0x60];
+    for (line, offset) in base.iter_mut().enumerate().skip(1) {
+        *offset = visible_battle_anim_sine((line as u8).wrapping_mul(phase_step), amplitude) as i8;
+    }
+    let mut offsets = [0_i8; 0x5f];
+    for (line, offset) in offsets.iter_mut().enumerate() {
+        *offset = base[(line + rotations) % base.len()];
+    }
+    Some(offsets)
+}
+
+fn visible_psychic_teleport_line_x_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    visible_wavy_screen_offsets(
+        animation,
+        &["BATTLE_BG_EFFECT_PSYCHIC", "BATTLE_BG_EFFECT_TELEPORT"],
+    )
+}
+
+fn visible_night_shade_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    visible_wavy_screen_offsets(animation, &["BATTLE_BG_EFFECT_NIGHT_SHADE"])
+}
+
+fn visible_whirlpool_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_WHIRLPOOL"
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let rotations = usize::from(animation.frame.saturating_sub(effect.frame));
+    let mut base = [0_i8; 0x5f];
+    for (line, offset) in base.iter_mut().enumerate().skip(1) {
+        *offset = visible_battle_anim_sine((line as u8).wrapping_mul(2), 2) as i8;
+    }
+    let mut offsets = [0_i8; 0x5f];
+    for (line, offset) in offsets.iter_mut().enumerate() {
+        *offset = base[(line + rotations) % base.len()];
+    }
+    Some(offsets)
+}
+
+fn visible_water_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let first_start = animation.bg_events.iter().find(|effect| {
+        effect.effect_id == "BATTLE_BG_EFFECT_START_WATER" && effect.frame <= animation.frame
+    })?;
+    // The ASM backup allocation extends beyond the visible $5f scanlines;
+    // Water centers can land at byte $5f and then expand back into view.
+    let mut backup = [0_i8; 0x99];
+    let mut range = None;
+    for frame in first_start.frame..=animation.frame {
+        for effect in animation.bg_events.iter().filter(|effect| effect.frame == frame) {
+            match effect.effect_id.as_str() {
+                "BATTLE_BG_EFFECT_START_WATER" => {
+                    backup.fill(0);
+                    range = Some(if target_player_for_effect(animation, effect) {
+                        (0x2f_usize, 0x5e_usize)
+                    } else {
+                        (0x00_usize, 0x36_usize)
+                    });
+                }
+                "BATTLE_BG_EFFECT_END_WATER" => range = None,
+                _ => {}
+            }
+        }
+        let Some((start, end)) = range else {
+            continue;
+        };
+        for effect in animation.bg_events.iter().filter(|effect| {
+            !effect.incremented
+                && effect.effect_id == "BATTLE_BG_EFFECT_WATER"
+                && effect.frame <= frame
+        }) {
+            let age = frame.saturating_sub(effect.frame);
+            if age >= 16 {
+                if age == 16 {
+                    backup.fill(0);
+                }
+                continue;
+            }
+            let timer = usize::from(age * 2);
+            let mut phase = (age as u8).wrapping_mul(4);
+            let amplitude = if age < 8 { 3 } else { 2 };
+            let center = start + usize::from(effect.duration);
+            let mut right = center;
+            let mut left = center;
+            for _ in 0..timer {
+                let displacement = visible_battle_anim_sine(phase, amplitude) as i8;
+                if right <= end && right < backup.len() {
+                    backup[right] = displacement;
+                    right += 1;
+                }
+                if left > start && left < backup.len() {
+                    backup[left] = displacement;
+                    left -= 1;
+                }
+                phase = phase.wrapping_add(4);
+            }
+        }
+    }
+    range.map(|_| {
+        let mut visible = [0_i8; 0x5f];
+        visible.copy_from_slice(&backup[..0x5f]);
+        visible
+    })
+}
+
+fn visible_double_team_line_x_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_DOUBLE_TEAM"
+            && effect.frame <= animation.frame
+    })?;
+    let increments = animation.bg_events.iter().filter(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+    }).map(|candidate| candidate.frame).collect::<Vec<_>>();
+    if increments.get(1).is_some_and(|frame| animation.frame >= *frame) {
+        return None;
+    }
+    let age = animation.frame.saturating_sub(effect.frame);
+    let displacement = if let Some(first_increment) = increments.first().filter(|frame| animation.frame >= **frame) {
+        let contraction_age = animation.frame.saturating_sub(*first_increment);
+        if contraction_age <= 16 {
+            // Entering state 3 consumes the increment command and immediately
+            // decrements the stored $10 displacement before writing it.
+            15_u8.saturating_sub(contraction_age as u8)
+        } else {
+            0
+        }
+    } else {
+        match age {
+            0 => 0,
+            1..=16 => age.saturating_sub(1) as u8,
+            17 => 15,
+            _ => {
+                let phase = (age.saturating_sub(18) as u8).wrapping_mul(4);
+                (16_i32 + visible_battle_anim_sine(phase, 2)) as u8
+            }
+        }
+    } as i8;
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let mut offsets = [0_i8; 0x5f];
+    for (index, offset) in offsets.iter_mut().enumerate().take(last_line + 1).skip(first_line) {
+        *offset = if (index - first_line) & 1 == 0 {
+            displacement
+        } else {
+            -displacement
+        };
+    }
+    Some(offsets)
+}
+
+fn visible_flail_line_x_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_FLAIL"
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let age = animation.frame.saturating_sub(effect.frame);
+    let displacement = if age == 0 {
+        0
+    } else {
+        let update = age.saturating_sub(1) as u8;
+        visible_battle_anim_sine(update.wrapping_mul(2), 6)
+            + visible_battle_anim_sine(update.wrapping_mul(8), 2)
+    } as i8;
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let mut offsets = [0_i8; 0x5f];
+    for offset in offsets.iter_mut().take(last_line + 1).skip(first_line) {
+        *offset = displacement;
+    }
+    Some(offsets)
+}
+
+#[derive(Clone)]
+struct VisibleBattleLineOffsets {
+    x: [i8; 0x5f],
+    y: [i8; 0x5f],
+    bgp: Option<[u8; 0x5f]>,
+}
+
+fn visible_battler_line_offsets(
+    base: Option<&VisibleBattleLineOffsets>,
+    bgp: Option<u8>,
+) -> Option<VisibleBattleLineOffsets> {
+    let mut offsets = base.cloned().unwrap_or(VisibleBattleLineOffsets {
+        x: [0; 0x5f],
+        y: [0; 0x5f],
+        bgp: None,
+    });
+    if let Some(bgp) = bgp {
+        offsets.bgp = Some([bgp; 0x5f]);
+    }
+    (base.is_some() || bgp.is_some()).then_some(offsets)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleBattleDmgPaletteRegisters {
+    bgp: u8,
+    obp0: u8,
+    obp1: u8,
+}
+
+fn dmg_palette(shades: [u8; 4]) -> u8 {
+    shades
+        .into_iter()
+        .enumerate()
+        .fold(0, |value, (index, shade)| value | ((shade & 3) << ((3 - index) * 2)))
+}
+
+fn battle_bg_effect_reload_interval(effect: &VisibleMoveBgEvent) -> u16 {
+    let raw = effect.target.trim().replace('_', "");
+    let battle_turn = if let Some(hex) = raw.strip_prefix('$') {
+        u16::from_str_radix(hex, 16)
+    } else if let Some(binary) = raw.strip_prefix('%') {
+        u16::from_str_radix(binary, 2)
+    } else {
+        raw.parse::<u16>()
+    }
+    .unwrap_or_else(|_| {
+        panic!(
+            "palette background effect {} has nonnumeric BATTLE_TURN byte {}",
+            effect.effect_id, effect.target
+        )
+    });
+    battle_turn.saturating_add(1).max(1)
+}
+
+fn visible_battle_dmg_palette_registers(
+    animation: Option<&VisibleMoveAnimation>,
+) -> VisibleBattleDmgPaletteRegisters {
+    let mut registers = VisibleBattleDmgPaletteRegisters {
+        bgp: 0xe4,
+        obp0: 0xe4,
+        obp1: 0xe4,
+    };
+    let Some(animation) = animation.filter(|animation| animation.started) else {
+        return registers;
+    };
+    for frame in 0..=animation.frame {
+        for effect in animation.bg_events.iter().filter(|effect| effect.frame <= frame) {
+            let age = frame - effect.frame;
+            match effect.effect_id.as_str() {
+                "BATTLE_PALETTE_BGP" if age == 0 => registers.bgp = effect.param,
+                "BATTLE_PALETTE_OBP0" if age == 0 => registers.obp0 = effect.param,
+                "BATTLE_PALETTE_OBP1" if age == 0 => registers.obp1 = effect.param,
+                "BATTLE_BG_EFFECT_FLASH_INVERTED" | "BATTLE_BG_EFFECT_FLASH_WHITE" => {
+                    let interval = battle_bg_effect_reload_interval(effect);
+                    if age % interval != 0 {
+                        continue;
+                    }
+                    let write = age / interval;
+                    if write >= u16::from(effect.param) {
+                        continue;
+                    }
+                    let remaining = effect.param - write as u8 - 1;
+                    registers.bgp = if remaining & 1 == 0 {
+                        0xe4
+                    } else if effect.effect_id == "BATTLE_BG_EFFECT_FLASH_INVERTED" {
+                        0x1b
+                    } else {
+                        0x00
+                    };
+                }
+                "BATTLE_BG_EFFECT_WHITE_HUES"
+                | "BATTLE_BG_EFFECT_BLACK_HUES"
+                | "BATTLE_BG_EFFECT_ALTERNATE_HUES"
+                | "BATTLE_BG_EFFECT_CYCLE_OBPALS_GRAY_AND_YELLOW"
+                | "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW"
+                | "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED" => {
+                    let interval = battle_bg_effect_reload_interval(effect);
+                    if age % interval != 0 {
+                        continue;
+                    }
+                    let write = usize::from(age / interval);
+                    let (table, repeating): (&[u8], bool) = match effect.effect_id.as_str() {
+                        "BATTLE_BG_EFFECT_WHITE_HUES" => (&[
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([3, 2, 0, 0]),
+                            dmg_palette([3, 1, 0, 0]),
+                        ], false),
+                        "BATTLE_BG_EFFECT_BLACK_HUES" => (&[
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([3, 3, 1, 0]),
+                            dmg_palette([3, 3, 2, 0]),
+                        ], false),
+                        "BATTLE_BG_EFFECT_ALTERNATE_HUES" => (&[
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([3, 3, 2, 0]),
+                            dmg_palette([3, 3, 3, 0]),
+                            dmg_palette([3, 3, 2, 0]),
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([2, 1, 0, 0]),
+                            dmg_palette([1, 0, 0, 0]),
+                            dmg_palette([2, 1, 0, 0]),
+                        ], true),
+                        "BATTLE_BG_EFFECT_CYCLE_OBPALS_GRAY_AND_YELLOW" => (&[
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([2, 1, 0, 0]),
+                        ], true),
+                        "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW" => (&[
+                            dmg_palette([3, 2, 1, 0]),
+                            dmg_palette([3, 1, 2, 0]),
+                        ], true),
+                        _ => (&[
+                            dmg_palette([0, 1, 2, 3]),
+                            dmg_palette([1, 2, 0, 3]),
+                            dmg_palette([2, 0, 1, 3]),
+                        ], true),
+                    };
+                    if !repeating && write >= table.len() {
+                        continue;
+                    }
+                    let value = table[write % table.len()];
+                    registers.bgp = value;
+                    if effect.effect_id == "BATTLE_BG_EFFECT_ALTERNATE_HUES" {
+                        registers.obp1 = value;
+                    } else if matches!(
+                        effect.effect_id.as_str(),
+                        "BATTLE_BG_EFFECT_CYCLE_OBPALS_GRAY_AND_YELLOW"
+                            | "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW"
+                    ) {
+                        registers.obp0 = value;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    registers
+}
+
+fn visible_beta_send_out_mon1_line_bgps(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[u8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1"
+            && effect.frame <= animation.frame
+    })?;
+    let target_player = target_player_for_effect(animation, effect);
+    let (mut start, end) = if target_player {
+        (0x2f_usize, 0x5f_usize)
+    } else {
+        (0x00_usize, 0x37_usize)
+    };
+    let mut bgps = [0xe4_u8; 0x5f];
+    for value in bgps.iter_mut().take(end.min(0x5f)).skip(start) {
+        *value = 0;
+    }
+    let mut state = 1_u8;
+    let mut parameter = 0_u8;
+    let data = [0x00_u8, 0x40, 0x90, 0xe4];
+    for frame in effect.frame.saturating_add(1)..=animation.frame {
+        let increments = animation.bg_events.iter().filter(|candidate| {
+            candidate.incremented
+                && candidate.effect_id == effect.effect_id
+                && candidate.frame == frame
+        }).count();
+        state = state.saturating_add(u8::try_from(increments).ok()?);
+        match state {
+            2 | 3 => {
+                let index = usize::from(parameter >> 3);
+                parameter = parameter.wrapping_add(1);
+                let Some(&value) = data.get(index) else {
+                    parameter = 0;
+                    if state == 2 {
+                        start = start.saturating_add(1);
+                    }
+                    state += 1;
+                    continue;
+                };
+                for line in (start..end.min(0x5f)).step_by(2) {
+                    bgps[line] = value;
+                }
+                if state == 3 && end > 0 && end - 1 < 0x5f {
+                    bgps[end - 1] = value;
+                }
+            }
+            5.. => return None,
+            _ => {}
+        }
+    }
+    Some(bgps)
+}
+
+fn visible_bounce_down_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_BOUNCE_DOWN"
+            && effect.frame <= animation.frame
+    })?;
+    let displacement = u8::try_from(visible_bounce_down_offset(animation, effect)?).ok()?;
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2d_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let mut offsets = [0_i8; 0x5f];
+    let line_count = last_line + 1 - first_line;
+    for (relative_line, offset) in offsets
+        .iter_mut()
+        .take(last_line + 1)
+        .skip(first_line)
+        .enumerate()
+    {
+        *offset = if relative_line < usize::from(displacement).min(line_count) {
+            0x90_u8 as i8
+        } else {
+            (!displacement) as i8
+        };
+    }
+    Some(offsets)
+}
+
+fn visible_dig_displacement(age: u16) -> i8 {
+    let mut wait = 0_u8;
+    let mut displacement = 0_i8;
+    let mut amount = 2_u8;
+    for _ in 1..=age {
+        if wait != 0 {
+            wait = wait.wrapping_sub(1);
+            continue;
+        }
+        if amount > 47 {
+            continue;
+        }
+        displacement = -((amount as i8).wrapping_add(1));
+        if amount & 7 == 0 {
+            wait = 16;
+        }
+        amount = amount.wrapping_add(2);
+    }
+    displacement
+}
+
+fn visible_dig_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_DIG"
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let displacement = visible_dig_displacement(animation.frame.saturating_sub(effect.frame));
+    let mut offsets = [0_i8; 0x5f];
+    if displacement == 0 {
+        return Some(offsets);
+    }
+    let blank_lines = usize::from(!(displacement as u8));
+    for (relative_line, offset) in offsets
+        .iter_mut()
+        .take(last_line + 1)
+        .skip(first_line)
+        .enumerate()
+    {
+        *offset = if relative_line < blank_lines {
+            0x90_u8 as i8
+        } else {
+            displacement
+        };
+    }
+    Some(offsets)
+}
+
+fn visible_acid_armor_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_ACID_ARMOR"
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let mut offsets = [0_i8; 0x5f];
+    for (line, offset) in offsets
+        .iter_mut()
+        .enumerate()
+        .take(last_line + 1)
+        .skip(first_line + 1)
+    {
+        *offset = visible_battle_anim_sine((line as u8).wrapping_mul(2), effect.param) as i8;
+    }
+    offsets[last_line] = 0;
+    offsets[last_line - 1] = 0;
+    for _ in 0..animation.frame.saturating_sub(effect.frame) {
+        for line in (first_line + 1..=last_line).rev() {
+            offsets[line] = offsets[line - 1];
+        }
+        offsets[first_line] = 0x90_u8 as i8;
+        if !matches!(offsets[last_line] as u8, 0 | 0x90) {
+            offsets[last_line] = 0;
+        }
+        if !matches!(offsets[last_line - 1] as u8, 0 | 1 | 0x90) {
+            offsets[last_line - 1] = 0;
+        }
+    }
+    Some(offsets)
+}
+
+fn visible_withdraw_line_y_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<[i8; 0x5f]> {
+    let animation = animation.filter(|animation| animation.started)?;
+    let effect = animation.bg_events.iter().rev().find(|effect| {
+        !effect.incremented
+            && effect.effect_id == "BATTLE_BG_EFFECT_WITHDRAW"
+            && effect.frame <= animation.frame
+    })?;
+    if animation.bg_events.iter().any(|candidate| {
+        candidate.incremented
+            && candidate.effect_id == effect.effect_id
+            && candidate.frame >= effect.frame
+            && candidate.frame <= animation.frame
+    }) {
+        return None;
+    }
+    let target_player = match effect.target.as_str() {
+        "BG_EFFECT_USER" => animation.player_move,
+        "BG_EFFECT_TARGET" => !animation.player_move,
+        _ => return None,
+    };
+    let (first_line, last_line) = if target_player {
+        (0x2f_usize, 0x5e_usize)
+    } else {
+        (0x00_usize, 0x36_usize)
+    };
+    let limit = effect.param & 0x3f;
+    let speed = effect.param.rotate_left(2) & 3;
+    let age = animation.frame.saturating_sub(effect.frame);
+    if age == 0 {
+        return Some([0; 0x5f]);
+    }
+    let displacement = if speed == 0 {
+        1
+    } else {
+        1_u16
+            .saturating_add(age.saturating_sub(1).saturating_mul(u16::from(speed)))
+            .min(u16::from(limit.saturating_sub(1))) as u8
+    };
+    let mut offsets = [0_i8; 0x5f];
+    for line in first_line..=last_line {
+        offsets[line] = if line - first_line < usize::from(displacement) {
+            0x90_u8 as i8
+        } else {
+            (!displacement) as i8
+        };
+    }
+    Some(offsets)
+}
+
+fn visible_battle_line_offsets(
+    animation: Option<&VisibleMoveAnimation>,
+) -> Option<VisibleBattleLineOffsets> {
+    let x = visible_battle_line_x_offsets(animation);
+    let global_bgp = visible_battle_dmg_palette_registers(animation).bgp;
+    let bgp = visible_beta_send_out_mon1_line_bgps(animation)
+        .or_else(|| (global_bgp != 0xe4).then_some([global_bgp; 0x5f]));
+    let y_sources = [
+        visible_bounce_down_line_y_offsets(animation),
+        visible_dig_line_y_offsets(animation),
+        visible_acid_armor_line_y_offsets(animation),
+        visible_withdraw_line_y_offsets(animation),
+        visible_night_shade_line_y_offsets(animation),
+        visible_whirlpool_line_y_offsets(animation),
+        visible_water_line_y_offsets(animation),
+    ];
+    let mut y = None::<[i8; 0x5f]>;
+    for source in y_sources.into_iter().flatten() {
+        let offsets = y.get_or_insert([0; 0x5f]);
+        for (offset, source_offset) in offsets.iter_mut().zip(source) {
+            *offset = offset.wrapping_add(source_offset);
+        }
+    }
+    if x.is_none() && y.is_none() && bgp.is_none() {
+        None
+    } else {
+        Some(VisibleBattleLineOffsets {
+            x: x.unwrap_or([0; 0x5f]),
+            y: y.unwrap_or([0; 0x5f]),
+            bgp,
+        })
+    }
 }
 
 fn spawn_battle_battler_markers(
@@ -1749,26 +2665,49 @@ fn spawn_battle_battler_markers(
             || visible_move_controls_battler_visibility(move_animation, false));
     let (move_player_clip_tiles, move_enemy_clip_tiles) =
         visible_move_battler_clip_tiles(move_animation);
-    let (move_player_overlay, move_enemy_overlay) =
-        visible_move_battler_overlays(move_animation);
+    let (move_player_remove_clip, move_enemy_remove_clip) =
+        visible_remove_mon_clips(move_animation);
+    let (move_player_row_extraction, move_enemy_row_extraction) =
+        visible_move_battler_row_extractions(move_animation);
+    let (move_player_bgp, move_enemy_bgp) = visible_move_battler_bgps(move_animation);
     let (move_player_art, move_enemy_art) =
         visible_move_battler_art_overrides(move_animation);
     let (move_player_species, move_enemy_species) =
         visible_move_battler_species_overrides(move_animation);
     let (move_player_shiny, move_enemy_shiny) =
         visible_move_battler_shiny_overrides(move_animation);
-    let surf_line_offsets = visible_surf_line_offsets(move_animation);
+    let line_offsets = visible_battle_line_offsets(move_animation);
+    let player_line_offsets = visible_battler_line_offsets(line_offsets.as_ref(), move_player_bgp);
+    let enemy_line_offsets = visible_battler_line_offsets(line_offsets.as_ref(), move_enemy_bgp);
     let render_hp = |side, hp| visible_faint_animation_render_hp(move_animation, side, hp);
-    let active_player_species = battle.player_transformed_species.as_deref().or_else(|| {
-        battle
-            .active_player_party_index
-            .and_then(|active_index| snapshot.party.slots.iter().find(|slot| slot.index == active_index))
-            .map(|slot| slot.pokemon.species.id.as_str())
-    });
-    let enemy_default_species = battle
-        .enemy_transformed_species
+    let active_player_pokemon = battle
+        .active_player_party_index
+        .and_then(|active_index| snapshot.party.slots.iter().find(|slot| slot.index == active_index))
+        .map(|slot| &slot.pokemon);
+    let active_player_species = battle
+        .player_transformed_species
         .as_deref()
-        .unwrap_or(&battle.enemy_pokemon.species.id);
+        .or_else(|| active_player_pokemon.map(|pokemon| pokemon.species.id.as_str()));
+    let transform_pending_player = move_animation.is_some_and(|animation| {
+        animation.started
+            && animation.animation_label == "BattleAnim_Transform"
+            && animation.player_move
+            && move_player_art != VisibleBattlerArtOverride::Transform
+    });
+    let transform_pending_enemy = move_animation.is_some_and(|animation| {
+        animation.started
+            && animation.animation_label == "BattleAnim_Transform"
+            && !animation.player_move
+            && move_enemy_art != VisibleBattlerArtOverride::Transform
+    });
+    let enemy_default_species = if transform_pending_enemy {
+        &battle.enemy_pokemon.species.id
+    } else {
+        battle
+            .enemy_transformed_species
+            .as_deref()
+            .unwrap_or(&battle.enemy_pokemon.species.id)
+    };
     let enemy_render_species = if let Some(species) = move_enemy_species {
         species
     } else if move_enemy_art == VisibleBattlerArtOverride::Transform {
@@ -1784,6 +2723,16 @@ fn spawn_battle_battler_markers(
         Some(enemy_default_species)
     } else {
         None
+    };
+    let enemy_render_shiny = if move_enemy_art == VisibleBattlerArtOverride::Transform {
+        active_player_pokemon.is_some_and(|pokemon| visible_pokemon_is_shiny(pokemon))
+    } else {
+        move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon))
+    };
+    let player_render_shiny = if move_player_art == VisibleBattlerArtOverride::Transform {
+        visible_pokemon_is_shiny(&battle.enemy_pokemon)
+    } else {
+        false
     };
     let send_out_scale = |side| {
         send_out_animation
@@ -1813,14 +2762,17 @@ fn spawn_battle_battler_markers(
             render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
+            enemy_render_shiny,
             enemy_animation_frame,
             enemy_move_offset,
             1.0,
-            move_enemy_overlay,
+            None,
             move_enemy_art,
             move_enemy_clip_tiles,
-            surf_line_offsets.as_ref(),
+            move_enemy_remove_clip,
+            move_enemy_row_extraction,
+            true,
+            enemy_line_offsets.as_ref(),
         )?;
         let player_stem = if snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE {
             "kris_back"
@@ -1859,23 +2811,34 @@ fn spawn_battle_battler_markers(
             asset_root,
             images,
             player_transform_species.unwrap_or_else(|| {
-                battle
-                    .player_transformed_species
-                    .as_deref()
-                    .unwrap_or(&slot.pokemon.species.id)
+                if transform_pending_player {
+                    &slot.pokemon.species.id
+                } else {
+                    battle
+                        .player_transformed_species
+                        .as_deref()
+                        .unwrap_or(&slot.pokemon.species.id)
+                }
             }),
             PokemonSpriteSide::Back,
             render_hp(crate::core::battle::turn::BattleSide::Player, slot.pokemon.hp),
             slot.pokemon.max_hp,
             battle.player_substitute_hp > 0,
-            move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon)),
+            if move_player_art == VisibleBattlerArtOverride::Transform {
+                player_render_shiny
+            } else {
+                move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon))
+            },
             0,
             player_move_offset,
             1.0,
-            move_player_overlay,
+            None,
             move_player_art,
             move_player_clip_tiles,
-            surf_line_offsets.as_ref(),
+            move_player_remove_clip,
+            move_player_row_extraction,
+            true,
+            player_line_offsets.as_ref(),
         )?;
         return Ok(());
     }
@@ -1890,14 +2853,17 @@ fn spawn_battle_battler_markers(
             render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
+            enemy_render_shiny,
             enemy_animation_frame,
             enemy_move_offset,
             1.0,
-            move_enemy_overlay,
+            None,
             move_enemy_art,
             move_enemy_clip_tiles,
-            surf_line_offsets.as_ref(),
+            move_enemy_remove_clip,
+            move_enemy_row_extraction,
+            true,
+            enemy_line_offsets.as_ref(),
         )?;
         return Ok(());
     }
@@ -1981,7 +2947,10 @@ fn spawn_battle_battler_markers(
         }
     }
     let enemy_scale = send_out_scale(crate::core::battle::turn::BattleSide::Enemy);
-    if !capture_enemy_hidden && move_enemy_visible && enemy_scale > 0.0 {
+    if !capture_enemy_hidden
+        && (move_enemy_visible || move_enemy_row_extraction.is_some())
+        && enemy_scale > 0.0
+    {
         spawn_battler_marker(
             commands,
             rendered_art,
@@ -1992,16 +2961,19 @@ fn spawn_battle_battler_markers(
             render_hp(crate::core::battle::turn::BattleSide::Enemy, battle.enemy_pokemon.hp),
             battle.enemy_pokemon.max_hp,
             battle.enemy_substitute_hp > 0,
-            move_enemy_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&battle.enemy_pokemon)),
+            enemy_render_shiny,
             enemy_animation_frame,
             enemy_move_offset,
             enemy_scale,
-            move_enemy_overlay,
+            None,
             move_enemy_art,
             capture_enemy_clip_tiles
                 .or_else(|| send_out_clip_tiles(crate::core::battle::turn::BattleSide::Enemy))
                 .or(move_enemy_clip_tiles),
-            surf_line_offsets.as_ref(),
+            move_enemy_remove_clip,
+            move_enemy_row_extraction,
+            move_enemy_visible,
+            enemy_line_offsets.as_ref(),
         )?;
     }
     if battle.battle_type == "BATTLETYPE_TUTORIAL" {
@@ -2041,7 +3013,8 @@ fn spawn_battle_battler_markers(
         )?;
         return Ok(());
     }
-    let player_pokemon_visible = entry_messages_remaining == 0 && move_player_visible;
+    let player_pokemon_visible = entry_messages_remaining == 0
+        && (move_player_visible || move_player_row_extraction.is_some());
     if player_pokemon_visible {
         let player_scale = send_out_scale(crate::core::battle::turn::BattleSide::Player);
         if player_scale <= 0.0 {
@@ -2062,24 +3035,35 @@ fn spawn_battle_battler_markers(
             asset_root,
             images,
             player_transform_species.unwrap_or_else(|| {
-                battle
-                    .player_transformed_species
-                    .as_deref()
-                    .unwrap_or(&slot.pokemon.species.id)
+                if transform_pending_player {
+                    &slot.pokemon.species.id
+                } else {
+                    battle
+                        .player_transformed_species
+                        .as_deref()
+                        .unwrap_or(&slot.pokemon.species.id)
+                }
             }),
             PokemonSpriteSide::Back,
             render_hp(crate::core::battle::turn::BattleSide::Player, slot.pokemon.hp),
             slot.pokemon.max_hp,
             battle.player_substitute_hp > 0,
-            move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon)),
+            if move_player_art == VisibleBattlerArtOverride::Transform {
+                player_render_shiny
+            } else {
+                move_player_shiny.unwrap_or_else(|| visible_pokemon_is_shiny(&slot.pokemon))
+            },
             0,
             player_move_offset,
             player_scale,
-            move_player_overlay,
+            None,
             move_player_art,
             send_out_clip_tiles(crate::core::battle::turn::BattleSide::Player)
                 .or(move_player_clip_tiles),
-            surf_line_offsets.as_ref(),
+            move_player_remove_clip,
+            move_player_row_extraction,
+            move_player_visible,
+            player_line_offsets.as_ref(),
         )?;
     }
     Ok(())
@@ -2182,7 +3166,10 @@ fn spawn_battler_marker(
     overlay: Option<([u8; 3], u8)>,
     art_override: VisibleBattlerArtOverride,
     clip_tiles: Option<u8>,
-    line_offsets: Option<&[i8; 0x5f]>,
+    remove_clip: Option<VisibleRemoveMonClip>,
+    row_extraction: Option<VisibleBattlerRowExtraction>,
+    base_visible: bool,
+    line_offsets: Option<&VisibleBattleLineOffsets>,
 ) -> Result<()> {
     if hp == 0 {
         return Ok(());
@@ -2244,16 +3231,32 @@ fn spawn_battler_marker(
         anchor_y - native_size.y * 0.5,
         3.0,
     ) + position_offset;
-    spawn_battle_battler_texture(
-        commands,
-        &frame,
-        display_size,
-        position,
-        Color::WHITE,
-        clip_tiles,
-        line_offsets,
-    );
-    if let Some((colour, alpha)) = overlay {
+    let mut bgp_frames = HashMap::new();
+    if let Some(bgps) = line_offsets.and_then(|offsets| offsets.bgp.as_ref()) {
+        for bgp in bgps {
+            if !bgp_frames.contains_key(bgp) {
+                bgp_frames.insert(
+                    *bgp,
+                    battle_battler_bgp_frame(rendered_art, images, &frame, *bgp)?,
+                );
+            }
+        }
+    }
+    if base_visible {
+        spawn_battle_battler_texture(
+            commands,
+            &frame,
+            display_size,
+            position,
+            Color::WHITE,
+            clip_tiles,
+            remove_clip,
+            row_extraction,
+            line_offsets,
+            (!bgp_frames.is_empty()).then_some(&bgp_frames),
+        );
+    }
+    if base_visible && let Some((colour, alpha)) = overlay {
         let overlay_frame = battle_battler_overlay_frame(
             rendered_art,
             images,
@@ -2267,7 +3270,19 @@ fn spawn_battler_marker(
             position + Vec3::new(0.0, 0.0, 0.01),
             Color::rgba_u8(255, 255, 255, alpha),
             clip_tiles,
+            remove_clip,
+            row_extraction,
             line_offsets,
+            None,
+        );
+    }
+    if let Some(extraction) = row_extraction {
+        spawn_visible_battler_extracted_rows(
+            commands,
+            &frame,
+            display_size,
+            position - position_offset,
+            extraction,
         );
     }
     Ok(())
@@ -2280,10 +3295,13 @@ fn spawn_battle_battler_texture(
     position: Vec3,
     colour: Color,
     clip_tiles: Option<u8>,
-    line_offsets: Option<&[i8; 0x5f]>,
+    remove_clip: Option<VisibleRemoveMonClip>,
+    row_extraction: Option<VisibleBattlerRowExtraction>,
+    line_offsets: Option<&VisibleBattleLineOffsets>,
+    bgp_frames: Option<&HashMap<u8, SpriteFrame>>,
 ) {
     let Some(line_offsets) = line_offsets else {
-        let (rect, visible_size) = if let Some(clip_tiles) = clip_tiles {
+        let (mut rect, mut visible_size) = if let Some(clip_tiles) = clip_tiles {
             let clip_source_pixels = f32::from(clip_tiles) * SOURCE_TILE_SIZE as f32;
             let visible_width = frame.size.x.min(clip_source_pixels);
             let visible_height = frame.size.y.min(clip_source_pixels);
@@ -2304,6 +3322,51 @@ fn spawn_battle_battler_texture(
         } else {
             (None, display_size)
         };
+        let mut position = position;
+        if let Some(remove_clip) = remove_clip {
+            let current = rect.unwrap_or(Rect::new(0.0, 0.0, frame.size.x, frame.size.y));
+            let cut = f32::from(remove_clip.source_pixels).min(current.width());
+            let displayed_cut = visible_size.x * cut / current.width();
+            let (source_left, source_right, position_adjustment) = if remove_clip.crop_left {
+                (current.min.x + cut, current.max.x, displayed_cut * 0.5)
+            } else {
+                (current.min.x, current.max.x - cut, -displayed_cut * 0.5)
+            };
+            rect = Some(Rect::new(source_left, current.min.y, source_right, current.max.y));
+            visible_size.x -= displayed_cut;
+            position.x += position_adjustment;
+        }
+        if let Some(extraction) = row_extraction.filter(|extraction| extraction.bg_rows_cleared) {
+            let current = rect.unwrap_or(Rect::new(0.0, 0.0, frame.size.x, frame.size.y));
+            let extracted_height =
+                (f32::from(extraction.rows) * SOURCE_TILE_SIZE as f32).min(frame.size.y);
+            let (source_top, source_bottom) = if extraction.top {
+                (current.min.y.max(extracted_height), current.max.y)
+            } else {
+                (
+                    current.min.y,
+                    current.max.y.min(frame.size.y - extracted_height),
+                )
+            };
+            let retained_height = (source_bottom - source_top).max(0.0);
+            let displayed_height = visible_size.y * retained_height / current.height();
+            let removed_height = visible_size.y - displayed_height;
+            rect = Some(Rect::new(
+                current.min.x,
+                source_top,
+                current.max.x,
+                source_bottom,
+            ));
+            visible_size.y = displayed_height;
+            position.y += if extraction.top {
+                -removed_height * 0.5
+            } else {
+                removed_height * 0.5
+            };
+        }
+        if visible_size.x <= 0.0 || visible_size.y <= 0.0 {
+            return;
+        }
         commands.spawn((
             SpriteBundle {
                 texture: frame.handle.clone(),
@@ -2321,6 +3384,18 @@ fn spawn_battle_battler_texture(
         return;
     };
     let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+    let horizontal_rect = remove_clip.map(|remove_clip| {
+        let cut = f32::from(remove_clip.source_pixels).min(frame.size.x);
+        if remove_clip.crop_left {
+            Rect::new(cut, 0.0, frame.size.x, frame.size.y)
+        } else {
+            Rect::new(0.0, 0.0, frame.size.x - cut, frame.size.y)
+        }
+    });
+    let horizontal_width = horizontal_rect.map_or(frame.size.x, |rect| rect.width());
+    if horizontal_width <= 0.0 {
+        return;
+    }
     let display_height = display_size.y / scale;
     let center_line = (PLAYFIELD_TOP - position.y) / scale;
     let top_line = center_line - display_height / 2.0;
@@ -2330,7 +3405,12 @@ fn spawn_battle_battler_texture(
         if !(0..0x5f).contains(&line) {
             continue;
         }
-        let sampled_line = line as f32 + f32::from(line_offsets[line as usize]);
+        let line_frame = line_offsets
+            .bgp
+            .as_ref()
+            .and_then(|bgps| bgp_frames?.get(&bgps[line as usize]))
+            .unwrap_or(frame);
+        let sampled_line = line as f32 + f32::from(line_offsets.y[line as usize]);
         let source_top_ratio = (sampled_line - top_line) / display_height;
         let source_bottom_ratio = (sampled_line + 1.0 - top_line) / display_height;
         if source_bottom_ratio <= 0.0 || source_top_ratio >= 1.0 {
@@ -2341,17 +3421,50 @@ fn spawn_battle_battler_texture(
         if source_bottom <= source_top {
             continue;
         }
+        if row_extraction.is_some_and(|extraction| {
+            if !extraction.bg_rows_cleared {
+                return false;
+            }
+            let height = f32::from(extraction.rows) * SOURCE_TILE_SIZE as f32;
+            let (extract_top, extract_bottom) = if extraction.top {
+                (0.0, height)
+            } else {
+                (frame.size.y - height, frame.size.y)
+            };
+            source_top < extract_bottom && source_bottom > extract_top
+        }) {
+            continue;
+        }
         commands.spawn((
             SpriteBundle {
-                texture: frame.handle.clone(),
+                texture: line_frame.handle.clone(),
                 sprite: Sprite {
                     color: colour,
-                    rect: Some(Rect::new(0.0, source_top, frame.size.x, source_bottom)),
-                    custom_size: Some(Vec2::new(display_size.x, scale)),
+                    rect: Some(Rect::new(
+                        horizontal_rect.map_or(0.0, |rect| rect.min.x),
+                        source_top,
+                        horizontal_rect.map_or(frame.size.x, |rect| rect.max.x),
+                        source_bottom,
+                    )),
+                    custom_size: Some(Vec2::new(
+                        display_size.x * horizontal_width / frame.size.x,
+                        scale,
+                    )),
                     ..default()
                 },
                 transform: Transform::from_xyz(
-                    position.x,
+                    position.x
+                        + f32::from(line_offsets.x[line as usize]) * scale
+                        + remove_clip.map_or(0.0, |clip| {
+                            let displayed_cut = display_size.x
+                                * f32::from(clip.source_pixels).min(frame.size.x)
+                                / frame.size.x;
+                            if clip.crop_left {
+                                displayed_cut * 0.5
+                            } else {
+                                -displayed_cut * 0.5
+                            }
+                        }),
                     PLAYFIELD_TOP - (line as f32 + 0.5) * scale,
                     position.z,
                 ),
@@ -2360,6 +3473,48 @@ fn spawn_battle_battler_texture(
             BattleBattlerMarker,
         ));
     }
+}
+
+fn spawn_visible_battler_extracted_rows(
+    commands: &mut Commands,
+    frame: &SpriteFrame,
+    display_size: Vec2,
+    position: Vec3,
+    extraction: VisibleBattlerRowExtraction,
+) {
+    let source_height =
+        (f32::from(extraction.rows) * SOURCE_TILE_SIZE as f32).min(frame.size.y);
+    if source_height <= 0.0 {
+        return;
+    }
+    let display_height = display_size.y * source_height / frame.size.y;
+    let (source_top, source_bottom, y) = if extraction.top {
+        (
+            0.0,
+            source_height,
+            position.y + (display_size.y - display_height) * 0.5,
+        )
+    } else {
+        (
+            frame.size.y - source_height,
+            frame.size.y,
+            position.y - (display_size.y - display_height) * 0.5,
+        )
+    };
+    commands.spawn((
+        SpriteBundle {
+            texture: frame.handle.clone(),
+            sprite: Sprite {
+                color: Color::WHITE,
+                rect: Some(Rect::new(0.0, source_top, frame.size.x, source_bottom)),
+                custom_size: Some(Vec2::new(display_size.x, display_height)),
+                ..default()
+            },
+            transform: Transform::from_xyz(position.x, y, position.z + 0.02),
+            ..default()
+        },
+        BattleCommandMarker,
+    ));
 }
 
 fn battle_minimize_frame<'a>(
@@ -2439,6 +3594,77 @@ fn battle_battler_overlay_frame(
     rendered_art
         .battle_battler_overlay_cache
         .insert(key, frame.clone());
+    Ok(frame)
+}
+
+fn battle_battler_bgp_frame(
+    rendered_art: &mut RenderedTilesetArt,
+    images: &mut Assets<Image>,
+    source: &SpriteFrame,
+    bgp: u8,
+) -> Result<SpriteFrame> {
+    let key = (source.handle.id(), bgp);
+    if let Some(frame) = rendered_art.battle_battler_bgp_cache.get(&key) {
+        return Ok(frame.clone());
+    }
+    let mut image = images
+        .get(&source.handle)
+        .context("battle battler BGP source image is unavailable")?
+        .clone();
+    let mut colours = image
+        .data
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] != 0)
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect::<Vec<_>>();
+    colours.sort_unstable();
+    colours.dedup();
+    anyhow::ensure!(
+        colours.len() <= 4,
+        "battle battler BGP source has {} opaque colours instead of at most four",
+        colours.len()
+    );
+    colours.sort_by_key(|colour| {
+        std::cmp::Reverse(
+            u32::from(colour[0]) * 299
+                + u32::from(colour[1]) * 587
+                + u32::from(colour[2]) * 114,
+        )
+    });
+    let transparent_shade_zero = colours.len() < 4;
+    let shade_zero = image
+        .data
+        .chunks_exact(4)
+        .find(|pixel| pixel[3] == 0)
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .unwrap_or([255, 255, 255]);
+    let source_colours = colours.clone();
+    for pixel in image.data.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let source_colour = [pixel[0], pixel[1], pixel[2]];
+        let source_index = source_colours
+            .iter()
+            .position(|colour| *colour == source_colour)
+            .context("battle battler BGP source colour disappeared")?
+            + usize::from(transparent_shade_zero);
+        let mapped_index = usize::from((bgp >> (source_index * 2)) & 3);
+        if transparent_shade_zero && mapped_index == 0 {
+            pixel[..3].copy_from_slice(&shade_zero);
+            pixel[3] = 255;
+        } else {
+            let colour_index = mapped_index.saturating_sub(usize::from(transparent_shade_zero));
+            let mapped = source_colours[colour_index.min(source_colours.len() - 1)];
+            pixel[..3].copy_from_slice(&mapped);
+        }
+    }
+    image.sampler = ImageSampler::nearest();
+    let frame = SpriteFrame {
+        handle: images.add(image),
+        size: source.size,
+    };
+    rendered_art.battle_battler_bgp_cache.insert(key, frame.clone());
     Ok(frame)
 }
 
@@ -3618,170 +4844,10 @@ fn spawn_visible_move_animation_overlay(
     else {
         return;
     };
-    let mut overlay = None;
-    for effect in animation
-        .bg_events
-        .iter()
-        .filter(|effect| !effect.incremented && effect.frame <= animation.frame)
-    {
-        if animation.bg_events.iter().any(|candidate| {
-            !candidate.incremented
-                && candidate.effect_id == effect.effect_id
-                && candidate.frame > effect.frame
-                && candidate.frame <= animation.frame
-        }) {
-            continue;
-        }
-        let reset_frame = animation
-            .bg_events
-            .iter()
-            .filter(|candidate| {
-                candidate.incremented
-                    && candidate.effect_id == effect.effect_id
-                    && candidate.frame >= effect.frame
-                    && candidate.frame <= animation.frame
-            })
-            .map(|candidate| candidate.frame)
-            .max()
-            .unwrap_or(effect.frame);
-        let active_age = animation.frame.saturating_sub(reset_frame);
-        let phase_age = animation.frame.saturating_sub(effect.frame);
-        let resolved = match effect.effect_id.as_str() {
-            "BATTLE_BG_EFFECT_FLASH_INVERTED" | "BATTLE_BG_EFFECT_FLASH_WHITE" => {
-                let duration = if effect.duration == 0 { 4 } else { effect.duration };
-                let frequency = u16::from(if effect.param == 0 { 2 } else { effect.param });
-                if active_age >= duration || (phase_age / frequency) % 2 != 0 {
-                    None
-                } else {
-                    Some((
-                        [255_u8, 255, 255],
-                        if effect.effect_id == "BATTLE_BG_EFFECT_FLASH_WHITE" { 128 } else { 96 },
-                    ))
-                }
-            }
-            "BATTLE_BG_EFFECT_WHITE_HUES" => (active_age < effect.duration.max(1))
-                .then_some(([248, 248, 248], 128)),
-            "BATTLE_BG_EFFECT_BLACK_HUES" => (active_age < effect.duration.max(1))
-                .then_some(([0, 0, 0], 128)),
-            "BATTLE_BG_EFFECT_ALTERNATE_HUES" => {
-                let duration = if effect.duration == 0 { 4 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 2) % 2 == 0 {
-                        [255, 255, 255]
-                    } else {
-                        [8, 8, 8]
-                    };
-                    (colour, 112)
-                })
-            }
-            "BATTLE_BG_EFFECT_CYCLE_OBPALS_GRAY_AND_YELLOW"
-            | "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 3) % 2 == 0 {
-                        [192, 192, 192]
-                    } else {
-                        [255, 232, 120]
-                    };
-                    (colour, 96)
-                })
-            }
-            "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED" => {
-                let duration = if effect.duration == 0 { 4 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 2) % 2 == 0 {
-                        [255, 255, 255]
-                    } else {
-                        [16, 16, 8]
-                    };
-                    (colour, 104)
-                })
-            }
-            "BATTLE_BG_EFFECT_CYCLE_MON_LIGHT_DARK_REPEATING" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 3) % 2 == 0 {
-                        [224, 224, 224]
-                    } else {
-                        [16, 16, 16]
-                    };
-                    (colour, 96)
-                })
-            }
-            "BATTLE_BG_EFFECT_ACID_ARMOR" => {
-                let duration = if effect.duration == 0 { 4 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 2) % 2 == 0 {
-                        [148, 200, 148]
-                    } else {
-                        [48, 112, 64]
-                    };
-                    (colour, 100)
-                })
-            }
-            "BATTLE_BG_EFFECT_START_WATER"
-            | "BATTLE_BG_EFFECT_WATER"
-            | "BATTLE_BG_EFFECT_END_WATER"
-            | "BATTLE_BG_EFFECT_WHIRLPOOL" => {
-                let duration = if effect.duration == 0 { 6 } else { effect.duration };
-                (active_age < duration).then_some(([28, 84, 160], 112))
-            }
-            "BATTLE_BG_EFFECT_NIGHT_SHADE" => {
-                (active_age < effect.duration.max(1)).then_some(([4, 4, 12], 128))
-            }
-            "BATTLE_BG_EFFECT_PSYCHIC" => {
-                let duration = if effect.duration == 0 { 4 } else { effect.duration };
-                (active_age < duration).then(|| {
-                    let colour = if (phase_age / 2) % 2 == 0 {
-                        [152, 80, 192]
-                    } else {
-                        [64, 32, 128]
-                    };
-                    (colour, 120)
-                })
-            }
-            "BATTLE_BG_EFFECT_TELEPORT" => {
-                (active_age < effect.duration.max(1)).then_some(([120, 120, 220], 110))
-            }
-            "BATTLE_BG_EFFECT_RAPID_FLASH" if !animation.bg_events.iter().any(|candidate| {
-                candidate.incremented
-                    && candidate.effect_id == effect.effect_id
-                    && candidate.frame >= effect.frame
-                    && candidate.frame <= animation.frame
-            }) => {
-                ((phase_age / 2) & 1 == 1).then_some(([0, 0, 0], 160))
-            }
-            "BATTLE_BG_EFFECT_FLASH_MON_REPEATING" if !animation.bg_events.iter().any(|candidate| {
-                candidate.incremented
-                    && candidate.effect_id == effect.effect_id
-                    && candidate.frame >= effect.frame
-                    && candidate.frame <= animation.frame
-            }) => match (phase_age / 2) & 3 {
-                1 => Some(([0, 0, 0], 213)),
-                3 => Some(([255, 255, 255], 255)),
-                _ => None,
-            },
-            _ => None,
-        };
-        if resolved.is_some() {
-            overlay = resolved;
-        }
-    }
-    let Some((colour, alpha)) = overlay else {
-        return;
-    };
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgba_u8(colour[0], colour[1], colour[2], alpha),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.48),
-            ..default()
-        },
-        BattleCommandMarker,
-    ));
+    // Move palette effects are applied through their indexed BGP/OBP state
+    // when battler and object textures are composed. They do not create a
+    // translucent fullscreen layer.
+    let _ = animation;
 }
 
 fn visible_battle_anim_sine(angle: u8, amplitude: u8) -> i32 {
@@ -5364,7 +6430,7 @@ fn spawn_visible_move_animation_objects(
         }
         if !capture.blocked && capture.ball_id.eq_ignore_ascii_case("MASTER_BALL") {
             object_events.extend((0_u8..8).map(|index| VisibleMoveObjectEvent {
-                frame: 76,
+                frame: capture.master_ball_special_frame().expect("Master Ball frame"),
                 command: VisibleMoveObjectCommand::Spawn {
                     object_id: "BATTLE_ANIM_OBJ_MASTER_BALL_SPARKLE".to_string(),
                     x: 136,
@@ -5524,20 +6590,24 @@ fn spawn_visible_move_animation_objects(
     }
     let active = slots
         .into_iter()
-        .flatten()
-        .map(|(event, spawn_frame, state, state_frame)| {
-            (
-                event,
-                animation.frame.saturating_sub(spawn_frame),
-                state,
-                animation.frame.saturating_sub(state_frame),
-            )
+        .enumerate()
+        .filter_map(|(slot_index, entry)| {
+            entry.map(|(event, spawn_frame, state, state_frame)| {
+                (
+                    slot_index,
+                    event,
+                    animation.frame.saturating_sub(spawn_frame),
+                    state,
+                    animation.frame.saturating_sub(state_frame),
+                )
+            })
         })
         .collect::<Vec<_>>();
     if active.is_empty() {
         return Ok(());
     }
-    for (event, age, state, state_age) in active {
+    let dmg_palettes = visible_battle_dmg_palette_registers(Some(animation));
+    for (slot_index, event, age, state, state_age) in active {
         let VisibleMoveObjectCommand::Spawn { object_id, x, y, .. } = &event.command else {
             continue;
         };
@@ -5625,6 +6695,8 @@ fn spawn_visible_move_animation_objects(
             function == "BATTLE_ANIM_FUNC_WATER_GUN"
                 && age >= u16::try_from((i32::from(*y) - 0x2f).max(0)).unwrap_or(0),
             palette_override,
+            dmg_palettes.obp0,
+            dmg_palettes.obp1,
             images,
         )?;
         let flags = object
@@ -5671,7 +6743,9 @@ fn spawn_visible_move_animation_objects(
         };
         let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
         let destination_x = source_x - 8 + i32::from(rendered.offset_x);
-        let destination_y = source_y - 16 + i32::from(rendered.offset_y);
+        let destination_y = source_y - 16
+            + i32::from(rendered.offset_y)
+            + visible_rollout_object_y_offset(animation, slot_index);
         commands.spawn((
             SpriteBundle {
                 texture: rendered.sprite.handle.clone(),
@@ -5806,6 +6880,8 @@ fn battle_anim_rendered_frame(
     extra_yflip: bool,
     suppress_enemy_flips: bool,
     palette_override: Option<&str>,
+    obp0: u8,
+    obp1: u8,
     images: &mut Assets<Image>,
 ) -> Result<BattleAnimRenderedFrame> {
     let flags = object
@@ -5824,8 +6900,8 @@ fn battle_anim_rendered_frame(
         ^ (enemy_move && !suppress_enemy_flips && flags & 0x40 != 0)
         ^ extra_yflip;
     let cache_key = format!(
-        "{object_id}:{frameset_name}:{frame_index}:{frame_xflip}:{frame_yflip}:{}",
-        palette_override.unwrap_or("default")
+        "{object_id}:{frameset_name}:{frame_index}:{frame_xflip}:{frame_yflip}:{}:{obp0:02x}:{obp1:02x}",
+        palette_override.unwrap_or("default"),
     );
     if let Some(rendered) = rendered_art.battle_anim_object_cache.get(&cache_key) {
         return Ok(rendered.clone());
@@ -5957,6 +7033,15 @@ fn battle_anim_rendered_frame(
                 .get("yflip")
                 .and_then(serde_json::Value::as_bool)
                 .with_context(|| format!("battle animation OAM set {oam_name} has an entry without yflip"))?;
+            let obp = entry
+                .get("obp")
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| format!("battle animation OAM set {oam_name} has an entry without obp"))?;
+            let object_palette = match obp {
+                0 => obp0,
+                1 => obp1,
+                other => anyhow::bail!("battle animation OAM set {oam_name} has invalid OBP selector {other}"),
+            };
             let tile_id = entry
                 .get("tile_id")
                 .and_then(serde_json::Value::as_i64)
@@ -5980,8 +7065,12 @@ fn battle_anim_rendered_frame(
                     if colour == 0 {
                         continue;
                     }
+                    let mapped_colour = usize::from((object_palette >> (colour * 2)) & 3);
                     let target = (output_y * 8 + output_x) * 4;
-                    pixels[target..target + 4].copy_from_slice(&palette[colour]);
+                    pixels[target..target + 4].copy_from_slice(&palette[mapped_colour]);
+                    // OBJ colour zero is transparent before palette lookup;
+                    // an opaque source colour mapped to DMG shade zero stays visible.
+                    pixels[target + 3] = 255;
                 }
             }
             min_x = min_x.min(x);
@@ -6570,7 +7659,7 @@ fn spawn_visible_capture_animation(
         .get("objects")
         .and_then(|objects| objects.get(object_id))
         .with_context(|| format!("battle animation object {object_id} is missing"))?;
-    let drop_start = if animation.ball_id.eq_ignore_ascii_case("MASTER_BALL") { 164 } else { 92 };
+    let drop_start = animation.shake_entry_frame().saturating_add(8);
     let (frameset, frameset_age) = if animation.blocked || animation.frame < 36 {
         ("BATTLE_ANIM_FRAMESET_POKE_BALL_1", animation.frame)
     } else if animation.frame < 68 {
@@ -6627,6 +7716,8 @@ fn spawn_visible_capture_animation(
             "LEVEL_BALL" => "PAL_BATTLE_OB_BROWN",
             _ => "PAL_BATTLE_OB_RED",
         }),
+        0xe4,
+        0xe4,
         images,
     )?;
     let source_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;

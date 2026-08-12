@@ -39,8 +39,8 @@ use crystal_core::battle::stats::{
 use crystal_core::battle::turn::{
     BattleAction, BattleCombatState, BattleEscapeTrapState, BattleEvent, BattleSide,
     BattleTurnInput, BattleTurnOutcome, MovePriorityTable, MovePriorityTableIssue,
-    battle_move_effect_is_supported, commit_battle_turn_outcome, commit_wild_battle_escape_attempt,
-    move_priority_table_issues,
+    active_battle_combat_state, battle_move_effect_is_supported, commit_battle_turn_outcome,
+    commit_wild_battle_escape_attempt, move_priority_table_issues,
     resolve_battle_enemy_action_with_items as core_resolve_battle_enemy_action_with_items,
     resolve_battle_turn_with_items as core_resolve_battle_turn_with_items,
     resolve_wild_battle_run as core_resolve_wild_battle_run,

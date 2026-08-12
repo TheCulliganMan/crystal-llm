@@ -797,6 +797,12 @@ pub fn apply_active_battle_item_effect(
     item: &Item,
     consumed: bool,
 ) -> Result<BattleItemOutcome, BattleItemError> {
+    // X Accuracy sets the battle-side SUBSTATUS_X_ACCURACY bit in Crystal; it
+    // never changes the Pokemon's accuracy stage.  The owning battle runtime
+    // applies that volatile side state after this Pokemon-only validation.
+    if item.script_name == "X_ACCURACY" {
+        return Ok(unchanged_battle_item_outcome(pokemon, item, consumed));
+    }
     let Some(plan) = active_battle_item_effect_plan(item) else {
         return Err(BattleItemError::MissingBattleItemPayload {
             item_id: item.script_name.clone(),
@@ -816,6 +822,37 @@ pub fn apply_active_battle_item_effect(
         _behavior_id => Err(BattleItemError::MissingBattleItemPayload {
             item_id: item.script_name.clone(),
         }),
+    }
+}
+
+fn unchanged_battle_item_outcome(
+    pokemon: &Pokemon,
+    item: &Item,
+    consumed: bool,
+) -> BattleItemOutcome {
+    BattleItemOutcome {
+        item_id: item.script_name.clone(),
+        hp_before: pokemon.hp,
+        hp_after: pokemon.hp,
+        level_before: pokemon.level,
+        level_after: pokemon.level,
+        experience_before: pokemon.experience,
+        experience_after: pokemon.experience,
+        status_before: pokemon.status.clone(),
+        status_after: pokemon.status.clone(),
+        confusion_turns_before: pokemon.confusion_turns,
+        confusion_turns_after: pokemon.confusion_turns,
+        focus_energy_before: pokemon.focus_energy,
+        focus_energy_after: pokemon.focus_energy,
+        pp_changes: Vec::new(),
+        stat_changes: Vec::new(),
+        battle_stat_stage_changes: Vec::new(),
+        learned_moves: Vec::new(),
+        pending_move_learns: Vec::new(),
+        deferred_level_evolution: false,
+        evolution_target: None,
+        evolution_cancel_snapshot: None,
+        consumed,
     }
 }
 
@@ -4223,7 +4260,7 @@ mod tests {
     }
 
     #[test]
-    fn battle_stat_boost_items_support_exact_accuracy_effect() {
+    fn x_accuracy_does_not_mutate_the_pokemon_accuracy_stage() {
         let item = battle_boost_item("X_ACCURACY", Some("ACCURACY"), Some(1));
         let mut pokemon = test_pokemon(35, 35);
 
@@ -4231,8 +4268,8 @@ mod tests {
             apply_active_battle_item_effect(&mut pokemon, &item, true).expect("X Accuracy applies");
 
         assert_eq!(outcome.item_id, "X_ACCURACY");
-        assert_eq!(outcome.battle_stat_stage_changes[0].stat, "ACCURACY");
-        assert_eq!(pokemon.stat_boosts[&Stat::Accuracy], 1);
+        assert!(outcome.battle_stat_stage_changes.is_empty());
+        assert_eq!(pokemon.stat_boosts[&Stat::Accuracy], 0);
     }
 
     #[test]

@@ -55,6 +55,17 @@ export type ExportedPokemonCryMetadata = {
   length: number;
 };
 
+export function pokemonCryVariantIds(speciesId: string): [string, string, string] {
+  if (!/^[A-Z0-9_]+$/.test(speciesId)) {
+    throw new Error(`Pokemon cry species id must be an exact constant token, got '${speciesId}'.`);
+  }
+  return [
+    `CRY_MON_${speciesId}`,
+    `CRY_MON_${speciesId}_GROWL`,
+    `CRY_MON_${speciesId}_ROAR`,
+  ];
+}
+
 const uniqueSorted = (values: Iterable<string>): string[] => Array.from(new Set(values)).sort();
 
 function exportConstantsFromAsm(disassemblyRoot: string, relativePath: string, prefix: "MUSIC" | "SFX"): string[] {
@@ -106,6 +117,7 @@ function writeRenderedPcmAsset(
   asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata>,
   disassemblyRoot: string,
   stem: string,
+  cryParameters?: { cryPitch: number; cryLength: number },
 ): PcmPayloadMetadata {
   const kind = asset.kind === "music" ? "music" : asset.kind === "cry" ? "cry" : "sfx";
   let clip;
@@ -115,6 +127,7 @@ function writeRenderedPcmAsset(
       kind,
       stem,
       asset.id,
+      cryParameters,
     );
   } catch (error) {
     throw new Error(`Audio asset ${asset.id} failed to render '${stem}': ${String(error)}`);
@@ -292,8 +305,29 @@ export function exportAudioAssets(
     return { ...asset, ...metadata } satisfies RenderedPcmAudioAsset;
   });
 
+  const speciesCries = Object.entries(pokemonCries)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([speciesId, cry]) => {
+      const stem = requireExactCryLabel(cry.cry).replace(/^CRY_/, "");
+      return pokemonCryVariantIds(speciesId).map((id, index) => {
+        const lengthOffset = [0, 0x00c0, 0x0040][index];
+        const asset: Omit<RenderedPcmAudioAsset, keyof PcmPayloadMetadata> = {
+          id,
+          path: `${CORE_AUDIO_ROOT}/cries/${id}.pcm`,
+          kind: "cry",
+          source: "pcm",
+          pcm_format: PCM_AUDIO_FORMAT,
+        };
+        const metadata = writeRenderedPcmAsset(asset, disassemblyRoot, stem, {
+          cryPitch: cry.pitch,
+          cryLength: cry.length + lengthOffset,
+        });
+        return { ...asset, ...metadata } satisfies RenderedPcmAudioAsset;
+      });
+    });
+
   const assets: Record<string, ExportedAudioAsset> = {};
-  for (const asset of [...music, ...sfx, ...cries]) {
+  for (const asset of [...music, ...sfx, ...cries, ...speciesCries]) {
     if (Object.prototype.hasOwnProperty.call(assets, asset.id)) {
       throw new Error(`duplicate audio asset id ${asset.id}`);
     }

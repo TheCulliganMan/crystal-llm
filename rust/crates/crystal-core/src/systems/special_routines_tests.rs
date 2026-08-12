@@ -7482,7 +7482,8 @@ fn bug_contest_full_selected_box_discards_catch_without_alternate_box_routing() 
         if index == 0 {
             boxed.caught_data = Some(crate::models::pokemon::CaughtData {
                 level: 5,
-                ball: 1,
+                time_of_day: Some(crate::world::encounters::TimeOfDay::Morning),
+                original_trainer_gender: 1,
                 location: 2,
             });
         }
@@ -7511,8 +7512,18 @@ fn bug_contest_full_selected_box_discards_catch_without_alternate_box_routing() 
         state.storage.pc_boxes[0].pokemon[0]
             .as_ref()
             .and_then(|pokemon| pokemon.caught_data.as_ref())
-            .map(|caught| (caught.level, caught.ball, caught.location)),
-        Some((5, 1, 0x13))
+            .map(|caught| (
+                caught.level,
+                caught.time_of_day,
+                caught.original_trainer_gender,
+                caught.location,
+            )),
+        Some((
+            5,
+            Some(crate::world::encounters::TimeOfDay::Morning),
+            1,
+            0x13,
+        ))
     );
     assert!(state.bug_contest.caught_mon.is_none());
     assert_eq!(state.bug_contest.caught_species, None);

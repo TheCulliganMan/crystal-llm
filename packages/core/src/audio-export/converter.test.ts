@@ -26,6 +26,40 @@ describe("WavConverter", () => {
     expect(result.sampleRate).toBe(44_100);
   });
 
+  it("applies cartridge cry pitch and length parameters to every tonal channel", () => {
+    const cryData: ParsedMusicData = {
+      channel_count: 2,
+      channels: {
+        Cry_Test_Ch5: {
+          number: 5,
+          commands: [
+            { command: "square_note", args: ["0", "15", "0", "1024"] },
+          ],
+        },
+        Cry_Test_Ch8: {
+          number: 8,
+          commands: [
+            { command: "drum_speed", args: ["1"] },
+            { command: "rest", args: ["1"] },
+          ],
+        },
+      },
+      subroutines: {},
+    };
+
+    const base = new WavConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
+      cryPitch: 0,
+      cryLength: 0x100,
+    }).convert("pcm");
+    const altered = new WavConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
+      cryPitch: 0x80,
+      cryLength: 0x200,
+    }).convert("pcm");
+
+    expect(altered.stereo.length / base.stereo.length).toBeCloseTo(2, 2);
+    expect(Array.from(altered.stereo.slice(0, 512))).not.toEqual(Array.from(base.stereo.slice(0, 512)));
+  });
+
   it("renders MIDI bytes", () => {
     const converter = new WavConverter(baseMusicData, {}, { 0: new Array(32).fill(0) });
     const result = converter.convert("midi");

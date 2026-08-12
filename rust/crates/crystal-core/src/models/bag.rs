@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Index};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -12,13 +12,98 @@ pub const BALL_POCKET_CAPACITY: usize = 12;
 pub const KEY_ITEM_POCKET_CAPACITY: usize = 25;
 pub const PC_ITEM_CAPACITY: usize = 50;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PocketStack {
+    pub item_id: String,
+    pub quantity: u16,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PocketInventory(pub Vec<PocketStack>);
+
+impl PocketInventory {
+    pub fn get(&self, item_id: &str) -> Option<&u16> {
+        self.0
+            .iter()
+            .find(|stack| stack.item_id == item_id)
+            .map(|stack| &stack.quantity)
+    }
+
+    pub fn insert(&mut self, item_id: String, quantity: u16) -> Option<u16> {
+        if let Some(stack) = self.0.iter_mut().find(|stack| stack.item_id == item_id) {
+            return Some(std::mem::replace(&mut stack.quantity, quantity));
+        }
+        self.0.push(PocketStack { item_id, quantity });
+        None
+    }
+
+    pub fn remove(&mut self, item_id: &str) -> Option<u16> {
+        let index = self.0.iter().position(|stack| stack.item_id == item_id)?;
+        Some(self.0.remove(index).quantity)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &u16)> {
+        self.0.iter().map(|stack| (&stack.item_id, &stack.quantity))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().map(|stack| &stack.item_id)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &u16> {
+        self.0.iter().map(|stack| &stack.quantity)
+    }
+
+    pub fn stacks(&self) -> &[PocketStack] {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a PocketInventory {
+    type Item = (&'a String, &'a u16);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, PocketStack>,
+        fn(&'a PocketStack) -> (&'a String, &'a u16),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn pair(stack: &PocketStack) -> (&String, &u16) {
+            (&stack.item_id, &stack.quantity)
+        }
+        self.0.iter().map(pair)
+    }
+}
+
+impl Index<&str> for PocketInventory {
+    type Output = u16;
+
+    fn index(&self, item_id: &str) -> &Self::Output {
+        self.get(item_id)
+            .unwrap_or_else(|| panic!("no pocket stack for item {item_id}"))
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bag {
-    pub items: BTreeMap<String, u16>,
-    pub pc_items: BTreeMap<String, u16>,
-    pub balls: BTreeMap<String, u16>,
-    pub key_items: BTreeMap<String, u16>,
+    pub items: PocketInventory,
+    pub pc_items: PocketInventory,
+    pub balls: PocketInventory,
+    pub key_items: PocketInventory,
     /// TM/HM quantities, indexed by the compiled `tmhm_index`.
     pub tm_hm: Vec<u8>,
     pub custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
@@ -32,10 +117,10 @@ impl<'de> Deserialize<'de> for Bag {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawBag {
-            items: BTreeMap<String, u16>,
-            pc_items: BTreeMap<String, u16>,
-            balls: BTreeMap<String, u16>,
-            key_items: BTreeMap<String, u16>,
+            items: PocketInventory,
+            pc_items: PocketInventory,
+            balls: PocketInventory,
+            key_items: PocketInventory,
             tm_hm: Vec<u8>,
             custom_pockets: BTreeMap<String, BTreeMap<String, u16>>,
         }
@@ -77,6 +162,26 @@ pub enum BagSaveError {
 }
 
 impl Bag {
+    pub fn switch_item_stacks(
+        &mut self,
+        pocket: &str,
+        source_index: usize,
+        target_index: usize,
+    ) -> Result<usize, String> {
+        match pocket {
+            ITEM_POCKET_ITEM => {
+                switch_inventory_stacks(&mut self.items, source_index, target_index, MAX_ITEM_STACK)
+            }
+            ITEM_POCKET_BALL => {
+                switch_inventory_stacks(&mut self.balls, source_index, target_index, MAX_ITEM_STACK)
+            }
+            ITEM_POCKET_KEY_ITEM => {
+                switch_inventory_stacks(&mut self.key_items, source_index, target_index, 1)
+            }
+            _ => Err(format!("item switching is unavailable for pocket {pocket}")),
+        }
+    }
+
     pub fn add_item(&mut self, definition: &Item, quantity: u16) -> Result<bool, String> {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
@@ -99,7 +204,7 @@ impl Bag {
             ITEM_POCKET_KEY_ITEM => add_to_inventory(
                 &mut self.key_items,
                 &definition.script_name,
-                quantity,
+                1,
                 1,
                 Some(KEY_ITEM_POCKET_CAPACITY),
             ),
@@ -125,7 +230,7 @@ impl Bag {
                 remove_from_inventory(&mut self.balls, &definition.script_name, quantity)
             }
             ITEM_POCKET_KEY_ITEM => {
-                remove_from_inventory(&mut self.key_items, &definition.script_name, quantity)
+                remove_from_inventory(&mut self.key_items, &definition.script_name, 1)
             }
             ITEM_POCKET_TM_HM => self.remove_tmhm(definition, quantity),
             other => remove_from_custom_pocket(
@@ -134,6 +239,41 @@ impl Bag {
                 &definition.script_name,
                 quantity,
             ),
+        }
+    }
+
+    pub fn remove_item_at(
+        &mut self,
+        definition: &Item,
+        stack_index: usize,
+        quantity: u16,
+    ) -> Result<bool, String> {
+        if quantity == 0 {
+            return Err("quantity must be positive".to_string());
+        }
+        match definition.pocket.as_str() {
+            ITEM_POCKET_ITEM => remove_from_inventory_at(
+                &mut self.items,
+                &definition.script_name,
+                stack_index,
+                quantity,
+            ),
+            ITEM_POCKET_BALL => remove_from_inventory_at(
+                &mut self.balls,
+                &definition.script_name,
+                stack_index,
+                quantity,
+            ),
+            ITEM_POCKET_KEY_ITEM => remove_from_inventory_at(
+                &mut self.key_items,
+                &definition.script_name,
+                stack_index,
+                1,
+            ),
+            _ => Err(format!(
+                "indexed removal is unavailable for pocket {}",
+                definition.pocket
+            )),
         }
     }
 
@@ -177,23 +317,34 @@ impl Bag {
         remove_from_inventory(&mut self.pc_items, &definition.script_name, quantity)
     }
 
+    pub fn remove_pc_item_at(
+        &mut self,
+        definition: &Item,
+        stack_index: usize,
+        quantity: u16,
+    ) -> Result<bool, String> {
+        if quantity == 0 {
+            return Err("quantity must be positive".to_string());
+        }
+        if definition.pocket != ITEM_POCKET_ITEM {
+            return Err(format!(
+                "PC item '{}' is not in the ITEM pocket",
+                definition.script_name
+            ));
+        }
+        remove_from_inventory_at(
+            &mut self.pc_items,
+            &definition.script_name,
+            stack_index,
+            quantity,
+        )
+    }
+
     pub fn quantity(&self, definition: &Item) -> u16 {
         match definition.pocket.as_str() {
-            ITEM_POCKET_ITEM => self
-                .items
-                .get(&definition.script_name)
-                .copied()
-                .unwrap_or(0),
-            ITEM_POCKET_BALL => self
-                .balls
-                .get(&definition.script_name)
-                .copied()
-                .unwrap_or(0),
-            ITEM_POCKET_KEY_ITEM => self
-                .key_items
-                .get(&definition.script_name)
-                .copied()
-                .unwrap_or(0),
+            ITEM_POCKET_ITEM => inventory_quantity(&self.items, &definition.script_name),
+            ITEM_POCKET_BALL => inventory_quantity(&self.balls, &definition.script_name),
+            ITEM_POCKET_KEY_ITEM => inventory_quantity(&self.key_items, &definition.script_name),
             ITEM_POCKET_TM_HM => definition
                 .tmhm_index
                 .and_then(|index| self.tm_hm.get(index).copied())
@@ -211,10 +362,7 @@ impl Bag {
         if definition.pocket != ITEM_POCKET_ITEM {
             return 0;
         }
-        self.pc_items
-            .get(&definition.script_name)
-            .copied()
-            .unwrap_or(0)
+        inventory_quantity(&self.pc_items, &definition.script_name)
     }
 
     pub fn consume_ball(&mut self, definition: &Item) -> Result<bool, String> {
@@ -231,14 +379,17 @@ impl Bag {
         if self.tm_hm.len() <= index {
             self.tm_hm.resize(index + 1, 0);
         }
-        if self.tm_hm[index] >= MAX_ITEM_STACK as u8 {
+        let Ok(quantity) = u8::try_from(quantity) else {
+            return Ok(false);
+        };
+        let Some(next) = self.tm_hm[index].checked_add(quantity) else {
+            return Ok(false);
+        };
+        if next > MAX_ITEM_STACK as u8 {
             return Ok(false);
         }
-        let before = self.tm_hm[index];
-        self.tm_hm[index] = self.tm_hm[index]
-            .saturating_add(quantity.min(MAX_ITEM_STACK) as u8)
-            .min(MAX_ITEM_STACK as u8);
-        Ok(self.tm_hm[index] != before)
+        self.tm_hm[index] = next;
+        Ok(true)
     }
 
     fn remove_tmhm(&mut self, definition: &Item, amount: u16) -> Result<bool, String> {
@@ -251,12 +402,14 @@ impl Bag {
         let Some(quantity) = self.tm_hm.get_mut(index) else {
             return Ok(false);
         };
-        if *quantity == 0 {
+        let Ok(amount) = u8::try_from(amount) else {
+            return Ok(false);
+        };
+        if amount == 0 || *quantity < amount {
             return Ok(false);
         }
-        let removed = (*quantity).min(amount.min(u16::from(u8::MAX)) as u8);
-        *quantity -= removed;
-        Ok(removed > 0)
+        *quantity -= amount;
+        Ok(true)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -287,7 +440,7 @@ fn add_to_custom_pocket(
 ) -> Result<bool, String> {
     validate_pocket_id(pocket_id)?;
     let inventory = custom_pockets.entry(pocket_id.to_string()).or_default();
-    add_to_inventory(inventory, item_id, quantity, MAX_ITEM_STACK, None)
+    add_to_map_inventory(inventory, item_id, quantity, MAX_ITEM_STACK)
 }
 
 fn remove_from_custom_pocket(
@@ -300,16 +453,16 @@ fn remove_from_custom_pocket(
     let Some(inventory) = custom_pockets.get_mut(pocket_id) else {
         return Ok(false);
     };
-    remove_from_inventory(inventory, item_id, quantity)
+    remove_from_map_inventory(inventory, item_id, quantity)
 }
 
-pub fn validate_saved_bag_pocket_references(
+pub fn validate_saved_bag_pocket_references<'a>(
     items: &BTreeMap<String, Item>,
     path: &str,
-    inventory: &BTreeMap<String, u16>,
+    inventory: impl IntoIterator<Item = (&'a String, &'a u16)>,
     expected_pocket: &str,
 ) -> Result<(), BagSaveError> {
-    for item_id in inventory.keys() {
+    for (item_id, _) in inventory {
         let item = items
             .get(item_id)
             .ok_or_else(|| BagSaveError::MissingItem {
@@ -336,23 +489,159 @@ pub fn validate_saved_bag_pocket_references(
 }
 
 fn add_to_inventory(
-    inventory: &mut BTreeMap<String, u16>,
+    inventory: &mut PocketInventory,
     item_id: &str,
     quantity: u16,
     stack_limit: u16,
     capacity: Option<usize>,
 ) -> Result<bool, String> {
     validate_item_id(item_id)?;
-    let current = inventory.get(item_id).copied().unwrap_or(0);
-    if current >= stack_limit {
+    let capacity = capacity.unwrap_or(usize::MAX);
+    let matching_space = inventory
+        .0
+        .iter()
+        .filter(|stack| stack.item_id == item_id)
+        .map(|stack| stack_limit.saturating_sub(stack.quantity))
+        .sum::<u16>();
+    let empty_slots = capacity.saturating_sub(inventory.len());
+    let empty_space = u32::try_from(empty_slots)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(u32::from(stack_limit));
+    if u32::from(quantity) > u32::from(matching_space).saturating_add(empty_space) {
         return Ok(false);
     }
-    if current == 0
-        && let Some(capacity) = capacity
-        && inventory.values().filter(|quantity| **quantity > 0).count() >= capacity
+
+    let mut remaining = quantity;
+    for stack in inventory
+        .0
+        .iter_mut()
+        .filter(|stack| stack.item_id == item_id)
     {
+        let added = remaining.min(stack_limit - stack.quantity);
+        stack.quantity += added;
+        remaining -= added;
+        if remaining == 0 {
+            return Ok(true);
+        }
+    }
+
+    while remaining > 0 {
+        let added = remaining.min(stack_limit);
+        inventory.0.push(PocketStack {
+            item_id: item_id.to_string(),
+            quantity: added,
+        });
+        remaining -= added;
+    }
+    Ok(true)
+}
+
+fn remove_from_inventory(
+    inventory: &mut PocketInventory,
+    item_id: &str,
+    quantity: u16,
+) -> Result<bool, String> {
+    validate_item_id(item_id)?;
+    let Some(index) = inventory
+        .0
+        .iter()
+        .position(|stack| stack.item_id == item_id)
+    else {
+        return Ok(false);
+    };
+    if inventory.0[index].quantity < quantity {
         return Ok(false);
     }
+    let next = inventory.0[index].quantity - quantity;
+    if next == 0 {
+        inventory.0.remove(index);
+    } else {
+        inventory.0[index].quantity = next;
+    }
+    Ok(true)
+}
+
+fn remove_from_inventory_at(
+    inventory: &mut PocketInventory,
+    item_id: &str,
+    stack_index: usize,
+    quantity: u16,
+) -> Result<bool, String> {
+    validate_item_id(item_id)?;
+    let Some(stack) = inventory.0.get(stack_index) else {
+        return Ok(false);
+    };
+    if stack.item_id != item_id || stack.quantity < quantity {
+        return Ok(false);
+    }
+    let next = stack.quantity - quantity;
+    if next == 0 {
+        inventory.0.remove(stack_index);
+    } else {
+        inventory.0[stack_index].quantity = next;
+    }
+    Ok(true)
+}
+
+fn inventory_quantity(inventory: &PocketInventory, item_id: &str) -> u16 {
+    inventory
+        .0
+        .iter()
+        .filter(|stack| stack.item_id == item_id)
+        .map(|stack| stack.quantity)
+        .sum()
+}
+
+fn switch_inventory_stacks(
+    inventory: &mut PocketInventory,
+    source_index: usize,
+    target_index: usize,
+    stack_limit: u16,
+) -> Result<usize, String> {
+    if source_index >= inventory.len() || target_index >= inventory.len() {
+        return Err(format!(
+            "item switch indices {source_index}->{target_index} are outside pocket length {}",
+            inventory.len()
+        ));
+    }
+    if source_index == target_index {
+        return Ok(target_index);
+    }
+
+    let source = &inventory.0[source_index];
+    let target = &inventory.0[target_index];
+    if source.item_id == target.item_id
+        && source.quantity < stack_limit
+        && target.quantity < stack_limit
+    {
+        let total = source.quantity + target.quantity;
+        if total <= stack_limit {
+            inventory.0[target_index].quantity = total;
+            inventory.0.remove(source_index);
+            return Ok(if source_index < target_index {
+                target_index - 1
+            } else {
+                target_index
+            });
+        }
+        inventory.0[target_index].quantity = stack_limit;
+        inventory.0[source_index].quantity = total - stack_limit;
+        return Ok(target_index);
+    }
+
+    let stack = inventory.0.remove(source_index);
+    inventory.0.insert(target_index, stack);
+    Ok(target_index)
+}
+
+fn add_to_map_inventory(
+    inventory: &mut BTreeMap<String, u16>,
+    item_id: &str,
+    quantity: u16,
+    stack_limit: u16,
+) -> Result<bool, String> {
+    validate_item_id(item_id)?;
+    let current = inventory.get(item_id).copied().unwrap_or(0);
     let Some(next) = current.checked_add(quantity) else {
         return Ok(false);
     };
@@ -363,7 +652,7 @@ fn add_to_inventory(
     Ok(true)
 }
 
-fn remove_from_inventory(
+fn remove_from_map_inventory(
     inventory: &mut BTreeMap<String, u16>,
     item_id: &str,
     quantity: u16,
@@ -385,12 +674,12 @@ fn remove_from_inventory(
 }
 
 fn validate_inventory(
-    inventory: &BTreeMap<String, u16>,
+    inventory: &PocketInventory,
     stack_limit: u16,
     capacity: usize,
     label: &str,
 ) -> Result<(), String> {
-    let active = inventory.values().filter(|quantity| **quantity > 0).count();
+    let active = inventory.len();
     if active > capacity {
         return Err(format!(
             "{label} has {active} active slots, capacity is {capacity}"
@@ -410,9 +699,9 @@ fn validate_inventory(
                 "{label} contains item id '{item_id}' that must contain only ASCII letters, numbers, or underscores"
             ));
         }
-        if *quantity > stack_limit {
+        if *quantity == 0 || *quantity > stack_limit {
             return Err(format!(
-                "{label}.{item_id} quantity {quantity} exceeds stack limit {stack_limit}"
+                "{label}.{item_id} quantity {quantity} is outside stack range 1..={stack_limit}"
             ));
         }
     }
@@ -432,12 +721,39 @@ fn validate_custom_pockets(
             }
             _ => {}
         }
-        validate_inventory(
+        validate_map_inventory(
             inventory,
             MAX_ITEM_STACK,
-            usize::MAX,
             &format!("custom_pockets.{pocket_id}"),
         )?;
+    }
+    Ok(())
+}
+
+fn validate_map_inventory(
+    inventory: &BTreeMap<String, u16>,
+    stack_limit: u16,
+    label: &str,
+) -> Result<(), String> {
+    for (item_id, quantity) in inventory {
+        if item_id.is_empty() {
+            return Err(format!("{label} contains an empty item id"));
+        }
+        if item_id.trim() != item_id {
+            return Err(format!(
+                "{label} contains item id '{item_id}' that must be exact and untrimmed"
+            ));
+        }
+        if !is_exact_item_id(item_id) {
+            return Err(format!(
+                "{label} contains item id '{item_id}' that must contain only ASCII letters, numbers, or underscores"
+            ));
+        }
+        if *quantity == 0 || *quantity > stack_limit {
+            return Err(format!(
+                "{label}.{item_id} quantity {quantity} is outside stack range 1..={stack_limit}"
+            ));
+        }
     }
     Ok(())
 }
@@ -647,14 +963,28 @@ mod tests {
     }
 
     #[test]
-    fn key_items_do_not_stack_and_tmhm_quantities_are_exact() {
+    fn key_items_append_distinct_slots_and_tmhm_quantities_are_exact() {
         let bicycle = item("BICYCLE", item_pocket("KEY_ITEM"));
         let mut tm_mud_slap = item("TM_MUD_SLAP", item_pocket("TM_HM"));
         tm_mud_slap.tmhm_index = Some(30);
         let mut bag = Bag::default();
 
         assert!(bag.add_item(&bicycle, 1).expect("add key item"));
-        assert!(!bag.add_item(&bicycle, 1).expect("key item already held"));
+        assert!(
+            bag.add_item(&bicycle, 1)
+                .expect("ASM ReceiveKeyItem appends duplicate key-item slots")
+        );
+        assert_eq!(bag.quantity(&bicycle), 2);
+        assert!(
+            bag.add_item(&bicycle, 99)
+                .expect("key item quantity byte is ignored")
+        );
+        assert_eq!(bag.quantity(&bicycle), 3);
+        assert!(
+            bag.remove_item(&bicycle, 99)
+                .expect("key item toss removes one entry")
+        );
+        assert_eq!(bag.quantity(&bicycle), 2);
         assert!(bag.add_item(&tm_mud_slap, 1).expect("add tm"));
         assert_eq!(bag.quantity(&tm_mud_slap), 1);
         assert!(
@@ -662,11 +992,91 @@ mod tests {
                 .expect("tm quantity increments")
         );
         assert_eq!(bag.quantity(&tm_mud_slap), 2);
-        assert!(bag.add_item(&tm_mud_slap, 200).expect("tm quantity caps"));
+        assert!(
+            !bag.add_item(&tm_mud_slap, u16::from(MAX_ITEM_STACK - 1))
+                .expect("an overflowing TM quantity is rejected atomically")
+        );
+        assert_eq!(bag.quantity(&tm_mud_slap), 2);
+        assert!(
+            bag.add_item(&tm_mud_slap, u16::from(MAX_ITEM_STACK - 2))
+                .expect("an exact TM stack fill succeeds")
+        );
         assert_eq!(bag.quantity(&tm_mud_slap), u16::from(MAX_ITEM_STACK));
-        assert!(!bag.add_item(&tm_mud_slap, 1).expect("tm stack full"));
+        assert!(!bag.add_item(&tm_mud_slap, 1).expect("TM stack is full"));
         assert!(bag.remove_item(&tm_mud_slap, 1).expect("remove tm"));
         assert_eq!(bag.quantity(&tm_mud_slap), u16::from(MAX_ITEM_STACK - 1));
+        assert!(
+            !bag.remove_item(&tm_mud_slap, u16::from(MAX_ITEM_STACK))
+                .expect("an oversized TM removal is rejected atomically")
+        );
+        assert_eq!(bag.quantity(&tm_mud_slap), u16::from(MAX_ITEM_STACK - 1));
+    }
+
+    #[test]
+    fn item_pockets_preserve_order_and_append_duplicate_stacks_like_asm() {
+        let potion = item("POTION", item_pocket("ITEM"));
+        let antidote = item("ANTIDOTE", item_pocket("ITEM"));
+        let mut bag = Bag::default();
+
+        assert!(bag.add_item(&potion, 90).expect("add first stack"));
+        assert!(bag.add_item(&antidote, 1).expect("append another item"));
+        assert!(bag.add_item(&potion, 20).expect("fill and append potion"));
+        assert_eq!(
+            bag.items.stacks(),
+            [
+                PocketStack {
+                    item_id: "POTION".to_string(),
+                    quantity: 99,
+                },
+                PocketStack {
+                    item_id: "ANTIDOTE".to_string(),
+                    quantity: 1,
+                },
+                PocketStack {
+                    item_id: "POTION".to_string(),
+                    quantity: 11,
+                },
+            ]
+        );
+        assert_eq!(bag.quantity(&potion), 110);
+
+        assert!(
+            bag.remove_item(&potion, 50)
+                .expect("remove from first stack")
+        );
+        assert_eq!(bag.items.stacks()[0].quantity, 49);
+        assert_eq!(bag.items.stacks()[2].quantity, 11);
+        assert!(
+            !bag.remove_item(&potion, 50)
+                .expect("removal cannot spill across duplicate stacks")
+        );
+        assert_eq!(bag.quantity(&potion), 60);
+        assert!(
+            bag.remove_item_at(&potion, 2, 10)
+                .expect("cursor-addressed removal selects the duplicate stack")
+        );
+        assert_eq!(bag.items.stacks()[2].quantity, 1);
+    }
+
+    #[test]
+    fn switch_items_reorders_and_combines_stacks_like_asm() {
+        let potion = item("POTION", item_pocket("ITEM"));
+        let antidote = item("ANTIDOTE", item_pocket("ITEM"));
+        let mut bag = Bag::default();
+        assert!(bag.add_item(&potion, 99).unwrap());
+        assert!(bag.add_item(&antidote, 1).unwrap());
+        assert!(bag.add_item(&potion, 20).unwrap());
+
+        assert_eq!(bag.switch_item_stacks(ITEM_POCKET_ITEM, 1, 0).unwrap(), 0);
+        assert_eq!(bag.items.stacks()[0].item_id, "ANTIDOTE");
+        bag.items.0[1].quantity = 80;
+        assert_eq!(bag.switch_item_stacks(ITEM_POCKET_ITEM, 2, 1).unwrap(), 1);
+        assert_eq!(bag.items.stacks()[1].quantity, 99);
+        assert_eq!(bag.items.stacks()[2].quantity, 1);
+        bag.items.0[1].quantity = 50;
+        assert_eq!(bag.switch_item_stacks(ITEM_POCKET_ITEM, 2, 1).unwrap(), 1);
+        assert_eq!(bag.items.stacks()[1].quantity, 51);
+        assert_eq!(bag.items.len(), 2);
     }
 
     #[test]
@@ -737,10 +1147,10 @@ mod tests {
     #[test]
     fn bag_json_rejects_unknown_inventory_fields_without_legacy_fallbacks() {
         let error = serde_json::from_value::<Bag>(serde_json::json!({
-            "items": {},
-            "pc_items": {},
-            "balls": {},
-            "key_items": {},
+            "items": [],
+            "pc_items": [],
+            "balls": [],
+            "key_items": [],
             "tm_hm": [],
             "custom_pockets": {},
             "legacy_pc_items": {}
@@ -754,10 +1164,10 @@ mod tests {
     #[test]
     fn bag_json_requires_all_inventory_pockets_without_empty_defaults() {
         let complete = serde_json::json!({
-            "items": {},
-            "pc_items": {},
-            "balls": {},
-            "key_items": {},
+            "items": [],
+            "pc_items": [],
+            "balls": [],
+            "key_items": [],
             "tm_hm": [],
             "custom_pockets": {}
         });

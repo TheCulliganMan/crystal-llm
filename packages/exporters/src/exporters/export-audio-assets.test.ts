@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { getTypeScriptDataDir } from "./asm-utils";
-import { exportAudioAssets, exportPokemonCryMetadataFromAsm } from "./export-audio-assets";
+import { exportAudioAssets, exportPokemonCryMetadataFromAsm, pokemonCryVariantIds } from "./export-audio-assets";
 
 describe("export-audio-assets", () => {
   it("exports Pokemon cry metadata with exact species ids from ASM", () => {
@@ -82,5 +82,14 @@ describe("export-audio-assets", () => {
     expect(() => exportAudioAssets({ LUGIA: { cry: "cry_lugia", pitch: 0, length: 0 } })).toThrow(
       "Pokemon cry metadata must use exact CRY_* labels"
     );
+  });
+
+  it("uses exact normal, Growl, and Roar runtime ids for each species", () => {
+    expect(pokemonCryVariantIds("SANDSHREW")).toEqual([
+      "CRY_MON_SANDSHREW",
+      "CRY_MON_SANDSHREW_GROWL",
+      "CRY_MON_SANDSHREW_ROAR",
+    ]);
+    expect(() => pokemonCryVariantIds("sandshrew")).toThrow("exact constant token");
   });
 });

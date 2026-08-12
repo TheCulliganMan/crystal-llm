@@ -54,10 +54,43 @@ with missing art evidence stays flat instead of guessing or disabling 2.5D.
 Celadon Department Store is claimed from its native roof cap through both
 rounded window courses and its entrance course as one exterior landmark. Only
 the real cap is top-facing, so its roof cannot detach and lie flat behind the
-six-storey facade.
+six-storey facade. Its twelve upright source rows remain at full native
+height, while generated sidewalls carry only the authored outer frame—not
+the broad window fields—so windows cannot wrap around the upper corners.
 The cave tileset's exact two-row rock drawings likewise fold into masked
-upright props while ambiguous wall contours remain flat pending a connected
-profile; cave collision is never treated as visual height.
+upright props. Its authored `$2d/$2e/$2f` ceiling-rock family forms one
+connected 16-pixel bank: the edge blocks retain their native boundary art,
+the repeated interior suppresses internal faces, and only the true perimeter
+is exposed. Other ambiguous contours remain flat pending an authored
+connected profile; cave collision is never treated as visual height.
+The closed `$31` cave shelf similarly keeps one topology: its north rim,
+side courses, interior cap, and final `$25/$26/$27` south lip all meet the
+same six-pixel shelf datum instead of leaving the bottom edge flat and open.
+The matching `$38/$39/$3a` hop-down family uses that same single native lip:
+left, repeating middle, and right blocks join one six-pixel shelf edge rather
+than becoming disconnected flat strips or full rock-height walls.
+The distinct barred shelf in `$13/$37` keeps its complete `$0e/$0f` over
+`$1e/$1f` drawing as two native upright rock courses with the contextual
+floor or ceiling cap. It is not segmented into four props, and the separate
+loose-boulder drawings remain flat 2.5D cards rather than voxel blocks.
+Loose cave-rock cards also remain on the actual ground datum. They no longer
+inherit the six-pixel lit-shelf elevation merely because the same drawing is
+used nearby; mixed block `$34` therefore stays two independent rocks above a
+separate pale course instead of becoming a floating or merged plateau.
+Mixed block `$35` likewise keeps its objects separate: the lower southeast
+quadrant reuses the exact authored diagonal-corner prism from `$10`, while
+the loose boulder above it remains its existing flat 2.5D card.
+Blocks `$12/$30` are treated as one mirrored transition vocabulary rather
+than gray decoration: one lower quadrant is the 16-pixel rock cap and the
+opposite `$36/$37` pair supplies its two native east/west wall courses. The
+same edge strips in `$36` retain that block's separate south-shelf role.
+Cave-water corners `$3d/$3e` remain wholly on the lower cave-water datum.
+Their reused `$15/$17` boundary pixels no longer inherit the lit shelf's
+six-pixel height, preventing false ledges beside pools and waterfalls.
+The lateral hop-edge pair `$3b/$3c` keeps the opposite topology: twelve
+interior cells form the six-pixel shelf, while the four repeated outside
+edge cells fold onto one continuous one-course west/east wall. They never
+stack into four artificial elevation levels.
 Compact interior fixtures use the same conservative source-art approach:
 authored PCs, TVs, radios, bookcases, counters, shelves, displays, and
 domestic furniture receive only shallow pixel relief, while unprofiled room
@@ -68,6 +101,14 @@ cabinet relief without inventing geometry for plain Crystal furniture.
 Complete wall-appliance drawings keep their exact live front pixels and gain
 only a one-source-pixel shallow casing; generic trees and other flat cards do
 not inherit that thickness.
+Interior depth ends at authored wall courses. The optional renderer does not
+insert a solid full-width back-wall quad, avoiding gray horizontal bars that
+have no counterpart in the Game Boy tilemap.
+The active Oak and Elm laboratory maps also separate their exact framed
+two-course north panels and complete four-course equipment bank from the
+floor/table vocabulary. Each native row folds once onto a shared upright
+plane; ordinary lab floor, chairs, and shallow worktables retain their
+existing presentation roles.
 Trainer House open books are reconstructed as their complete cross-metatile
 two-by-two page drawing and remain paper-thin on the authored tabletop. Their
 light boundary-touching pages use whole-drawing background separation rather
@@ -88,6 +129,11 @@ The four 6F machine banks reuse the existing complete two-by-four rack/card
 geometry through their exact `$0b` and `$20` metatile-half variants, so the
 native machine drawing stands once without fusing neighboring banks or
 raising the shop floor.
+The shared Underground `$0c/$0e` boundary blocks now raise only their exact
+two-column dark rail halves as one 16-pixel wall course across the department
+store basement, warehouse, port passages, Saffron Gym, and Underground Path.
+Their adjacent `$10` floor halves remain flat, and Team Rocket Base retains
+its separate authored maze-wall network for the reused atlas cells.
 The remaining regular-floor variants share those same systems: 2F's final
 two-by-four rack is reconstructed across its `$2c/$2d` metatile boundary, and
 the exact blocked counter-end quadrants on 1F/3F remain eight-pixel top-facing

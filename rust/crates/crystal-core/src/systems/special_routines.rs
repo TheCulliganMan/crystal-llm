@@ -9146,7 +9146,7 @@ fn check_party_full_after_contest(
     let species = contest_mon.species.id.clone();
     let result = if state.storage.party.has_space() {
         let mut contest_mon = contest_mon;
-        set_bug_contest_caught_data(&mut contest_mon, 0xb1);
+        set_bug_contest_caught_data(&mut contest_mon);
         if !state.storage.party.add_pokemon(contest_mon) {
             return Err(SpecialRoutineError::InvalidState {
                 routine: routine.to_string(),
@@ -9174,11 +9174,11 @@ fn check_party_full_after_contest(
             if let Some(first_boxed_mon) =
                 state.storage.pc_boxes[current_pc_box].pokemon[0].as_mut()
             {
-                set_bug_contest_caught_data(first_boxed_mon, 0);
+                set_bug_contest_caught_data(first_boxed_mon);
             }
         } else {
             let mut contest_mon = contest_mon;
-            set_bug_contest_caught_data(&mut contest_mon, 0xb1);
+            set_bug_contest_caught_data(&mut contest_mon);
             state
                 .storage
                 .register_capture_in_box(current_pc_box, contest_mon)
@@ -9204,16 +9204,17 @@ fn check_party_full_after_contest(
     })
 }
 
-fn set_bug_contest_caught_data(pokemon: &mut Pokemon, default_ball: u8) {
+fn set_bug_contest_caught_data(pokemon: &mut Pokemon) {
     match pokemon.caught_data.as_mut() {
         Some(caught_data) => {
-            caught_data.level = pokemon.level;
+            caught_data.level = pokemon.level & 0x3f;
             caught_data.location = 0x13; // LANDMARK_NATIONAL_PARK
         }
         None => {
             pokemon.caught_data = Some(CaughtData {
-                level: pokemon.level,
-                ball: default_ball,
+                level: pokemon.level & 0x3f,
+                time_of_day: None,
+                original_trainer_gender: 0,
                 location: 0x13,
             });
         }

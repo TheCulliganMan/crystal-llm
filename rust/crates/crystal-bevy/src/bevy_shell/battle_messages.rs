@@ -741,13 +741,13 @@ fn stage_visible_battle_messages(
                                 && animation_index > 0
                             {
                                 bg_events.insert(0, VisibleMoveBgEvent {
-                                    frame: 0,
+                                frame: 0,
                                     effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
                                     duration: 0,
                                     target: "BG_EFFECT_USER".to_string(),
                                     param: 0,
                                     incremented: false,
-                                });
+                            });
                             }
                             runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
                                 trigger_message: message.clone(),
@@ -839,7 +839,7 @@ fn stage_visible_battle_messages(
                                         && called_animation_index > 0
                                     {
                                         bg_events.insert(0, VisibleMoveBgEvent {
-                                            frame: 0,
+                                        frame: 0,
                                             effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
                                             duration: 0,
                                             target: "BG_EFFECT_USER".to_string(),
@@ -1116,7 +1116,7 @@ fn stage_visible_battle_messages(
                 let message = match status.as_str() {
                     "SLEEP" if move_name == "DISOBEDIENCE_NAP" => {
                         format!("{} began\nto nap!", name(*target))
-                    }
+                }
                     "SLEEP" => format!("{}\nfell asleep!", name(*target)),
                     "POISON" => format!("{}\nwas poisoned!", name(*target)),
                     "BAD_POISON" => format!("{}'s\nbadly poisoned!", name(*target)),
@@ -1740,9 +1740,10 @@ fn stage_visible_battle_messages(
             BattleEvent::BideStarted { side, .. } | BattleEvent::BideStoring { side, .. } => {
                 Some(format!("{}\nis storing energy!", name(*side)))
             }
-            BattleEvent::BideReleased { side, .. } => {
+            BattleEvent::BideUnleashed { side, .. } => {
                 Some(format!("{}\nunleashed energy!", name(*side)))
             }
+            BattleEvent::BideReleased { .. } => None,
             BattleEvent::BideFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::SpiteApplied {
                 target,
@@ -2085,7 +2086,7 @@ fn stage_visible_battle_messages(
                     next_cry_event: 0,
                     object_events: Vec::new(),
                     bg_events: vec![VisibleMoveBgEvent {
-                        frame: 0,
+                    frame: 0,
                         effect_id: "BATTLE_BG_EFFECT_FAINT_MON".to_string(),
                         duration: 20,
                         target: "BG_EFFECT_USER".to_string(),
@@ -2779,95 +2780,125 @@ fn visible_battle_animation_definition(
                         && candidate.frame >= effect.frame
                 })
                 .map(|candidate| candidate.frame);
+            let reload_interval = || {
+                parse_visible_battle_animation_int(&effect.target)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .map(|value| value.saturating_add(1).max(1))
+            };
             let lifetime = match effect.effect_id.as_str() {
                 "BATTLE_BG_EFFECT_TACKLE"
                 | "BATTLE_BG_EFFECT_BODY_SLAM"
-                | "BATTLE_BG_EFFECT_BETA_PURSUIT"
-                | "BATTLE_BG_EFFECT_ROLLOUT"
-                | "BATTLE_BG_EFFECT_VITAL_THROW" => 8,
+                | "BATTLE_BG_EFFECT_BETA_PURSUIT" => 12,
+                "BATTLE_BG_EFFECT_VITAL_THROW" => {
+                    return terminating_increment
+                        .map(|frame| frame.saturating_add(7))
+                        .or(Some(timeline_frame));
+                }
+                "BATTLE_BG_EFFECT_ROLLOUT" => effect.duration,
                 "BATTLE_BG_EFFECT_SHAKE_SCREEN_X" | "BATTLE_BG_EFFECT_SHAKE_SCREEN_Y" => {
                     effect.duration.max(1)
                 }
                 "BATTLE_BG_EFFECT_FLASH_INVERTED" | "BATTLE_BG_EFFECT_FLASH_WHITE" => {
-                    if effect.duration == 0 { 4 } else { effect.duration }
+                    reload_interval()?.saturating_mul(u16::from(effect.param))
                 }
                 "BATTLE_BG_EFFECT_WHITE_HUES" | "BATTLE_BG_EFFECT_BLACK_HUES" => {
-                    effect.duration.max(1)
+                    reload_interval()?.saturating_mul(3)
                 }
                 "BATTLE_BG_EFFECT_ALTERNATE_HUES"
-                | "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED"
-                | "BATTLE_BG_EFFECT_ACID_ARMOR" => {
-                    if effect.duration == 0 { 4 } else { effect.duration }
+                | "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED" => {
+                    return Some(timeline_frame);
+                }
+                "BATTLE_BG_EFFECT_ACID_ARMOR" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
                 "BATTLE_BG_EFFECT_CYCLE_OBPALS_GRAY_AND_YELLOW"
-                | "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW"
-                | "BATTLE_BG_EFFECT_CYCLE_MON_LIGHT_DARK_REPEATING" => {
+                | "BATTLE_BG_EFFECT_CYCLE_MID_OBPALS_GRAY_AND_YELLOW" => {
+                    return Some(timeline_frame);
+                }
+                "BATTLE_BG_EFFECT_CYCLE_MON_LIGHT_DARK_REPEATING" => {
                     if effect.duration == 0 { 6 } else { effect.duration }
                 }
-                "BATTLE_BG_EFFECT_START_WATER"
-                | "BATTLE_BG_EFFECT_WATER"
-                | "BATTLE_BG_EFFECT_END_WATER"
-                | "BATTLE_BG_EFFECT_WHIRLPOOL" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                "BATTLE_BG_EFFECT_START_WATER" | "BATTLE_BG_EFFECT_END_WATER" => 1,
+                "BATTLE_BG_EFFECT_WATER" => 17,
+                "BATTLE_BG_EFFECT_WHIRLPOOL" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_NIGHT_SHADE" | "BATTLE_BG_EFFECT_TELEPORT" => {
-                    effect.duration.max(1)
+                "BATTLE_BG_EFFECT_NIGHT_SHADE"
+                | "BATTLE_BG_EFFECT_TELEPORT"
+                | "BATTLE_BG_EFFECT_PSYCHIC" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_PSYCHIC" => {
-                    if effect.duration == 0 { 4 } else { effect.duration }
+                "BATTLE_BG_EFFECT_WOBBLE_MON" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_WOBBLE_MON" | "BATTLE_BG_EFFECT_WAVE_DEFORM_MON" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                "BATTLE_BG_EFFECT_WAVE_DEFORM_MON" => {
+                    return terminating_increment
+                        .map(|frame| frame.saturating_add(32))
+                        .or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_WOBBLE_PLAYER" | "BATTLE_BG_EFFECT_WOBBLE_SCREEN" => {
-                    if effect.duration == 0 { 8 } else { effect.duration }
+                "BATTLE_BG_EFFECT_WOBBLE_PLAYER" => 33,
+                "BATTLE_BG_EFFECT_WOBBLE_SCREEN" => 32,
+                // One setup update, $20 displacement updates, then cleanup.
+                "BATTLE_BG_EFFECT_VIBRATE_MON" => 33,
+                "BATTLE_BG_EFFECT_FLAIL" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_VIBRATE_MON" => effect.duration.max(2),
-                "BATTLE_BG_EFFECT_DIG" | "BATTLE_BG_EFFECT_FLAIL" | "BATTLE_BG_EFFECT_DOUBLE_TEAM" => {
-                    if effect.duration == 0 {
-                        u16::from(if effect.param == 0 { 3 } else { effect.param })
-                            .saturating_mul(2)
-                    } else {
-                        effect.duration
-                    }
+                "BATTLE_BG_EFFECT_DIG" => {
+                    return terminating_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_BOUNCE_DOWN" => 4,
+                "BATTLE_BG_EFFECT_DOUBLE_TEAM" => {
+                    let second_increment = bg_events.iter().filter(|candidate| {
+                        candidate.incremented
+                            && candidate.effect_id == effect.effect_id
+                            && candidate.frame >= effect.frame
+                    }).nth(1).map(|candidate| candidate.frame);
+                    return second_increment.or(Some(timeline_frame));
+                }
+                "BATTLE_BG_EFFECT_BOUNCE_DOWN" => {
+                    return terminating_increment.or(Some(timeline_frame));
+                }
+                "BATTLE_BG_EFFECT_WITHDRAW" => {
+                    return terminating_increment.or(Some(timeline_frame));
+                }
                 "BATTLE_BG_EFFECT_REMOVE_MON" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                    // The longer player-side tile rectangle takes nine shifts
+                    // plus its setup and three-state cadence to terminate.
+                    37
                 }
                 "BATTLE_BG_EFFECT_FAINT_MON" => {
                     if effect.duration == 0 { 14 } else { effect.duration }
                 }
-                "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" | "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON2" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" => {
+                    let second_increment = bg_events
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.incremented
+                                && candidate.effect_id == effect.effect_id
+                                && candidate.frame >= effect.frame
+                        })
+                        .nth(1)
+                        .map(|candidate| candidate.frame);
+                    return second_increment.or(Some(timeline_frame));
                 }
-                "BATTLE_BG_EFFECT_ENTER_MON" => effect.duration.max(1).saturating_mul(3),
-                "BATTLE_BG_EFFECT_RETURN_MON" => effect.duration.max(1).saturating_mul(4),
+                "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON2" => 66,
+                // RunPicResizeScript spends four updates on every table
+                // entry. Enter has three graphics entries; Return has three
+                // graphics entries plus its terminal hidden entry.
+                "BATTLE_BG_EFFECT_ENTER_MON" => 12,
+                "BATTLE_BG_EFFECT_RETURN_MON" => 16,
                 "BATTLE_BG_EFFECT_BATTLEROBJ_1ROW" | "BATTLE_BG_EFFECT_BATTLEROBJ_2ROW" => {
                     if effect.duration == 0 { 6 } else { effect.duration }
                 }
-                "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT" | "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK" => {
-                    u16::from((effect.param >> 4).max(1)).saturating_mul(3)
-                }
-                "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT_REPEATING"
+                "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT"
+                | "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK"
+                | "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT_REPEATING"
                 | "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK_REPEATING"
-                | "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING" => {
+                | "BATTLE_BG_EFFECT_FADE_MONS_TO_BLACK_REPEATING"
+                | "BATTLE_BG_EFFECT_FADE_MON_TO_WHITE_WAIT_FADE_BACK"
+                | "BATTLE_BG_EFFECT_RAPID_FLASH"
+                | "BATTLE_BG_EFFECT_FLASH_MON_REPEATING"
+                | "BATTLE_BG_EFFECT_FADE_MON_FROM_WHITE" => {
                     return terminating_increment.or(Some(timeline_frame));
-                }
-                "BATTLE_BG_EFFECT_FADE_MON_TO_WHITE_WAIT_FADE_BACK" => {
-                    let step_delay = u16::from((effect.param >> 4).max(1));
-                    let initial_delay = u16::from((effect.param & 0x0f).max(effect.param >> 4).max(1));
-                    let natural_end = effect.frame
-                        .saturating_add(initial_delay)
-                        .saturating_add(step_delay.saturating_mul(16));
-                    return Some(terminating_increment.map_or(natural_end, |frame| frame.min(natural_end)));
-                }
-                "BATTLE_BG_EFFECT_RAPID_FLASH"
-                | "BATTLE_BG_EFFECT_FLASH_MON_REPEATING" => {
-                    return terminating_increment.or(Some(timeline_frame));
-                }
-                "BATTLE_BG_EFFECT_FADE_MON_FROM_WHITE" => {
-                    if effect.duration == 0 { 8 } else { effect.duration }
                 }
                 _ => return None,
             };
@@ -3131,13 +3162,6 @@ fn execute_visible_battle_animation_script(
                         .push((timeline.frame.saturating_add(1), (*sound).to_string()));
                 }
             }
-            "playsound" => {
-                if let Some(sound) = arguments.first() {
-                    timeline
-                        .sounds
-                        .push((timeline.frame.saturating_add(1), (*sound).to_string()));
-                }
-            }
             "anim_cry" => {
                 let selector = arguments
                     .first()
@@ -3148,24 +3172,12 @@ fn execute_visible_battle_animation_script(
                     u8::try_from(selector & 0x03).ok()?,
                 ));
             }
-            "anim_obj" if arguments.len() >= 4 => {
-                let (x, y, param) = if arguments.len() >= 6 {
-                    (
-                        parse_visible_battle_animation_int(arguments[1])?
-                            .saturating_mul(8)
-                            .saturating_add(parse_visible_battle_animation_int(arguments[2])?),
-                        parse_visible_battle_animation_int(arguments[3])?
-                            .saturating_mul(8)
-                            .saturating_add(parse_visible_battle_animation_int(arguments[4])?),
-                        parse_visible_battle_animation_int(arguments[5])?,
-                    )
-                } else {
-                    (
+            "anim_obj" if arguments.len() == 4 => {
+                let (x, y, param) = (
                         parse_visible_battle_animation_int(arguments[1])?,
                         parse_visible_battle_animation_int(arguments[2])?,
                         parse_visible_battle_animation_int(arguments[3])?,
-                    )
-                };
+                );
                 timeline.objects.push(VisibleMoveObjectEvent {
                     frame: timeline.frame.saturating_add(1),
                     command: VisibleMoveObjectCommand::Spawn {
@@ -3200,11 +3212,17 @@ fn execute_visible_battle_animation_script(
                     },
                 });
             }
-            "anim_transform" | "anim_raisesub" | "anim_dropsub" | "anim_minimize"
-            | "anim_minimizeopp" | "anim_updateactorpic" => {
+            "anim_transform"
+            | "anim_raisesub"
+            | "anim_dropsub"
+            | "anim_minimize"
+            | "anim_updateactorpic" => {
                 timeline.bg_effects.push(VisibleMoveBgEvent {
                     frame: timeline.frame.saturating_add(1),
-                    effect_id: format!("BATTLE_ACTOR_{}", opcode.trim_start_matches("anim_").to_ascii_uppercase()),
+                    effect_id: format!(
+                        "BATTLE_ACTOR_{}",
+                        opcode.trim_start_matches("anim_").to_ascii_uppercase()
+                    ),
                     duration: 0,
                     target: "BG_EFFECT_USER".to_string(),
                     param: 0,
@@ -3227,7 +3245,9 @@ fn execute_visible_battle_animation_script(
                 effect_id: "BATTLE_PALETTE_OBP0".to_string(),
                 duration: 0,
                 target: String::new(),
-                param: 0xe4,
+                // BattleAnimCmd_ResetObp0 writes $e0 unless hSGB is set. The
+                // Rust runtime has no Super Game Boy execution mode.
+                param: battle_anim_reset_obp0_value(false),
                 incremented: false,
             }),
             "anim_beatup" => timeline.bg_effects.push(VisibleMoveBgEvent {
@@ -3243,6 +3263,10 @@ fn execute_visible_battle_animation_script(
             | "anim_keepsprites" => {}
             "anim_bgeffect" if arguments.len() >= 4 => {
                 let duration = parse_visible_battle_animation_int(arguments[1])?;
+                // This byte is BG_EFFECT_STRUCT_BATTLE_TURN. Most effects use
+                // the user/target constants, while palette effects use it as
+                // their reload counter.
+                parse_visible_battle_animation_int(arguments[2])?;
                 let param = parse_visible_battle_animation_int(arguments[3])?;
                 timeline.bg_effects.push(VisibleMoveBgEvent {
                     frame: timeline.frame.saturating_add(1),
@@ -3283,17 +3307,7 @@ fn execute_visible_battle_animation_script(
                 let count = parse_visible_battle_animation_int(arguments.first()?)?;
                 let target = *arguments.get(1)?;
                 let key = (script_label.to_string(), command_index);
-                if let Some(remaining) = timeline.loops.get_mut(&key) {
-                    if *remaining < 0 {
-                        pointer = *labels.get(target)?;
-                    } else if *remaining > 0 {
-                        *remaining -= 1;
-                        pointer = *labels.get(target)?;
-                    } else {
-                        timeline.loops.remove(&key);
-                    }
-                } else {
-                    timeline.loops.insert(key, if count <= 0 { -1 } else { count - 1 });
+                if advance_visible_battle_animation_loop(&mut timeline.loops, key, count) {
                     pointer = *labels.get(target)?;
                 }
             }
@@ -3344,6 +3358,37 @@ fn execute_visible_battle_animation_script(
     Some(())
 }
 
+fn advance_visible_battle_animation_loop(
+    loops: &mut std::collections::BTreeMap<(String, usize), i32>,
+    key: (String, usize),
+    count: i32,
+) -> bool {
+    if let Some(remaining) = loops.get_mut(&key) {
+        if *remaining < 0 {
+            return true;
+        }
+        if *remaining > 0 {
+            *remaining -= 1;
+            return true;
+        }
+        loops.remove(&key);
+        return false;
+    }
+    if count <= 0 {
+        loops.insert(key, -1);
+        return true;
+    }
+    if count > 1 {
+        loops.insert(key, count - 2);
+        return true;
+    }
+    false
+}
+
+fn battle_anim_reset_obp0_value(super_game_boy: bool) -> u8 {
+    if super_game_boy { 0xf0 } else { 0xe0 }
+}
+
 fn visible_null_battle_animation_object_lifetime(
     bundle: &serde_json::Value,
     frameset_name: &str,
@@ -3375,7 +3420,17 @@ fn parse_visible_battle_animation_int(token: &str) -> Option<i32> {
     } else if let Some(binary) = token.strip_prefix("0b") {
         i32::from_str_radix(binary, 2).ok()
     } else {
-        token.parse::<i32>().ok()
+        token.parse::<i32>().ok().or_else(|| match token.as_str() {
+            // constants/item_constants.asm. These are the only symbolic byte
+            // values used in numeric battle-animation command positions.
+            "NOITEM" => Some(0x00),
+            "MASTERBALL" => Some(0x01),
+            "ULTRABALL" => Some(0x02),
+            "GREATBALL" => Some(0x04),
+            "BGEFFECTTARGET" => Some(0),
+            "BGEFFECTUSER" => Some(1),
+            _ => None,
+        })
     }
 }
 
@@ -7334,6 +7389,7 @@ fn close_visible_pc_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     runtime_shell.mailbox_attach_index = None;
     runtime_shell.pc_confirmation = None;
     runtime_shell.bill_pc_move_open = false;
+    runtime_shell.bill_pc_move_party_open = false;
     runtime_shell.bill_pc_move_source = None;
     runtime_shell.bill_pc_pokemon_action_cursor = None;
     runtime_shell.bill_pc_box_summary = None;
@@ -7451,6 +7507,7 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
         VisibleBillPcAction::MoveWithoutMail => {
             let snapshot = runtime_shell.shell.snapshot()?;
             runtime_shell.bill_pc_move_open = true;
+            runtime_shell.bill_pc_move_party_open = false;
             runtime_shell.bill_pc_move_source = None;
             runtime_shell.storage_cursor = Some(MenuCursor {
                 surface_id: storage_cursor_surface_id(snapshot.storage.current_pc_box),
@@ -7488,45 +7545,55 @@ fn confirm_visible_bill_pc_box(runtime_shell: &mut BevyRuntimeShell) -> Result<(
 fn confirm_visible_bill_pc_move(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let box_index = snapshot.storage.current_pc_box;
-    let slot = selected_current_box_slot_index(runtime_shell)?;
-    let Some((source_box, source_slot)) = runtime_shell.bill_pc_move_source else {
-        let occupied = current_storage_box(&snapshot)?
-            .slots
-            .iter()
-            .any(|candidate| candidate.index == slot);
+    let slot = selected_pc_move_slot_index(runtime_shell)?;
+    let target = if runtime_shell.bill_pc_move_party_open {
+        crystal_assets::RuntimePokemonStorageLocation::Party { slot }
+    } else {
+        crystal_assets::RuntimePokemonStorageLocation::Box { box_index, slot }
+    };
+    let Some(source) = runtime_shell.bill_pc_move_source.clone() else {
+        let occupied = match &target {
+            crystal_assets::RuntimePokemonStorageLocation::Party { slot } => snapshot
+                .party
+                .slots
+                .iter()
+                .any(|candidate| candidate.index == *slot),
+            crystal_assets::RuntimePokemonStorageLocation::Box { .. } => current_storage_box(&snapshot)?
+                .slots
+                .iter()
+                .any(|candidate| candidate.index == slot),
+        };
         if !occupied {
             set_shell_action_status(runtime_shell, "NO POKEMON THERE");
             return Ok(());
         }
-        runtime_shell.bill_pc_move_source = Some((box_index, slot));
+        runtime_shell.bill_pc_move_source = Some(target);
         set_shell_action_status(runtime_shell, "CHOOSE A DESTINATION");
         return Ok(());
     };
-    if source_box == box_index && source_slot == slot {
+    if source == target {
         runtime_shell.bill_pc_move_source = None;
         set_shell_action_status(runtime_shell, "MOVE CANCELLED");
         return Ok(());
     }
-    let moved = runtime_shell.shell.move_pc_pokemon_without_mail(
-        source_box,
-        source_slot,
-        box_index,
-        slot,
-    )?;
+    let moved = runtime_shell.shell.move_pokemon_without_mail(source, target)?;
     runtime_shell.bill_pc_move_source = None;
-    runtime_shell.storage_cursor = Some(MenuCursor {
-        surface_id: storage_cursor_surface_id(moved.target_box),
-        option_index: 0,
-    });
+    match moved.target {
+        crystal_assets::RuntimePokemonStorageLocation::Party { .. } => {
+            runtime_shell.bill_pc_move_party_open = true;
+            runtime_shell.storage_cursor = Some(MenuCursor {
+                surface_id: pc_move_party_surface_id().to_string(), option_index: 0,
+            });
+        }
+        crystal_assets::RuntimePokemonStorageLocation::Box { box_index, .. } => {
+            runtime_shell.bill_pc_move_party_open = false;
+            runtime_shell.storage_cursor = Some(MenuCursor {
+                surface_id: storage_cursor_surface_id(box_index), option_index: 0,
+            });
+        }
+    }
     mark_runtime_snapshot_dirty(runtime_shell);
-    set_shell_action_status(
-        runtime_shell,
-        if moved.swapped {
-            "POKEMON SWAPPED"
-        } else {
-            "POKEMON MOVED"
-        },
-    );
+    set_shell_action_status(runtime_shell, "POKEMON MOVED");
     Ok(())
 }
 
@@ -7536,6 +7603,7 @@ fn close_visible_bill_pc_actions(runtime_shell: &mut BevyRuntimeShell) -> Result
     runtime_shell.bill_pc_action_cursor = None;
     runtime_shell.bill_pc_box_cursor = None;
     runtime_shell.bill_pc_move_open = false;
+    runtime_shell.bill_pc_move_party_open = false;
     runtime_shell.bill_pc_move_source = None;
     runtime_shell.storage_cursor = None;
     runtime_shell.party_menu_open = false;
@@ -7860,12 +7928,18 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
         return Ok(());
     }
     match confirmation {
-        VisiblePcConfirmation::TossItem { item_id, quantity } => {
+        VisiblePcConfirmation::TossItem {
+            item_id,
+            stack_index,
+            quantity,
+        } => {
             record_visible_runtime_action(
                 runtime_shell,
                 format!("pc:toss_item:{item_id}:{quantity}"),
             )?;
-            let transfer = runtime_shell.shell.toss_pc_item(&item_id, quantity)?;
+            let transfer = runtime_shell
+                .shell
+                .toss_pc_item(&item_id, stack_index, quantity)?;
             runtime_shell.pc_notice = Some(format!(
                 "Discarded\n{}(S).",
                 item_display_name(&runtime_shell.shell.snapshot()?, &transfer.item_id)
@@ -8221,6 +8295,7 @@ fn turn_off_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.bill_pc_action_cursor = None;
     runtime_shell.bill_pc_box_cursor = None;
     runtime_shell.bill_pc_move_open = false;
+    runtime_shell.bill_pc_move_party_open = false;
     runtime_shell.bill_pc_move_source = None;
     runtime_shell.storage_cursor = None;
     runtime_shell.pc_item_cursor = None;

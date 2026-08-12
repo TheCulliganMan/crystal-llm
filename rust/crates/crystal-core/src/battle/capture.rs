@@ -760,10 +760,11 @@ pub fn complete_active_wild_capture_result(
             return Err("cannot complete capture without an active wild battle".to_string());
         }
     };
-    if let Some(ball_id) = outcome.ball_id.as_deref() {
+    if outcome.ball_id.is_some() {
         enemy_pokemon.caught_data = Some(crate::models::pokemon::CaughtData {
-            level: enemy_pokemon.level,
-            ball: caught_ball_item_id(ball_id),
+            level: enemy_pokemon.level & 0x3f,
+            time_of_day: Some(state.time.time_of_day),
+            original_trainer_gender: state.player_gender,
             // The map-specific caught location is resolved by the pack-facing
             // adapter; zero is Crystal's explicit "no location" value.
             location: 0,
@@ -841,25 +842,6 @@ pub fn complete_active_wild_capture_result(
         stored,
         contest_pokemon: None,
     })
-}
-
-fn caught_ball_item_id(ball_id: &str) -> u8 {
-    match ball_id {
-        "MASTER_BALL" => 0x01,
-        "ULTRA_BALL" => 0x02,
-        "GREAT_BALL" => 0x04,
-        "POKE_BALL" => 0x05,
-        "SAFARI_BALL" => 0x08,
-        "HEAVY_BALL" => 0x9d,
-        "LEVEL_BALL" => 0x9f,
-        "LURE_BALL" => 0xa0,
-        "FAST_BALL" => 0xa1,
-        "FRIEND_BALL" => 0xa4,
-        "MOON_BALL" => 0xa5,
-        "LOVE_BALL" => 0xa6,
-        "PARK_BALL" => 0xb1,
-        _ => 0,
-    }
 }
 
 pub fn compute_final_catch_rate(
@@ -1932,8 +1914,13 @@ mod tests {
 
         assert_eq!(stored.location, CaptureStorageLocation::Party { slot: 0 });
         assert_eq!(
-            stored.pokemon.caught_data.as_ref().map(|data| data.ball),
-            Some(0x02)
+            stored.pokemon.caught_data.as_ref().map(|data| (
+                data.level,
+                data.time_of_day,
+                data.original_trainer_gender,
+                data.location,
+            )),
+            Some((2, Some(crate::world::encounters::TimeOfDay::Night), 0, 0,))
         );
         assert!(state.pokedex.has_seen("PIDGEY"));
         assert!(state.pokedex.has_caught("PIDGEY"));

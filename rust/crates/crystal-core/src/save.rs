@@ -2257,20 +2257,26 @@ mod tests {
         let mut bag_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
-        bag_save_json["state"]["bag"]["items"]["POTION"] = serde_json::json!(100);
+        bag_save_json["state"]["bag"]["items"] = serde_json::json!([{
+            "item_id": "POTION",
+            "quantity": 100
+        }]);
         let error = serde_json::from_value::<SaveGame>(bag_save_json)
             .expect_err("saved bag metadata must be exact")
             .to_string();
-        assert!(error.contains("items.POTION quantity 100 exceeds stack limit 99"));
+        assert!(error.contains("items.POTION quantity 100 is outside stack range 1..=99"));
 
         let mut pc_bag_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
                 .expect("save json");
-        pc_bag_save_json["state"]["bag"]["pc_items"]["POTION"] = serde_json::json!(100);
+        pc_bag_save_json["state"]["bag"]["pc_items"] = serde_json::json!([{
+            "item_id": "POTION",
+            "quantity": 100
+        }]);
         let error = serde_json::from_value::<SaveGame>(pc_bag_save_json)
             .expect_err("saved PC item metadata must be exact")
             .to_string();
-        assert!(error.contains("pc_items.POTION quantity 100 exceeds stack limit 99"));
+        assert!(error.contains("pc_items.POTION quantity 100 is outside stack range 1..=99"));
 
         let mut storage_save_json =
             serde_json::to_value(test_save(GameState::default(), expected.clone()))
