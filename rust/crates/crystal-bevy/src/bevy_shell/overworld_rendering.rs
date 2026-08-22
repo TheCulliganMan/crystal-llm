@@ -321,7 +321,7 @@ fn spawn_field_prompt_marker(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(1.0, 0.92, 0.22, 0.62),
+                color: Color::srgba(1.0, 0.92, 0.22, 0.62),
                 custom_size: Some(Vec2::new(TILE_SIZE * 0.88, TILE_SIZE * 0.88)),
                 ..default()
             },
@@ -336,7 +336,7 @@ fn spawn_field_prompt_marker(
                 label,
                 TextStyle {
                     font_size: 13.0,
-                    color: Color::rgb(1.0, 0.98, 0.80),
+                    color: Color::srgb(1.0, 0.98, 0.80),
                     ..default()
                 },
             ),
@@ -506,11 +506,17 @@ fn field_warp_prompt_label(warp: &crate::core::map::WarpEvent) -> String {
 /// close and the complete overworld replacement has been staged.
 fn retained_field_fullscreen_active(runtime_shell: &BevyRuntimeShell) -> bool {
     (runtime_shell.pending_name_choice.is_some()
-        && runtime_shell.pending_standard_capture.is_none())
+        && runtime_shell.pending_standard_capture.is_none()
+        && runtime_shell.pending_gift_pokemon_nickname.is_none()
+        && runtime_shell.pending_egg_hatch_nickname.is_none())
         || runtime_shell.pending_name_input.is_some()
+        || runtime_shell.pending_mail_input.is_some()
+        || runtime_shell.pending_mail_read.is_some()
+        || runtime_shell.pending_egg_hatch_nickname.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_card_flip.is_some()
         || runtime_shell.visible_unown_puzzle.is_some()
+        || runtime_shell.visible_unown_printer.is_some()
         || runtime_shell.visible_diploma.is_some()
         || runtime_shell.visible_magnet_train.is_some()
         || runtime_shell.hall_of_fame_pc_index.is_some()
@@ -521,6 +527,9 @@ fn retained_field_fullscreen_active(runtime_shell: &BevyRuntimeShell) -> bool {
         || (runtime_shell.storage_cursor.is_some() && !runtime_shell.party_menu_open)
         || (runtime_shell.pc_item_cursor.is_some() && !visible_field_pack_is_open(runtime_shell))
         || runtime_shell.bill_pc_box_cursor.is_some()
+        || runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
+            hatch.phase != VisibleEggHatchPhase::HuhText
+        })
 }
 
 fn textbox_frame_id(frame: crate::core::state::FrameType) -> u8 {
@@ -552,6 +561,58 @@ fn spawn_field_command_menu(
             return;
         }
         spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
+        return;
+    }
+    // The Town Map is a complete raster surface and intentionally has no
+    // command-entry rows. Render Pokégear ownership before the generic empty
+    // entry guard, or TownMapScript opens modal state while drawing nothing.
+    if runtime_shell.pokegear_menu_open {
+        if let Err(error) = spawn_field_pokegear_screen(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
+        return;
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        if let Err(error) = spawn_visible_buena_password_menu(
+            commands,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
+        return;
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        if let Err(error) = spawn_visible_battle_tower_challenge_menu(
+            commands,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
+        return;
+    }
+    if runtime_shell.visible_battle_tower_room_menu.is_some() {
+        if let Err(error) = spawn_visible_battle_tower_room_menu(
+            commands,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
         return;
     }
     let entries = match visible_field_command_entries(snapshot, runtime_shell) {
@@ -597,6 +658,18 @@ fn spawn_field_command_menu(
         if let Err(error) =
             spawn_visible_unown_puzzle(commands, runtime_shell, rendered_art, asset_root, images)
         {
+            *render_error = Some(error);
+        }
+        return;
+    }
+    if runtime_shell.visible_unown_printer.is_some() {
+        if let Err(error) = spawn_visible_unown_printer(
+            commands,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
             *render_error = Some(error);
         }
         return;
@@ -650,19 +723,6 @@ fn spawn_field_command_menu(
     }
     if runtime_shell.pokedex_menu_open {
         if let Err(error) = spawn_field_pokedex_screen(
-            commands,
-            snapshot,
-            runtime_shell,
-            rendered_art,
-            asset_root,
-            images,
-        ) {
-            *render_error = Some(error);
-        }
-        return;
-    }
-    if runtime_shell.pokegear_menu_open {
-        if let Err(error) = spawn_field_pokegear_screen(
             commands,
             snapshot,
             runtime_shell,
@@ -904,6 +964,203 @@ fn spawn_field_command_menu(
     }
 }
 
+fn spawn_visible_buena_password_menu(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let menu = runtime_shell
+        .visible_buena_password
+        .as_ref()
+        .context("no Buena password menu is open")?;
+    anyhow::ensure!(menu.options.len() == 3, "Buena password menu must have three choices");
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
+    let labels = menu
+        .options
+        .iter()
+        .map(|option| match menu.category_type.as_str() {
+            "BUENA_MON" => Ok(crate::core::models::pokemon_species_display_name(option)),
+            "BUENA_ITEM" => Ok(item_display_name(&snapshot, option)),
+            "BUENA_MOVE" => Ok(battle_move_display_name(&snapshot, option)),
+            "BUENA_STRING" => Ok(option.clone()),
+            other => anyhow::bail!("unknown Buena password category type {other}"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let selected = strict_readonly_cursor_index(
+        &Some(menu.cursor.clone()),
+        "script:buena-password",
+        menu.options.len(),
+    )
+    .context("Buena password menu has no valid cursor")?;
+    let width = labels
+        .iter()
+        .map(|option| option.chars().count())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(3)
+        .clamp(11, 20);
+    let (center_x, center_y) = field_window_center(0.0, 0.0, width as f32, 8.0);
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(
+                    TILE_SIZE * (width - 2) as f32,
+                    TILE_SIZE * 6.0,
+                )),
+                ..default()
+            },
+            transform: Transform::from_xyz(center_x, center_y, 3.3),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
+    let frame = battle_window_frame_art(rendered_art, asset_root, images)
+        .context("Buena password window frame art is unavailable")?;
+    spawn_field_command_window_frame_tiles(commands, frame, 0.0, 0.0, width, 8, 3.35);
+    for (index, option) in labels.iter().enumerate() {
+        let (x, y) = battle_hud_tile_origin(1.0, 2.0 + index as f32 * 2.0);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &format!("{}{}", if index == selected { ">" } else { " " }, option),
+            x,
+            y,
+            3.6,
+        );
+    }
+    Ok(())
+}
+
+fn spawn_visible_battle_tower_challenge_menu(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let menu = runtime_shell
+        .visible_battle_tower_challenge_menu
+        .as_ref()
+        .context("no Battle Tower challenge menu is open")?;
+    let options: &[&str] = if menu.english {
+        &["CHALLENGE", "EXPLANATION", "CANCEL"]
+    } else {
+        &["NEWS", "NEWS", "???", "CANCEL"]
+    };
+    let selected = strict_readonly_cursor_index(
+        &Some(menu.cursor.clone()),
+        "script:battle-tower-challenge",
+        options.len(),
+    )
+    .context("Battle Tower challenge menu has no valid cursor")?;
+    let (center_x, center_y) = field_window_center(0.0, 0.0, 14.0, 8.0);
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(TILE_SIZE * 12.0, TILE_SIZE * 6.0)),
+                ..default()
+            },
+            transform: Transform::from_xyz(center_x, center_y, 3.3),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
+    let frame = battle_window_frame_art(rendered_art, asset_root, images)
+        .context("Battle Tower challenge menu frame art is unavailable")?;
+    spawn_field_command_window_frame_tiles(commands, frame, 0.0, 0.0, 14, 8, 3.35);
+    for (index, option) in options.iter().enumerate() {
+        let (x, y) = battle_hud_tile_origin(1.0, 2.0 + index as f32 * 2.0);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &format!("{}{}", if index == selected { ">" } else { " " }, option),
+            x,
+            y,
+            3.6,
+        );
+    }
+    Ok(())
+}
+
+fn spawn_visible_battle_tower_room_menu(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let menu = runtime_shell
+        .visible_battle_tower_room_menu
+        .as_ref()
+        .context("no Battle Tower room menu is open")?;
+    commit_presented_fullscreen_solid(commands, rendered_art, [247, 247, 247, 255], 3.2, images)?;
+    let frame = battle_window_frame_art(rendered_art, asset_root, images)
+        .context("Battle Tower room menu frame art is unavailable")?;
+    match &menu.phase {
+        VisibleBattleTowerRoomMenuPhase::PickLevel => {
+            let selected = strict_readonly_cursor_index(
+                &Some(menu.cursor.clone()),
+                "script:battle-tower-room",
+                menu.level_groups.len() + 1,
+            )
+            .context("Battle Tower room menu has no valid cursor")?;
+            let choice = menu
+                .level_groups
+                .get(selected)
+                .map(|group| format!("L:{:>3}", u16::from(*group) * 10))
+                .unwrap_or_else(|| "CANCEL".to_string());
+            spawn_field_command_window_frame_tiles(commands, frame, 12.0, 7.0, 8, 7, 3.35);
+            for (text, tile_x, tile_y) in [
+                ("What level do you\nwant to challenge?".to_string(), 1.0, 2.0),
+                ("▲".to_string(), 16.0, 8.0),
+                (choice, 13.0, 10.0),
+                ("▼".to_string(), 16.0, 12.0),
+            ] {
+                let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+                spawn_field_command_bitmap_text(
+                    commands, rendered_art, asset_root, images, &text, x, y, 3.6,
+                );
+            }
+        }
+        VisibleBattleTowerRoomMenuPhase::ConfirmCancel { yes_no_index } => {
+            spawn_field_command_window_frame_tiles(commands, frame, 13.0, 7.0, 7, 6, 3.35);
+            for (text, tile_x, tile_y) in [
+                ("Cancel your BATTLE\nROOM challenge?".to_string(), 1.0, 2.0),
+                (
+                    format!("{}YES", if *yes_no_index == 0 { ">" } else { " " }),
+                    14.0,
+                    8.0,
+                ),
+                (
+                    format!("{}NO", if *yes_no_index == 1 { ">" } else { " " }),
+                    14.0,
+                    10.0,
+                ),
+            ] {
+                let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+                spawn_field_command_bitmap_text(
+                    commands, rendered_art, asset_root, images, &text, x, y, 3.6,
+                );
+            }
+        }
+        VisibleBattleTowerRoomMenuPhase::Rejection { message } => {
+            let (x, y) = battle_hud_tile_origin(1.0, 2.0);
+            spawn_field_command_bitmap_text(
+                commands, rendered_art, asset_root, images, message, x, y, 3.6,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn spawn_visible_hall_of_fame_pc(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
@@ -1038,30 +1295,7 @@ fn spawn_visible_card_flip(
         coin_y,
         3.6,
     );
-    if matches!(game.phase, VisibleCardFlipPhase::ChooseCard) {
-        for index in 0..2 {
-            let label = if index == game.which_card {
-                ">[CARD]<"
-            } else {
-                " [CARD] "
-            };
-            let (x, y) = battle_hud_tile_origin(1.0, 2.0 + index as f32 * 6.0);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                &label,
-                x,
-                y,
-                3.6,
-            );
-        }
-    } else if matches!(game.phase, VisibleCardFlipPhase::PlaceBet) {
-        let (x, y) =
-            battle_hud_tile_origin(9.0 + game.bet_x as f32 * 1.75, game.bet_y as f32 * 1.45);
-        spawn_field_command_bitmap_text(commands, rendered_art, asset_root, images, ">", x, y, 3.8);
-    } else if matches!(
+    if matches!(
         game.phase,
         VisibleCardFlipPhase::AskPlay | VisibleCardFlipPhase::PlayAgain
     ) {
@@ -1084,23 +1318,6 @@ fn spawn_visible_card_flip(
             );
         }
     }
-    let (x, y) = battle_hud_tile_origin(1.0, 15.0);
-    let instructions = match game.phase {
-        VisibleCardFlipPhase::ChooseCard => "A FLIP",
-        VisibleCardFlipPhase::PlaceBet => "A BET",
-        VisibleCardFlipPhase::AskPlay | VisibleCardFlipPhase::PlayAgain => "A OK   B NO",
-        VisibleCardFlipPhase::NotEnoughCoins => "A OK",
-    };
-    spawn_field_command_bitmap_text(
-        commands,
-        rendered_art,
-        asset_root,
-        images,
-        instructions,
-        x,
-        y,
-        3.6,
-    );
     Ok(())
 }
 
@@ -1114,6 +1331,12 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
         .to_rgba8();
     let sheet_2 = crate::open_runtime_image(root.join("card_flip_2.png"))
         .context("decode Card Flip secondary sheet")?
+        .to_rgba8();
+    let sheet_3 = crate::open_runtime_image(root.join("card_flip_3.png"))
+        .context("decode Card Flip object sheet")?
+        .to_rgba8();
+    let font = crate::open_runtime_image(asset_root.runtime_assets().join("gfx/font/font.png"))
+        .context("decode Card Flip font")?
         .to_rgba8();
     let light_off = crate::open_runtime_image(root.join("off.png"))
         .context("decode Card Flip off light")?
@@ -1130,6 +1353,10 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
         "invalid Card Flip secondary sheet"
     );
     anyhow::ensure!(
+        sheet_3.dimensions() == (8, 56),
+        "invalid Card Flip object sheet"
+    );
+    anyhow::ensure!(
         light_off.dimensions() == (8, 8),
         "invalid Card Flip off light"
     );
@@ -1137,8 +1364,8 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
         light_on.dimensions() == (8, 8),
         "invalid Card Flip on light"
     );
-    let tilemap =
-        crate::read_runtime_asset(root.join("card_flip.tilemap")).context("read Card Flip tilemap")?;
+    let tilemap = crate::read_runtime_asset(root.join("card_flip.tilemap"))
+        .context("read Card Flip tilemap")?;
     anyhow::ensure!(tilemap.len() == 12 * 11, "invalid Card Flip tilemap length");
     let palettes = load_card_flip_palettes(&root.join("card_flip.pal"))?;
     let [red, green, blue] = palettes[0][2];
@@ -1182,6 +1409,10 @@ fn load_card_flip_render_sources(asset_root: &AssetRoot) -> Result<CardFlipRende
     }
     Ok(CardFlipRenderSources {
         base: target,
+        background_tiles: sheet_1,
+        face_tiles: sheet_2,
+        object_tiles: sheet_3,
+        font,
         light_on,
         palettes,
     })
@@ -1209,6 +1440,56 @@ fn render_visible_card_flip_frame(
             &mut target,
         );
     }
+    match game.phase {
+        VisibleCardFlipPhase::ChooseCard => {
+            match game.animation {
+                VisibleCardFlipAnimation::Deal { frame } if frame < 20 => {}
+                VisibleCardFlipAnimation::Deal { .. } => {
+                    draw_card_flip_face_down(sources, 2, 0, &mut target);
+                }
+                VisibleCardFlipAnimation::Cycle { .. } => {
+                    draw_card_flip_face_down(sources, 2, 0, &mut target);
+                    draw_card_flip_face_down(sources, 2, 6, &mut target);
+                    draw_card_flip_border(sources, game.which_card, &mut target);
+                }
+                VisibleCardFlipAnimation::SelectFlash { frame } => {
+                    draw_card_flip_face_down(sources, 2, 0, &mut target);
+                    draw_card_flip_face_down(sources, 2, 6, &mut target);
+                    if frame / 4 % 2 == 0 {
+                        draw_card_flip_border(sources, game.which_card, &mut target);
+                    }
+                }
+                VisibleCardFlipAnimation::None
+                | VisibleCardFlipAnimation::WaitStake
+                | VisibleCardFlipAnimation::WaitBeforeReveal
+                | VisibleCardFlipAnimation::WaitReveal
+                | VisibleCardFlipAnimation::WaitResult { .. }
+                | VisibleCardFlipAnimation::Payout { .. }
+                | VisibleCardFlipAnimation::AwaitResult
+                | VisibleCardFlipAnimation::QuitWaitBefore
+                | VisibleCardFlipAnimation::QuitWaitAfter => {}
+            }
+        }
+        VisibleCardFlipPhase::PlaceBet => {
+            draw_card_flip_face_down(sources, 2, game.which_card * 6, &mut target);
+            draw_card_flip_bet_cursor(sources, game.bet_x, game.bet_y, &mut target);
+        }
+        VisibleCardFlipPhase::Result | VisibleCardFlipPhase::PlayAgain => {
+            if let Some((species, level)) = game.face_card.as_ref() {
+                draw_card_flip_face_up(
+                    sources,
+                    2,
+                    game.which_card * 6,
+                    species,
+                    *level,
+                    &mut target,
+                )?;
+            }
+        }
+        VisibleCardFlipPhase::AskPlay
+        | VisibleCardFlipPhase::Shuffled
+        | VisibleCardFlipPhase::NotEnoughCoins => {}
+    }
     let mut image = Image::new(
         Extent3d {
             width: WIDTH as u32,
@@ -1225,6 +1506,326 @@ fn render_visible_card_flip_frame(
         handle: images.add(image),
         size: Vec2::new(WIDTH as f32, HEIGHT as f32),
     })
+}
+
+const CARD_FLIP_FACE_DOWN: [[u8; 5]; 6] = [
+    [0x08, 0x09, 0x09, 0x09, 0x0a],
+    [0x0b, 0x28, 0x2b, 0x28, 0x0c],
+    [0x0b, 0x2c, 0x2d, 0x2e, 0x0c],
+    [0x0b, 0x2f, 0x30, 0x31, 0x0c],
+    [0x0b, 0x32, 0x33, 0x34, 0x0c],
+    [0x0d, 0x0e, 0x0e, 0x0e, 0x0f],
+];
+
+const CARD_FLIP_FACE_UP: [[u8; 5]; 6] = [
+    [0x18, 0x19, 0x19, 0x19, 0x1a],
+    [0x1b, 0x35, 0x7f, 0x7f, 0x1c],
+    [0x0b, 0x28, 0x28, 0x28, 0x0c],
+    [0x0b, 0x28, 0x28, 0x28, 0x0c],
+    [0x0b, 0x28, 0x28, 0x28, 0x0c],
+    [0x1d, 0x1e, 0x1e, 0x1e, 0x1f],
+];
+
+fn draw_card_flip_bg_box(
+    sources: &CardFlipRenderSources,
+    tilemap: &[[u8; 5]; 6],
+    tile_x: usize,
+    tile_y: usize,
+    palette_index: usize,
+    target: &mut [u8],
+) {
+    for (row, tiles) in tilemap.iter().enumerate() {
+        for (column, tile) in tiles.iter().copied().enumerate() {
+            if tile == 0x7f {
+                continue;
+            }
+            blit_paletted_slot_tile(
+                &sources.background_tiles,
+                usize::from(tile),
+                &sources.palettes[palette_index],
+                (tile_x + column) * 8,
+                (tile_y + row) * 8,
+                false,
+                target,
+            );
+        }
+    }
+}
+
+fn draw_card_flip_face_down(
+    sources: &CardFlipRenderSources,
+    tile_x: usize,
+    tile_y: usize,
+    target: &mut [u8],
+) {
+    draw_card_flip_bg_box(sources, &CARD_FLIP_FACE_DOWN, tile_x, tile_y, 0, target);
+}
+
+fn draw_card_flip_face_up(
+    sources: &CardFlipRenderSources,
+    tile_x: usize,
+    tile_y: usize,
+    species: &str,
+    level: u8,
+    target: &mut [u8],
+) -> Result<()> {
+    let (palette_index, source_anchor): (usize, usize) = match species {
+        "PIKACHU" => (1, 0x4e),
+        "JIGGLYPUFF" => (2, 0x57),
+        "POLIWAG" => (3, 0x69),
+        "ODDISH" => (4, 0x60),
+        other => anyhow::bail!("unknown Card Flip face species {other}"),
+    };
+    anyhow::ensure!((1..=6).contains(&level), "invalid Card Flip face level {level}");
+    draw_card_flip_bg_box(
+        sources,
+        &CARD_FLIP_FACE_UP,
+        tile_x,
+        tile_y,
+        palette_index,
+        target,
+    );
+    // The source adds SCREEN_HEIGHT (18), not SCREEN_WIDTH, to the card's
+    // tilemap address before writing its 3x3 portrait.
+    let portrait_linear = tile_y * 20 + tile_x + 18;
+    let portrait_x = portrait_linear % 20;
+    let portrait_y = portrait_linear / 20;
+    for row in 0..3 {
+        for column in 0..3 {
+            blit_paletted_slot_tile(
+                &sources.face_tiles,
+                source_anchor - 0x3e + row * 3 + column,
+                &sources.palettes[palette_index],
+                (portrait_x + column) * 8,
+                (portrait_y + row) * 8,
+                false,
+                target,
+            );
+        }
+    }
+    draw_card_flip_level(
+        sources,
+        level,
+        (tile_x + 3) * 8,
+        (tile_y + 1) * 8,
+        palette_index,
+        target,
+    );
+    Ok(())
+}
+
+fn draw_card_flip_level(
+    sources: &CardFlipRenderSources,
+    level: u8,
+    dest_x: usize,
+    dest_y: usize,
+    palette_index: usize,
+    target: &mut [u8],
+) {
+    let tile_index = usize::from(0xf6 + level - 0x80);
+    let columns = sources.font.width() as usize / 8;
+    let source_x = tile_index % columns * 8;
+    let source_y = tile_index / columns * 8;
+    for y in 0..7 {
+        for x in 0..8 {
+            let pixel = sources.font.get_pixel((source_x + x) as u32, (source_y + y + 1) as u32);
+            let color = palette_index_from_gray(pixel[0]);
+            let [red, green, blue] = sources.palettes[palette_index][color];
+            let offset = ((dest_y + y) * 160 + dest_x + x) * 4;
+            target[offset..offset + 4].copy_from_slice(&[red, green, blue, 255]);
+        }
+    }
+}
+
+fn draw_card_flip_border(
+    sources: &CardFlipRenderSources,
+    which_card: usize,
+    target: &mut [u8],
+) {
+    let origin_x = 2 * 8;
+    let origin_y = which_card * 6 * 8;
+    for (x, y, tile, flip_x, flip_y) in [
+        (0, 0, 4, false, false), (1, 0, 6, false, false),
+        (2, 0, 6, false, false), (3, 0, 6, false, false), (4, 0, 4, true, false),
+        (0, 1, 5, false, false), (4, 1, 5, true, false),
+        (0, 2, 5, false, false), (4, 2, 5, true, false),
+        (0, 3, 5, false, false), (4, 3, 5, true, false),
+        (0, 4, 5, false, false), (4, 4, 5, true, false),
+        (0, 5, 4, false, true), (1, 5, 6, false, true),
+        (2, 5, 6, false, true), (3, 5, 6, false, true), (4, 5, 4, true, true),
+    ] {
+        blit_card_flip_object_tile(
+            sources,
+            tile,
+            (origin_x + x * 8) as i32,
+            (origin_y + y * 8) as i32,
+            flip_x,
+            flip_y,
+            target,
+        );
+    }
+}
+
+fn draw_card_flip_bet_cursor(
+    sources: &CardFlipRenderSources,
+    cursor_x: usize,
+    cursor_y: usize,
+    target: &mut [u8],
+) {
+    #[derive(Clone, Copy)]
+    enum Shape {
+        Impossible,
+        SingleTile,
+        PokeGroup,
+        PokeGroupPair,
+        NumGroup,
+        NumGroupPair,
+    }
+
+    let Some((anchor_x, anchor_y, shape)) = (match (cursor_x, cursor_y) {
+        (0, 0) => Some((88, 16, Shape::Impossible)),
+        (1, 0) => Some((96, 16, Shape::Impossible)),
+        (2 | 3, 0) => Some((104, 16, Shape::PokeGroupPair)),
+        (4 | 5, 0) => Some((136, 16, Shape::PokeGroupPair)),
+        (0, 1) => Some((88, 24, Shape::Impossible)),
+        (1, 1) => Some((96, 24, Shape::Impossible)),
+        (2..=5, 1) => Some((104 + (cursor_x - 2) as i32 * 16, 24, Shape::PokeGroup)),
+        (0, 2 | 3) => Some((88, 40, Shape::NumGroupPair)),
+        (1, 2) => Some((96, 40, Shape::NumGroup)),
+        (1, 3) => Some((96, 52, Shape::NumGroup)),
+        (2..=5, 2) => Some((104 + (cursor_x - 2) as i32 * 16, 40, Shape::SingleTile)),
+        (2..=5, 3) => Some((104 + (cursor_x - 2) as i32 * 16, 52, Shape::SingleTile)),
+        (0, 4 | 5) => Some((88, 64, Shape::NumGroupPair)),
+        (1, 4) => Some((96, 64, Shape::NumGroup)),
+        (1, 5) => Some((96, 76, Shape::NumGroup)),
+        (2..=5, 4) => Some((104 + (cursor_x - 2) as i32 * 16, 64, Shape::SingleTile)),
+        (2..=5, 5) => Some((104 + (cursor_x - 2) as i32 * 16, 76, Shape::SingleTile)),
+        (0, 6 | 7) => Some((88, 88, Shape::NumGroupPair)),
+        (1, 6) => Some((96, 88, Shape::NumGroup)),
+        (1, 7) => Some((96, 100, Shape::NumGroup)),
+        (2..=5, 6) => Some((104 + (cursor_x - 2) as i32 * 16, 88, Shape::SingleTile)),
+        (2..=5, 7) => Some((104 + (cursor_x - 2) as i32 * 16, 100, Shape::SingleTile)),
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut sprite = |x_tile, y_tile, x_pixel, y_pixel, tile, flip_x, flip_y| {
+        blit_card_flip_object_tile(
+            sources,
+            tile,
+            anchor_x + x_tile * 8 + x_pixel,
+            anchor_y + y_tile * 8 + y_pixel,
+            flip_x,
+            flip_y,
+            target,
+        );
+    };
+
+    match shape {
+        Shape::Impossible => {
+            sprite(0, 0, 0, 0, 0, false, false);
+            sprite(1, 0, 0, 0, 0, true, false);
+            sprite(0, 1, 0, 0, 0, false, true);
+            sprite(1, 1, 0, 0, 0, true, true);
+        }
+        Shape::SingleTile => {
+            sprite(-1, 0, 7, 0, 0, false, false);
+            sprite(0, 0, 0, 0, 2, false, false);
+            sprite(1, 0, 0, 0, 3, false, false);
+            sprite(-1, 0, 7, 5, 0, false, true);
+            sprite(0, 0, 0, 5, 2, false, true);
+            sprite(1, 0, 0, 5, 3, false, false);
+        }
+        Shape::PokeGroup => {
+            sprite(-1, 0, 7, 0, 0, false, false);
+            sprite(0, 0, 0, 0, 2, false, false);
+            sprite(1, 0, 0, 0, 0, true, false);
+            sprite(-1, 1, 7, 0, 1, false, false);
+            sprite(1, 1, 0, 0, 1, true, false);
+            for row in 2..=10 {
+                sprite(-1, row, 7, 0, 1, false, false);
+                sprite(1, row, 0, 0, 3, false, false);
+            }
+            sprite(-1, 10, 7, 1, 0, false, true);
+            sprite(0, 10, 0, 1, 2, false, true);
+            sprite(1, 10, 0, 1, 3, false, false);
+        }
+        Shape::NumGroup => {
+            sprite(-1, 0, 7, 0, 0, false, false);
+            for column in 0..=8 {
+                let tile = if column == 0 || column % 2 == 1 { 2 } else { 3 };
+                sprite(column, 0, 0, 0, tile, false, false);
+            }
+            sprite(-1, 0, 7, 5, 0, false, true);
+            for column in 0..=8 {
+                let tile = if column == 0 || column % 2 == 1 { 2 } else { 3 };
+                sprite(column, 0, 0, 5, tile, false, tile == 2);
+            }
+        }
+        Shape::NumGroupPair => {
+            for column in 0..=9 {
+                let tile = if column == 0 { 0 } else if column <= 2 || column % 2 == 0 { 2 } else { 3 };
+                sprite(column, 0, 0, 0, tile, false, false);
+            }
+            for row in 1..=2 {
+                sprite(0, row, 0, 0, 1, false, false);
+                for column in [3, 5, 7, 9] {
+                    sprite(column, row, 0, 0, 3, false, false);
+                }
+            }
+            sprite(0, 2, 0, 1, 0, false, true);
+            sprite(1, 2, 0, 1, 2, false, true);
+            sprite(2, 2, 0, 1, 2, false, true);
+            for column in 3..=9 {
+                sprite(column, 2, 0, 1, 3, false, false);
+            }
+        }
+        Shape::PokeGroupPair => {
+            sprite(-1, 0, 7, 0, 0, false, false);
+            sprite(3, 0, 0, 0, 0, true, false);
+            for row in 1..=2 {
+                sprite(-1, row, 7, 0, 1, false, false);
+                sprite(3, row, 0, 0, 1, true, false);
+            }
+            for row in 3..=11 {
+                sprite(-1, row, 7, 0, 1, false, false);
+                sprite(1, row, 0, 0, 3, false, false);
+                sprite(3, row, 0, 0, 3, false, false);
+            }
+            sprite(-1, 11, 7, 1, 0, false, true);
+            sprite(0, 11, 0, 1, 2, false, true);
+            sprite(1, 11, 0, 1, 3, false, true);
+            sprite(2, 11, 0, 1, 2, false, true);
+            sprite(3, 11, 0, 1, 3, true, true);
+        }
+    }
+}
+
+fn blit_card_flip_object_tile(
+    sources: &CardFlipRenderSources,
+    tile: usize,
+    dest_x: i32,
+    dest_y: i32,
+    flip_x: bool,
+    flip_y: bool,
+    target: &mut [u8],
+) {
+    for y in 0..8 {
+        for x in 0..8 {
+            let source_x = if flip_x { 7 - x } else { x };
+            let source_y = if flip_y { 7 - y } else { y };
+            let pixel = sources.object_tiles.get_pixel(source_x as u32, (tile * 8 + source_y) as u32);
+            let color = palette_index_from_gray(pixel[0]);
+            let output_x = dest_x + x as i32;
+            let output_y = dest_y + y as i32;
+            if color == 0 || !(0..160).contains(&output_x) || !(0..144).contains(&output_y) {
+                continue;
+            }
+            let [red, green, blue] = sources.palettes[0][color];
+            let offset = (output_y as usize * 160 + output_x as usize) * 4;
+            target[offset..offset + 4].copy_from_slice(&[red, green, blue, 255]);
+        }
+    }
 }
 
 fn load_card_flip_palettes(path: &Path) -> Result<Vec<Palette>> {
@@ -1287,6 +1888,9 @@ fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachin
     let symbols = crate::open_runtime_image(root.join("slots_2.png"))
         .context("decode slots symbol sheet")?
         .to_rgba8();
+    let actors = crate::open_runtime_image(root.join("slots_3.png"))
+        .context("decode slots actor sheet")?
+        .to_rgba8();
     anyhow::ensure!(
         ui.dimensions() == (16, 152),
         "invalid slots UI sheet dimensions"
@@ -1295,7 +1899,12 @@ fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachin
         symbols.dimensions() == (16, 256),
         "invalid slots symbol sheet dimensions"
     );
-    let tilemap = crate::read_runtime_asset(root.join("slots.tilemap")).context("read slots tilemap")?;
+    anyhow::ensure!(
+        actors.dimensions() == (24, 240),
+        "invalid slots actor sheet dimensions"
+    );
+    let tilemap =
+        crate::read_runtime_asset(root.join("slots.tilemap")).context("read slots tilemap")?;
     anyhow::ensure!(tilemap.len() == 20 * 12, "invalid slots tilemap length");
     let palettes = load_slot_machine_palettes(&root.join("slots.pal"))?;
     let mut target = vec![255_u8; WIDTH * HEIGHT * 4];
@@ -1322,6 +1931,7 @@ fn load_slot_machine_render_sources(asset_root: &AssetRoot) -> Result<SlotMachin
     Ok(SlotMachineRenderSources {
         base: target,
         symbols,
+        actors,
         palettes,
     })
 }
@@ -1335,16 +1945,25 @@ fn render_visible_slot_machine_frame(
     const HEIGHT: usize = 144;
     const TILE: usize = 8;
     let mut target = sources.base.clone();
+    let flash_inverted = matches!(
+        machine.animation,
+        VisibleSlotMachineAnimation::FlashResult { frames_remaining }
+            if frames_remaining % 2 == 1
+    );
     for reel in 0..3 {
         for row in 0..3 {
             let symbol_index = slot_symbol_palette_index(&machine.windows[reel][2 - row])?;
             let base_tile = symbol_index * 4;
+            let mut palette = sources.palettes[symbol_index];
+            if flash_inverted {
+                palette.reverse();
+            }
             for icon_y in 0..2 {
                 for icon_x in 0..2 {
                     blit_paletted_slot_tile(
                         &sources.symbols,
                         base_tile + icon_y * 2 + icon_x,
-                        &sources.palettes[symbol_index],
+                        &palette,
                         [5, 9, 13][reel] * TILE + icon_x * TILE,
                         [4, 6, 8][row] * TILE + icon_y * TILE,
                         true,
@@ -1353,6 +1972,15 @@ fn render_visible_slot_machine_frame(
                 }
             }
         }
+    }
+    if machine.background_y_offset != 0 {
+        target = scroll_slot_background(&target, machine.background_y_offset);
+    }
+    if let Some(actor) = machine.actor {
+        draw_visible_slot_actor(sources, actor, &mut target);
+    }
+    if let Some(actor) = machine.secondary_actor {
+        draw_visible_slot_actor(sources, actor, &mut target);
     }
     let mut image = Image::new(
         Extent3d {
@@ -1370,6 +1998,168 @@ fn render_visible_slot_machine_frame(
         handle: images.add(image),
         size: Vec2::new(WIDTH as f32, HEIGHT as f32),
     })
+}
+
+fn scroll_slot_background(source: &[u8], y_offset: i8) -> Vec<u8> {
+    const WIDTH: usize = 160;
+    const HEIGHT: usize = 144;
+    let mut target = vec![255; source.len()];
+    for dest_y in 0..HEIGHT {
+        let source_y = dest_y as isize + isize::from(y_offset);
+        if !(0..HEIGHT as isize).contains(&source_y) {
+            continue;
+        }
+        let source_y = source_y as usize;
+        let source_start = source_y * WIDTH * 4;
+        let dest_start = dest_y * WIDTH * 4;
+        target[dest_start..dest_start + WIDTH * 4]
+            .copy_from_slice(&source[source_start..source_start + WIDTH * 4]);
+    }
+    target
+}
+
+fn draw_visible_slot_actor(
+    sources: &SlotMachineRenderSources,
+    actor: VisibleSlotActor,
+    target: &mut [u8],
+) {
+    const GOLEM_PIECES: [(i16, i16, usize, bool); 6] = [
+        (-12, -12, 0, false),
+        (-4, -12, 2, false),
+        (4, -12, 0, true),
+        (-12, 4, 4, false),
+        (-4, 4, 6, false),
+        (4, 4, 4, true),
+    ];
+    const CHANSEY_TOP: [(i16, i16, usize); 3] =
+        [(-12, -12, 0), (-4, -12, 2), (4, -12, 4)];
+    const CHANSEY_BOTTOMS: [[usize; 3]; 5] = [
+        [6, 8, 10],
+        [12, 14, 16],
+        [18, 20, 22],
+        [24, 26, 28],
+        [36, 38, 40],
+    ];
+    let palette = &sources.palettes[9];
+    match actor {
+        VisibleSlotActor::Golem {
+            x,
+            y_offset,
+            frame,
+            flip_x,
+            flip_y,
+            ..
+        } => {
+            let frame_base = if frame % 2 == 0 { 0 } else { 8 };
+            for (relative_x, relative_y, tile, piece_flip_x) in GOLEM_PIECES {
+                blit_paletted_slot_object(
+                    &sources.actors,
+                    frame_base + tile,
+                    palette,
+                    x + if flip_x { -8 - relative_x } else { relative_x } - 8,
+                    104 + y_offset
+                        + if flip_y { -8 - relative_y } else { relative_y }
+                        - 16,
+                    piece_flip_x ^ flip_x,
+                    flip_y,
+                    target,
+                );
+            }
+        }
+        VisibleSlotActor::Chansey {
+            x,
+            frame,
+            finishing,
+            ..
+        } => {
+            let set = if finishing {
+                [0, 3, 4, 3, 0][usize::from(frame).min(4)]
+            } else {
+                [0, 1, 0, 2][usize::from(frame) % 4]
+            };
+            let top = if set == 4 {
+                [(-12, -12, 30), (-4, -12, 32), (4, -12, 34)]
+            } else {
+                CHANSEY_TOP
+            };
+            for (relative_x, relative_y, tile) in top {
+                blit_paletted_slot_object(
+                    &sources.actors,
+                    16 + tile,
+                    palette,
+                    x + relative_x - 8,
+                    relative_y - 16,
+                    false,
+                    false,
+                    target,
+                );
+            }
+            for (column, tile) in CHANSEY_BOTTOMS[set].into_iter().enumerate() {
+                blit_paletted_slot_object(
+                    &sources.actors,
+                    16 + tile,
+                    palette,
+                    x - 12 + column as i16 * 8 - 8,
+                    4 - 16,
+                    false,
+                    false,
+                    target,
+                );
+            }
+        }
+        VisibleSlotActor::Egg { x, y_offset } => blit_paletted_slot_object(
+            &sources.actors,
+            58,
+            palette,
+            x - 4 - 8,
+            108 + y_offset - 4 - 16,
+            false,
+            false,
+            target,
+        ),
+    }
+}
+
+fn blit_paletted_slot_object(
+    source: &image::RgbaImage,
+    tile_index: usize,
+    palette: &Palette,
+    dest_x: i16,
+    dest_y: i16,
+    flip_x: bool,
+    flip_y: bool,
+    target: &mut [u8],
+) {
+    const TARGET_WIDTH: i16 = 160;
+    const TARGET_HEIGHT: i16 = 144;
+    let columns = source.width() as usize / 8;
+    for y in 0..16 {
+        for x in 0..8 {
+            let output_x = dest_x + x;
+            let output_y = dest_y + y;
+            if !(0..TARGET_WIDTH).contains(&output_x) || !(0..TARGET_HEIGHT).contains(&output_y) {
+                continue;
+            }
+            let source_pixel_x = if flip_x { 7 - x } else { x };
+            let source_pixel_y = if flip_y { 15 - y } else { y };
+            let source_tile = tile_index + usize::from(source_pixel_y >= 8);
+            let source_x = (source_tile % columns) * 8 + source_pixel_x as usize;
+            let source_y = (source_tile / columns) * 8 + (source_pixel_y as usize % 8);
+            let pixel = source.get_pixel(source_x as u32, source_y as u32);
+            let palette_index = palette_index_from_gray(pixel[0]);
+            if palette_index == 0 {
+                continue;
+            }
+            let [red, green, blue] = palette[palette_index];
+            let offset = (usize::from(output_y as u16) * TARGET_WIDTH as usize
+                + usize::from(output_x as u16))
+                * 4;
+            target[offset] = red;
+            target[offset + 1] = green;
+            target[offset + 2] = blue;
+            target[offset + 3] = 255;
+        }
+    }
 }
 
 fn load_slot_machine_palettes(path: &Path) -> Result<Vec<Palette>> {
@@ -1490,6 +2280,147 @@ fn spawn_visible_unown_puzzle(
         3.6,
         images,
     )?;
+    Ok(())
+}
+
+fn spawn_visible_unown_printer(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let Some(printer) = runtime_shell.visible_unown_printer.as_ref() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !printer.letters.is_empty(),
+        "Unown Printer is visible without any registered forms"
+    );
+    commit_presented_fullscreen_solid(commands, rendered_art, [247, 247, 247, 255], 3.4, images)?;
+    let frame = battle_window_frame_art(rendered_art, asset_root, images)
+        .context("Unown Printer window frame art is unavailable")?;
+    // These are the three Textbox calls in _UnownPrinter: a full-width title,
+    // the 7x7 front-picture box, and the full-width prompt at the bottom.
+    spawn_field_command_window_frame_tiles(commands, frame, 0.0, 0.0, 20, 5, 3.5);
+    spawn_field_command_window_frame_tiles(commands, frame, 0.0, 5.0, 9, 9, 3.5);
+    spawn_field_command_window_frame_tiles(commands, frame, 0.0, 14.0, 20, 4, 3.5);
+
+    for (text, tile_x, tile_y) in [
+        (" ALPH RUINS STAMP", 1.0, 2.0),
+        (" PRINT", 11.0, 6.0),
+        (" CANCEL", 11.0, 7.0),
+        ("← PREVIOUS", 10.0, 8.0),
+        ("→ NEXT", 10.0, 9.0),
+        ("Do what?", 1.0, 16.0),
+    ] {
+        let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            text,
+            x,
+            y,
+            3.7,
+        );
+    }
+    spawn_unown_printer_button(
+        commands,
+        images,
+        asset_root.resolve_vendor("gfx/printer/bold_a.png"),
+        10.0,
+        6.0,
+    )?;
+    spawn_unown_printer_button(
+        commands,
+        images,
+        asset_root.resolve_vendor("gfx/printer/bold_b.png"),
+        10.0,
+        7.0,
+    )?;
+
+    if printer.selected < 26 {
+        let letter = char::from(b'A' + printer.selected);
+        if let Some(frontpic) = pokemon_frame_for_art(
+            rendered_art,
+            asset_root,
+            &format!("UNOWN_{letter}"),
+            PokemonSpriteSide::Front,
+            false,
+            images,
+        ) {
+            let (x, y) = battle_hud_tile_origin(4.0, 9.0);
+            commands.spawn((
+                SpriteBundle {
+                    texture: frontpic.handle,
+                    sprite: Sprite {
+                        custom_size: Some(frontpic.size),
+                        ..default()
+                    },
+                    transform: Transform::from_xyz(x, y, 3.7),
+                    ..default()
+                },
+                FieldCommandMarker,
+            ));
+        }
+    } else {
+        let (x, y) = battle_hud_tile_origin(1.0, 9.0);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            "VACANT",
+            x,
+            y,
+            3.7,
+        );
+    }
+    Ok(())
+}
+
+fn spawn_unown_printer_button(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    path: PathBuf,
+    tile_x: f32,
+    tile_y: f32,
+) -> Result<()> {
+    let source = crate::open_runtime_image(&path)
+        .with_context(|| format!("decode Unown Printer button {}", path.display()))?
+        .to_rgba8();
+    anyhow::ensure!(
+        source.dimensions() == (8, 8),
+        "invalid Unown Printer button dimensions for {}",
+        path.display()
+    );
+    let mut image = Image::new(
+        Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        source.into_raw(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+    commands.spawn((
+        SpriteBundle {
+            texture: images.add(image),
+            sprite: Sprite {
+                custom_size: Some(Vec2::splat(8.0)),
+                ..default()
+            },
+            transform: Transform::from_xyz(x, y, 3.7),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
     Ok(())
 }
 
@@ -2073,41 +3004,41 @@ fn spawn_field_pokegear_screen(
     if runtime_shell.pokegear_page == PokegearPage::Radio {
         if let Some(station) = runtime_shell.pokegear_radio_station.as_deref() {
             let transcript = visible_map_radio_transcript(station);
-            let label = transcript
-                .get(runtime_shell.pokegear_radio_segment)
-                .with_context(|| {
-                    format!(
-                        "Pokégear radio segment {} is outside {} transcript segments for {station}",
-                        runtime_shell.pokegear_radio_segment,
-                        transcript.len()
-                    )
-                })?;
-            snapshot
-                .presentation
-                .asm_text
-                .get(*label)
-                .with_context(|| format!("Pokégear radio transcript text {label} is missing"))?;
+            if !transcript.is_empty() {
+                let label = transcript
+                    .get(runtime_shell.pokegear_radio_segment)
+                    .with_context(|| {
+                        format!(
+                            "Pokégear radio segment {} is outside {} transcript segments for {station}",
+                            runtime_shell.pokegear_radio_segment,
+                            transcript.len()
+                        )
+                    })?;
+                snapshot
+                    .presentation
+                    .asm_text
+                    .get(*label)
+                    .with_context(|| {
+                        format!("Pokégear radio transcript text {label} is missing")
+                    })?;
+            }
         } else {
             anyhow::ensure!(
-                runtime_shell.pokegear_radio_index < VISIBLE_POKEGEAR_RADIO_FREQUENCIES.len(),
-                "Pokégear radio index {} is outside {} frequencies",
-                runtime_shell.pokegear_radio_index,
-                VISIBLE_POKEGEAR_RADIO_FREQUENCIES.len()
+                runtime_shell.pokegear_radio_tuning_knob <= 80
+                    && runtime_shell.pokegear_radio_tuning_knob % 2 == 0,
+                "Pokégear radio tuning knob {} is outside the even range 0..=80",
+                runtime_shell.pokegear_radio_tuning_knob,
             );
         }
     }
-    if runtime_shell.pokegear_page == PokegearPage::Map {
-        let frame = visible_overworld_town_map_frame(asset_root, images)?;
-        commit_presented_fullscreen_frame(
+    if runtime_shell.pokegear_page != PokegearPage::Map {
+        commit_presented_fullscreen_solid(
             commands,
             rendered_art,
-            &frame,
-            PresentedFullscreenFrameSource::Transient,
+            [230, 209, 140, 255],
             3.4,
             images,
         )?;
-    } else {
-        commit_presented_fullscreen_solid(commands, rendered_art, [230, 209, 140, 255], 3.4, images)?;
     }
     let cards = [
         (PokegearPage::Clock, "CLOCK"),
@@ -2115,7 +3046,11 @@ fn spawn_field_pokegear_screen(
         (PokegearPage::Phone, "PHONE"),
         (PokegearPage::Radio, "RADIO"),
     ];
-    for (index, (page, label)) in cards.iter().enumerate().filter(|_| runtime_shell.pokegear_page != PokegearPage::Map) {
+    for (index, (page, label)) in cards
+        .iter()
+        .enumerate()
+        .filter(|_| runtime_shell.pokegear_page != PokegearPage::Map)
+    {
         let unlocked = match page {
             PokegearPage::Clock => true,
             PokegearPage::Map => snapshot
@@ -2155,7 +3090,7 @@ fn spawn_field_pokegear_screen(
         );
     }
     if runtime_shell.pokegear_page == PokegearPage::Map {
-        let region = visible_pokegear_region(snapshot);
+        let region = visible_pokegear_region(snapshot)?;
         let tile_palettes = snapshot
             .presentation
             .pokegear_town_map_palette_map
@@ -2180,19 +3115,14 @@ fn spawn_field_pokegear_screen(
                     .unwrap_or("Town Map art is unavailable")
             )
         })?;
-        commands.spawn((
-            SpriteBundle {
-                texture: frame.handle,
-                sprite: Sprite { custom_size: Some(frame.size), ..default() },
-                transform: Transform::from_xyz(
-                    PLAYFIELD_LEFT + PLAYFIELD_WIDTH / 2.0,
-                    PLAYFIELD_TOP - PLAYFIELD_HEIGHT / 2.0,
-                    3.5,
-                ),
-                ..default()
-            },
-            FieldCommandMarker,
-        ));
+        commit_presented_fullscreen_frame(
+            commands,
+            rendered_art,
+            &frame,
+            PresentedFullscreenFrameSource::Cached,
+            3.4,
+            images,
+        )?;
         let landmarks = &snapshot.presentation.pokegear_landmarks.landmarks;
         let selected = runtime_shell.pokegear_cursor;
         let landmark = selected_pokegear_landmark(snapshot, runtime_shell.pokegear_cursor)?;
@@ -2207,7 +3137,7 @@ fn spawn_field_pokegear_screen(
             y,
             3.8,
         );
-        for index in visible_pokegear_landmark_indices(snapshot) {
+        for index in visible_pokegear_landmark_indices(snapshot)? {
             let landmark = &landmarks[index];
             let x = (landmark.x as f32 - 8.0).clamp(0.0, 159.0);
             let y = (landmark.y as f32 - 16.0).clamp(0.0, 143.0);
@@ -2222,11 +3152,11 @@ fn spawn_field_pokegear_screen(
                 SpriteBundle {
                     sprite: Sprite {
                         color: if is_selected {
-                            Color::rgb(0.95, 0.12, 0.12)
+                            Color::srgb(0.95, 0.12, 0.12)
                         } else if is_current {
-                            Color::rgb(0.15, 0.35, 0.95)
+                            Color::srgb(0.15, 0.35, 0.95)
                         } else {
-                            Color::rgb(0.35, 0.55, 0.25)
+                            Color::srgb(0.35, 0.55, 0.25)
                         },
                         custom_size: Some(Vec2::splat(if is_selected { 5.0 } else { 2.0 })),
                         ..default()
@@ -2239,7 +3169,7 @@ fn spawn_field_pokegear_screen(
         }
     }
     if runtime_shell.pokegear_page != PokegearPage::Map {
-        let entries = visible_pokegear_menu_entries(snapshot, runtime_shell);
+        let entries = visible_pokegear_menu_entries(snapshot, runtime_shell)?;
         for (index, line) in entries.iter().take(10).enumerate() {
             let (x, y) = battle_hud_tile_origin(1.0, 4.0 + index as f32);
             spawn_field_command_bitmap_text(
@@ -2280,7 +3210,10 @@ fn visible_overworld_town_map_frame(
     if tilemap.last() == Some(&0xff) {
         tilemap.pop();
     }
-    anyhow::ensure!(tilemap.len() == 20 * 18, "Johto town-map tilemap must contain 360 tiles");
+    anyhow::ensure!(
+        tilemap.len() == 20 * 18,
+        "Johto town-map tilemap must contain 360 tiles"
+    );
     let palette_tokens: serde_json::Value = serde_json::from_slice(
         &crate::read_runtime_asset(assets.join("data/pokegear_town_map_palette_map.json"))
             .context("read town-map palette assignments")?,
@@ -2312,7 +3245,10 @@ fn visible_overworld_town_map_frame(
             .with_context(|| format!("Pokégear palette {palette_key} is missing"))?;
         let source_x = u32::from(tile_id) % columns * 8;
         let source_y = u32::from(tile_id) / columns * 8;
-        anyhow::ensure!(source_y + 8 <= sheet.height(), "town-map tile {tile_id} is outside its sheet");
+        anyhow::ensure!(
+            source_y + 8 <= sheet.height(),
+            "town-map tile {tile_id} is outside its sheet"
+        );
         let target_x = map_index % 20 * 8;
         let target_y = map_index / 20 * 8;
         for row in 0..8_usize {
@@ -2320,7 +3256,15 @@ fn visible_overworld_town_map_frame(
                 let gray = sheet.get_pixel(source_x + col as u32, source_y + row as u32)[0];
                 // Match TypeScript's PNG -> Game Boy level inversion before
                 // applying the four-color CGB palette.
-                let level = if gray >= 192 { 0 } else if gray >= 128 { 1 } else if gray >= 64 { 2 } else { 3 };
+                let level = if gray >= 192 {
+                    0
+                } else if gray >= 128 {
+                    1
+                } else if gray >= 64 {
+                    2
+                } else {
+                    3
+                };
                 let target = ((target_y + row) * 160 + target_x + col) * 4;
                 pixels[target..target + 3].copy_from_slice(&palette[level]);
                 pixels[target + 3] = 255;
@@ -2328,17 +3272,26 @@ fn visible_overworld_town_map_frame(
         }
     }
     let mut image = Image::new(
-        Extent3d { width: 160, height: 144, depth_or_array_layers: 1 },
+        Extent3d {
+            width: 160,
+            height: 144,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         pixels,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
     image.sampler = ImageSampler::nearest();
-    Ok(SpriteFrame { handle: images.add(image), size: Vec2::new(160.0, 144.0) })
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(160.0, 144.0),
+    })
 }
 
-fn parse_visible_pokegear_palette_bank(path: &std::path::Path) -> Result<HashMap<String, [[u8; 3]; 4]>> {
+fn parse_visible_pokegear_palette_bank(
+    path: &std::path::Path,
+) -> Result<HashMap<String, [[u8; 3]; 4]>> {
     let source = crate::read_runtime_asset_to_string(path)
         .with_context(|| format!("read Pokégear palette {}", path.display()))?;
     let mut palettes = HashMap::new();
@@ -2347,14 +3300,29 @@ fn parse_visible_pokegear_palette_bank(path: &std::path::Path) -> Result<HashMap
     for raw in source.lines() {
         let line = raw.trim();
         if let Some(comment) = line.strip_prefix(';') {
-            label = Some(comment.trim().to_ascii_lowercase().replace(" (boy)", "").replace(' ', "_"));
+            label = Some(
+                comment
+                    .trim()
+                    .to_ascii_lowercase()
+                    .replace(" (boy)", "")
+                    .replace(' ', "_"),
+            );
             colors.clear();
         } else if let Some(rgb) = line.strip_prefix("RGB") {
-            let values = rgb.split(',').map(|value| value.trim().parse::<u8>()).collect::<std::result::Result<Vec<_>, _>>()?;
+            let values = rgb
+                .split(',')
+                .map(|value| value.trim().parse::<u8>())
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             anyhow::ensure!(values.len() == 3, "malformed Pokégear RGB line {line}");
-            colors.push([values[0] << 3 | values[0] >> 2, values[1] << 3 | values[1] >> 2, values[2] << 3 | values[2] >> 2]);
+            colors.push([
+                values[0] << 3 | values[0] >> 2,
+                values[1] << 3 | values[1] >> 2,
+                values[2] << 3 | values[2] >> 2,
+            ]);
             if colors.len() == 4 {
-                let key = label.take().context("Pokégear RGB values have no palette label")?;
+                let key = label
+                    .take()
+                    .context("Pokégear RGB values have no palette label")?;
                 palettes.insert(key, [colors[0], colors[1], colors[2], colors[3]]);
             }
         }
@@ -2371,7 +3339,7 @@ fn spawn_field_fly_map_screen(
     images: &mut Assets<Image>,
 ) -> Result<()> {
     commit_presented_fullscreen_solid(commands, rendered_art, [173, 209, 148, 255], 3.4, images)?;
-    let destinations = active_fly_destinations(snapshot, &runtime_shell.shell);
+    let destinations = active_fly_destinations(snapshot, &runtime_shell.shell)?;
     let selected = strict_readonly_cursor_index(
         &runtime_shell.fly_cursor,
         "fly:destinations",
@@ -2403,9 +3371,9 @@ fn spawn_field_fly_map_screen(
             SpriteBundle {
                 sprite: Sprite {
                     color: if is_selected {
-                        Color::rgb(0.95, 0.12, 0.12)
+                        Color::srgb(0.95, 0.12, 0.12)
                     } else {
-                        Color::rgb(0.18, 0.42, 0.82)
+                        Color::srgb(0.18, 0.42, 0.82)
                     },
                     custom_size: Some(Vec2::splat(if is_selected { 6.0 } else { 3.0 })),
                     ..default()
@@ -2618,79 +3586,7 @@ fn spawn_field_pack_screen(
         strict_readonly_cursor_index(cursor, &surface_id, row_count).with_context(|| {
             format!("field PACK cursor is invalid for {surface_id} with {row_count} rows")
         })?;
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                // gfx/pack/pack.pal color zero: RGB 31,31,31.
-                color: Color::WHITE,
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
-    let pocket_label = field_pack_pocket_label(&pocket).to_uppercase();
-    for (row, text) in [
-        (1.0, "< PACK >".to_string()),
-        (4.0, "[BAG]".to_string()),
-        (7.0, "<     >".to_string()),
-        (8.0, compact_scene_label(&pocket_label, 5)),
-    ] {
-        let (x, y) = battle_hud_tile_origin(0.0, row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &text,
-            x,
-            y,
-            3.8,
-        );
-    }
     let list_start = visible_window_start(selected, row_count, 7);
-    for visible_index in 0..7 {
-        let index = list_start + visible_index;
-        if index >= row_count {
-            break;
-        }
-        let row = 2.0 + visible_index as f32;
-        let marker = if index == selected { ">" } else { " " };
-        let (name, quantity) = if index >= items.len() {
-            ("CANCEL".to_string(), None)
-        } else {
-            (
-                item_display_name(snapshot, &items[index].0),
-                Some(items[index].1),
-            )
-        };
-        let (x, y) = battle_hud_tile_origin(7.0, row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!("{marker}{}", compact_scene_label(&name, 8)),
-            x,
-            y,
-            3.8,
-        );
-        if let Some(quantity) = quantity {
-            let (x, y) = battle_hud_tile_origin(16.0, row);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                &format!("×{:02}", quantity.min(99)),
-                x,
-                y,
-                3.8,
-            );
-        }
-    }
     let description = if let Some((item_id, _)) = items.get(selected) {
         snapshot
             .items
@@ -2700,73 +3596,26 @@ fn spawn_field_pack_screen(
             .description
             .as_str()
     } else {
-        "Close the PACK."
+        ""
     };
-    for (index, line) in wrap_boot_text_for_box(description, 18, 4)
-        .iter()
-        .enumerate()
-    {
-        let (x, y) = battle_hud_tile_origin(1.0, 13.0 + index as f32);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            line,
-            x,
-            y,
-            3.8,
-        );
-    }
-    if let Some(action_cursor) = &runtime_shell.field_pack_action_cursor {
-        let actions = visible_selected_pack_item_actions(snapshot, runtime_shell, &pocket, false)?;
-        let action_selected = strict_readonly_cursor_index(
-            &Some(action_cursor.clone()),
-            "pack:actions",
-            actions.len(),
-        )
-        .with_context(|| {
-            format!(
-                "field PACK action cursor is invalid for {} actions",
-                actions.len()
-            )
-        })?;
-        let top = match actions.len() {
-            5 => 1.0,
-            4 => 3.0,
-            3 => 5.0,
-            2 => 7.0,
-            _ => 9.0,
-        };
-        spawn_battle_window(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            13.0,
-            top,
-            7.0,
-            actions.len() as f32 * 2.0 + 1.0,
-            4.1,
-        );
-        for (index, action) in actions.iter().enumerate() {
-            let (x, y) = battle_hud_tile_origin(14.0, top + 1.0 + index as f32 * 2.0);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                &format!(
-                    "{}{}",
-                    if index == action_selected { ">" } else { " " },
-                    visible_field_pack_action_label(*action)
-                ),
-                x,
-                y,
-                4.3,
-            );
-        }
-    }
+    let frame = load_visible_field_pack_frame(
+        snapshot,
+        runtime_shell,
+        &pocket,
+        &items,
+        selected,
+        list_start,
+        description,
+        images,
+    )?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.4,
+        images,
+    )?;
     spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
     Ok(())
 }
@@ -2875,42 +3724,35 @@ fn spawn_field_party_summary_screen(
             })?;
     }
     let tint = if pokemon.is_egg {
-        Color::rgb(0.98, 0.94, 0.78)
+        [255, 240, 199, 255]
     } else {
         match page {
-            1 => Color::rgb(1.0, 0.86, 0.89),
-            2 => Color::rgb(0.84, 0.96, 0.84),
-            _ => Color::rgb(0.84, 0.91, 1.0),
+            1 => [255, 219, 227, 255],
+            2 => [214, 245, 214, 255],
+            _ => [214, 232, 255, 255],
         }
     };
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: tint,
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
     let mut rows = vec![
-        (1.0, compact_scene_label(&pokemon.nickname, 10)),
         (
-            2.0,
+            8,
+            0.0,
             format!(
-                "No.{:03}  \u{e10a}{:>2}",
+                "No.{:03}  L{:>2}",
                 pokemon.species.int_id, pokemon.level
             ),
         ),
+        (8, 2.0, compact_scene_label(&pokemon.nickname, 10)),
         (
-            3.0,
-            crate::core::models::pokemon_species_display_name(&pokemon.species.id),
+            9,
+            4.0,
+            format!(
+                "/{}",
+                crate::core::models::pokemon_species_display_name(&pokemon.species.id)
+            ),
         ),
     ];
     if pokemon.is_egg {
-        rows.push((7.0, "EGG".to_string()));
+        rows.push((8, 1.0, "EGG".to_string()));
         let hatch_lines = if pokemon.happiness < 6 {
             [
                 "It's making sounds",
@@ -2940,18 +3782,9 @@ fn spawn_field_party_summary_screen(
                 .into_iter()
                 .enumerate()
                 .filter(|(_, line)| !line.is_empty())
-                .map(|(index, line)| (9.0 + index as f32 * 2.0, line.to_string())),
+                .map(|(index, line)| (1, 9.0 + index as f32 * 2.0, line.to_string())),
         );
     } else {
-        rows.push((
-            5.0,
-            format!(
-                "< {}  {}  {} >",
-                if page == 1 { "[1]" } else { "1" },
-                if page == 2 { "[2]" } else { "2" },
-                if page == 3 { "[3]" } else { "3" }
-            ),
-        ));
         match page {
             1 => {
                 let species = snapshot
@@ -2964,56 +3797,185 @@ fn spawn_field_party_summary_screen(
                             pokemon.species.id
                         )
                     })?;
-                let type_label = if species.type1 == species.type2 {
-                    species.type1.clone()
-                } else {
-                    format!("{}/{}", species.type1, species.type2)
-                };
+                let type1 = species.type1.clone();
+                let type2 = (species.type1 != species.type2).then(|| species.type2.clone());
                 rows.extend([
-                    (7.0, format!("HP  {:>3}/{:>3}", pokemon.hp, pokemon.max_hp)),
-                    (8.0, format!("STATUS  {}", party_status_token(pokemon))),
-                    (10.0, format!("TYPE/ {type_label}")),
-                    (12.0, format!("EXP POINTS {:>7}", pokemon.experience.max(0))),
-                    (14.0, format!("ITEM {held_item_label}")),
+                    (0, 9.0, "HP".to_string()),
+                    (1, 10.0, format!("{:>3}/{:>3}", pokemon.hp, pokemon.max_hp)),
+                    (0, 12.0, "STATUS/".to_string()),
+                    (6, 13.0, party_status_token(pokemon).to_string()),
+                    (0, 14.0, "TYPE/".to_string()),
+                    (1, 15.0, type1),
+                    (1, 16.0, type2.unwrap_or_default()),
+                    (10, 9.0, "EXP POINTS".to_string()),
+                    (13, 10.0, format!("{:>7}", pokemon.experience.max(0))),
                 ]);
             }
             2 => {
-                rows.push((6.0, format!("ITEM {held_item_label}")));
+                rows.push((0, 8.0, "ITEM".to_string()));
+                rows.push((8, 8.0, held_item_label));
                 if pokemon.moves.is_empty() {
-                    rows.push((9.0, "NO MOVES".to_string()));
+                    rows.push((8, 10.0, "NO MOVES".to_string()));
                 } else {
                     for (index, learned) in pokemon.moves.iter().take(4).enumerate() {
                         let row = 8.0 + index as f32 * 2.0;
-                        rows.push((row, battle_move_display_name(snapshot, &learned.name)));
-                        rows.push((row + 1.0, visible_move_pp_text(snapshot, learned)));
+                        rows.push((8, row + 2.0, battle_move_display_name(snapshot, &learned.name)));
+                        rows.push((12, row + 3.0, visible_move_pp_text(snapshot, learned)));
                     }
                 }
             }
             _ => rows.extend([
-                (7.0, format!("OT/{}", pokemon.original_trainer_name)),
-                (8.0, format!("IDNo.{:05}", pokemon.original_trainer_id)),
-                (10.0, format!("ATTACK  {:>3}", pokemon.attack)),
-                (11.0, format!("DEFENSE {:>3}", pokemon.defense)),
-                (12.0, format!("SPCL.ATK{:>3}", pokemon.special_attack)),
-                (13.0, format!("SPCL.DEF{:>3}", pokemon.special_defense)),
-                (14.0, format!("SPEED   {:>3}", pokemon.speed)),
+                (0, 9.0, format!("IDNo.{:05}", pokemon.original_trainer_id)),
+                (0, 12.0, format!("OT/{}", pokemon.original_trainer_name)),
+                (11, 8.0, "ATTACK".to_string()),
+                (17, 9.0, format!("{:>3}", pokemon.attack)),
+                (11, 10.0, "DEFENSE".to_string()),
+                (17, 11.0, format!("{:>3}", pokemon.defense)),
+                (11, 12.0, "SPCL.ATK".to_string()),
+                (17, 13.0, format!("{:>3}", pokemon.special_attack)),
+                (11, 14.0, "SPCL.DEF".to_string()),
+                (17, 15.0, format!("{:>3}", pokemon.special_defense)),
+                (11, 16.0, "SPEED".to_string()),
+                (17, 17.0, format!("{:>3}", pokemon.speed)),
             ]),
         }
     }
-    for (row, text) in rows {
-        let (x, y) = battle_hud_tile_origin(1.0, row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &compact_scene_label(&text, 18),
-            x,
-            y,
-            3.8,
-        );
-    }
+    let frame = load_visible_party_summary_frame(
+        runtime_shell,
+        &rows,
+        tint,
+        page,
+        (!pokemon.is_egg).then_some((pokemon.hp, pokemon.max_hp)),
+        images,
+    )?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.4,
+        images,
+    )?;
+    let sprite_species = if pokemon.is_egg { "EGG" } else { &pokemon.species.id };
+    let shiny = !pokemon.is_egg && visible_pokemon_is_shiny(pokemon);
+    let sprite = pokemon_frame_for_art(
+        rendered_art,
+        asset_root,
+        sprite_species,
+        PokemonSpriteSide::Front,
+        shiny,
+        images,
+    )
+    .with_context(|| format!("party summary front sprite {sprite_species} is unavailable"))?;
+    let (x, y) = battle_hud_tile_origin(3.5, 3.5);
+    commands.spawn((
+        SpriteBundle {
+            texture: sprite.handle,
+            sprite: Sprite { custom_size: Some(sprite.size * 4.0), ..default() },
+            transform: Transform::from_xyz(x, y, 3.8),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
     Ok(())
+}
+
+fn spawn_visible_egg_hatch_tile(
+    commands: &mut Commands,
+    tile: &SpriteFrame,
+    screen_x: f32,
+    screen_y: f32,
+    flip_x: bool,
+    flip_y: bool,
+    z: f32,
+) {
+    let source_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+    commands.spawn((
+        SpriteBundle {
+            texture: tile.handle.clone(),
+            sprite: Sprite {
+                custom_size: Some(tile.size * source_scale),
+                flip_x,
+                flip_y,
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                PLAYFIELD_LEFT + (screen_x - 4.0) * source_scale,
+                PLAYFIELD_TOP - (screen_y - 12.0) * source_scale,
+                z,
+            ),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
+}
+
+fn visible_egg_hatch_tiles<'a>(
+    rendered_art: &'a mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<&'a [SpriteFrame; 2]> {
+    if rendered_art.egg_hatch_tile_cache.is_none()
+        && rendered_art.egg_hatch_tile_error.is_none()
+    {
+        let loaded = (|| -> Result<[SpriteFrame; 2]> {
+            let bytes = crate::read_runtime_asset(
+                asset_root.runtime_assets().join("gfx/evo/egg_hatch.2bpp"),
+            )
+            .context("read exact egg hatch crack/fragment graphics")?;
+            if bytes.len() != 32 {
+                anyhow::bail!("egg_hatch.2bpp must contain exactly two tiles");
+            }
+            let mut frames = Vec::with_capacity(2);
+            for tile_index in 0..2 {
+                let tile = &bytes[tile_index * 16..tile_index * 16 + 16];
+                let mut rgba = vec![0_u8; 8 * 8 * 4];
+                for y in 0..8_usize {
+                    for x in 0..8_usize {
+                        let bit = 1 << (7 - x);
+                        let level = (((tile[y * 2 + 1] & bit != 0) as u8) << 1)
+                            | (tile[y * 2] & bit != 0) as u8;
+                        if level == 0 {
+                            continue;
+                        }
+                        let shade = [255_u8, 170, 85, 0][usize::from(level)];
+                        let offset = (y * 8 + x) * 4;
+                        rgba[offset..offset + 3].fill(shade);
+                        rgba[offset + 3] = 255;
+                    }
+                }
+                let mut image = Image::new(
+                    Extent3d {
+                        width: 8,
+                        height: 8,
+                        depth_or_array_layers: 1,
+                    },
+                    TextureDimension::D2,
+                    rgba,
+                    TextureFormat::Rgba8UnormSrgb,
+                    RenderAssetUsages::default(),
+                );
+                image.sampler = ImageSampler::nearest();
+                frames.push(SpriteFrame {
+                    handle: images.add(image),
+                    size: Vec2::splat(8.0),
+                });
+            }
+            frames
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("egg hatch tile decode count drifted"))
+        })();
+        match loaded {
+            Ok(frames) => rendered_art.egg_hatch_tile_cache = Some(frames),
+            Err(error) => rendered_art.egg_hatch_tile_error = Some(error.to_string()),
+        }
+    }
+    rendered_art.egg_hatch_tile_cache.as_ref().with_context(|| {
+        rendered_art
+            .egg_hatch_tile_error
+            .clone()
+            .unwrap_or_else(|| "egg hatch graphics are unavailable".to_string())
+    })
 }
 
 fn spawn_field_move_reorder_screen(
@@ -3057,7 +4019,7 @@ fn spawn_field_move_reorder_screen(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
+                color: Color::srgb(1.0, 1.0, 1.0),
                 custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                 ..default()
             },
@@ -3358,21 +4320,16 @@ fn spawn_field_party_menu(
     } else {
         source
     };
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
-                custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                ..default()
-            },
-            transform: Transform::from_xyz(0.0, 0.0, 3.4),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
+    let frame = load_visible_field_party_frame(snapshot, runtime_shell, selected, images)?;
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Transient,
+        3.4,
+        images,
+    )?;
     for (row_index, slot) in snapshot.party.slots.iter().enumerate().take(6) {
-        let name_row = 1.0 + row_index as f32 * 2.0;
-        let status_row = name_row + 1.0;
         spawn_battle_party_icon(
             commands,
             snapshot,
@@ -3385,131 +4342,7 @@ fn spawn_field_party_menu(
             images,
         )
         .context("field party selection has no valid icon")?;
-        let (x, y) = battle_hud_tile_origin(0.0, name_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            if selected == row_index { ">" } else { " " },
-            x,
-            y,
-            3.8,
-        );
-        if runtime_shell.party_switch_cursor.is_some() && source == row_index {
-            let (x, y) = battle_hud_tile_origin(2.0, name_row);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                "▷",
-                x,
-                y,
-                3.8,
-            );
-        }
-        let (x, y) = battle_hud_tile_origin(3.0, name_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &compact_scene_label(&slot.pokemon.nickname, 10),
-            x,
-            y,
-            3.8,
-        );
-        if slot.pokemon.is_egg {
-            continue;
-        }
-        let (x, y) = battle_hud_tile_origin(13.0, name_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!(
-                "{:>3}/{:>3}",
-                slot.pokemon.hp.min(999),
-                slot.pokemon.max_hp.min(999)
-            ),
-            x,
-            y,
-            3.8,
-        );
-        let (x, y) = battle_hud_tile_origin(5.0, status_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            party_status_token(&slot.pokemon),
-            x,
-            y,
-            3.8,
-        );
-        let (x, y) = battle_hud_tile_origin(8.0, status_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!("\u{e10a}{:>2}", slot.pokemon.level.min(100)),
-            x,
-            y,
-            3.8,
-        );
-        let hp_tiles = ((u32::from(slot.pokemon.hp.min(slot.pokemon.max_hp)) * 6)
-            / u32::from(slot.pokemon.max_hp.max(1))) as usize;
-        let (x, y) = battle_hud_tile_origin(11.0, status_row);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!("{}{}", "|".repeat(hp_tiles), ".".repeat(6 - hp_tiles)),
-            x,
-            y,
-            3.8,
-        );
     }
-    let cancel_row = 1.0 + snapshot.party.slots.len().min(6) as f32 * 2.0;
-    let (x, y) = battle_hud_tile_origin(1.0, cancel_row);
-    spawn_field_command_bitmap_text(
-        commands,
-        rendered_art,
-        asset_root,
-        images,
-        &format!(
-            "{}CANCEL",
-            if selected >= snapshot.party.slots.len() {
-                ">"
-            } else {
-                " "
-            }
-        ),
-        x,
-        y,
-        3.8,
-    );
-    let (x, y) = battle_hud_tile_origin(1.0, 15.0);
-    spawn_field_command_bitmap_text(
-        commands,
-        rendered_art,
-        asset_root,
-        images,
-        if runtime_shell.party_hp_transfer_source.is_some() {
-            "Use on which <PKMN>?"
-        } else if runtime_shell.party_switch_cursor.is_some() {
-            "Move to where?"
-        } else {
-            "Choose a <PKMN>."
-        },
-        x,
-        y,
-        4.1,
-    );
     Ok(())
 }
 
@@ -3521,46 +4354,7 @@ fn spawn_field_party_action_window(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    let actions = visible_party_actions(snapshot, runtime_shell)?;
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.party_action_cursor,
-        "party:actions",
-        actions.len(),
-    )
-    .with_context(|| {
-        format!(
-            "party action cursor is invalid for {} actions",
-            actions.len()
-        )
-    })?;
-    let (left, top, width, height) = (6.0, 0.0, 14.0, 18.0);
-    let (center_x, center_y) =
-        battle_hud_tile_origin(left + width / 2.0 - 0.5, top + height / 2.0 - 0.5);
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
-                custom_size: Some(Vec2::new(TILE_SIZE * width, TILE_SIZE * height)),
-                ..default()
-            },
-            transform: Transform::from_xyz(center_x, center_y, 4.0),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
-    for (index, action) in actions.iter().enumerate() {
-        let (x, y) = battle_hud_tile_origin(7.0, 1.0 + index as f32 * 2.0);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &party_submenu_action_entry(*action, if index == selected { ">" } else { " " }),
-            x,
-            y,
-            4.2,
-        );
-    }
+    let _ = (commands, snapshot, runtime_shell, rendered_art, asset_root, images);
     Ok(())
 }
 
@@ -3571,52 +4365,7 @@ fn spawn_field_party_give_take_window(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    let mail_actions = runtime_shell
-        .party_give_take_cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.surface_id == "party:mail-actions");
-    let surface = if mail_actions {
-        "party:mail-actions"
-    } else {
-        "party:give-take"
-    };
-    let labels: &[&str] = if mail_actions {
-        &["READ", "TAKE", "QUIT"]
-    } else {
-        &["GIVE", "TAKE"]
-    };
-    let selected =
-        strict_readonly_cursor_index(&runtime_shell.party_give_take_cursor, surface, labels.len())
-            .with_context(|| format!("{surface} cursor is invalid for {} actions", labels.len()))?;
-    let (center_x, center_y) = battle_hud_tile_origin(15.5, 14.5);
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
-                custom_size: Some(Vec2::new(
-                    TILE_SIZE * 8.0,
-                    TILE_SIZE * (labels.len() as f32 * 2.0 + 2.0),
-                )),
-                ..default()
-            },
-            transform: Transform::from_xyz(center_x, center_y, 4.3),
-            ..default()
-        },
-        FieldCommandMarker,
-    ));
-    for (index, label) in labels.iter().enumerate() {
-        let (x, y) = battle_hud_tile_origin(13.0, 13.0 + index as f32 * 2.0);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!("{}{label}", if selected == index { ">" } else { " " }),
-            x,
-            y,
-            4.5,
-        );
-    }
+    let _ = (commands, runtime_shell, rendered_art, asset_root, images);
     Ok(())
 }
 
@@ -3708,7 +4457,7 @@ fn spawn_start_menu_command_window_fill(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
+                color: Color::srgb(1.0, 1.0, 1.0),
                 custom_size: Some(Vec2::new(
                     width_tiles as f32 * TILE_SIZE,
                     height_tiles as f32 * TILE_SIZE,
@@ -3737,7 +4486,7 @@ fn spawn_bug_contest_start_menu_status(
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
+                color: Color::srgb(1.0, 1.0, 1.0),
                 custom_size: Some(Vec2::new(
                     WIDTH as f32 * TILE_SIZE,
                     HEIGHT as f32 * TILE_SIZE,
@@ -3886,7 +4635,7 @@ fn spawn_options_menu_window_fill(commands: &mut Commands, z: f32) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgb(1.0, 1.0, 1.0),
+                color: Color::srgb(1.0, 1.0, 1.0),
                 custom_size: Some(Vec2::new(
                     OPTIONS_MENU_WIDTH_TILES as f32 * TILE_SIZE,
                     OPTIONS_MENU_HEIGHT_TILES as f32 * TILE_SIZE,
@@ -3939,6 +4688,24 @@ fn spawn_scene_dialog(
             images,
         )?;
         return Ok(());
+    }
+    if runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
+        hatch.phase != VisibleEggHatchPhase::HuhText
+    }) {
+        let hatch_text = runtime_shell
+            .visible_egg_hatch
+            .as_ref()
+            .is_some_and(|hatch| hatch.phase == VisibleEggHatchPhase::HatchText);
+        spawn_visible_egg_hatch(
+            commands,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        )?;
+        if !hatch_text {
+            return Ok(());
+        }
     }
     if let Some(word) = runtime_shell.visible_unown_words.as_deref() {
         spawn_visible_unown_words(commands, rendered_art, asset_root, images, word);
@@ -3995,6 +4762,26 @@ fn spawn_scene_dialog(
         )?;
         return Ok(());
     }
+    if let Some(input) = runtime_shell.pending_mail_input.as_ref() {
+        spawn_visible_mail_entry_screen(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            input,
+        )?;
+        return Ok(());
+    }
+    if let Some(reader) = runtime_shell.pending_mail_read.as_ref() {
+        spawn_visible_mail_read_screen(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            reader,
+        )?;
+        return Ok(());
+    }
     if let Some(shop) = snapshot.pending_shop.as_ref() {
         spawn_field_shop_screen(
             commands,
@@ -4022,6 +4809,16 @@ fn spawn_scene_dialog(
         spawn_field_pc_item_screen(
             commands,
             snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        )?;
+        return Ok(());
+    }
+    if runtime_shell.decoration_menu.is_some() {
+        spawn_visible_decoration_screen(
+            commands,
             runtime_shell,
             rendered_art,
             asset_root,
@@ -4067,11 +4864,20 @@ fn spawn_scene_dialog(
     if let Some(day_prompt) = runtime_shell.pending_day_of_week.as_ref() {
         if day_prompt.confirming {
             spawn_visible_day_of_week_confirmation(
-                commands, snapshot, runtime_shell, rendered_art, asset_root, images,
-            );
+                commands,
+                snapshot,
+                runtime_shell,
+                rendered_art,
+                asset_root,
+                images,
+            )?;
         } else {
             spawn_visible_day_of_week_selection(
-                commands, runtime_shell, rendered_art, asset_root, images,
+                commands,
+                runtime_shell,
+                rendered_art,
+                asset_root,
+                images,
             );
         }
         return Ok(());
@@ -4091,6 +4897,116 @@ fn spawn_scene_dialog(
         asset_root,
         images,
     )?;
+    Ok(())
+}
+
+fn spawn_visible_egg_hatch(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let hatch = runtime_shell
+        .visible_egg_hatch
+        .as_ref()
+        .context("egg hatch renderer requires active hatch state")?;
+    commit_presented_fullscreen_solid(
+        commands,
+        rendered_art,
+        [247, 247, 247, 255],
+        5.8,
+        images,
+    )?;
+    let (species_id, x_offset, animation_frame) = match hatch.phase {
+        VisibleEggHatchPhase::EggHold => ("EGG", 0, 0),
+        VisibleEggHatchPhase::Wobble => ("EGG", visible_egg_wobble_x(hatch.frame), 0),
+        VisibleEggHatchPhase::Shell => (hatch.species_id.as_str(), 0, 0),
+        VisibleEggHatchPhase::Reveal => (
+            hatch.species_id.as_str(),
+            0,
+            runtime_shell
+                .visible_frontpic_animation
+                .as_ref()
+                .map_or(0, |animation| animation.frame),
+        ),
+        VisibleEggHatchPhase::HatchText => (hatch.species_id.as_str(), 0, 0),
+        VisibleEggHatchPhase::HuhText => return Ok(()),
+    };
+    let sprite = pokemon_animation_frame_for_art(
+        rendered_art,
+        asset_root,
+        species_id,
+        PokemonSpriteSide::Front,
+        false,
+        animation_frame,
+        images,
+    )
+    .with_context(|| format!("egg hatch front sprite {species_id} is unavailable"))?;
+    let (center_x, center_y) = battle_hud_tile_origin(10.0, 8.0);
+    commands.spawn((
+        SpriteBundle {
+            texture: sprite.handle,
+            sprite: Sprite {
+                custom_size: Some(sprite.size * 4.0),
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                center_x + f32::from(x_offset) * TILE_SIZE / SOURCE_TILE_SIZE as f32,
+                center_y,
+                6.0,
+            ),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
+    let tiles = visible_egg_hatch_tiles(rendered_art, asset_root, images)?;
+    if hatch.phase == VisibleEggHatchPhase::Wobble {
+        let crack_count = [50_u16, 124, 222]
+            .into_iter()
+            .filter(|boundary| hatch.frame >= *boundary)
+            .count();
+        for crack_index in 0..crack_count {
+            spawn_visible_egg_hatch_tile(
+                commands,
+                &tiles[0],
+                88.0,
+                84.0 + crack_index as f32 * 16.0,
+                false,
+                false,
+                6.2,
+            );
+        }
+    }
+    if hatch.phase == VisibleEggHatchPhase::Shell && hatch.frame < 16 {
+        const FRAGMENTS: [(i16, i16, bool, bool, u8); 10] = [
+            (84, 72, false, false, 0x3c),
+            (92, 72, true, false, 0x04),
+            (84, 80, false, false, 0x30),
+            (92, 80, true, false, 0x10),
+            (84, 88, false, true, 0x24),
+            (92, 88, true, true, 0x1c),
+            (80, 76, false, false, 0x36),
+            (96, 76, true, false, 0x0a),
+            (80, 84, false, true, 0x2a),
+            (96, 84, true, true, 0x16),
+        ];
+        let amplitude = (hatch.frame as u8).wrapping_mul(8);
+        for (base_y, base_x, flip_x, flip_y, angle) in FRAGMENTS {
+            let phase = angle ^ if hatch.frame % 2 == 0 { 0x20 } else { 0 };
+            let y_offset = visible_battle_anim_sine(phase, amplitude);
+            let x_offset = visible_battle_anim_sine(phase.wrapping_add(0x10), amplitude);
+            spawn_visible_egg_hatch_tile(
+                commands,
+                &tiles[1],
+                f32::from(base_x) + x_offset as f32,
+                f32::from(base_y) + y_offset as f32,
+                flip_x,
+                flip_y,
+                6.3,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -4155,6 +5071,145 @@ fn spawn_visible_player_pc_action_screen(
                 if index == selected { ">" } else { " " },
                 visible_player_pc_action_label(*action)
             ),
+            x,
+            y,
+            4.2,
+        );
+    }
+    Ok(())
+}
+
+fn spawn_visible_decoration_screen(
+    commands: &mut Commands,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let menu = runtime_shell
+        .decoration_menu
+        .as_ref()
+        .context("decoration screen requires an active menu")?;
+    if let VisibleDecorationMenuPhase::Side { decoration_id, .. } = &menu.phase {
+        spawn_scene_dialog_text_box(commands, rendered_art, asset_root, images, 4.0);
+        let (question_x, question_y) = battle_hud_tile_origin(1.0, 13.0);
+        spawn_scene_dialog_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            if decoration_id.is_some() {
+                "Which side do you\nwant to put it on?"
+            } else {
+                "Which side do you\nwant to put away?"
+            },
+            question_x,
+            question_y,
+            4.2,
+        );
+    }
+    let (left, top, width, height, entries, selected, surface_id, visible_rows) = match &menu.phase {
+        VisibleDecorationMenuPhase::Categories { categories, cursor } => (
+            5.0,
+            0.0,
+            15.0,
+            18.0,
+            categories
+                .iter()
+                .map(|category| visible_decoration_category_label(*category).to_string())
+                .chain(std::iter::once("EXIT".to_string()))
+                .collect::<Vec<_>>(),
+            cursor.option_index,
+            "pc:decorations:categories",
+            16usize,
+        ),
+        VisibleDecorationMenuPhase::Decorations {
+            decorations,
+            cursor,
+            ..
+        } => (
+            0.0,
+            0.0,
+            20.0,
+            18.0,
+            decorations
+                .iter()
+                .map(|decoration| decoration.display_name.clone())
+                .chain(["PUT IT AWAY".to_string(), "CANCEL".to_string()])
+                .collect::<Vec<_>>(),
+            cursor.option_index,
+            "pc:decorations:items",
+            8usize,
+        ),
+        VisibleDecorationMenuPhase::Side { cursor, .. } => (
+            0.0,
+            0.0,
+            14.0,
+            8.0,
+            vec![
+                "RIGHT SIDE".to_string(),
+                "LEFT SIDE".to_string(),
+                "CANCEL".to_string(),
+            ],
+            cursor.option_index,
+            "pc:decorations:side",
+            3usize,
+        ),
+    };
+    anyhow::ensure!(
+        selected < entries.len(),
+        "{surface_id} cursor {selected} exceeds {} entries",
+        entries.len()
+    );
+    let (center_x, center_y) = field_window_center(left, top, width, height);
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(
+                    TILE_SIZE * (width - 2.0),
+                    TILE_SIZE * (height - 2.0),
+                )),
+                ..default()
+            },
+            transform: Transform::from_xyz(center_x, center_y, 4.0),
+            ..default()
+        },
+        SceneDialogMarker,
+        SceneDialogTextBoxBackgroundMarker,
+    ));
+    if let Some(frame) = battle_window_frame_art(rendered_art, asset_root, images) {
+        spawn_scene_dialog_window_frame_tiles(
+            commands,
+            frame,
+            left,
+            top,
+            width as usize,
+            height as usize,
+            4.05,
+        );
+    }
+    let scroll = if entries.len() > visible_rows {
+        selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(entries.len() - visible_rows)
+    } else {
+        0
+    };
+    for (row, (index, label)) in entries
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_rows)
+        .enumerate()
+    {
+        let (x, y) = battle_hud_tile_origin(left + 1.0, top + 2.0 + row as f32);
+        spawn_scene_dialog_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &format!("{}{}", if index == selected { ">" } else { " " }, label),
             x,
             y,
             4.2,
@@ -4423,15 +5478,18 @@ fn spawn_visible_magnet_train(
 fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
     const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
     const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
-    let tileset = crate::open_runtime_image(asset_root.resolve_vendor("gfx/tilesets/train_station.png"))
-        .context("decode magnet-train station tileset")?
-        .to_rgba8();
-    let background =
-        crate::read_runtime_asset(asset_root.resolve_vendor("gfx/overworld/magnet_train_bg.tilemap"))
-            .context("read magnet-train background tilemap")?;
-    let foreground =
-        crate::read_runtime_asset(asset_root.resolve_vendor("gfx/overworld/magnet_train_fg.tilemap"))
-            .context("read magnet-train foreground tilemap")?;
+    let tileset =
+        crate::open_runtime_image(asset_root.resolve_vendor("gfx/tilesets/train_station.png"))
+            .context("decode magnet-train station tileset")?
+            .to_rgba8();
+    let background = crate::read_runtime_asset(
+        asset_root.resolve_vendor("gfx/overworld/magnet_train_bg.tilemap"),
+    )
+    .context("read magnet-train background tilemap")?;
+    let foreground = crate::read_runtime_asset(
+        asset_root.resolve_vendor("gfx/overworld/magnet_train_fg.tilemap"),
+    )
+    .context("read magnet-train foreground tilemap")?;
     anyhow::ensure!(
         background.len() == 36,
         "magnet-train background tilemap must be 36 bytes"
@@ -4586,16 +5644,18 @@ fn load_visible_heal_machine_ball_frames(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<([SpriteFrame; 4], [SpriteFrame; 4])> {
-    let source = crate::open_runtime_image(asset_root.resolve_vendor("gfx/overworld/heal_machine.png"))
-        .context("decode heal-machine source art")?
-        .to_rgba8();
+    let source =
+        crate::open_runtime_image(asset_root.resolve_vendor("gfx/overworld/heal_machine.png"))
+            .context("decode heal-machine source art")?
+            .to_rgba8();
     anyhow::ensure!(
         source.dimensions() == (8, 16),
         "heal-machine source art must be 8x16"
     );
-    let palette_source =
-        crate::read_runtime_asset_to_string(asset_root.resolve_vendor("gfx/overworld/heal_machine.pal"))
-            .context("read heal-machine palette")?;
+    let palette_source = crate::read_runtime_asset_to_string(
+        asset_root.resolve_vendor("gfx/overworld/heal_machine.pal"),
+    )
+    .context("read heal-machine palette")?;
     let colors = palette_source
         .lines()
         .filter_map(|line| {
@@ -4906,6 +5966,13 @@ fn spawn_runtime_2d_menu(
     true
 }
 
+const SHOP_TOP_MENU_LEFT: f32 = 0.0;
+const SHOP_TOP_MENU_WIDTH: f32 = 8.0;
+const SHOP_TOP_MENU_OPTION_LEFT: f32 = SHOP_TOP_MENU_LEFT + 1.0;
+const SHOP_MONEY_WINDOW_LEFT: f32 = 11.0;
+const SHOP_MONEY_WINDOW_WIDTH: f32 = 9.0;
+const SHOP_MONEY_TEXT_LEFT: f32 = SHOP_MONEY_WINDOW_LEFT + 1.0;
+
 fn spawn_field_shop_screen(
     commands: &mut Commands,
     snapshot: &RuntimeShellSnapshot,
@@ -4933,11 +6000,11 @@ fn spawn_field_shop_screen(
             4.1,
         );
         let visible_notice = visible_revealed_shell_notice_text(runtime_shell, notice);
-        for (index, line) in wrap_boot_text_for_box(&visible_notice, 18, 4)
+        for (index, line) in wrap_boot_text_for_box(&visible_notice, 18, 2)
             .iter()
             .enumerate()
         {
-            let (x, y) = battle_hud_tile_origin(1.0, 12.0 + index as f32);
+            let (x, y) = battle_hud_tile_origin(1.0, 14.0 + index as f32 * 2.0);
             spawn_scene_dialog_bitmap_text(
                 commands,
                 rendered_art,
@@ -4972,9 +6039,9 @@ fn spawn_field_shop_screen(
             rendered_art,
             asset_root,
             images,
+            SHOP_TOP_MENU_LEFT,
             0.0,
-            0.0,
-            8.0,
+            SHOP_TOP_MENU_WIDTH,
             9.0,
             4.1,
         );
@@ -4983,27 +6050,28 @@ fn spawn_field_shop_screen(
             rendered_art,
             asset_root,
             images,
-            11.0,
+            SHOP_MONEY_WINDOW_LEFT,
             0.0,
-            9.0,
+            SHOP_MONEY_WINDOW_WIDTH,
             3.0,
             4.1,
         );
         let selected = strict_readonly_cursor_index(&Some(cursor.clone()), "shop:top", 3)
             .context("shop top-menu cursor is invalid")?;
-        let (x, y) = battle_hud_tile_origin(12.0, 0.5);
+        let (x, y) = battle_hud_tile_origin(SHOP_MONEY_TEXT_LEFT, 1.0);
         spawn_scene_dialog_bitmap_text(
             commands,
             rendered_art,
             asset_root,
             images,
-            &format!("¥{}", snapshot.trainer.money),
+            &format_price(snapshot.trainer.money),
             x,
             y,
             4.2,
         );
         for (index, option) in ["BUY", "SELL", "QUIT"].iter().enumerate() {
-            let (x, y) = battle_hud_tile_origin(13.0, 3.0 + index as f32 * 2.0);
+            let (x, y) =
+                battle_hud_tile_origin(SHOP_TOP_MENU_OPTION_LEFT, 1.0 + index as f32 * 2.0);
             spawn_scene_dialog_bitmap_text(
                 commands,
                 rendered_art,
@@ -5078,7 +6146,7 @@ fn spawn_field_shop_screen(
                 "BUY".to_string()
             },
         ),
-        (12.0, 0.5, format!("¥{}", snapshot.trainer.money)),
+        (12.0, 1.0, format_price(snapshot.trainer.money)),
     ] {
         let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
         spawn_scene_dialog_bitmap_text(
@@ -5092,10 +6160,10 @@ fn spawn_field_shop_screen(
             4.2,
         );
     }
-    let scroll = visible_window_start(selected, item_ids.len(), 5);
-    for (visible_index, item_id) in item_ids.iter().skip(scroll).take(5).enumerate() {
+    let scroll = visible_window_start(selected, item_ids.len(), 4);
+    for (visible_index, item_id) in item_ids.iter().skip(scroll).take(4).enumerate() {
         let index = scroll + visible_index;
-        let row = 3.0 + visible_index as f32 * 2.0;
+        let row = 4.0 + visible_index as f32 * 2.0;
         let item = snapshot
             .items
             .iter()
@@ -5118,7 +6186,7 @@ fn spawn_field_shop_screen(
                 compact_scene_label(&name, 10)
             )
         };
-        let (x, y) = battle_hud_tile_origin(1.0, row);
+        let (x, y) = battle_hud_tile_origin(2.0, row);
         spawn_scene_dialog_bitmap_text(
             commands,
             rendered_art,
@@ -5129,18 +6197,19 @@ fn spawn_field_shop_screen(
             y,
             4.2,
         );
-        let price = if selling { item.price / 2 } else { item.price };
-        let (x, y) = battle_hud_tile_origin(14.0, row);
-        spawn_scene_dialog_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!("¥{price}"),
-            x,
-            y,
-            4.2,
-        );
+        if !selling {
+            let (x, y) = battle_hud_tile_origin(10.0, row + 1.0);
+            spawn_scene_dialog_bitmap_text(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                &format_price(u32::from(item.price)),
+                x,
+                y,
+                4.2,
+            );
+        }
     }
     let selected_item_id = item_ids
         .get(selected)
@@ -5152,11 +6221,11 @@ fn spawn_field_shop_screen(
         .with_context(|| format!("selected shop item {selected_item_id} is missing"))?
         .description
         .as_str();
-    for (index, line) in wrap_boot_text_for_box(description, 18, 3)
+    for (index, line) in wrap_boot_text_for_box(description, 18, 4)
         .iter()
         .enumerate()
     {
-        let (x, y) = battle_hud_tile_origin(1.0, 14.0 + index as f32);
+        let (x, y) = battle_hud_tile_origin(1.0, 13.0 + index as f32);
         spawn_scene_dialog_bitmap_text(commands, rendered_art, asset_root, images, line, x, y, 4.2);
     }
     if let Some(quantity) = runtime_shell.shop_quantity.as_ref() {
@@ -5176,13 +6245,13 @@ fn spawn_field_shop_screen(
             4.3,
         );
         let total = u32::from(quantity.unit_price) * u32::from(quantity.quantity);
-        let (x, y) = battle_hud_tile_origin(8.0, 15.0);
+        let (x, y) = battle_hud_tile_origin(8.0, 16.0);
         spawn_scene_dialog_bitmap_text(
             commands,
             rendered_art,
             asset_root,
             images,
-            &format!("×{:02} ¥{}", quantity.quantity, total),
+            &format!("×{:02} {}", quantity.quantity, format_price(total)),
             x,
             y,
             4.5,
@@ -5321,9 +6390,18 @@ fn spawn_field_storage_screen(
     }
     let party_move_view = runtime_shell.bill_pc_move_open && runtime_shell.bill_pc_move_party_open;
     let entries = if party_move_view {
-        snapshot.party.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+        snapshot
+            .party
+            .slots
+            .iter()
+            .map(|slot| (slot.index, &slot.pokemon))
+            .collect::<Vec<_>>()
     } else {
-        pc_box.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+        pc_box
+            .slots
+            .iter()
+            .map(|slot| (slot.index, &slot.pokemon))
+            .collect::<Vec<_>>()
     };
     let option_count = if runtime_shell.bill_pc_move_open {
         if runtime_shell.bill_pc_move_source.is_some() {
@@ -5339,23 +6417,34 @@ fn spawn_field_storage_screen(
     } else {
         storage_cursor_surface_id(pc_box.index)
     };
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.storage_cursor,
-        &surface_id,
-        option_count,
-    )
-    .with_context(|| {
-        format!(
-            "PC storage cursor is invalid for box {} with {option_count} entries",
-            pc_box.index
-        )
-    })?;
+    let selected =
+        strict_readonly_cursor_index(&runtime_shell.storage_cursor, &surface_id, option_count)
+            .with_context(|| {
+                format!(
+                    "PC storage cursor is invalid for box {} with {option_count} entries",
+                    pc_box.index
+                )
+            })?;
     for (tile_x, text) in [
         (
             1.0,
-            format!("< {} >", if party_move_view { "PARTY".to_string() } else { compact_scene_label(&pc_box.name, 10) }),
+            format!(
+                "< {} >",
+                if party_move_view {
+                    "PARTY".to_string()
+                } else {
+                    compact_scene_label(&pc_box.name, 10)
+                }
+            ),
         ),
-        (14.0, format!("{:02}/{}", entries.len(), if party_move_view { 6 } else { 20 })),
+        (
+            14.0,
+            format!(
+                "{:02}/{}",
+                entries.len(),
+                if party_move_view { 6 } else { 20 }
+            ),
+        ),
     ] {
         let (x, y) = battle_hud_tile_origin(tile_x, 0.5);
         spawn_scene_dialog_bitmap_text(
@@ -5411,6 +6500,20 @@ fn spawn_field_storage_screen(
             4.2,
         );
     }
+    if runtime_shell.bill_pc_move_save.is_some() {
+        let (x, y) = battle_hud_tile_origin(1.0, 16.0);
+        spawn_scene_dialog_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            "Saving… Leave ON!",
+            x,
+            y,
+            4.2,
+        );
+        return Ok(());
+    }
     let action = if runtime_shell.bill_pc_move_open {
         "A PLACE  B CANCEL"
     } else {
@@ -5438,7 +6541,7 @@ fn spawn_field_storage_screen(
         y,
         4.2,
     );
-    if let Some(prompt) = runtime_shell.pending_pc_release.as_ref() {
+    if runtime_shell.pending_pc_release.is_some() {
         spawn_battle_window(
             commands,
             rendered_art,
@@ -5459,7 +6562,7 @@ fn spawn_field_storage_screen(
             rendered_art,
             asset_root,
             images,
-            &format!("RELEASE {}?", compact_scene_label(&prompt.nickname, 9)),
+            "Release <PK><MN>?",
             x,
             y,
             4.8,
@@ -5519,7 +6622,13 @@ fn spawn_pc_notice(
     images: &mut Assets<Image>,
 ) {
     if let Some(notice) = runtime_shell.pc_notice.as_deref() {
-        let visible_notice = visible_revealed_shell_notice_text(runtime_shell, notice);
+        let visible_notice = if runtime_shell.pc_release_sequence.is_some()
+            || runtime_shell.pc_transfer_sequence.is_some()
+        {
+            notice.to_string()
+        } else {
+            visible_revealed_shell_notice_text(runtime_shell, notice)
+        };
         spawn_battle_window(
             commands,
             rendered_art,
@@ -5716,6 +6825,38 @@ fn spawn_field_pc_box_selection_screen(
             4.2,
         );
     }
+    if let Some(cursor) = runtime_shell.bill_pc_box_action_cursor.as_ref() {
+        let selected_action = strict_readonly_cursor_index(
+            &Some(cursor.clone()),
+            "pc:bill-box-actions",
+            4,
+        )
+        .context("PC box-action cursor is invalid")?;
+        spawn_battle_window(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            10.0,
+            4.0,
+            9.0,
+            10.0,
+            4.5,
+        );
+        for (index, label) in ["SWITCH", "NAME", "PRINT", "QUIT"].iter().enumerate() {
+            let (x, y) = battle_hud_tile_origin(11.0, 5.0 + index as f32 * 2.0);
+            spawn_scene_dialog_bitmap_text(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                &format!("{}{}", if index == selected_action { ">" } else { " " }, label),
+                x,
+                y,
+                4.2,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -5761,7 +6902,7 @@ fn spawn_scene_dialog_text_content(
             rendered_art,
             asset_root,
             images,
-        );
+        )?;
     } else if field_dialogue_prompt_arrow_visible(snapshot, runtime_shell) {
         let (x, y) = battle_hud_tile_origin(
             FIELD_TEXT_BOX_LEFT_TILE + FIELD_TEXT_BOX_WIDTH_TILES - 2.0,
@@ -5777,9 +6918,20 @@ fn field_dialogue_prompt_arrow_visible(
     runtime_shell: &BevyRuntimeShell,
 ) -> bool {
     snapshot.ui.pending_text_wait.is_some()
-        && pending_text_wait_uses_prompt_button(runtime_shell)
-        && visible_field_dialogue_is_fully_revealed(runtime_shell, snapshot)
+        && runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .pending_text_wait
+            .as_ref()
+            .is_some_and(|wait| pending_text_wait_command_shows_prompt_arrow(&wait.command))
+        && visible_field_dialogue_is_entirely_consumed(runtime_shell, snapshot)
         && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+}
+
+fn pending_text_wait_command_shows_prompt_arrow(command: &str) -> bool {
+    command.eq_ignore_ascii_case("promptbutton") || command.eq_ignore_ascii_case("waitbutton")
 }
 
 fn pending_text_wait_uses_prompt_button(runtime_shell: &BevyRuntimeShell) -> bool {
@@ -5808,12 +6960,14 @@ fn scene_dialog_yes_no_active(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
 ) -> bool {
-    snapshot.ui.pending_yes_no.is_some()
+    (snapshot.ui.pending_yes_no.is_some()
+        && visible_field_dialogue_is_entirely_consumed(runtime_shell, snapshot))
         || runtime_shell
             .pending_day_of_week
             .as_ref()
             .is_some_and(|prompt| prompt.confirming)
         || runtime_shell.pending_phone_prompt.is_some()
+        || runtime_shell.pending_remember_password.is_some()
         || runtime_shell.pending_contextual_field_move.is_some()
         || runtime_shell.held_item_swap_prompt
         || runtime_shell.party_mail_take_stage.is_some()
@@ -5835,25 +6989,34 @@ fn scene_dialog_yes_no_active(
 fn scene_dialog_yes_no_cursor_index(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
-) -> usize {
+) -> Result<usize> {
     if let Some(prompt) = runtime_shell
         .pending_day_of_week
         .as_ref()
         .filter(|prompt| prompt.confirming)
     {
-        return prompt.yes_no_index.min(1);
+        anyhow::ensure!(prompt.yes_no_index < 2, "day-of-week YES/NO cursor is invalid");
+        return Ok(prompt.yes_no_index);
     }
     if snapshot.ui.pending_yes_no.is_some() {
         return strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "ui:yes-no", 2)
-            .unwrap_or(0);
+            .context("script YES/NO prompt has no valid ui:yes-no cursor");
     }
     if runtime_shell.pending_phone_prompt.is_some() {
         return strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "ui:phone-number", 2)
-            .unwrap_or(0);
+            .context("phone-number prompt has no valid ui:phone-number cursor");
+    }
+    if runtime_shell.pending_remember_password.is_some() {
+        return strict_readonly_cursor_index(
+            &runtime_shell.yes_no_cursor,
+            "script:remember-password",
+            2,
+        )
+        .context("password prompt has no valid script:remember-password cursor");
     }
     if runtime_shell.pending_contextual_field_move.is_some() {
         return strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "field:move-confirm", 2)
-            .unwrap_or(0);
+            .context("field-move prompt has no valid field:move-confirm cursor");
     }
     if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
         return strict_readonly_cursor_index(
@@ -5861,7 +7024,7 @@ fn scene_dialog_yes_no_cursor_index(
             "pack:tmhm:teach-prompt",
             2,
         )
-        .unwrap_or(0);
+        .context("TM/HM teach prompt has no valid pack:tmhm:teach-prompt cursor");
     }
     if runtime_shell.tmhm_decision_prompt_cursor.is_some() {
         return strict_readonly_cursor_index(
@@ -5869,7 +7032,7 @@ fn scene_dialog_yes_no_cursor_index(
             "pack:tmhm:decision",
             2,
         )
-        .unwrap_or(0);
+        .context("TM/HM decision has no valid pack:tmhm:decision cursor");
     }
     if runtime_shell.held_item_swap_prompt {
         return strict_readonly_cursor_index(
@@ -5877,7 +7040,7 @@ fn scene_dialog_yes_no_cursor_index(
             "party:held-item-swap",
             2,
         )
-        .unwrap_or(0);
+        .context("held-item swap has no valid party:held-item-swap cursor");
     }
     if let Some(stage) = runtime_shell.party_mail_take_stage {
         return strict_readonly_cursor_index(
@@ -5889,11 +7052,11 @@ fn scene_dialog_yes_no_cursor_index(
             },
             2,
         )
-        .unwrap_or(0);
+        .context("party Mail prompt has no valid cursor");
     }
     if runtime_shell.pc_confirmation.is_some() {
         return strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pc:confirmation", 2)
-            .unwrap_or(1);
+            .context("PC confirmation has no valid pc:confirmation cursor");
     }
     if runtime_shell
         .pack_toss
@@ -5901,9 +7064,9 @@ fn scene_dialog_yes_no_cursor_index(
         .is_some_and(|toss| toss.confirming)
     {
         return strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pack:toss-confirm", 2)
-            .unwrap_or(0);
+            .context("Pack toss confirmation has no valid pack:toss-confirm cursor");
     }
-    runtime_shell
+    let flow = runtime_shell
         .save_flow
         .as_ref()
         .filter(|flow| {
@@ -5912,8 +7075,9 @@ fn scene_dialog_yes_no_cursor_index(
                 VisibleSaveFlowStage::Prompt | VisibleSaveFlowStage::OverwritePrompt
             )
         })
-        .map(|flow| flow.yes_no_index.min(1))
-        .unwrap_or(0)
+        .context("no active YES/NO prompt owns the visible cursor")?;
+    anyhow::ensure!(flow.yes_no_index < 2, "save YES/NO cursor is invalid");
+    Ok(flow.yes_no_index)
 }
 
 fn spawn_visible_day_of_week_selection(
@@ -6002,12 +7166,18 @@ fn spawn_visible_day_of_week_confirmation(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     const DAYS: [&str; 7] = [
-        "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY",
+        "SUNDAY",
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+        "SATURDAY",
     ];
     let Some(prompt) = runtime_shell.pending_day_of_week.as_ref() else {
-        return;
+        return Ok(());
     };
     spawn_scene_dialog_text_box(commands, rendered_art, asset_root, images, 4.0);
     let (x, y) = battle_hud_tile_origin(1.0, 13.0);
@@ -6028,7 +7198,8 @@ fn spawn_visible_day_of_week_confirmation(
         rendered_art,
         asset_root,
         images,
-    );
+    )?;
+    Ok(())
 }
 
 fn spawn_visible_yes_no_prompt_box(
@@ -6038,7 +7209,7 @@ fn spawn_visible_yes_no_prompt_box(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
+) -> Result<()> {
     // `YesNoBox` in home/menu.asm sets b=SCREEN_WIDTH-6 and c=7, then
     // `_YesNoBox` anchors at (14,7), and the TypeScript reference renders a
     // 6x4-tile surface with YES/NO on consecutive interior rows 8 and 9.
@@ -6075,7 +7246,7 @@ fn spawn_visible_yes_no_prompt_box(
             4.3,
         );
     }
-    let selected = scene_dialog_yes_no_cursor_index(snapshot, runtime_shell);
+    let selected = scene_dialog_yes_no_cursor_index(snapshot, runtime_shell)?;
     for (index, label) in ["YES", "NO"].into_iter().enumerate() {
         let marker = if index == selected { ">" } else { " " };
         let (x, y) = battle_hud_tile_origin(
@@ -6093,6 +7264,7 @@ fn spawn_visible_yes_no_prompt_box(
             4.4,
         );
     }
+    Ok(())
 }
 
 fn spawn_scene_dialog_text_box(
@@ -6193,6 +7365,934 @@ fn spawn_visible_name_entry_screen(
     Ok(())
 }
 
+fn spawn_visible_mail_entry_screen(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+    input: &PendingMailInput,
+) -> Result<()> {
+    let key = MailEntryArtKey {
+        value: input.value.clone(),
+        cursor_column: input.cursor_column,
+        cursor_row: input.cursor_row,
+        case: input.case,
+    };
+    if !rendered_art.mail_entry_cache.contains_key(&key)
+        && !rendered_art.mail_entry_errors.contains_key(&key)
+    {
+        match load_mail_entry_frame(asset_root, input, images) {
+            Ok(frame) => {
+                rendered_art.mail_entry_errors.remove(&key);
+                rendered_art.mail_entry_cache.insert(key.clone(), frame);
+            }
+            Err(error) => {
+                rendered_art
+                    .mail_entry_errors
+                    .insert(key.clone(), error.to_string());
+            }
+        }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.mail_entry_cache,
+            &mut rendered_art.mail_entry_errors,
+            &mut rendered_art.mail_entry_cache_order,
+            key.clone(),
+            images,
+        );
+    }
+    let Some(frame) = rendered_art.mail_entry_cache.get(&key).cloned() else {
+        return Ok(());
+    };
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        6.0,
+        images,
+    )?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct MailReadTile {
+    set_pixels: [bool; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE],
+    color_index: usize,
+}
+
+fn spawn_visible_mail_read_screen(
+    commands: &mut Commands,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+    reader: &VisibleMailRead,
+) -> Result<()> {
+    if !rendered_art.mail_read_cache.contains_key(reader)
+        && !rendered_art.mail_read_errors.contains_key(reader)
+    {
+        match load_mail_read_frame(asset_root, reader, images) {
+            Ok(frame) => {
+                rendered_art.mail_read_errors.remove(reader);
+                rendered_art.mail_read_cache.insert(reader.clone(), frame);
+            }
+            Err(error) => {
+                rendered_art
+                    .mail_read_errors
+                    .insert(reader.clone(), error.to_string());
+            }
+        }
+        retain_bounded_fullscreen_art_key(
+            &mut rendered_art.mail_read_cache,
+            &mut rendered_art.mail_read_errors,
+            &mut rendered_art.mail_read_cache_order,
+            reader.clone(),
+            images,
+        );
+    }
+    let Some(frame) = rendered_art.mail_read_cache.get(reader).cloned() else {
+        return Ok(());
+    };
+    commit_presented_fullscreen_frame(
+        commands,
+        rendered_art,
+        &frame,
+        PresentedFullscreenFrameSource::Cached,
+        6.0,
+        images,
+    )?;
+    Ok(())
+}
+
+fn load_mail_read_frame(
+    asset_root: &AssetRoot,
+    reader: &VisibleMailRead,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let palette_source = std::fs::read_to_string(
+        asset_root.runtime_assets().join("gfx/mail/mail.pal"),
+    )
+    .context("read Mail palette bank")?;
+    let palettes = parse_palette_file(&palette_source, None)?;
+    let mail_index = crate::core::models::item::MAIL_ITEM_IDS
+        .iter()
+        .position(|item| *item == reader.mail.mail_type)
+        .with_context(|| format!("unknown Mail stationery {}", reader.mail.mail_type))?;
+    let palette = palettes
+        .get(mail_index)
+        .copied()
+        .with_context(|| format!("Mail palette bank has no row {mail_index}"))?;
+    let mut tilemap = [[0x7f_u8; NAME_ENTRY_SCREEN_TILE_WIDTH]; NAME_ENTRY_SCREEN_TILE_HEIGHT];
+    let mut tiles = BTreeMap::<u8, MailReadTile>::new();
+    build_mail_read_stationery(
+        asset_root,
+        &reader.mail.mail_type,
+        &mut tilemap,
+        &mut tiles,
+    )?;
+    place_mail_read_text(&reader.mail, mail_index, &mut tilemap)?;
+
+    let font = crate::open_runtime_image(asset_root.runtime_assets().join("gfx/font/font.png"))
+        .context("decode Mail reader font PNG")?
+        .to_rgba8();
+    let font_extra =
+        crate::open_runtime_image(asset_root.runtime_assets().join("gfx/font/font_extra.png"))
+            .context("decode Mail reader extra-font PNG")?
+            .to_rgba8();
+    let width = NAME_ENTRY_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
+    let height = NAME_ENTRY_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
+    let mut data = vec![0_u8; width * height * 4];
+    for pixel in data.chunks_exact_mut(4) {
+        pixel[..3].copy_from_slice(&palette[0]);
+        pixel[3] = 255;
+    }
+    for (tile_y, row) in tilemap.iter().enumerate() {
+        for (tile_x, tile_id) in row.iter().copied().enumerate() {
+            if let Some(tile) = tiles.get(&tile_id) {
+                draw_mail_read_tile(
+                    tile,
+                    &palette,
+                    tile_x * SOURCE_TILE_SIZE,
+                    tile_y * SOURCE_TILE_SIZE,
+                    &mut data,
+                );
+            } else if tile_id != 0x7f {
+                draw_mail_read_font_tile(
+                    tile_id,
+                    &font,
+                    &font_extra,
+                    &palette,
+                    tile_x * SOURCE_TILE_SIZE,
+                    tile_y * SOURCE_TILE_SIZE,
+                    &mut data,
+                )?;
+            }
+        }
+    }
+    if reader.mail.mail_type == "PORTRAITMAIL" {
+        draw_mail_portrait(asset_root, &reader.mail.species, &palette, &mut data)?;
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    })
+}
+
+fn load_mail_1bpp_tiles(asset_root: &AssetRoot, name: &str) -> Result<Vec<[bool; 64]>> {
+    let path = asset_root
+        .runtime_assets()
+        .join("gfx/mail")
+        .join(format!("{name}.1bpp"));
+    let source = std::fs::read(&path)
+        .with_context(|| format!("read canonical Mail art {}", path.display()))?;
+    anyhow::ensure!(
+        source.len() % 8 == 0,
+        "Mail art {} has non-tile byte length {}",
+        path.display(),
+        source.len()
+    );
+    let mut result = Vec::with_capacity(source.len() / 8);
+    for rows in source.chunks_exact(8) {
+        let mut tile = [false; 64];
+        for (y, row) in rows.iter().copied().enumerate() {
+            for x in 0..8 {
+                tile[y * 8 + x] = row & (0x80 >> x) != 0;
+            }
+        }
+        result.push(tile);
+    }
+    Ok(result)
+}
+
+fn register_mail_tiles(
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+    start: u8,
+    source: &[[bool; 64]],
+    offset: usize,
+    count: usize,
+    color_index: usize,
+) -> Result<u8> {
+    let selected = source
+        .get(offset..offset + count)
+        .with_context(|| format!("Mail tile slice {offset}..{} is outside source", offset + count))?;
+    for (index, set_pixels) in selected.iter().enumerate() {
+        let tile_id = start
+            .checked_add(u8::try_from(index).context("Mail tile index exceeds byte")?)
+            .context("Mail tile id overflow")?;
+        tiles.insert(
+            tile_id,
+            MailReadTile {
+                set_pixels: *set_pixels,
+                color_index,
+            },
+        );
+    }
+    start
+        .checked_add(u8::try_from(count).context("Mail tile count exceeds byte")?)
+        .context("Mail tile pointer overflow")
+}
+
+fn register_solid_mail_tiles(
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+    start: u8,
+    count: usize,
+    color_index: usize,
+) -> Result<u8> {
+    let source = vec![[true; 64]; count];
+    register_mail_tiles(tiles, start, &source, 0, count, color_index)
+}
+
+fn build_mail_read_stationery(
+    asset_root: &AssetRoot,
+    mail_type: &str,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    match mail_type {
+        "FLOWER_MAIL" => build_flower_mail_stationery(asset_root, map, tiles),
+        "SURF_MAIL" => build_surf_or_liteblue_mail_stationery(asset_root, map, tiles, false),
+        "LITEBLUEMAIL" => build_surf_or_liteblue_mail_stationery(asset_root, map, tiles, true),
+        "PORTRAITMAIL" => build_portrait_mail_stationery(asset_root, map, tiles),
+        "LOVELY_MAIL" => build_lovely_mail_stationery(asset_root, map, tiles),
+        "EON_MAIL" => build_eon_mail_stationery(asset_root, map, tiles),
+        "MORPH_MAIL" => build_morph_mail_stationery(asset_root, map, tiles),
+        "BLUESKY_MAIL" => build_bluesky_mail_stationery(asset_root, map, tiles),
+        "MUSIC_MAIL" => build_music_mail_stationery(asset_root, map, tiles),
+        "MIRAGE_MAIL" => build_mirage_mail_stationery(asset_root, map, tiles),
+        other => anyhow::bail!("unknown Mail stationery {other}"),
+    }
+}
+
+fn mail_draw_row(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8, count: usize) {
+    for column in x..x + count {
+        map[y][column] = tile;
+    }
+}
+
+fn mail_draw_column(
+    map: &mut [[u8; 20]; 18],
+    x: usize,
+    y: usize,
+    tile: u8,
+    count: usize,
+) {
+    for row in y..y + count {
+        map[row][x] = tile;
+    }
+}
+
+fn mail_draw_2x2(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8) {
+    map[y][x] = tile;
+    map[y][x + 1] = tile + 1;
+    map[y + 1][x] = tile + 2;
+    map[y + 1][x + 1] = tile + 3;
+}
+
+fn mail_draw_3x2(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8) {
+    for column in 0..3 {
+        map[y][x + column] = tile + column as u8;
+        map[y + 1][x + column] = tile + 3 + column as u8;
+    }
+}
+
+fn mail_draw_alternating_row(
+    map: &mut [[u8; 20]; 18],
+    x: usize,
+    y: usize,
+    tile: u8,
+    pairs: usize,
+) {
+    for index in 0..=pairs * 2 {
+        map[y][x + index] = tile + (index % 2) as u8;
+    }
+}
+
+fn mail_draw_alternating_column(
+    map: &mut [[u8; 20]; 18],
+    x: usize,
+    y: usize,
+    tile: u8,
+    pairs: usize,
+) {
+    for index in 0..=pairs * 2 {
+        map[y + index][x] = tile + (index % 2) as u8;
+    }
+}
+
+fn draw_mail_border(map: &mut [[u8; 20]; 18], variant_two: bool) {
+    map[0][0] = 0x31;
+    mail_draw_row(map, 1, 0, 0x32, 18);
+    map[0][19] = if variant_two { 0x31 } else { 0x33 };
+    mail_draw_column(map, 0, 1, if variant_two { 0x33 } else { 0x34 }, 16);
+    map[17][0] = if variant_two { 0x31 } else { 0x36 };
+    mail_draw_row(map, 1, 17, if variant_two { 0x34 } else { 0x37 }, 18);
+    mail_draw_column(map, 19, 1, 0x35, 16);
+    map[17][19] = if variant_two { 0x31 } else { 0x38 };
+}
+
+fn load_mail_tiles_named(
+    asset_root: &AssetRoot,
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+    start: u8,
+    name: &str,
+    offset: usize,
+    count: usize,
+    color_index: usize,
+) -> Result<u8> {
+    let source = load_mail_1bpp_tiles(asset_root, name)?;
+    register_mail_tiles(tiles, start, &source, offset, count, color_index)
+}
+
+fn place_lovely_eon_icons(map: &mut [[u8; 20]; 18]) {
+    for (x, y) in [(2, 2), (16, 2), (9, 4), (2, 11), (6, 12), (12, 11)] {
+        mail_draw_2x2(map, x, y, 0x3d);
+    }
+    for (x, y) in [(5, 4), (6, 2), (12, 4), (14, 2), (3, 13), (9, 11), (16, 12)] {
+        map[y][x] = 0x41;
+    }
+}
+
+fn build_flower_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    let mut next = load_mail_tiles_named(asset_root, tiles, 0x31, "flower_mail_border", 0, 8, 1)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "oddish", 0, 4, 3)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "flower_mail_border", 6, 1, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "flower_1", 0, 4, 1)?;
+    let _ = load_mail_tiles_named(asset_root, tiles, next, "flower_2", 0, 4, 2)?;
+    draw_mail_border(map, false);
+    mail_draw_row(map, 2, 15, 0x3d, 16);
+    for (x, y) in [(16, 13), (2, 13)] {
+        mail_draw_2x2(map, x, y, 0x39);
+    }
+    for (x, y) in [(2, 2), (5, 3), (10, 2), (16, 3), (5, 11), (16, 10)] {
+        mail_draw_2x2(map, x, y, 0x3e);
+    }
+    for (x, y) in [(3, 4), (12, 3), (14, 2), (2, 10), (14, 11)] {
+        mail_draw_2x2(map, x, y, 0x42);
+    }
+    Ok(())
+}
+
+fn build_surf_or_liteblue_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+    lite_blue: bool,
+) -> Result<()> {
+    let border = if lite_blue {
+        "litebluemail_border"
+    } else {
+        "surf_mail_border"
+    };
+    let pokemon = if lite_blue { "dratini" } else { "lapras" };
+    let mut next = load_mail_tiles_named(asset_root, tiles, 0x31, border, 0, 8, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, pokemon, 0, 6, 3)?;
+    next = load_mail_tiles_named(
+        asset_root,
+        tiles,
+        next,
+        if lite_blue { "portraitmail_underline" } else { "wave" },
+        0,
+        1,
+        2,
+    )?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "small_triangle", 0, 1, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "eon_mail_border_1", 0, 1, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "eon_mail_border_1", 1, 1, 1)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "eon_mail_border_2", 0, 1, 1)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "large_triangle", 0, 4, 1)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "large_heart", 0, 4, 1)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "morph_mail_corner", 0, 4, 2)?;
+    let _ = load_mail_tiles_named(asset_root, tiles, next, "large_circle", 0, 4, 2)?;
+
+    draw_mail_border(map, false);
+    mail_draw_row(map, 2, 15, 0x3f, 16);
+    mail_draw_3x2(map, 15, 14, 0x39);
+    for (x, y) in [(2, 2), (15, 11)] {
+        mail_draw_2x2(map, x, y, 0x44);
+    }
+    for (x, y) in [(3, 12), (15, 2)] {
+        mail_draw_2x2(map, x, y, 0x4c);
+    }
+    mail_draw_2x2(map, 6, 3, 0x50);
+    for (tile, positions) in [
+        (0x40, &[(13, 2), (6, 14)][..]),
+        (0x41, &[(4, 5), (17, 5), (13, 12)][..]),
+        (0x42, &[(9, 2), (14, 5), (3, 10)][..]),
+        (0x43, &[(6, 11)][..]),
+    ] {
+        for &(x, y) in positions {
+            map[y][x] = tile;
+        }
+    }
+    Ok(())
+}
+
+fn build_portrait_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    let mut next = load_mail_tiles_named(asset_root, tiles, 0x31, "portraitmail_border", 0, 5, 2)?;
+    let _ = load_mail_tiles_named(asset_root, tiles, next, "portraitmail_underline", 0, 1, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, 0x3d, "large_pokeball", 0, 4, 1)?;
+    let _ = load_mail_tiles_named(asset_root, tiles, next, "small_pokeball", 0, 1, 2)?;
+    draw_mail_border(map, true);
+    mail_draw_row(map, 8, 15, 0x36, 10);
+    place_lovely_eon_icons(map);
+    Ok(())
+}
+
+fn build_lovely_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    let mut next = load_mail_tiles_named(asset_root, tiles, 0x31, "lovely_mail_border", 0, 5, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "poliwag", 0, 6, 3)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "lovely_mail_underline", 0, 1, 2)?;
+    next = load_mail_tiles_named(asset_root, tiles, next, "large_heart", 0, 4, 2)?;
+    let _ = load_mail_tiles_named(asset_root, tiles, next, "small_heart", 0, 1, 1)?;
+    draw_mail_border(map, true);
+    mail_draw_row(map, 2, 15, 0x3c, 16);
+    mail_draw_3x2(map, 15, 14, 0x36);
+    place_lovely_eon_icons(map);
+    Ok(())
+}
+
+fn build_eon_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    load_mail_tiles_named(asset_root, tiles, 0x31, "eon_mail_border_1", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x32, "eon_mail_border_2", 0, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x33, "eon_mail_border_2", 0, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x34, "eon_mail_border_1", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x35, "surf_mail_border", 6, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x36, "eevee", 0, 6, 3)?;
+    load_mail_tiles_named(asset_root, tiles, 0x3d, "large_circle", 0, 4, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x41, "eon_mail_border_2", 0, 1, 2)?;
+    mail_draw_alternating_row(map, 0, 0, 0x31, 9);
+    mail_draw_alternating_row(map, 1, 17, 0x31, 9);
+    mail_draw_alternating_column(map, 0, 1, 0x33, 8);
+    mail_draw_alternating_column(map, 19, 0, 0x33, 8);
+    mail_draw_row(map, 2, 15, 0x35, 16);
+    mail_draw_3x2(map, 15, 14, 0x36);
+    place_lovely_eon_icons(map);
+    Ok(())
+}
+
+fn build_morph_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    register_solid_mail_tiles(tiles, 0x31, 5, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x36, "morph_mail_corner", 3, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x37, "morph_mail_corner", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x38, "morph_mail_border", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x39, "eon_mail_border_1", 0, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x3a, "morph_mail_divider", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x3b, "ditto", 0, 6, 3)?;
+    draw_mail_border(map, true);
+    for (x, y) in [(1, 1), (17, 15)] {
+        mail_draw_2x2(map, x, y, 0x31);
+    }
+    for (x, y) in [(1, 3), (3, 1), (16, 16), (18, 14)] {
+        map[y][x] = 0x31;
+    }
+    for (x, y) in [(1, 4), (2, 3), (3, 2), (4, 1)] {
+        map[y][x] = 0x36;
+    }
+    for (x, y) in [(15, 16), (16, 15), (17, 14), (18, 13)] {
+        map[y][x] = 0x37;
+    }
+    mail_draw_row(map, 2, 15, 0x38, 14);
+    mail_draw_row(map, 2, 11, 0x39, 16);
+    mail_draw_row(map, 2, 5, 0x39, 16);
+    mail_draw_row(map, 6, 1, 0x3a, 13);
+    mail_draw_row(map, 1, 16, 0x3a, 13);
+    mail_draw_3x2(map, 3, 13, 0x3b);
+    Ok(())
+}
+
+fn build_bluesky_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    load_mail_tiles_named(asset_root, tiles, 0x31, "eon_mail_border_1", 0, 1, 2)?;
+    register_solid_mail_tiles(tiles, 0x32, 1, 3)?;
+    load_mail_tiles_named(asset_root, tiles, 0x33, "grass", 0, 1, 3)?;
+    let mut pokemon = load_mail_1bpp_tiles(asset_root, "dragonite")?;
+    pokemon.extend(load_mail_1bpp_tiles(asset_root, "sentret")?);
+    register_mail_tiles(tiles, 0x34, &pokemon, 0, 23, 3)?;
+    load_mail_tiles_named(asset_root, tiles, 0x4b, "cloud", 0, 6, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x51, "flower_mail_border", 6, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x52, "cloud", 0, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x53, "cloud", 2, 2, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x55, "cloud", 5, 1, 1)?;
+
+    mail_draw_row(map, 0, 0, 0x31, 20);
+    mail_draw_column(map, 0, 1, 0x31, 16);
+    mail_draw_column(map, 19, 1, 0x31, 16);
+    mail_draw_row(map, 0, 17, 0x32, 20);
+    mail_draw_row(map, 0, 16, 0x33, 20);
+    for (row, x) in [(2, 2), (3, 3), (4, 4)] {
+        for offset in 0..6 {
+            map[row][x + offset] = 0x34 + ((row - 2) * 6 + offset) as u8;
+        }
+    }
+    map[4][9] = 0x7f;
+    mail_draw_2x2(map, 15, 14, 0x45);
+    map[16][15] = 0x49;
+    map[16][16] = 0x4a;
+    mail_draw_3x2(map, 12, 1, 0x4b);
+    mail_draw_3x2(map, 15, 4, 0x4b);
+    mail_draw_row(map, 2, 11, 0x51, 16);
+    mail_draw_2x2(map, 10, 3, 0x52);
+    Ok(())
+}
+
+fn build_music_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    load_mail_tiles_named(asset_root, tiles, 0x31, "music_mail_border", 0, 4, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x35, "morph_mail_border", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x36, "small_note", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x37, "natu", 0, 6, 3)?;
+    tiles.insert(
+        0x3d,
+        MailReadTile {
+            set_pixels: [false; 64],
+            color_index: 0,
+        },
+    );
+    load_mail_tiles_named(asset_root, tiles, 0x3e, "large_note", 0, 3, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x41, "small_note", 0, 1, 1)?;
+    mail_draw_alternating_row(map, 0, 0, 0x31, 9);
+    mail_draw_alternating_row(map, 1, 17, 0x31, 9);
+    mail_draw_alternating_column(map, 0, 1, 0x33, 8);
+    mail_draw_alternating_column(map, 19, 0, 0x33, 8);
+    mail_draw_alternating_row(map, 2, 15, 0x35, 7);
+    mail_draw_3x2(map, 15, 14, 0x37);
+    place_lovely_eon_icons(map);
+    Ok(())
+}
+
+fn build_mirage_mail_stationery(
+    asset_root: &AssetRoot,
+    map: &mut [[u8; 20]; 18],
+    tiles: &mut BTreeMap<u8, MailReadTile>,
+) -> Result<()> {
+    register_solid_mail_tiles(tiles, 0x31, 5, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x36, "grass", 0, 1, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x37, "mew", 0, 18, 2)?;
+    load_mail_tiles_named(asset_root, tiles, 0x49, "litebluemail_border", 1, 1, 1)?;
+    load_mail_tiles_named(asset_root, tiles, 0x4a, "litebluemail_border", 6, 1, 1)?;
+    draw_mail_border(map, true);
+    mail_draw_row(map, 1, 16, 0x36, 18);
+    mail_draw_3x2(map, 15, 14, 0x37);
+    map[16][15] = 0x3d;
+    map[16][16] = 0x3e;
+    mail_draw_alternating_row(map, 1, 1, 0x3f, 9);
+    mail_draw_alternating_column(map, 0, 2, 0x41, 7);
+    mail_draw_alternating_column(map, 19, 2, 0x43, 7);
+    for (tile, x, y) in [(0x45, 0, 1), (0x46, 19, 1), (0x47, 0, 16), (0x48, 19, 16)] {
+        map[y][x] = tile;
+    }
+    mail_draw_row(map, 2, 5, 0x49, 16);
+    mail_draw_row(map, 2, 11, 0x4a, 16);
+    Ok(())
+}
+
+fn place_mail_read_text(
+    mail: &crate::core::models::pokemon::MailData,
+    mail_index: usize,
+    map: &mut [[u8; 20]; 18],
+) -> Result<()> {
+    let mut lines = mail.message.split('\n');
+    let first = lines.next().unwrap_or_default();
+    let explicit_second = lines.next();
+    let (first, second) = if let Some(second) = explicit_second {
+        (first.to_string(), second.to_string())
+    } else {
+        let chars = first.chars().collect::<Vec<_>>();
+        (
+            chars.iter().take(16).collect(),
+            chars.iter().skip(16).take(16).collect(),
+        )
+    };
+    for (row, text) in [(7, first.as_str()), (9, second.as_str())] {
+        for (offset, character) in text.chars().take(16).enumerate() {
+            map[row][2 + offset] = mail_entry_char_tile(character)
+                .with_context(|| format!("unsupported Mail reader character {character:?}"))?;
+        }
+    }
+    if !mail.author.is_empty() {
+        let x = match mail_index {
+            3 => 8,
+            6 => 6,
+            _ => 5,
+        };
+        for (offset, character) in mail.author.chars().take(10).enumerate() {
+            map[14][x + offset] = mail_entry_char_tile(character)
+                .with_context(|| format!("unsupported Mail author character {character:?}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_mail_read_tile(
+    tile: &MailReadTile,
+    palette: &[[u8; 3]; 4],
+    dest_x: usize,
+    dest_y: usize,
+    target: &mut [u8],
+) {
+    for y in 0..8 {
+        for x in 0..8 {
+            if tile.set_pixels[y * 8 + x] {
+                let target_index = ((dest_y + y) * 160 + dest_x + x) * 4;
+                target[target_index..target_index + 3]
+                    .copy_from_slice(&palette[tile.color_index]);
+            }
+        }
+    }
+}
+
+fn draw_mail_read_font_tile(
+    tile_id: u8,
+    font: &image::RgbaImage,
+    font_extra: &image::RgbaImage,
+    palette: &[[u8; 3]; 4],
+    dest_x: usize,
+    dest_y: usize,
+    target: &mut [u8],
+) -> Result<()> {
+    let (source, index) = if (0x60..0x80).contains(&tile_id) {
+        (font_extra, usize::from(tile_id - 0x60))
+    } else if tile_id >= 0x80 {
+        (font, usize::from(tile_id - 0x80))
+    } else {
+        return Ok(());
+    };
+    let tiles_per_row = source.width() as usize / 8;
+    anyhow::ensure!(tiles_per_row > 0, "Mail font has invalid width {}", source.width());
+    let source_x = (index % tiles_per_row) * 8;
+    let source_y = (index / tiles_per_row) * 8;
+    anyhow::ensure!(source_y + 8 <= source.height() as usize, "Mail font tile {tile_id:#x} is absent");
+    for y in 0..8 {
+        for x in 0..8 {
+            let pixel = source.get_pixel((source_x + x) as u32, (source_y + y) as u32);
+            if pixel[3] != 0 && pixel[0] < 128 {
+                let target_index = ((dest_y + y) * 160 + dest_x + x) * 4;
+                target[target_index..target_index + 3].copy_from_slice(&palette[3]);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_mail_portrait(
+    asset_root: &AssetRoot,
+    species: &str,
+    palette: &[[u8; 3]; 4],
+    target: &mut [u8],
+) -> Result<()> {
+    let path = asset_root
+        .runtime_assets()
+        .join("gfx/pokemon")
+        .join(species.to_ascii_lowercase().replace('_', "-"))
+        .join("front.png");
+    let source = crate::open_runtime_image(&path)
+        .with_context(|| format!("decode Portrait Mail frontpic {}", path.display()))?
+        .to_rgba8();
+    let frame_size = source.width().min(source.height()) as usize;
+    anyhow::ensure!(frame_size > 0 && frame_size <= 56, "invalid Portrait Mail frontpic dimensions {}x{}", source.width(), source.height());
+    let dest_x = 8 + (56 - frame_size) / 2;
+    let dest_y = 80 + (56 - frame_size) / 2;
+    for y in 0..frame_size {
+        for x in 0..frame_size {
+            let pixel = source.get_pixel(x as u32, y as u32);
+            if pixel[3] == 0 {
+                continue;
+            }
+            let luminance = (u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3;
+            let color_index = match luminance {
+                0..=63 => 3,
+                64..=159 => 2,
+                160..=239 => 1,
+                _ => 0,
+            };
+            if color_index != 0 {
+                let target_index = ((dest_y + y) * 160 + dest_x + x) * 4;
+                target[target_index..target_index + 3].copy_from_slice(&palette[color_index]);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_mail_entry_frame(
+    asset_root: &AssetRoot,
+    input: &PendingMailInput,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let assets = asset_root.runtime_assets();
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
+        .context("decode Mail composer font PNG")?
+        .to_rgba8();
+    let font_extra = crate::open_runtime_image(assets.join("gfx/font/font_extra.png"))
+        .context("decode Mail composer extra-font PNG")?
+        .to_rgba8();
+    let cursor = crate::open_runtime_image(assets.join("gfx/naming_screen/cursor.png"))
+        .context("decode Mail composer cursor PNG")?
+        .to_rgba8();
+    let border = crate::open_runtime_image(assets.join("gfx/naming_screen/border.png"))
+        .context("decode Mail composer border PNG")?
+        .to_rgba8();
+    let underline = crate::open_runtime_image(assets.join("gfx/naming_screen/underline.png"))
+        .context("decode Mail composer underline PNG")?
+        .to_rgba8();
+    let middle_line = crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
+        .context("decode Mail composer middle-line PNG")?
+        .to_rgba8();
+    let mail_icon = crate::open_runtime_image(assets.join("gfx/naming_screen/mail.png"))
+        .context("decode Mail composer icon PNG")?
+        .to_rgba8();
+    let tilemap = build_mail_entry_tilemap(input)?;
+    let width = NAME_ENTRY_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
+    let height = NAME_ENTRY_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
+    let mut data = vec![255_u8; width * height * 4];
+    for pixel in data.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    for (tile_y, row) in tilemap.iter().enumerate() {
+        for (tile_x, tile_id) in row.iter().copied().enumerate() {
+            draw_name_entry_tile(
+                tile_id,
+                &font,
+                &font_extra,
+                &border,
+                &underline,
+                &middle_line,
+                tile_x * SOURCE_TILE_SIZE,
+                tile_y * SOURCE_TILE_SIZE,
+                &mut data,
+            )?;
+        }
+    }
+    blit_name_entry_tile_image(&mail_icon, 0, 0, 8, 8, false, false, true, &mut data);
+    blit_name_entry_tile_image(&mail_icon, 8, 0, 16, 8, false, false, true, &mut data);
+    blit_name_entry_tile_image(&mail_icon, 0, 8, 8, 16, false, false, true, &mut data);
+    blit_name_entry_tile_image(&mail_icon, 8, 8, 16, 16, false, false, true, &mut data);
+    draw_mail_entry_cursor(input, &cursor, &mut data)?;
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    })
+}
+
+fn build_mail_entry_tilemap(input: &PendingMailInput) -> Result<Vec<Vec<u8>>> {
+    let mut tilemap = vec![vec![0_u8; NAME_ENTRY_SCREEN_TILE_WIDTH]; NAME_ENTRY_SCREEN_TILE_HEIGHT];
+    for row in tilemap.iter_mut().take(6) {
+        row.fill(NAME_ENTRY_BORDER_TILE);
+    }
+    clear_name_entry_box(&mut tilemap, 1, 1, 18, 4);
+    for (index, character) in input.value.chars().take(MAIL_INPUT_MESSAGE_LENGTH).enumerate() {
+        let (x, y) = if index < MAIL_INPUT_LINE_LENGTH {
+            (2 + index, 2)
+        } else {
+            (2 + index - MAIL_INPUT_LINE_LENGTH, 4)
+        };
+        tilemap[y][x] = mail_entry_char_tile(character)
+            .with_context(|| format!("unsupported Mail composer character {character:?}"))?;
+    }
+    let next = input.value.chars().count().min(MAIL_INPUT_MESSAGE_LENGTH);
+    if next < MAIL_INPUT_MESSAGE_LENGTH {
+        let (x, y) = if next < MAIL_INPUT_LINE_LENGTH {
+            (2 + next, 2)
+        } else {
+            (2 + next - MAIL_INPUT_LINE_LENGTH, 4)
+        };
+        tilemap[y][x] = NAME_ENTRY_UNDERLINE_TILE;
+    }
+    for row in 0..5 {
+        for column in 0..MAIL_INPUT_COLUMNS {
+            if let Some(character) = visible_mail_input_row_chars(input.case, row)[column] {
+                tilemap[7 + row * 2][column * 2] = mail_entry_char_tile(character)
+                    .with_context(|| format!("unsupported Mail keyboard character {character:?}"))?;
+            }
+        }
+    }
+    let bottom = visible_mail_input_layout(input.case)[5];
+    for (column, tile) in name_entry_string_tiles_19(bottom)?.into_iter().enumerate() {
+        tilemap[17][column] = tile;
+    }
+    Ok(tilemap)
+}
+
+fn name_entry_string_tiles_19(text: &str) -> Result<Vec<u8>> {
+    let mut tiles = Vec::new();
+    for token in tokenize_name_entry_string(text) {
+        let tile = name_entry_token_tile(&token)
+            .with_context(|| format!("unsupported Mail keyboard glyph {token:?}"))?;
+        tiles.push(tile);
+    }
+    if tiles.len() != 19 {
+        anyhow::bail!("Mail keyboard command row has {} tiles, expected 19", tiles.len());
+    }
+    Ok(tiles)
+}
+
+fn mail_entry_char_tile(character: char) -> Option<u8> {
+    Some(match character {
+        '\u{e105}' => 0xe1,
+        '\u{e106}' => 0xe2,
+        '\u{e108}' => 0x70,
+        '\u{e109}' => 0x71,
+        '\u{e120}' => 0xd0,
+        '\u{e121}' => 0xd1,
+        '\u{e122}' => 0xd2,
+        '\u{e123}' => 0xd3,
+        '\u{e124}' => 0xd4,
+        '\u{e125}' => 0xd5,
+        '\u{e126}' => 0xd6,
+        '“' => 0x72,
+        '”' => 0x73,
+        '…' => 0x75,
+        other => name_entry_char_tile(other)?,
+    })
+}
+
+fn draw_mail_entry_cursor(
+    input: &PendingMailInput,
+    cursor: &image::RgbaImage,
+    target: &mut [u8],
+) -> Result<()> {
+    let x_offset = if input.cursor_row == MAIL_INPUT_ROWS - 1 {
+        [0, 0, 0, 0x30, 0x30, 0x30, 0x60, 0x60, 0x60, 0x60][input.cursor_column]
+    } else {
+        (input.cursor_column as i16) * 0x10
+    };
+    // `depixel 9, 2` becomes OAM x=16/y=72 because sprite init consumes
+    // RGBDS's DE pair in y/x order, matching the ordinary naming compositor.
+    let anchor_x = 16 + x_offset;
+    let anchor_y = 72 + input.cursor_row as i16 * 0x10;
+    let tile_x = ((anchor_x - 8) / 8) * 8;
+    let tile_y = ((anchor_y - 16) / 8) * 8;
+    let pieces: &[(i16, i16, i16, i16, usize, bool, bool)] =
+        if input.cursor_row == MAIL_INPUT_ROWS - 1 {
+            &NAME_ENTRY_BIG_CURSOR_OAM
+        } else {
+            &NAME_ENTRY_SMALL_CURSOR_OAM
+        };
+    for (x_tile, y_tile, x_px, y_px, tile_index, xflip, yflip) in pieces {
+        blit_name_entry_tile_image(
+            cursor,
+            0,
+            tile_index * SOURCE_TILE_SIZE,
+            (tile_x + x_tile * 8 + x_px).max(0) as usize,
+            (tile_y + y_tile * 8 + y_px).max(0) as usize,
+            *xflip,
+            *yflip,
+            true,
+            target,
+        );
+    }
+    Ok(())
+}
+
 fn spawn_visible_name_choice_screen(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
@@ -6201,7 +8301,23 @@ fn spawn_visible_name_choice_screen(
     images: &mut Assets<Image>,
     choice: &VisibleNameChoice,
 ) -> Result<()> {
-    if let Some(capture) = runtime_shell.pending_standard_capture.as_ref() {
+    let nickname_target = runtime_shell
+        .pending_standard_capture
+        .as_ref()
+        .map(|capture| capture.default_name.as_str())
+        .or_else(|| {
+            runtime_shell
+                .pending_gift_pokemon_nickname
+                .as_ref()
+                .map(|gift| gift.default_name.as_str())
+        })
+        .or_else(|| {
+            runtime_shell
+                .pending_egg_hatch_nickname
+                .as_ref()
+                .map(|hatch| hatch.default_name.as_str())
+        });
+    if let Some(default_name) = nickname_target {
         spawn_battle_window(
             commands,
             rendered_art,
@@ -6226,7 +8342,7 @@ fn spawn_visible_name_choice_screen(
         );
         for (line_index, line) in [
             "Give a nickname to".to_string(),
-            capture.default_name.clone(),
+            default_name.to_string(),
         ]
         .into_iter()
         .enumerate()
@@ -6428,8 +8544,10 @@ fn update_scene_dialog_text_content_in_place<F: QueryFilter>(
         }
     }
     if prompt_active {
+        let Ok(selected) = scene_dialog_yes_no_cursor_index(snapshot, runtime_shell) else {
+            return false;
+        };
         for (index, label) in ["YES", "NO"].into_iter().enumerate() {
-            let selected = scene_dialog_yes_no_cursor_index(snapshot, runtime_shell);
             let marker = if index == selected { ">" } else { " " };
             let (x, y) = battle_hud_tile_origin(
                 FIELD_YES_NO_LEFT_TILE,
@@ -6542,6 +8660,9 @@ fn load_name_entry_frame(
     let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode naming screen font PNG")?
         .to_rgba8();
+    let font_extra = crate::open_runtime_image(assets.join("gfx/font/font_extra.png"))
+        .context("decode naming screen extra-font PNG")?
+        .to_rgba8();
     let cursor = crate::open_runtime_image(assets.join("gfx/naming_screen/cursor.png"))
         .context("decode naming screen cursor PNG")?
         .to_rgba8();
@@ -6568,6 +8689,7 @@ fn load_name_entry_frame(
             draw_name_entry_tile(
                 tile_id,
                 &font,
+                &font_extra,
                 &border,
                 &underline,
                 &middle_line,
@@ -6748,6 +8870,8 @@ fn name_entry_token_tile(token: &str) -> Option<u8> {
         "▷" => 0xec,
         "▶" => 0xed,
         "▼" => 0xee,
+        "▲" => 0x61,
+        "◀" => 0x71,
         "♂" => 0xef,
         "¥" => 0xf0,
         "×" => 0xf1,
@@ -6765,6 +8889,7 @@ fn name_entry_token_tile(token: &str) -> Option<u8> {
 fn draw_name_entry_tile(
     tile_id: u8,
     font: &image::RgbaImage,
+    font_extra: &image::RgbaImage,
     border: &image::RgbaImage,
     underline: &image::RgbaImage,
     middle_line: &image::RgbaImage,
@@ -6797,7 +8922,23 @@ fn draw_name_entry_tile(
         );
         return Ok(());
     }
-    if tile_id >= 0x80 {
+    if (0x60..0x80).contains(&tile_id) {
+        let font_index = usize::from(tile_id - 0x60);
+        let tiles_per_row = font_extra.width() as usize / SOURCE_TILE_SIZE;
+        let source_x = (font_index % tiles_per_row) * SOURCE_TILE_SIZE;
+        let source_y = (font_index / tiles_per_row) * SOURCE_TILE_SIZE;
+        blit_name_entry_tile_image(
+            font_extra,
+            source_x,
+            source_y,
+            dest_x,
+            dest_y,
+            false,
+            false,
+            false,
+            target,
+        );
+    } else if tile_id >= 0x80 {
         let font_index = usize::from(tile_id - 0x80);
         let tiles_per_row = font.width() as usize / SOURCE_TILE_SIZE;
         if tiles_per_row == 0 {
@@ -7225,7 +9366,17 @@ fn visible_field_dialog_pages(
     if let Some(notice) = runtime_shell.pc_notice.as_ref() {
         return Some(vec![notice.clone()]);
     }
-    if snapshot.ui.pending_yes_no.is_some() {
+    // `last_special_routine` is execution history, not the identity of the
+    // current YesNoBox. Mom's later PHONE question is pending while
+    // `ComeHomeForDSTText` prints, so a stale Initial*DSTFlag value must not
+    // replace those four pages with the earlier clock confirmation.
+    if snapshot.ui.pending_yes_no.is_some()
+        && snapshot
+            .ui
+            .text
+            .as_ref()
+            .is_some_and(|text| text.label == "IsItDSTText")
+    {
         match snapshot.script_events.last_special_routine.as_deref() {
             Some("InitialSetDSTFlag") => {
                 return Some(vec![format!(
@@ -7260,17 +9411,43 @@ fn visible_field_dialog_pages(
         return None;
     }
     let text = snapshot.ui.text.as_ref()?;
-    let pages = if let Some(asm_text) = &text.asm_text {
-        normalize_visible_script_text_with_context(
+    let mut resolved_asm_text = text.asm_text.clone();
+    let mut resolved_body = text.body.clone();
+    // TX_FAR prints the body at its pointer; the pointer symbol itself is not
+    // text. Exported wrappers are `text_far Target` followed by `text_end`.
+    // Resolve through the authoritative runtime catalog, with a hard depth
+    // bound to reject malformed cycles rather than displaying debug labels.
+    for _ in 0..8 {
+        let far_target = resolved_body.as_ref().and_then(|body| {
+            body.commands
+                .iter()
+                .find(|command| command.command == "text_far")
+                .and_then(|command| command.args.first())
+                .cloned()
+        });
+        let Some(far_target) = far_target else {
+            break;
+        };
+        let far_text = runtime_shell.shell.text_snapshot(&far_target).ok()?;
+        resolved_asm_text = far_text.asm_text;
+        resolved_body = far_text.body;
+    }
+    if resolved_body.as_ref().is_some_and(|body| {
+        body.commands
+            .iter()
+            .any(|command| command.command == "text_far")
+    }) {
+        return None;
+    }
+    let pages = if let Some(asm_text) = &resolved_asm_text {
+        render_visible_asm_text_pages(
             asm_text,
+            &snapshot.script_events.named_buffers,
             &snapshot.trainer.player_name,
             visible_rival_name(snapshot),
             snapshot.progression.time.day_of_week,
         )
-        .split("\n\n")
-        .map(str::to_owned)
-        .collect()
-    } else if let Some(body) = &text.body {
+    } else if let Some(body) = &resolved_body {
         render_visible_script_text_pages(
             body,
             &snapshot.script_events.named_buffers,
@@ -7326,7 +9503,14 @@ fn visible_field_dialogue_is_fully_revealed(
         return true;
     };
     let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
-        return true;
+        // The authoritative script can publish `writetext` and its following
+        // wait in one update, before the presentation system has initialized
+        // the typewriter.  That is still an entirely unread page, not a
+        // completed one.  Reporting it complete lets the same A press consume
+        // `promptbutton`/`waitbutton` and enter the next modal command; Mom's
+        // weekday selector then opens while her previous text starts printing
+        // underneath it.
+        return false;
     };
     let text_identity = pages.join("\u{1e}");
     if reveal.text != text_identity {
@@ -7334,6 +9518,23 @@ fn visible_field_dialogue_is_fully_revealed(
     }
     let full_text = &pages[reveal.page_index.min(pages.len().saturating_sub(1))];
     visible_field_text_reveal_is_complete(reveal, &full_text)
+}
+
+fn visible_field_dialogue_is_entirely_consumed(
+    runtime_shell: &BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) -> bool {
+    let Some(pages) = visible_field_dialog_pages(snapshot, runtime_shell) else {
+        return true;
+    };
+    let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
+        return false;
+    };
+    let text_identity = pages.join("\u{1e}");
+    if reveal.text != text_identity || reveal.page_index + 1 != pages.len() {
+        return false;
+    }
+    visible_field_text_reveal_is_complete(reveal, &pages[reveal.page_index])
 }
 
 fn visible_field_text_reveal_is_complete(
@@ -7361,6 +9562,13 @@ fn tick_visible_field_text_reveal(
 ) -> Result<bool> {
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let Some(pages) = visible_field_dialog_pages(&snapshot, runtime_shell) else {
+        if runtime_shell.active_script_cursor.is_some() {
+            // A completed writetext can have a one-frame gap after its
+            // TextLabel is consumed and before yesorno/promptbutton publishes
+            // the same last Write again. Retain the completed printer across
+            // that transient gap; clearing it reprints the full dialogue.
+            return Ok(false);
+        }
         let changed = runtime_shell.field_text_reveal.take().is_some();
         return Ok(changed);
     };
@@ -7425,7 +9633,8 @@ fn advance_visible_completed_field_text_page(
         return Ok(false);
     }
     reveal.page_index = reveal.page_index.min(pages.len().saturating_sub(1));
-    let text_len = pages[reveal.page_index].chars().count();
+    let previous_page_index = reveal.page_index;
+    let text_len = pages[previous_page_index].chars().count();
     if reveal.visible_chars < text_len {
         return Ok(false);
     }
@@ -7438,10 +9647,27 @@ fn advance_visible_completed_field_text_page(
         .as_mut()
         .context("field text reveal disappeared while advancing its page")?;
     reveal.page_index += 1;
-    reveal.visible_chars = 0;
+    // `<CONT>` scrolls the existing bottom line to the top and then prints
+    // only the new bottom line. Starting the next page at zero retyped that
+    // carried line, which players saw as Mom repeating her last words.
+    reveal.visible_chars =
+        visible_field_page_initial_chars(&pages[previous_page_index], &pages[reveal.page_index]);
     reveal.frames_until_next_char = 0;
     mark_runtime_presentation_dirty(runtime_shell);
     Ok(true)
+}
+
+fn visible_field_page_initial_chars(previous_page: &str, next_page: &str) -> usize {
+    let Some(previous_bottom_line) = previous_page.lines().last() else {
+        return 0;
+    };
+    let Some(next_top_line) = next_page.lines().next() else {
+        return 0;
+    };
+    if previous_bottom_line.is_empty() || previous_bottom_line != next_top_line {
+        return 0;
+    }
+    next_top_line.chars().count() + usize::from(next_page.contains('\n'))
 }
 
 fn visible_scene_dialog_entries(
@@ -7558,6 +9784,11 @@ fn visible_scene_dialog_entries(
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
+    if runtime_shell.decoration_menu.is_some() {
+        entries.extend(visible_decoration_command_entries(runtime_shell)?);
+        entries.truncate(SCENE_MENU_VISIBLE_ROWS);
+        return Ok(entries);
+    }
     if runtime_shell.player_pc_action_cursor.is_some() {
         entries.push("PLAYER'S PC".to_string());
         let actions = visible_player_pc_actions(runtime_shell);
@@ -7583,7 +9814,7 @@ fn visible_scene_dialog_entries(
         return Ok(entries);
     }
     if runtime_shell.mailbox_cursor.is_some() {
-        push_visible_mailbox_dialog_entries(&mut entries, snapshot, runtime_shell);
+        push_visible_mailbox_dialog_entries(&mut entries, snapshot, runtime_shell)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
@@ -7598,31 +9829,27 @@ fn visible_scene_dialog_entries(
         return Ok(entries);
     }
     if let Some(shop) = &snapshot.pending_shop {
-        push_visible_shop_dialog_entries(&mut entries, snapshot, runtime_shell, shop);
+        push_visible_shop_dialog_entries(&mut entries, snapshot, runtime_shell, shop)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
     if let Some(menu) = &snapshot.ui.menu {
-        push_visible_runtime_menu_dialog_entries(&mut entries, runtime_shell, menu);
+        push_visible_runtime_menu_dialog_entries(&mut entries, runtime_shell, menu)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
-    if let Some(picture) = &snapshot.ui.active_pokemon_picture {
-        push_visible_pokemon_picture_entries(&mut entries, snapshot, picture);
-        entries.truncate(SCENE_MENU_VISIBLE_ROWS);
+    // ASM `pokepic` owns only its menu_coords 6,4,14,13 picture window.
+    // It does not implicitly open the field textbox or print species data;
+    // the surrounding script supplies any authored text after `closepokepic`.
+    if snapshot.ui.active_pokemon_picture.is_some() {
         return Ok(entries);
     }
     if snapshot.pending_move_learn.is_some() {
-        push_visible_pending_move_learn_entries(&mut entries, snapshot, runtime_shell);
+        push_visible_pending_move_learn_entries(&mut entries, snapshot, runtime_shell)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
     }
-    if has_visible_gift_pokemon_prompt(snapshot, runtime_shell) {
-        push_visible_gift_pokemon_entries(&mut entries, snapshot, runtime_shell)?;
-        entries.truncate(SCENE_MENU_VISIBLE_ROWS);
-        return Ok(entries);
-    }
-    if has_visible_elevator_prompt(snapshot, runtime_shell) {
+    if runtime_shell.elevator_cursor.is_some() {
         push_visible_elevator_entries(&mut entries, snapshot, runtime_shell)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
         return Ok(entries);
@@ -7644,6 +9871,10 @@ fn visible_scene_dialog_entries(
         push_visible_name_input_entries(&mut entries, runtime_shell);
         return Ok(entries);
     }
+    if runtime_shell.pending_mail_input.is_some() {
+        push_visible_mail_input_entries(&mut entries, runtime_shell);
+        return Ok(entries);
+    }
     if runtime_shell.save_flow.is_some() {
         push_visible_save_dialog_entries(&mut entries, snapshot, runtime_shell)?;
         entries.truncate(SCENE_MENU_VISIBLE_ROWS);
@@ -7656,7 +9887,9 @@ fn visible_scene_dialog_entries(
             &visible_revealed_field_dialog_text(runtime_shell, &full_text),
         );
     }
-    if snapshot.ui.pending_yes_no.is_some() {
+    if snapshot.ui.pending_yes_no.is_some()
+        && visible_field_dialogue_is_entirely_consumed(runtime_shell, snapshot)
+    {
         let selected = strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "ui:yes-no", 2)
             .context("yes/no prompt is active without a valid cursor")?;
         push_priority_scene_dialog_entry(
@@ -7670,8 +9903,8 @@ fn visible_scene_dialog_entries(
     }
 
     if field_dialog_text.is_some() {
-        // The field box has four interior rows. A `promptbutton` indicator is
-        // an arrow in its bottom-right tile, never a fifth textual row (and
+        // The field box has two printable baselines. A `promptbutton`
+        // indicator is an arrow in its bottom-right tile, never another row (and
         // never the debug word "NEXT").
         entries.truncate(FIELD_TEXT_BOX_VISIBLE_ROWS);
     }
@@ -7707,14 +9940,14 @@ fn push_visible_mailbox_dialog_entries(
     entries: &mut Vec<String>,
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
-) {
+) -> Result<()> {
     entries.push("MAIL BOX".to_string());
     let selected = strict_readonly_cursor_index(
         &runtime_shell.mailbox_cursor,
         "pc:mailbox",
         snapshot.mailbox.len(),
     )
-    .unwrap_or(0);
+    .context("mailbox is open without a valid nonempty cursor")?;
     for (index, entry) in snapshot.mailbox.iter().enumerate() {
         entries.push(compact_scene_label(
             &format!(
@@ -7731,7 +9964,7 @@ fn push_visible_mailbox_dialog_entries(
             "pc:mailbox-actions",
             VISIBLE_MAILBOX_ACTIONS.len(),
         )
-        .unwrap_or(0);
+        .context("mailbox action menu is open without a valid cursor")?;
         entries.clear();
         entries.push(compact_scene_label(
             &snapshot.mailbox[selected].mail.author,
@@ -7746,6 +9979,7 @@ fn push_visible_mailbox_dialog_entries(
                 }),
         );
     }
+    Ok(())
 }
 
 fn scene_dialog_surface_active(
@@ -7757,22 +9991,28 @@ fn scene_dialog_surface_active(
         || snapshot.ui.menu.is_some()
         || snapshot.ui.text.is_some()
         || snapshot.ui.active_pokemon_picture.is_some()
-        || has_visible_gift_pokemon_prompt(snapshot, runtime_shell)
-        || has_visible_elevator_prompt(snapshot, runtime_shell)
+        || runtime_shell.elevator_cursor.is_some()
         || runtime_shell.pending_day_of_week.is_some()
         || runtime_shell.pending_phone_prompt.is_some()
+        || runtime_shell.pending_remember_password.is_some()
         || runtime_shell.pending_name_input.is_some()
+        || runtime_shell.pending_mail_input.is_some()
+        || runtime_shell.pending_mail_read.is_some()
         || runtime_shell.pending_name_choice.is_some()
         || runtime_shell.save_flow.is_some()
         || snapshot.ui.pending_yes_no.is_some()
         || snapshot.ui.pending_text_wait.is_some()
         || runtime_shell.pc_hub_cursor.is_some()
+        || runtime_shell.decoration_menu.is_some()
         || runtime_shell.player_pc_action_cursor.is_some()
         || runtime_shell.mailbox_cursor.is_some()
         || runtime_shell.pc_confirmation.is_some()
         || runtime_shell.storage_cursor.is_some()
         || runtime_shell.pc_item_cursor.is_some()
-        || runtime_shell.active_script_cursor.is_some()
+        || (runtime_shell.active_script_cursor.is_some()
+            && runtime_shell.visible_buena_password.is_none()
+            && runtime_shell.visible_battle_tower_challenge_menu.is_none()
+            && runtime_shell.visible_battle_tower_room_menu.is_none())
         || runtime_shell.tmhm_teach_prompt_cursor.is_some()
         || runtime_shell.tmhm_decision_prompt_cursor.is_some()
 }
@@ -7786,7 +10026,11 @@ fn push_visible_save_dialog_entries(
         return Ok(());
     };
     let label = match flow.stage {
-        VisibleSaveFlowStage::Prompt => SAVE_TEXT_WOULD_YOU_LIKE,
+        VisibleSaveFlowStage::Prompt => match flow.origin {
+            VisibleSaveFlowOrigin::StartMenu => SAVE_TEXT_WOULD_YOU_LIKE,
+            VisibleSaveFlowOrigin::BillsPcMove => SAVE_TEXT_MOVE_MON_WITHOUT_MAIL,
+            VisibleSaveFlowOrigin::BillsPcChangeBox { .. } => SAVE_TEXT_CHANGE_BOX,
+        },
         VisibleSaveFlowStage::OverwritePrompt => SAVE_TEXT_ALREADY_EXISTS,
         VisibleSaveFlowStage::Saving => SAVE_TEXT_SAVING,
         VisibleSaveFlowStage::Saved => SAVE_TEXT_SAVED,
@@ -7821,84 +10065,6 @@ fn visible_asm_text(snapshot: &RuntimeShellSnapshot, label: &str) -> Result<Stri
         .replace("<PLAYER>", &snapshot.trainer.player_name)
         .replace("<PLAY_G>", &snapshot.trainer.player_name);
     Ok(text)
-}
-
-fn push_visible_pokemon_picture_entries(
-    entries: &mut Vec<String>,
-    snapshot: &RuntimeShellSnapshot,
-    species_id: &str,
-) {
-    let Some(species) = snapshot
-        .pokemon
-        .iter()
-        .find(|species| species.species_id == species_id)
-    else {
-        entries.push(compact_scene_label(
-            &format!("INVALID SPECIES {species_id}"),
-            30,
-        ));
-        return;
-    };
-    entries.push(compact_scene_label(
-        &crate::core::models::pokemon_species_display_name(species_id),
-        30,
-    ));
-    entries.push(compact_scene_label(
-        &format!("#{:03} {} {}", species.int_id, species.type1, species.type2),
-        30,
-    ));
-    if runtime_debug_overlays_enabled() {
-        entries.push(compact_scene_label(
-            &format!(
-                "catch={} exp={} growth={}",
-                species.catch_rate, species.base_exp, species.growth_rate
-            ),
-            30,
-        ));
-    }
-}
-
-fn push_visible_gift_pokemon_entries(
-    entries: &mut Vec<String>,
-    snapshot: &RuntimeShellSnapshot,
-    runtime_shell: &BevyRuntimeShell,
-) -> Result<()> {
-    let gifts = visible_gift_pokemon_prompt_options(snapshot, runtime_shell);
-    let gift_count = gifts.len();
-    if gift_count == 0 {
-        entries.push("GIFT POKEMON EMPTY".to_string());
-        return Ok(());
-    }
-    let cursor = runtime_shell
-        .gift_pokemon_cursor
-        .as_ref()
-        .context("gift Pokemon prompt is active without a cursor")?;
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.gift_pokemon_cursor,
-        &cursor.surface_id,
-        gift_count,
-    )
-    .context("gift Pokemon prompt is active without a valid cursor")?;
-    entries.push(compact_scene_label(
-        &format!("GIFT POKEMON {}/{}", selected + 1, gift_count),
-        30,
-    ));
-    entries.extend(windowed_index_range(selected, gift_count).map(|index| {
-        let gift = gifts[index];
-        let marker = if index == selected { ">" } else { " " };
-        let held = gift
-            .held_item_id
-            .as_deref()
-            .map(|item| format!(" {}", item_display_name(snapshot, item)))
-            .unwrap_or_default();
-        let species_name = if gift.egg {
-            "EGG".to_string()
-        } else {
-            crate::core::models::pokemon_species_display_name(&gift.species_id)
-        };
-        compact_scene_label(&format!("{marker}{species_name} L{}{held}", gift.level), 30)
-    }));
-    Ok(())
 }
 
 fn push_visible_phone_prompt_entries(
@@ -7988,13 +10154,50 @@ fn push_visible_name_input_entries(entries: &mut Vec<String>, runtime_shell: &Be
     ));
 }
 
+fn push_visible_mail_input_entries(entries: &mut Vec<String>, runtime_shell: &BevyRuntimeShell) {
+    let Some(input) = runtime_shell.pending_mail_input.as_ref() else {
+        return;
+    };
+    entries.push("MAIL COMPOSER".to_string());
+    let first = input.value.chars().take(MAIL_INPUT_LINE_LENGTH).collect::<String>();
+    let second = input
+        .value
+        .chars()
+        .skip(MAIL_INPUT_LINE_LENGTH)
+        .collect::<String>();
+    entries.push(first);
+    entries.push(second);
+    for (row, line) in visible_mail_input_layout(input.case).iter().enumerate() {
+        entries.push((*line).to_string());
+        if row == input.cursor_row {
+            entries.push(format!("{}^", " ".repeat(input.cursor_column * 2)));
+        }
+    }
+}
+
 fn push_visible_name_choice_entries(entries: &mut Vec<String>, runtime_shell: &BevyRuntimeShell) {
     let Some(choice) = runtime_shell.pending_name_choice.as_ref() else {
         return;
     };
-    if let Some(capture) = runtime_shell.pending_standard_capture.as_ref() {
+    if let Some(default_name) = runtime_shell
+        .pending_standard_capture
+        .as_ref()
+        .map(|capture| capture.default_name.as_str())
+        .or_else(|| {
+            runtime_shell
+                .pending_gift_pokemon_nickname
+                .as_ref()
+                .map(|gift| gift.default_name.as_str())
+        })
+        .or_else(|| {
+            runtime_shell
+                .pending_egg_hatch_nickname
+                .as_ref()
+                .map(|hatch| hatch.default_name.as_str())
+        })
+    {
         entries.push(compact_scene_label(
-            &format!("Give a nickname to {}?", capture.default_name),
+            &format!("Give a nickname to {default_name}?"),
             30,
         ));
     } else {
@@ -8017,14 +10220,15 @@ fn push_visible_elevator_entries(
     let elevators = visible_elevator_prompt_options(snapshot, runtime_shell);
     let option_count = visible_elevator_option_count(snapshot, runtime_shell);
     if option_count == 0 {
-        entries.push("ELEVATOR EMPTY".to_string());
-        for elevator in &elevators {
-            entries.push(compact_scene_label(
-                &format!("{} has no floors", elevator.data_label),
-                30,
-            ));
-        }
-        return Ok(());
+        let surface_id = runtime_shell
+            .elevator_cursor
+            .as_ref()
+            .map(|cursor| cursor.surface_id.as_str())
+            .context("elevator prompt is active without a cursor")?;
+        anyhow::bail!(
+            "retained elevator surface {surface_id} has no matching compiled floors on map {}",
+            snapshot.overworld.map_name
+        );
     }
     let cursor = runtime_shell
         .elevator_cursor
@@ -8063,75 +10267,60 @@ fn push_visible_pending_move_learn_entries(
     entries: &mut Vec<String>,
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
-) {
+) -> Result<()> {
     let Some(pending) = snapshot.pending_move_learn.as_ref() else {
-        return;
+        return Ok(());
     };
-    let move_name = battle_move_display_name(snapshot, &pending.learned_move.name);
-    entries.push(compact_scene_label(
-        &format!(
-            "{} WANTS {}",
-            crate::core::models::pokemon_species_display_name(&pending.species_id),
-            move_name
-        ),
-        SCENE_DIALOG_TEXT_CHARS,
-    ));
-    if let Some(cursor) = &runtime_shell.move_learn_decision_cursor {
-        let selected =
-            strict_readonly_cursor_index(&Some(cursor.clone()), "move-learn:decision", 2);
-        let Some(selected) = selected else {
-            entries.push(compact_scene_label(
-                "INVALID CURSOR move-learn:decision",
-                SCENE_DIALOG_TEXT_CHARS,
-            ));
-            return;
-        };
-        let prompt = match runtime_shell.move_learn_decision {
-            Some(VisibleTmHmDecision::ForgetMove) => "DELETE A MOVE TO MAKE ROOM?",
-            Some(VisibleTmHmDecision::StopLearning) => "STOP LEARNING THIS MOVE?",
-            None => "INVALID MOVE-LEARN DECISION",
-        };
-        entries.push(compact_scene_label(prompt, SCENE_DIALOG_TEXT_CHARS));
-        entries.push(format!("{}YES", if selected == 0 { ">" } else { " " }));
-        entries.push(format!("{}NO", if selected == 1 { ">" } else { " " }));
-        return;
-    }
-    if !runtime_shell.move_learn_forget_menu_open {
-        entries.push(compact_scene_label(
-            "IS TRYING TO LEARN IT!",
-            SCENE_DIALOG_TEXT_CHARS,
-        ));
-        entries.push(compact_scene_label("A/B CONTINUE", SCENE_DIALOG_TEXT_CHARS));
-        return;
-    }
-    entries.push(compact_scene_label(
-        "WHICH MOVE SHOULD BE FORGOTTEN?",
-        SCENE_DIALOG_TEXT_CHARS,
-    ));
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.party_move_cursor,
-        &party_move_cursor_surface_id(pending.party_index),
-        5,
-    );
-    let Some(selected) = selected else {
-        entries.push(compact_scene_label(
-            "INVALID CURSOR move-learn",
-            SCENE_DIALOG_TEXT_CHARS,
-        ));
-        return;
-    };
-    let Some(slot) = snapshot
+    let slot = snapshot
         .party
         .slots
         .iter()
         .find(|slot| slot.index == pending.party_index)
-    else {
-        entries.push(compact_scene_label(
-            &format!("INVALID PARTY {}", pending.party_index),
-            SCENE_DIALOG_TEXT_CHARS,
-        ));
-        return;
+        .with_context(|| {
+            format!(
+                "pending move learn party index {} is not in the party",
+                pending.party_index
+            )
+        })?;
+    let text_target = if runtime_shell.move_learn_forget_menu_open {
+        "_MoveAskForgetText"
+    } else if runtime_shell.move_learn_decision == Some(VisibleTmHmDecision::StopLearning) {
+        "_StopLearningMoveText"
+    } else {
+        "_AskForgetMoveText"
     };
+    let mut pages = visible_move_learning_text_pages(
+        runtime_shell,
+        text_target,
+        &slot.pokemon.nickname,
+        &slot.pokemon.nickname,
+        &pending.learned_move.name,
+    )?;
+    entries.push(
+        pages
+            .pop()
+            .with_context(|| format!("move-learning text {text_target} has no final page"))?,
+    );
+    if let Some(cursor) = &runtime_shell.move_learn_decision_cursor {
+        let selected = strict_readonly_cursor_index(
+            &Some(cursor.clone()),
+            "move-learn:decision",
+            2,
+        )
+        .context("pending move-learn decision has no valid cursor")?;
+        entries.push(format!("{}YES", if selected == 0 { ">" } else { " " }));
+        entries.push(format!("{}NO", if selected == 1 { ">" } else { " " }));
+        return Ok(());
+    }
+    if !runtime_shell.move_learn_forget_menu_open {
+        return Ok(());
+    }
+    let selected = strict_readonly_cursor_index(
+        &runtime_shell.party_move_cursor,
+        &party_move_cursor_surface_id(pending.party_index),
+        5,
+    )
+    .context("pending move-learn forget menu has no valid cursor")?;
     for (index, learned) in slot.pokemon.moves.iter().enumerate() {
         let marker = if index == selected { ">" } else { " " };
         entries.push(move_menu_entry(snapshot, learned, marker));
@@ -8144,6 +10333,7 @@ fn push_visible_pending_move_learn_entries(
             " "
         }
     ));
+    Ok(())
 }
 
 fn push_visible_storage_dialog_entries(
@@ -8165,9 +10355,18 @@ fn push_visible_storage_dialog_entries(
     };
     let party_move_view = runtime_shell.bill_pc_move_open && runtime_shell.bill_pc_move_party_open;
     let visible_slots = if party_move_view {
-        snapshot.party.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+        snapshot
+            .party
+            .slots
+            .iter()
+            .map(|slot| (slot.index, &slot.pokemon))
+            .collect::<Vec<_>>()
     } else {
-        box_snapshot.slots.iter().map(|slot| (slot.index, &slot.pokemon)).collect::<Vec<_>>()
+        box_snapshot
+            .slots
+            .iter()
+            .map(|slot| (slot.index, &slot.pokemon))
+            .collect::<Vec<_>>()
     };
     let surface_id = if party_move_view {
         pc_move_party_surface_id().to_string()
@@ -8177,14 +10376,20 @@ fn push_visible_storage_dialog_entries(
     entries.push(compact_scene_label(
         &format!(
             "{} {}/{}",
-            if party_move_view { "PARTY".to_string() } else { format!("BOX {} {}", box_snapshot.index, box_snapshot.name) },
+            if party_move_view {
+                "PARTY".to_string()
+            } else {
+                format!("BOX {} {}", box_snapshot.index, box_snapshot.name)
+            },
             visible_slots.len(),
             if party_move_view { 6 } else { 20 }
         ),
         SCENE_DIALOG_TEXT_CHARS,
     ));
     entries.push(compact_scene_label(
-        if runtime_shell.party_menu_open {
+        if runtime_shell.bill_pc_move_save.is_some() {
+            "Saving… Leave ON!"
+        } else if runtime_shell.party_menu_open {
             "A DEPOSIT  B CLOSE"
         } else {
             "A WITHDRAW SELECT RELEASE"
@@ -8216,7 +10421,9 @@ fn push_visible_storage_dialog_entries(
     entries.extend(
         windowed_index_range(cursor_index, option_count).map(|offset| {
             let marker = if offset == cursor_index { ">" } else { " " };
-            let Some((slot_index, pokemon)) = visible_slots.iter().find(|(index, _)| *index == offset) else {
+            let Some((slot_index, pokemon)) =
+                visible_slots.iter().find(|(index, _)| *index == offset)
+            else {
                 return compact_scene_label(
                     &format!("{marker}{offset} EMPTY"),
                     SCENE_DIALOG_TEXT_CHARS,
@@ -8230,12 +10437,7 @@ fn push_visible_storage_dialog_entries(
             compact_scene_label(
                 &format!(
                     "{marker}{} {} L{} HP {}/{}{}",
-                    slot_index,
-                    pokemon.species.id,
-                    pokemon.level,
-                    pokemon.hp,
-                    pokemon.max_hp,
-                    held
+                    slot_index, pokemon.species.id, pokemon.level, pokemon.hp, pokemon.max_hp, held
                 ),
                 SCENE_DIALOG_TEXT_CHARS,
             )
@@ -8310,26 +10512,23 @@ fn push_visible_runtime_menu_dialog_entries(
     entries: &mut Vec<String>,
     runtime_shell: &BevyRuntimeShell,
     menu: &crate::RuntimeMenuSnapshot,
-) {
+) -> Result<()> {
     for vertical in &menu.layout.vertical_menus {
         let surface_id = vertical_menu_surface_id(menu, vertical);
         let cursor_index = strict_readonly_cursor_index(
             &runtime_shell.menu_cursor,
             &surface_id,
             vertical.options.len(),
-        );
-        let Some(cursor_index) = cursor_index else {
-            entries.push(compact_scene_label(
-                &format!("INVALID CURSOR {surface_id}"),
-                SCENE_DIALOG_TEXT_CHARS,
-            ));
-            return;
-        };
+        )
+        .with_context(|| format!("runtime menu {surface_id} has no valid nonempty cursor"))?;
         if vertical.two_dimensional {
-            let Some(columns) = vertical.columns else {
-                entries.push("INVALID 2D MENU".to_string());
-                return;
-            };
+            let columns = vertical.columns.with_context(|| {
+                format!("two-dimensional runtime menu {surface_id} has no column count")
+            })?;
+            anyhow::ensure!(
+                columns > 0,
+                "two-dimensional runtime menu {surface_id} has zero columns"
+            );
             for (row_index, row) in vertical.options.chunks(columns).enumerate() {
                 let first_index = row_index * columns;
                 let line = row
@@ -8347,7 +10546,7 @@ fn push_visible_runtime_menu_dialog_entries(
                     .join(" ");
                 entries.push(compact_scene_label(&line, SCENE_DIALOG_TEXT_CHARS));
             }
-            return;
+            return Ok(());
         }
         entries.push(compact_scene_label(&menu.menu_id, SCENE_DIALOG_TEXT_CHARS));
         entries.extend(
@@ -8358,9 +10557,10 @@ fn push_visible_runtime_menu_dialog_entries(
             }),
         );
         if entries.len() >= SCENE_MENU_VISIBLE_ROWS {
-            return;
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 fn push_visible_shop_dialog_entries(
@@ -8368,22 +10568,39 @@ fn push_visible_shop_dialog_entries(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     shop: &crate::core::state::ScriptShopRequest,
-) {
+) -> Result<()> {
+    if !runtime_shell.shop_welcome_seen {
+        entries.push("Welcome! How may I".to_string());
+        entries.push("help you?".to_string());
+        return Ok(());
+    }
+    if let Some(notice) = runtime_shell.shop_notice.as_deref() {
+        entries.extend(notice.lines().map(str::to_string));
+        return Ok(());
+    }
+    if let Some(cursor) = runtime_shell.shop_top_cursor.as_ref() {
+        let selected = strict_readonly_cursor_index(&Some(cursor.clone()), "shop:top", 3)
+            .context("shop top menu is open without a valid shop:top cursor")?;
+        entries.push(format_price(snapshot.trainer.money));
+        entries.extend(
+            ["BUY", "SELL", "QUIT"]
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    format!("{}{}", if index == selected { ">" } else { " " }, option)
+                }),
+        );
+        return Ok(());
+    }
     if runtime_shell.sell_cursor.is_some() {
         let sellable = sellable_carried_item_ids(snapshot);
         entries.push(compact_scene_label(
-            &format!("SELL {} ${}", shop.mart_id, snapshot.trainer.money),
+            &format!("SELL {}", format_price(snapshot.trainer.money)),
             SCENE_DIALOG_TEXT_CHARS,
         ));
-        let Some(cursor_index) =
+        let cursor_index =
             strict_readonly_cursor_index(&runtime_shell.sell_cursor, "sell:bag", sellable.len())
-        else {
-            entries.push(compact_scene_label(
-                "INVALID CURSOR sell:bag",
-                SCENE_DIALOG_TEXT_CHARS,
-            ));
-            return;
-        };
+                .context("shop sell menu is open without a valid nonempty cursor")?;
         entries.extend(
             windowed_index_range(cursor_index, sellable.len()).map(|index| {
                 let item = &sellable[index];
@@ -8394,7 +10611,7 @@ fn push_visible_shop_dialog_entries(
                 )
             }),
         );
-        return;
+        return Ok(());
     }
     let surface_id = shop_cursor_surface_id(shop);
     let cursor_index = strict_readonly_cursor_index(
@@ -8403,19 +10620,12 @@ fn push_visible_shop_dialog_entries(
         shop.inventory.len(),
     );
     entries.push(compact_scene_label(
-        &format!(
-            "{} {} ${}",
-            shop.mart_type, shop.mart_id, snapshot.trainer.money
-        ),
+        &format!("BUY {}", format_price(snapshot.trainer.money)),
         SCENE_DIALOG_TEXT_CHARS,
     ));
-    let Some(cursor_index) = cursor_index else {
-        entries.push(compact_scene_label(
-            &format!("INVALID CURSOR {surface_id}"),
-            SCENE_DIALOG_TEXT_CHARS,
-        ));
-        return;
-    };
+    let cursor_index = cursor_index.with_context(|| {
+        format!("shop buy menu is open without a valid nonempty cursor for {surface_id}")
+    })?;
     entries.extend(
         windowed_index_range(cursor_index, shop.inventory.len()).map(|index| {
             let item = &shop.inventory[index];
@@ -8426,13 +10636,14 @@ fn push_visible_shop_dialog_entries(
             )
         }),
     );
+    Ok(())
 }
 
 fn spawn_shell_status_banner(commands: &mut Commands, runtime_shell: &BevyRuntimeShell) {
     let Some(message) = shell_status_banner_text(runtime_shell) else {
         return;
     };
-    spawn_shell_banner(commands, message, Color::rgb(0.98, 0.96, 0.82));
+    spawn_shell_banner(commands, message, Color::srgb(0.98, 0.96, 0.82));
 }
 
 fn spawn_shell_error_banner(commands: &mut Commands, runtime_shell: &BevyRuntimeShell) {
@@ -8442,7 +10653,7 @@ fn spawn_shell_error_banner(commands: &mut Commands, runtime_shell: &BevyRuntime
     spawn_shell_banner(
         commands,
         format!("ERR {}", compact_scene_label(error, 72)),
-        Color::rgb(1.0, 0.82, 0.68),
+        Color::srgb(1.0, 0.82, 0.68),
     );
 }
 
@@ -8452,7 +10663,7 @@ fn spawn_shell_banner(commands: &mut Commands, message: String, text_color: Colo
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(0.03, 0.04, 0.05, 0.82),
+                color: Color::srgba(0.03, 0.04, 0.05, 0.82),
                 custom_size: Some(Vec2::new(TILE_SIZE * 13.2, TILE_SIZE * 0.86)),
                 ..default()
             },
@@ -8529,7 +10740,7 @@ fn spawn_audio_status_label(commands: &mut Commands, runtime_shell: &BevyRuntime
                 label,
                 TextStyle {
                     font_size: 12.0,
-                    color: Color::rgb(0.82, 0.94, 1.0),
+                    color: Color::srgb(0.82, 0.94, 1.0),
                     ..default()
                 },
             ),
@@ -8561,7 +10772,7 @@ fn spawn_map_status_label(commands: &mut Commands, snapshot: &RuntimeShellSnapsh
                 label,
                 TextStyle {
                     font_size: 12.0,
-                    color: Color::rgb(0.92, 0.96, 0.86),
+                    color: Color::srgb(0.92, 0.96, 0.86),
                     ..default()
                 },
             ),
@@ -8595,7 +10806,7 @@ fn spawn_map_connection_labels(commands: &mut Commands, map: &crate::RuntimeMapC
                 label,
                 TextStyle {
                     font_size: 10.5,
-                    color: Color::rgb(0.78, 0.88, 0.96),
+                    color: Color::srgb(0.78, 0.88, 0.96),
                     ..default()
                 },
             ),
@@ -8631,6 +10842,22 @@ fn visible_field_command_entries(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
 ) -> Result<Vec<String>> {
+    if let Some(printer) = runtime_shell.visible_unown_printer.as_ref() {
+        let form = if printer.selected < 26 {
+            char::from(b'A' + printer.selected).to_string()
+        } else {
+            "VACANT".to_string()
+        };
+        return Ok(vec![
+            " ALPH RUINS STAMP".to_string(),
+            form,
+            "A PRINT".to_string(),
+            "B CANCEL".to_string(),
+            "← PREVIOUS".to_string(),
+            "→ NEXT".to_string(),
+            "Do what?".to_string(),
+        ]);
+    }
     if let Some(game) = runtime_shell.visible_card_flip.as_ref() {
         return Ok(vec![
             "CARD FLIP".to_string(),
@@ -8751,6 +10978,9 @@ fn visible_field_command_entries(
     if runtime_shell.bill_pc_box_cursor.is_some() {
         return visible_bill_pc_box_entries(snapshot, runtime_shell);
     }
+    if runtime_shell.decoration_menu.is_some() {
+        return visible_decoration_command_entries(runtime_shell);
+    }
     if runtime_shell.player_pc_action_cursor.is_some() {
         let actions = visible_player_pc_actions(runtime_shell);
         let selected = strict_readonly_cursor_index(
@@ -8778,29 +11008,29 @@ fn visible_field_command_entries(
     }
     if runtime_shell.mailbox_cursor.is_some() {
         let mut entries = Vec::new();
-        push_visible_mailbox_dialog_entries(&mut entries, snapshot, runtime_shell);
+        push_visible_mailbox_dialog_entries(&mut entries, snapshot, runtime_shell)?;
         return Ok(entries);
     }
     if runtime_shell.start_menu_cursor.is_some() {
         return visible_start_menu_entries(runtime_shell);
     }
     if visible_field_pack_is_open(runtime_shell) {
-        return Ok(visible_field_pack_entries(snapshot, runtime_shell));
+        return visible_field_pack_entries(snapshot, runtime_shell);
     }
     if runtime_shell.party_menu_open {
-        return Ok(visible_party_menu_entries(snapshot, runtime_shell));
+        return visible_party_menu_entries(snapshot, runtime_shell);
     }
     if runtime_shell.pokedex_menu_open {
-        return Ok(visible_pokedex_menu_entries(snapshot, runtime_shell));
+        return visible_pokedex_menu_entries(snapshot, runtime_shell);
     }
     if runtime_shell.pokegear_menu_open {
-        return Ok(visible_pokegear_menu_entries(snapshot, runtime_shell));
+        return visible_pokegear_menu_entries(snapshot, runtime_shell);
     }
     if runtime_shell.trainer_card_open {
         return Ok(visible_trainer_card_entries(snapshot, runtime_shell));
     }
     if runtime_shell.options_menu_open {
-        return Ok(visible_options_menu_entries(snapshot, runtime_shell));
+        return visible_options_menu_entries(snapshot, runtime_shell);
     }
     if runtime_shell.save_menu_open {
         return Ok(Vec::new());
@@ -8809,6 +11039,52 @@ fn visible_field_command_entries(
         return Ok(visible_special_boundary_entries(runtime_shell));
     }
     visible_field_idle_entries(snapshot, runtime_shell)
+}
+
+fn visible_decoration_command_entries(
+    runtime_shell: &BevyRuntimeShell,
+) -> Result<Vec<String>> {
+    let phase = &runtime_shell
+        .decoration_menu
+        .as_ref()
+        .context("decoration entries require an active menu")?
+        .phase;
+    let (labels, selected) = match phase {
+        VisibleDecorationMenuPhase::Categories { categories, cursor } => (
+            categories
+                .iter()
+                .map(|category| visible_decoration_category_label(*category).to_string())
+                .chain(std::iter::once("EXIT".to_string()))
+                .collect::<Vec<_>>(),
+            cursor.option_index,
+        ),
+        VisibleDecorationMenuPhase::Decorations {
+            decorations,
+            cursor,
+            ..
+        } => (
+            decorations
+                .iter()
+                .map(|decoration| decoration.display_name.clone())
+                .chain(["PUT IT AWAY".to_string(), "CANCEL".to_string()])
+                .collect::<Vec<_>>(),
+            cursor.option_index,
+        ),
+        VisibleDecorationMenuPhase::Side { cursor, .. } => (
+            vec![
+                "RIGHT SIDE".to_string(),
+                "LEFT SIDE".to_string(),
+                "CANCEL".to_string(),
+            ],
+            cursor.option_index,
+        ),
+    };
+    anyhow::ensure!(selected < labels.len(), "decoration menu cursor is invalid");
+    Ok(labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| format!("{}{}", if index == selected { ">" } else { " " }, label))
+        .collect())
 }
 
 fn visible_bill_pc_action_entries(runtime_shell: &BevyRuntimeShell) -> Result<Vec<String>> {
@@ -8844,30 +11120,39 @@ fn visible_bill_pc_box_entries(
         crate::core::models::MAX_PC_BOXES,
     )
     .context("Bill's PC box menu is open without a valid cursor")?;
-    Ok(
+    let mut entries: Vec<String> =
         windowed_index_range(selected, crate::core::models::MAX_PC_BOXES)
-            .map(|index| {
-                let (name, count) = snapshot
+            .map(|index| -> Result<String> {
+                let pc_box = snapshot
                     .storage
                     .boxes
                     .iter()
                     .find(|pc_box| pc_box.index == index)
-                    .map(|pc_box| (pc_box.name.as_str(), pc_box.count))
-                    .unwrap_or(("BOX", 0));
-                compact_scene_label(
+                    .with_context(|| format!("Bill's PC box {index} is missing from storage"))?;
+                Ok(compact_scene_label(
                     &format!(
                         "{}{} {} {}/{}",
                         if index == selected { ">" } else { " " },
                         index + 1,
-                        name,
-                        count,
+                        pc_box.name,
+                        pc_box.count,
                         crate::core::models::MAX_BOX_MONS
                     ),
                     SCENE_DIALOG_TEXT_CHARS,
-                )
+                ))
             })
-            .collect(),
-    )
+            .collect::<Result<Vec<_>>>()?;
+    if let Some(cursor) = runtime_shell.bill_pc_box_action_cursor.as_ref() {
+        let action = strict_readonly_cursor_index(&Some(cursor.clone()), "pc:bill-box-actions", 4)
+            .context("Bill's PC box action cursor is invalid")?;
+        entries.extend(
+            ["SWITCH", "NAME", "PRINT", "QUIT"]
+                .iter()
+                .enumerate()
+                .map(|(index, label)| format!("{}{}", if index == action { ">" } else { " " }, label)),
+        );
+    }
+    Ok(entries)
 }
 
 fn visible_field_idle_entries(

@@ -6,6 +6,7 @@ import { exportFieldEncounters } from "./export-field-encounters";
 import { exportFishing } from "./export-fishing";
 import { exportFieldMoves } from "./export-field-moves";
 import { exportFieldBoxItems } from "./export-field-box-items";
+import { exportDecorations } from "./export-decorations";
 import { exportFlyDestinations } from "./export-fly-destinations";
 import { exportBattleRewardRules } from "./export-battle-reward-rules";
 import { exportBattleEscapeRules } from "./export-battle-escape-rules";
@@ -64,6 +65,7 @@ export function exportCoreData(): void {
   const fishing = exportFishing();
   const fieldMoves = exportFieldMoves();
   const fieldBoxItems = exportFieldBoxItems();
+  const decorations = exportDecorations();
   const flyDestinations = exportFlyDestinations();
   const battleRewardRules = exportBattleRewardRules();
   const battleEscapeRules = exportBattleEscapeRules();
@@ -132,6 +134,7 @@ export function exportCoreData(): void {
     fishing,
     fieldMoves,
     fieldBoxItems,
+    decorations,
     flyDestinations,
     battleRewardRules,
     battleEscapeRules,

@@ -204,6 +204,7 @@ export function updateEnumsFileContent(enumsContent: string, newEnumStr: string)
 export function parseMoves(movesFilePath: string): Record<string, Move> {
   const movesMap: Record<string, Move> = {};
   const content = fs.readFileSync(movesFilePath, "utf8");
+  let sourceIndex = 0;
   for (const [lineIndex, rawLine] of content.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line.startsWith("move")) continue;
@@ -212,6 +213,7 @@ export function parseMoves(movesFilePath: string): Record<string, Move> {
       throw new Error(`Could not parse move row ${lineIndex + 1} in ${movesFilePath}: ${line}`);
     }
     const name = parts[0].replace("move ", "");
+    sourceIndex += 1;
     let effect = parts[1].replace("EFFECT_", "");
     let stat: Move["stat"] = null;
     let amount: Move["amount"] = null;
@@ -227,6 +229,7 @@ export function parseMoves(movesFilePath: string): Record<string, Move> {
       }
     }
     movesMap[name] = {
+      source_index: sourceIndex,
       name: name as Move["name"],
       type: parts[3] as Move["type"],
       power: Number.parseInt(parts[2], 10),

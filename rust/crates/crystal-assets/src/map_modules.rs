@@ -333,6 +333,22 @@ impl CompiledModpack {
             },
         )
     }
+
+    pub fn write_browser_game_pack(&self, path: impl AsRef<Path>) -> Result<()> {
+        write_compiled_game_pack_with_pcm_sidecars(
+            path,
+            &CompiledGamePack {
+                format_version: COMPILED_GAME_PACK_FORMAT_VERSION,
+                data: self.data.clone(),
+                compiled_audio: self.compiled_audio.clone(),
+                audio_manifest: self.audio_manifest.clone(),
+                audio_compression: None,
+                runtime_files: self.runtime_files.clone(),
+                report: self.report.clone(),
+                identity: self.identity.clone(),
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

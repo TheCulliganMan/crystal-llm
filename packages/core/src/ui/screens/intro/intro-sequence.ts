@@ -1474,6 +1474,11 @@ export class IntroSequence {
     this.clearTilemap();
     this.clearSprites();
     this.drawTilemap("background", this.bgMap0);
+    // ASM zeroes both hardware scroll registers after loading the forest BG.
+    // Without this, stale vertical scroll makes valid tiles appear in the
+    // wrong rows as Suicune runs through the scene.
+    this.hSCX = 0;
+    this.hSCY = 0;
     this.audioEngine.playMusic("MUSIC_CRYSTAL_OPENING", "intro");
     // ASM: engine/movie/intro.asm::IntroScene13 uses `depixel 13, 11, 4, 0`.
     // macros/gfx.asm::depixel is x tile, y tile, x pixel, y pixel.

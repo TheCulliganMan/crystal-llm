@@ -1,7 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::models::pokemon::StatExperience;
-use crate::models::{Party, Pokemon, calculate_stats};
+use crate::models::pokemon::{CaughtData, StatExperience};
+use crate::models::{Party, Pokemon, calculate_stats, pokemon_species_display_name};
+use crate::random::{CrystalRandom, DividerSource};
 use crate::state::GameState;
 use crate::systems::experience::{ExperienceError, GrowthRateCatalog};
 
@@ -90,6 +91,12 @@ pub enum StepEventError {
     InvalidRules { issue: StepEventRulesIssue },
     #[error("day-care experience calculation failed: {error}")]
     DayCareExperience { error: ExperienceError },
+    #[error("day-care divider source failed: {message}")]
+    DayCareDivider { message: String },
+    #[error("egg caught location {location} exceeds Crystal's seven-bit field")]
+    InvalidCaughtLocation { location: u16 },
+    #[error("an egg hatch requires the current map's exact caught landmark")]
+    MissingCaughtLocation,
 }
 
 pub fn step_event_rules_issues(rules: &StepEventRules) -> Vec<StepEventRulesIssue> {
@@ -154,8 +161,15 @@ pub struct StepEventResult {
     pub repel_expired: Option<String>,
     pub egg_hatched: bool,
     pub hatched_species: Option<String>,
+    pub hatched_party_index: Option<usize>,
     pub poison_result: Option<PoisonDamageResult>,
     pub happiness_changed: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EggHatchResult {
+    pub party_index: usize,
+    pub species_id: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,11 +193,12 @@ pub fn process_step(
     }
 
     if counters.step_count == rules.egg_step_trigger {
-        if let Some(hatched_species) = process_egg_step(rules, party) {
+        if let Some(hatch) = process_egg_step(rules, party) {
             return StepEventResult {
                 repel_expired: None,
                 egg_hatched: true,
-                hatched_species: Some(hatched_species),
+                hatched_species: Some(hatch.species_id),
+                hatched_party_index: Some(hatch.party_index),
                 poison_result: None,
                 happiness_changed,
             };
@@ -195,6 +210,7 @@ pub fn process_step(
         repel_expired: None,
         egg_hatched: false,
         hatched_species: None,
+        hatched_party_index: None,
         poison_result,
         happiness_changed,
     }
@@ -209,11 +225,34 @@ pub fn process_step_checked(
     Ok(process_step(rules, counters, party))
 }
 
-pub fn process_overworld_step(
+pub fn process_overworld_step<S>(
     state: &mut GameState,
     rules: &StepEventRules,
     growth_rates: &GrowthRateCatalog,
-) -> Result<StepEventResult, StepEventError> {
+    caught_location: Option<u16>,
+    rng: &mut CrystalRandom<S>,
+) -> Result<StepEventResult, StepEventError>
+where
+    S: DividerSource,
+    S::Error: std::fmt::Display,
+{
+    if caught_location.is_some_and(|location| location > 0x7f) {
+        return Err(StepEventError::InvalidCaughtLocation {
+            location: caught_location.expect("checked present caught location"),
+        });
+    }
+    let hatch_ready_on_this_step = state.repel_steps_remaining != 1
+        && state.step_events.step_count.wrapping_add(1) == rules.egg_step_trigger
+        && state
+            .storage
+            .party
+            .pokemon
+            .iter()
+            .flatten()
+            .any(|pokemon| is_egg(rules, pokemon) && pokemon.happiness == 1);
+    if hatch_ready_on_this_step && caught_location.is_none() {
+        return Err(StepEventError::MissingCaughtLocation);
+    }
     if state.repel_steps_remaining > 0 {
         let expired = state.tick_repel_step_after_movement();
         if let Some(item_id) = expired {
@@ -236,26 +275,57 @@ pub fn process_overworld_step(
     }
 
     if state.step_events.step_count == rules.egg_step_trigger {
-        if let Some(hatched_species) = process_egg_step(rules, &mut state.storage.party) {
+        if let Some(hatch) = process_egg_step(rules, &mut state.storage.party) {
+            let caught_location = caught_location.expect("hatch-ready preflight requires location");
+            let pokemon = state.storage.party.pokemon[hatch.party_index]
+                .as_mut()
+                .expect("egg hatch result points at occupied party slot");
+            pokemon.caught_data = Some(CaughtData {
+                level: 1,
+                time_of_day: Some(state.time.time_of_day),
+                original_trainer_gender: state.player_gender,
+                location: caught_location as u8,
+            });
+            pokemon.original_trainer_id = state.player_id;
+            pokemon.original_trainer_name = state.player_name.clone();
+            state.pokedex.record_caught_pokemon(pokemon);
+            if hatch.species_id == "TOGEPI" {
+                state
+                    .flags
+                    .set_event_flag("EVENT_TOGEPI_HATCHED", true)
+                    .expect("canonical Togepi hatch event flag is valid");
+            }
             state.sync_party_from_storage();
             return Ok(StepEventResult {
                 repel_expired: None,
                 egg_hatched: true,
-                hatched_species: Some(hatched_species),
+                hatched_species: Some(hatch.species_id),
+                hatched_party_index: Some(hatch.party_index),
                 poison_result: None,
                 happiness_changed,
             });
         }
     }
 
-    crate::systems::special_routines::advance_day_care_step(state, growth_rates)
-        .map_err(|error| StepEventError::DayCareExperience { error })?;
+    crate::systems::special_routines::advance_day_care_step(state, growth_rates, rng).map_err(
+        |error| match error {
+            crate::systems::special_routines::DayCareStepError::Experience(error) => {
+                StepEventError::DayCareExperience { error }
+            }
+            crate::systems::special_routines::DayCareStepError::Divider(error) => {
+                StepEventError::DayCareDivider {
+                    message: error.to_string(),
+                }
+            }
+        },
+    )?;
     let poison_result =
         process_poison_step(rules, &mut state.step_events, &mut state.storage.party);
     let result = StepEventResult {
         repel_expired: None,
         egg_hatched: false,
         hatched_species: None,
+        hatched_party_index: None,
         poison_result,
         happiness_changed,
     };
@@ -263,13 +333,19 @@ pub fn process_overworld_step(
     Ok(result)
 }
 
-pub fn process_overworld_step_checked(
+pub fn process_overworld_step_checked<S>(
     state: &mut GameState,
     rules: &StepEventRules,
     growth_rates: &GrowthRateCatalog,
-) -> Result<StepEventResult, StepEventError> {
+    caught_location: Option<u16>,
+    rng: &mut CrystalRandom<S>,
+) -> Result<StepEventResult, StepEventError>
+where
+    S: DividerSource,
+    S::Error: std::fmt::Display,
+{
     require_step_event_rules(rules)?;
-    process_overworld_step(state, rules, growth_rates)
+    process_overworld_step(state, rules, growth_rates, caught_location, rng)
 }
 
 pub fn apply_happiness_step(
@@ -297,8 +373,11 @@ pub fn apply_happiness_step(
     changed
 }
 
-pub fn process_egg_step(rules: &StepEventRules, party: &mut Party) -> Option<String> {
-    for pokemon in party.pokemon.iter_mut().flatten() {
+pub fn process_egg_step(rules: &StepEventRules, party: &mut Party) -> Option<EggHatchResult> {
+    for (party_index, pokemon) in party.pokemon.iter_mut().enumerate() {
+        let Some(pokemon) = pokemon else {
+            continue;
+        };
         if !is_egg(rules, pokemon) {
             continue;
         }
@@ -318,11 +397,21 @@ pub fn process_egg_step(rules: &StepEventRules, party: &mut Party) -> Option<Str
                 },
             );
             pokemon.is_egg = false;
-            pokemon.nickname = species_id.clone();
+            pokemon.nickname = pokemon_species_display_name(&species_id);
             pokemon.happiness = rules.hatched_egg_happiness;
+            pokemon.status = None;
+            pokemon.sleep_turns = 0;
             pokemon.max_hp = stats.max_hp;
             pokemon.hp = stats.max_hp;
-            return Some(species_id);
+            pokemon.attack = stats.attack;
+            pokemon.defense = stats.defense;
+            pokemon.speed = stats.speed;
+            pokemon.special_attack = stats.special_attack;
+            pokemon.special_defense = stats.special_defense;
+            return Some(EggHatchResult {
+                party_index,
+                species_id,
+            });
         }
     }
     None
@@ -621,9 +710,33 @@ mod tests {
         let result = process_step(&rules(), &mut counters, &mut party);
         assert_eq!(result.egg_hatched, true);
         assert_eq!(result.hatched_species, Some("TOGEPI".to_string()));
+        assert_eq!(result.hatched_party_index, Some(0));
         let pokemon = party.pokemon[0].as_ref().expect("pokemon");
         assert_eq!(pokemon.nickname, "TOGEPI");
         assert_eq!(pokemon.happiness, rules().hatched_egg_happiness);
+        assert_eq!(pokemon.status, None);
+        pokemon.validate_saved_state().expect("exact hatch stats");
+    }
+
+    #[test]
+    fn egg_hatch_initializes_the_exact_display_name_when_nickname_is_declined() {
+        let mut egg = pokemon("FARFETCH_D");
+        egg.is_egg = true;
+        egg.nickname = rules().egg_nickname;
+        egg.happiness = 1;
+        let mut party = party_with(vec![(0, egg)]);
+        let mut counters = StepEventCounters {
+            step_count: 0x7f,
+            ..StepEventCounters::default()
+        };
+
+        let result = process_step(&rules(), &mut counters, &mut party);
+
+        assert_eq!(result.hatched_species.as_deref(), Some("FARFETCH_D"));
+        assert_eq!(
+            party.pokemon[0].as_ref().expect("hatched Pokemon").nickname,
+            "FARFETCH'D"
+        );
     }
 
     #[test]
@@ -718,11 +831,15 @@ mod tests {
         state.step_events.poison_step_count = 3;
         state.repel_steps_remaining = 1;
         state.active_repel_item = Some("REPEL".to_string());
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
 
         let result = process_overworld_step(
             &mut state,
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
+            Some(0),
+            &mut rng,
         )
         .expect("overworld step");
 
@@ -737,10 +854,123 @@ mod tests {
             &mut state,
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
+            Some(0),
+            &mut rng,
         )
         .expect("overworld step");
         assert_eq!(state.repel_steps_remaining, 0);
         assert_eq!(state.active_repel_item, None);
+    }
+
+    #[test]
+    fn overworld_hatch_applies_exact_owner_caught_pokedex_and_story_state() {
+        let mut state = GameState::default();
+        state.player_name = "KRIS".to_string();
+        state.player_id = 0x1234;
+        state.player_gender = 1;
+        state.time.time_of_day = crate::world::encounters::TimeOfDay::Night;
+        state.step_events.step_count = 0x7f;
+        let mut egg = pokemon("TOGEPI");
+        egg.is_egg = true;
+        egg.nickname = rules().egg_nickname;
+        egg.status = Some("EGG".to_string());
+        egg.sleep_turns = 5;
+        egg.happiness = 1;
+        egg.original_trainer_name = "DAY_CARE".to_string();
+        egg.original_trainer_id = 0xbeef;
+        state.storage.party.pokemon[2] = Some(egg);
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+
+        let result = process_overworld_step(
+            &mut state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+            Some(0x2a),
+            &mut rng,
+        )
+        .expect("overworld hatch");
+
+        assert_eq!(result.hatched_species.as_deref(), Some("TOGEPI"));
+        assert_eq!(result.hatched_party_index, Some(2));
+        let hatched = state.storage.party.pokemon[2]
+            .as_ref()
+            .expect("hatched mon");
+        assert!(!hatched.is_egg);
+        assert_eq!(hatched.status, None);
+        assert_eq!(hatched.sleep_turns, 0);
+        assert_eq!(hatched.original_trainer_name, "KRIS");
+        assert_eq!(hatched.original_trainer_id, 0x1234);
+        assert_eq!(
+            hatched.caught_data,
+            Some(CaughtData {
+                level: 1,
+                time_of_day: Some(crate::world::encounters::TimeOfDay::Night),
+                original_trainer_gender: 1,
+                location: 0x2a,
+            })
+        );
+        hatched.validate_saved_state().expect("exact hatch stats");
+        assert!(state.pokedex.has_seen("TOGEPI"));
+        assert!(state.pokedex.has_caught("TOGEPI"));
+        assert!(
+            state
+                .flags
+                .is_event_flag_set("EVENT_TOGEPI_HATCHED")
+                .expect("valid event flag")
+        );
+        assert_eq!(
+            state.party.pokemon[2].as_ref().expect("party sync").species,
+            "TOGEPI"
+        );
+    }
+
+    #[test]
+    fn overworld_step_rejects_caught_location_outside_crystal_field_before_mutation() {
+        let mut state = GameState::default();
+        let before = state.clone();
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+
+        let error = process_overworld_step(
+            &mut state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+            Some(0x80),
+            &mut rng,
+        )
+        .expect_err("seven-bit caught location must be enforced");
+
+        assert_eq!(
+            error,
+            StepEventError::InvalidCaughtLocation { location: 0x80 }
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn overworld_hatch_requires_exact_map_landmark_before_decrementing_egg() {
+        let mut state = GameState::default();
+        state.step_events.step_count = 0x7f;
+        let mut egg = pokemon("TOGEPI");
+        egg.is_egg = true;
+        egg.happiness = 1;
+        state.storage.party.pokemon[0] = Some(egg);
+        let before = state.clone();
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+
+        let error = process_overworld_step(
+            &mut state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+            None,
+            &mut rng,
+        )
+        .expect_err("hatch must not invent a caught landmark");
+
+        assert_eq!(error, StepEventError::MissingCaughtLocation);
+        assert_eq!(state, before);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::models::pokemon::CaughtData;
 use crate::models::{
     CaptureStorageLocation, Dv, Item, MAX_PC_BOXES, Move, Pokemon, PokemonBuildError,
     PokemonSpecies, PokemonStorage, create_pokemon_from_known_dvs,
@@ -95,6 +96,7 @@ pub struct GiftPokemonRequest {
     pub nickname: Option<String>,
     pub original_trainer_name: String,
     pub original_trainer_id: u16,
+    pub caught_data: Option<CaughtData>,
     #[serde(deserialize_with = "required_gift_label_token")]
     pub source_script: String,
     pub command_index: usize,
@@ -118,6 +120,7 @@ impl<'de> Deserialize<'de> for GiftPokemonRequest {
             nickname: Option<String>,
             original_trainer_name: String,
             original_trainer_id: u16,
+            caught_data: Option<CaughtData>,
             #[serde(deserialize_with = "required_gift_label_token")]
             source_script: String,
             command_index: usize,
@@ -134,6 +137,7 @@ impl<'de> Deserialize<'de> for GiftPokemonRequest {
             nickname: raw.nickname,
             original_trainer_name: raw.original_trainer_name,
             original_trainer_id: raw.original_trainer_id,
+            caught_data: raw.caught_data,
             source_script: raw.source_script,
             command_index: raw.command_index,
             egg: raw.egg,
@@ -398,6 +402,7 @@ pub fn give_gift_pokemon(
     .map_err(|error| GiftPokemonError::PokemonBuild { error })?;
     pokemon.original_trainer_name = request.original_trainer_name.clone();
     pokemon.original_trainer_id = request.original_trainer_id;
+    pokemon.caught_data = request.caught_data.clone();
     pokemon.item = request.held_item_id.clone();
     if let Some(nickname) = request.nickname.as_deref() {
         pokemon.nickname = nickname.to_string();
@@ -580,6 +585,7 @@ mod tests {
             nickname: None,
             original_trainer_name: "PLAYER".to_string(),
             original_trainer_id: 1234,
+            caught_data: None,
             source_script: "GiftScript".to_string(),
             command_index: 4,
             egg: false,

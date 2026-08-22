@@ -55,17 +55,12 @@ fn real_pack_battle_tower_loads_canonical_roster_and_party() {
             )
             .expect("add Battle Tower party member");
     }
+    shell.session_mut().state_mut().battle_tower.level_group = 1;
     shell
-        .apply_battle_tower_action(
-            "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
-            Some(1),
-            None,
-        )
+        .apply_battle_tower_action("BATTLETOWERACTION_SAVELEVELGROUP".to_string())
         .expect("select level group");
     shell
         .load_battle_tower_opponent_special(
-            "caller_supplied_id".to_string(),
-            "caller_supplied_sprite".to_string(),
             "OBJECT_EVENT_1".to_string(),
         )
         .expect("load canonical Battle Tower opponent");
@@ -622,7 +617,8 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextOne);
         assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[1]);
     }
-    finish_current_oak_intro_page_for_test(&mut runtime_shell);
+    press_visible_oak_intro_a_button(&mut runtime_shell)
+        .expect("revealing the final OakText2 page must enter the cry without another prompt");
     {
         let oak_intro = runtime_shell
             .pending_oak_intro
@@ -630,7 +626,8 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
             .expect("Wooper cry phase pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::Cry);
         assert!(!oak_intro.wooper_cry_queued);
-        assert!(oak_intro.current_text.is_empty());
+        assert_eq!(oak_intro.current_text, "#MON.");
+        assert!(!oak_intro.waiting_for_input);
     }
     assert!(
         !runtime_shell
@@ -665,8 +662,18 @@ fn oak_intro_queues_wooper_cry_from_pack_metadata() {
             .expect("Wooper text-two pending");
         assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextTwo);
         assert!(oak_intro.wooper_cry_queued);
-        assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[2]);
+        assert_eq!(oak_intro.current_text, "#MON.");
+        assert!(oak_intro.waiting_for_input);
     }
+
+    press_visible_oak_intro_b_button(&mut runtime_shell)
+        .expect("ASM prompt button accepts B without skipping Oak intro");
+    let oak_intro = runtime_shell
+        .pending_oak_intro
+        .as_ref()
+        .expect("Oak intro must remain open after the Wooper prompt");
+    assert_eq!(oak_intro.scene_phase, VisibleOakIntroPhase::TextTwo);
+    assert_eq!(oak_intro.current_text, VISIBLE_OAK_INTRO_SCENES[1].2[2]);
 }
 
 #[test]
@@ -838,6 +845,8 @@ fn player_name_entry_renders_real_naming_screen_assets() {
     assert_eq!(image.texture_descriptor.size.height, 144);
     assert_eq!(frame.size, Vec2::new(160.0, 144.0));
     assert_eq!(name_entry_screen_center(), Vec3::ZERO);
+    assert_eq!(&image.data[0..4], &[222, 255, 222, 255]);
+    assert_eq!(&image.data[(161 * 4)..(162 * 4)], &[107, 107, 107, 255]);
     assert_opaque_nonblack_lcd_pixels(&image.data, "name entry");
     assert!(
         image

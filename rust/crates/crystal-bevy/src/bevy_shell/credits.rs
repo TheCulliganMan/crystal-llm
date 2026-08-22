@@ -526,6 +526,50 @@ fn confirm_visible_name_choice(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     let Some(choice) = runtime_shell.pending_name_choice.take() else {
         return handle_visible_no_player_name_input(runtime_shell, "choice-confirm");
     };
+    if runtime_shell.pending_egg_hatch_nickname.is_some() {
+        if choice.selected == 0 {
+            let default_name = runtime_shell
+                .pending_egg_hatch_nickname
+                .as_ref()
+                .context("egg hatch nickname choice lost its pending Pokemon")?
+                .default_name
+                .clone();
+            runtime_shell.pending_name_input = Some(PendingNameInput {
+                label: "NAME YOUR POKéMON?".to_string(),
+                value: default_name,
+                max_length: 10,
+                cursor_column: 0,
+                cursor_row: 0,
+                case: NameInputCase::Upper,
+            });
+            set_shell_action_status(runtime_shell, "POKEMON NAME");
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
+        return finish_visible_egg_hatch_nickname(runtime_shell, None);
+    }
+    if runtime_shell.pending_gift_pokemon_nickname.is_some() {
+        if choice.selected == 0 {
+            let default_name = runtime_shell
+                .pending_gift_pokemon_nickname
+                .as_ref()
+                .context("gift nickname choice lost its pending gift")?
+                .default_name
+                .clone();
+            runtime_shell.pending_name_input = Some(PendingNameInput {
+                label: "NAME YOUR POKéMON?".to_string(),
+                value: default_name,
+                max_length: 10,
+                cursor_column: 0,
+                cursor_row: 0,
+                case: NameInputCase::Upper,
+            });
+            set_shell_action_status(runtime_shell, "POKEMON NAME");
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
+        return finish_visible_gift_pokemon_nickname(runtime_shell, None);
+    }
     if runtime_shell.pending_standard_capture.is_some() {
         if choice.selected == 0 {
             let default_name = runtime_shell
@@ -629,6 +673,251 @@ fn apply_visible_name_input_keys(
         run_bevy_action(runtime_shell, move_visible_player_name_cursor_to_end);
         return;
     }
+}
+
+const MAIL_INPUT_COLUMNS: usize = 10;
+const MAIL_INPUT_ROWS: usize = 6;
+const MAIL_INPUT_MESSAGE_LENGTH: usize = 32;
+const MAIL_INPUT_LINE_LENGTH: usize = 16;
+
+fn apply_visible_mail_input_keys(
+    keys: &ButtonInput<KeyCode>,
+    runtime_shell: &mut BevyRuntimeShell,
+) {
+    let shift_pressed = keys.pressed(KeyCode::ShiftRight);
+    let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if alt_pressed || ctrl_pressed {
+        return;
+    }
+    let action = if keys.just_pressed(KeyCode::ArrowLeft) {
+        Some((-1, 0))
+    } else if keys.just_pressed(KeyCode::ArrowRight) {
+        Some((1, 0))
+    } else if keys.just_pressed(KeyCode::ArrowUp) {
+        Some((0, -1))
+    } else if keys.just_pressed(KeyCode::ArrowDown) {
+        Some((0, 1))
+    } else {
+        None
+    };
+    if let Some((dx, dy)) = action {
+        run_bevy_action(runtime_shell, |shell| move_visible_mail_cursor(shell, dx, dy));
+        return;
+    }
+    if keys.just_pressed(KeyCode::ShiftRight) {
+        run_bevy_action(runtime_shell, toggle_visible_mail_case);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyZ) && !shift_pressed {
+        run_bevy_action(runtime_shell, select_visible_mail_grid_key);
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyX) && !shift_pressed {
+        run_bevy_action(runtime_shell, delete_visible_mail_character);
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) {
+        run_bevy_action(runtime_shell, |shell| {
+            let input = shell
+                .pending_mail_input
+                .as_mut()
+                .context("no Mail composer is open")?;
+            input.cursor_row = MAIL_INPUT_ROWS - 1;
+            input.cursor_column = 9;
+            record_visible_runtime_action(shell, "party:mail:start:end")
+        });
+    }
+}
+
+fn visible_mail_input_layout(case: NameInputCase) -> &'static [&'static str; 6] {
+    match case {
+        NameInputCase::Upper => &[
+            "A B C D E F G H I J",
+            "K L M N O P Q R S T",
+            "U V W X Y Z   , ? !",
+            "1 2 3 4 5 6 7 8 9 0",
+            "<PK> <MN> <PO> <KE> é ♂ ♀ ¥ … ×",
+            "lower  DEL   END   ",
+        ],
+        NameInputCase::Lower => &[
+            "a b c d e f g h i j",
+            "k l m n o p q r s t",
+            "u v w x y z   . - /",
+            "'d 'l 'm 'r 's 't 'v & ( )",
+            "“ ” [ ] ' : ;       ",
+            "UPPER  DEL   END   ",
+        ],
+    }
+}
+
+fn visible_mail_input_row_chars(case: NameInputCase, row: usize) -> [Option<char>; 10] {
+    let text = match (case, row) {
+        (NameInputCase::Upper, 0) => "ABCDEFGHIJ",
+        (NameInputCase::Upper, 1) => "KLMNOPQRST",
+        (NameInputCase::Upper, 2) => "UVWXYZ ,?!",
+        (NameInputCase::Upper, 3) => "1234567890",
+        (NameInputCase::Upper, 4) => "\u{e105}\u{e106}\u{e108}\u{e109}é♂♀¥…×",
+        (NameInputCase::Lower, 0) => "abcdefghij",
+        (NameInputCase::Lower, 1) => "klmnopqrst",
+        (NameInputCase::Lower, 2) => "uvwxyz .-/",
+        (NameInputCase::Lower, 3) => "\u{e120}\u{e121}\u{e122}\u{e123}\u{e124}\u{e125}\u{e126}&()",
+        (NameInputCase::Lower, 4) => "“”[]':;   ",
+        _ => "          ",
+    };
+    let mut row_chars = [None; 10];
+    for (index, character) in text.chars().take(10).enumerate() {
+        row_chars[index] = Some(character);
+    }
+    row_chars
+}
+
+fn visible_mail_bottom_group(column: usize) -> usize {
+    if column < 3 { 0 } else if column < 6 { 1 } else { 2 }
+}
+
+fn move_visible_mail_cursor(
+    runtime_shell: &mut BevyRuntimeShell,
+    dx: isize,
+    dy: isize,
+) -> Result<()> {
+    let input = runtime_shell
+        .pending_mail_input
+        .as_ref()
+        .context("no Mail composer is open")?;
+    let mut row = input.cursor_row;
+    let mut column = input.cursor_column;
+    if dy != 0 {
+        row = (row as isize + dy).rem_euclid(MAIL_INPUT_ROWS as isize) as usize;
+    }
+    if dx != 0 {
+        if row == MAIL_INPUT_ROWS - 1 {
+            let group = visible_mail_bottom_group(column);
+            let next_group = (group as isize + dx).rem_euclid(3) as usize;
+            column = next_group * 3;
+        } else {
+            column = (column as isize + dx).rem_euclid(MAIL_INPUT_COLUMNS as isize) as usize;
+        }
+    }
+    record_visible_runtime_action(runtime_shell, format!("party:mail:cursor:{row}:{column}"))?;
+    let input = runtime_shell
+        .pending_mail_input
+        .as_mut()
+        .context("no Mail composer is open")?;
+    input.cursor_row = row;
+    input.cursor_column = column;
+    Ok(())
+}
+
+fn toggle_visible_mail_case(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    record_visible_runtime_action(runtime_shell, "party:mail:case")?;
+    let input = runtime_shell
+        .pending_mail_input
+        .as_mut()
+        .context("no Mail composer is open")?;
+    input.case = match input.case {
+        NameInputCase::Upper => NameInputCase::Lower,
+        NameInputCase::Lower => NameInputCase::Upper,
+    };
+    Ok(())
+}
+
+fn select_visible_mail_grid_key(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let (row, column, case) = runtime_shell
+        .pending_mail_input
+        .as_ref()
+        .map(|input| (input.cursor_row, input.cursor_column, input.case))
+        .context("no Mail composer is open")?;
+    record_visible_runtime_action(runtime_shell, format!("party:mail:grid:{row}:{column}"))?;
+    if row == MAIL_INPUT_ROWS - 1 {
+        return match visible_mail_bottom_group(column) {
+            0 => toggle_visible_mail_case(runtime_shell),
+            1 => delete_visible_mail_character(runtime_shell),
+            _ => confirm_visible_mail_input(runtime_shell),
+        };
+    }
+    let Some(character) = visible_mail_input_row_chars(case, row)[column] else {
+        return Ok(());
+    };
+    let input = runtime_shell
+        .pending_mail_input
+        .as_mut()
+        .context("no Mail composer is open")?;
+    if input.value.chars().count() < MAIL_INPUT_MESSAGE_LENGTH {
+        input.value.push(character);
+        if input.value.chars().count() == MAIL_INPUT_MESSAGE_LENGTH {
+            input.cursor_row = MAIL_INPUT_ROWS - 1;
+            input.cursor_column = 9;
+        }
+    }
+    Ok(())
+}
+
+fn delete_visible_mail_character(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    record_visible_runtime_action(runtime_shell, "party:mail:delete")?;
+    runtime_shell
+        .pending_mail_input
+        .as_mut()
+        .context("no Mail composer is open")?
+        .value
+        .pop();
+    Ok(())
+}
+
+fn confirm_visible_mail_input(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let input = runtime_shell
+        .pending_mail_input
+        .take()
+        .context("no Mail composer is open")?;
+    let mut glyphs = input.value.chars();
+    let first = glyphs
+        .by_ref()
+        .take(MAIL_INPUT_LINE_LENGTH)
+        .collect::<String>();
+    let second = glyphs.collect::<String>();
+    let message = if second.is_empty() {
+        first
+    } else {
+        format!("{first}\n{second}")
+    };
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("party:mail:confirm:{}:{}", input.party_index, input.item_id),
+    )?;
+    let transfer = runtime_shell.shell.compose_bag_mail_to_party(
+        &input.item_id,
+        input.party_index,
+        message,
+    )?;
+    runtime_shell.party_held_item_give_target = None;
+    runtime_shell.held_item_swap_prompt = false;
+    runtime_shell.yes_no_cursor = None;
+    close_visible_field_pack_without_log(runtime_shell);
+    runtime_shell.battle_pack_target_mode = None;
+    runtime_shell.field_notice = Some(format!(
+        "Made party #{} hold {}.",
+        input.party_index, transfer.item_id
+    ));
+    runtime_shell.last_audio_events.push(format!(
+        "composed Mail item={} party_index={} checksum={:?}",
+        transfer.item_id, input.party_index, transfer.state_checksum
+    ));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    mark_runtime_snapshot_dirty(runtime_shell);
+    continue_visible_script_after_prompt(runtime_shell)
+}
+
+fn close_visible_mail_read(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let mail = runtime_shell
+        .pending_mail_read
+        .take()
+        .context("no Mail reader is open")?;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("mail:read:close:{}", mail.mail.mail_type),
+    )?;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
 }
 
 fn apply_visible_name_input_smoke_char(
@@ -1009,6 +1298,39 @@ fn confirm_visible_player_name_input(runtime_shell: &mut BevyRuntimeShell) -> Re
         runtime_shell.pending_name_input = Some(input);
         anyhow::bail!("player name must be exact");
     }
+    if input.label == "BOX NAME?" {
+        let box_index = strict_readonly_cursor_index(
+            &runtime_shell.bill_pc_box_cursor,
+            "pc:bill-boxes",
+            crate::core::models::MAX_PC_BOXES,
+        )
+        .context("box naming screen lost its selected PC box")?;
+        let snapshot = runtime_shell.shell.snapshot()?;
+        let old_name = snapshot
+            .storage
+            .boxes
+            .iter()
+            .find(|pc_box| pc_box.index == box_index)
+            .map(|pc_box| pc_box.name.clone())
+            .with_context(|| format!("selected PC box {box_index} is missing"))?;
+        let name = if input.value.is_empty() {
+            old_name
+        } else {
+            input.value
+        };
+        record_visible_runtime_action(
+            runtime_shell,
+            format!("pc:bill:box_name:{box_index}:{name}"),
+        )?;
+        let named = runtime_shell.shell.name_pc_box(box_index, name)?;
+        runtime_shell.last_audio_events.push(format!(
+            "named PC box {} {}->{} checksum={:?}",
+            named.box_index, named.previous_name, named.name, named.state_checksum
+        ));
+        set_shell_action_status(runtime_shell, "CHOOSE A BOX");
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
     if input.label == "RIVAL'S NAME?" {
         let rival_name = if input.value.is_empty() {
             "SILVER".to_string()
@@ -1053,26 +1375,24 @@ fn confirm_visible_player_name_input(runtime_shell: &mut BevyRuntimeShell) -> Re
             "name rater outcome={:?} checksum={:?}",
             special.outcome.effect, special.state_checksum
         ));
-        runtime_shell.special_boundary_queue.clear();
-        runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-            label: "NameRaterNamedText".to_string(),
-            details: vec![format!("All right. This\nPOKéMON is now\nnamed {nickname}.")],
-        });
-        runtime_shell
-            .special_boundary_queue
-            .push_back(SpecialBoundaryDisplay {
-                label: if nickname == old_nickname {
-                    "NameRaterSameNameText"
-                } else {
-                    "NameRaterFinishedText"
-                }
-                .to_string(),
-                details: vec![if nickname == old_nickname {
-                    "It might look the\nsame as before,\nbut this new name\nis much better!\n\nWell done!".to_string()
-                } else {
-                    "That's a better\nname than before!\n\nWell done!".to_string()
-                }],
-            });
+        let mut boundaries = visible_exported_special_text_boundaries_with_buffer(
+            runtime_shell,
+            "NameRaterNamedText",
+            "_NameRaterNamedText",
+            Some(&nickname),
+        )?;
+        let (completion_label, completion_target) = if nickname == old_nickname {
+            ("NameRaterSameNameText", "_NameRaterSameNameText")
+        } else {
+            ("NameRaterFinishedText", "_NameRaterFinishedText")
+        };
+        boundaries.extend(visible_exported_special_text_boundaries(
+            runtime_shell,
+            completion_label,
+            completion_target,
+        )?);
+        runtime_shell.special_boundary = boundaries.pop_front();
+        runtime_shell.special_boundary_queue = boundaries;
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -1089,7 +1409,55 @@ fn confirm_visible_player_name_input(runtime_shell: &mut BevyRuntimeShell) -> Re
         };
         return finish_visible_capture_nickname(runtime_shell, Some(nickname));
     }
+    if let Some(pending) = runtime_shell.pending_egg_hatch_nickname.as_ref() {
+        let nickname = if input.value.is_empty() {
+            pending.default_name.clone()
+        } else {
+            input.value
+        };
+        return finish_visible_egg_hatch_nickname(runtime_shell, Some(nickname));
+    }
+    if let Some(pending) = runtime_shell.pending_gift_pokemon_nickname.as_ref() {
+        let nickname = if input.value.is_empty() {
+            pending.default_name.clone()
+        } else {
+            input.value
+        };
+        return finish_visible_gift_pokemon_nickname(runtime_shell, Some(nickname));
+    }
     apply_visible_player_name(runtime_shell, input.value)
+}
+
+fn finish_visible_egg_hatch_nickname(
+    runtime_shell: &mut BevyRuntimeShell,
+    nickname: Option<String>,
+) -> Result<()> {
+    let pending = runtime_shell
+        .pending_egg_hatch_nickname
+        .take()
+        .context("no hatched Pokemon is awaiting a nickname")?;
+    if let Some(nickname) = nickname.as_ref() {
+        let renamed = runtime_shell
+            .shell
+            .rename_party_pokemon(pending.party_index, nickname.clone())?;
+        runtime_shell.last_audio_events.push(format!(
+            "hatched Pokemon nickname party_index={} name={} checksum={:?}",
+            pending.party_index, nickname, renamed.state_checksum
+        ));
+    }
+    record_visible_runtime_action(
+        runtime_shell,
+        format!(
+            "overworld:egg_hatch_nickname:{}:{}",
+            pending.party_index,
+            nickname.as_deref().unwrap_or("declined")
+        ),
+    )?;
+    runtime_shell.pending_name_input = None;
+    runtime_shell.pending_name_choice = None;
+    queue_visible_current_music(runtime_shell)?;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
 }
 
 fn finish_visible_capture_nickname(
@@ -1162,20 +1530,6 @@ fn reset_visible_music_state(runtime_shell: &mut BevyRuntimeShell) {
     clear_pending_music_commands(&mut runtime_shell.pending_audio);
 }
 
-fn visible_script_surface_option_count(
-    snapshot: &RuntimeShellSnapshot,
-    runtime_shell: &BevyRuntimeShell,
-) -> Option<usize> {
-    if has_visible_elevator_prompt(snapshot, runtime_shell) {
-        return Some(visible_elevator_option_count(snapshot, runtime_shell).max(1));
-    }
-    let gift_count = visible_gift_pokemon_prompt_options(snapshot, runtime_shell).len();
-    if gift_count > 0 {
-        return Some(gift_count);
-    }
-    None
-}
-
 fn elevator_surface_id(source_script: &str, command_index: usize) -> String {
     format!("ui:elevators:{source_script}:{command_index}")
 }
@@ -1216,36 +1570,6 @@ fn visible_elevator_option_count(
         .sum()
 }
 
-fn gift_pokemon_surface_id(source_script: &str, command_index: usize) -> String {
-    format!("ui:gift-pokemon:{source_script}:{command_index}")
-}
-
-fn visible_gift_pokemon_prompt_options<'a>(
-    snapshot: &'a RuntimeShellSnapshot,
-    runtime_shell: &BevyRuntimeShell,
-) -> Vec<&'a RuntimeGiftPokemonSnapshot> {
-    let Some(cursor) = runtime_shell.gift_pokemon_cursor.as_ref() else {
-        return Vec::new();
-    };
-    snapshot
-        .ui
-        .gift_pokemon
-        .iter()
-        .filter(|gift| {
-            gift.map_name == snapshot.overworld.map_name
-                && gift_pokemon_surface_id(&gift.source_script, gift.command_index)
-                    == cursor.surface_id
-        })
-        .collect()
-}
-
-fn has_visible_gift_pokemon_prompt(
-    snapshot: &RuntimeShellSnapshot,
-    runtime_shell: &BevyRuntimeShell,
-) -> bool {
-    !visible_gift_pokemon_prompt_options(snapshot, runtime_shell).is_empty()
-}
-
 fn selected_visible_elevator_option(
     runtime_shell: &mut BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
@@ -1276,47 +1600,20 @@ fn selected_visible_elevator_option(
 
 fn move_visible_elevator_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isize) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let option_count = visible_elevator_option_count(&snapshot, runtime_shell);
-    if option_count == 0 {
-        return handle_visible_no_elevator_prompt(runtime_shell, "move");
-    }
     let surface_id = runtime_shell
         .elevator_cursor
         .as_ref()
         .map(|cursor| cursor.surface_id.clone())
         .context("elevator prompt requires a cursor surface")?;
+    let option_count = visible_elevator_option_count(&snapshot, runtime_shell);
+    if option_count == 0 {
+        anyhow::bail!(
+            "retained elevator surface {surface_id} has no matching compiled floors on map {}",
+            snapshot.overworld.map_name
+        );
+    }
     move_visible_cursor_slot(
         &mut runtime_shell.elevator_cursor,
-        surface_id,
-        option_count,
-        delta,
-        &mut runtime_shell.last_audio_events,
-    )
-}
-
-fn move_visible_gift_pokemon_cursor(
-    runtime_shell: &mut BevyRuntimeShell,
-    delta: isize,
-) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    let option_count = visible_gift_pokemon_prompt_options(&snapshot, runtime_shell).len();
-    if option_count == 0 {
-        runtime_shell.gift_pokemon_cursor = None;
-        record_visible_runtime_action(runtime_shell, "ui:gift_pokemon:move:none_visible")?;
-        runtime_shell
-            .last_audio_events
-            .push("no compiled gift Pokemon prompt is visible".to_string());
-        set_shell_action_status(runtime_shell, "NO GIFT POKEMON");
-        trim_event_log(&mut runtime_shell.last_audio_events);
-        return Ok(());
-    }
-    let surface_id = runtime_shell
-        .gift_pokemon_cursor
-        .as_ref()
-        .map(|cursor| cursor.surface_id.clone())
-        .context("gift Pokemon prompt requires a cursor surface")?;
-    move_visible_cursor_slot(
-        &mut runtime_shell.gift_pokemon_cursor,
         surface_id,
         option_count,
         delta,
@@ -1509,11 +1806,12 @@ fn move_visible_battle_action_cursor_axis(
         // Forced replacement is a one-entry boundary, not the 2x2 menu.
         return move_visible_battle_action_cursor(runtime_shell, 0);
     }
-    let current = visible_cursor_index(
-        &mut runtime_shell.battle_action_cursor,
+    let current = strict_readonly_cursor_index(
+        &runtime_shell.battle_action_cursor,
         "battle:actions",
         actions.len(),
-    );
+    )
+    .context("battle action menu has no valid cursor")?;
     let (row, column) = (current / 2, current % 2);
     let next = match axis {
         BattleMenuAxis::Horizontal => {
@@ -1579,7 +1877,12 @@ fn move_visible_regular_party_menu_cursor(
         return Ok(());
     }
     let row_count = normal_visible_party_menu_row_count(&snapshot);
-    let current = runtime_shell.party_cursor.min(row_count - 1);
+    anyhow::ensure!(
+        runtime_shell.party_cursor < row_count,
+        "party cursor {} is outside {row_count} Pokemon/CANCEL rows",
+        runtime_shell.party_cursor
+    );
+    let current = runtime_shell.party_cursor;
     let next = wrapped_index(current, row_count, delta);
     runtime_shell.party_cursor = next;
     runtime_shell.party_action_cursor = None;
@@ -1609,9 +1912,13 @@ fn move_visible_party_slot_cursor(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let current = runtime_shell
-        .party_cursor
-        .min(snapshot.party.slots.len() - 1);
+    anyhow::ensure!(
+        runtime_shell.party_cursor < snapshot.party.slots.len(),
+        "party cursor {} is outside {} Pokemon rows",
+        runtime_shell.party_cursor,
+        snapshot.party.slots.len()
+    );
+    let current = runtime_shell.party_cursor;
     let next = if delta.is_negative() {
         current
             .checked_sub(delta.unsigned_abs())
@@ -1641,7 +1948,7 @@ fn party_menu_cursor_label(snapshot: &RuntimeShellSnapshot, cursor: usize) -> St
     }
 }
 
-fn normalize_visible_party_cursor(
+fn initialize_visible_party_cursor(
     runtime_shell: &mut BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) {
@@ -1651,9 +1958,10 @@ fn normalize_visible_party_cursor(
         runtime_shell.party_switch_cursor = None;
         return;
     }
-    let last_slot = snapshot.party.slots.len() - 1;
-    if runtime_shell.party_cursor > last_slot {
-        runtime_shell.party_cursor = last_slot;
+    if runtime_shell.party_cursor >= snapshot.party.slots.len() {
+        // InitPartyMenuWithCancel/NoCancel use wPartyMenuCursor only when it
+        // is in 1..=wPartyCount; zero or an out-of-range value starts at row 1.
+        runtime_shell.party_cursor = 0;
         runtime_shell.party_action_cursor = None;
         runtime_shell.party_switch_cursor = None;
     }
@@ -1664,8 +1972,18 @@ fn selected_party_index(runtime_shell: &mut BevyRuntimeShell) -> Result<usize> {
     if snapshot.party.slots.is_empty() {
         anyhow::bail!("party is empty");
     }
-    normalize_visible_party_cursor(runtime_shell, &snapshot);
-    Ok(snapshot.party.slots[runtime_shell.party_cursor].index)
+    snapshot
+        .party
+        .slots
+        .get(runtime_shell.party_cursor)
+        .map(|slot| slot.index)
+        .with_context(|| {
+            format!(
+                "party cursor {} is outside {} Pokemon rows",
+                runtime_shell.party_cursor,
+                snapshot.party.slots.len()
+            )
+        })
 }
 
 fn selected_party_move_slot(
@@ -1682,11 +2000,12 @@ fn selected_party_move_slot(
     if slot.pokemon.moves.is_empty() {
         anyhow::bail!("selected party index {party_index} has no moves");
     }
-    Ok(visible_cursor_index(
-        &mut runtime_shell.party_move_cursor,
+    strict_readonly_cursor_index(
+        &runtime_shell.party_move_cursor,
         &party_move_cursor_surface_id(party_index),
         slot.pokemon.moves.len(),
-    ))
+    )
+    .context("selected party move cursor is invalid")
 }
 
 fn selected_pending_move_learn_replacement_slot(
@@ -1714,11 +2033,12 @@ fn selected_pending_move_learn_replacement_slot(
             pending.party_index
         );
     }
-    Ok(visible_cursor_index(
-        &mut runtime_shell.party_move_cursor,
+    strict_readonly_cursor_index(
+        &runtime_shell.party_move_cursor,
         &party_move_cursor_surface_id(pending.party_index),
         slot.pokemon.moves.len() + 1,
-    ))
+    )
+    .context("pending move-learn move-or-CANCEL cursor is invalid")
 }
 
 fn open_visible_move_learn_decision(
@@ -1896,9 +2216,13 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
             runtime_shell
                 .last_audio_events
                 .push(format!("move learn cannot forget HM {move_id}"));
-            runtime_shell
-                .battle_messages
-                .push_back("HM moves can't be\nforgotten now.".to_string());
+            runtime_shell.battle_messages.extend(visible_move_learning_text_pages(
+                runtime_shell,
+                "_MoveCantForgetHMText",
+                "",
+                "",
+                move_id,
+            )?);
             set_shell_action_status(runtime_shell, "HM MOVES CAN'T BE FORGOTTEN NOW");
             trim_event_log(&mut runtime_shell.last_audio_events);
             return Ok(());
@@ -1908,7 +2232,6 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
     let resolution = &outcome.resolution;
     let recipient_name = visible_party_pokemon_name(runtime_shell, resolution.party_index)?;
     let snapshot = runtime_shell.shell.snapshot()?;
-    let learned_move_name = battle_move_display_name(&snapshot, &resolution.learned_move);
     let replaced_move_name = resolution
         .replaced_move
         .as_deref()
@@ -1925,27 +2248,12 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
         resolution.learned_move,
         resolution.replaced_move
     ));
-    runtime_shell
-        .battle_messages
-        .push_back("1, 2 and…".to_string());
-    runtime_shell
-        .battle_messages
-        .push_back("Poof!".to_string());
-    runtime_shell.battle_messages.push_back(format!(
-        "{} forgot\n{}.",
-        recipient_name, replaced_move_name
-    ));
-    runtime_shell
-        .battle_messages
-        .push_back("And…".to_string());
-    let learned_message = format!(
-        "{} learned\n{}!",
-        recipient_name, learned_move_name
-    );
-    runtime_shell
-        .battle_fanfare_messages
-        .push_back(learned_message.clone());
-    runtime_shell.battle_messages.push_back(learned_message);
+    install_visible_move_learn_result_sequence(
+        runtime_shell,
+        &recipient_name,
+        Some(&replaced_move_name),
+        &resolution.learned_move,
+    )?;
     push_visible_deferred_evolution_events(
         runtime_shell,
         outcome.deferred_evolution.as_ref(),
@@ -1957,7 +2265,10 @@ fn replace_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
         visible_pending_move_learn_resolution_status("LEARNED", &outcome),
     );
     trim_event_log(&mut runtime_shell.last_audio_events);
-    continue_visible_script_after_prompt(runtime_shell)
+    // The source sequence owns two automatic text pauses and remains the
+    // active presentation until its final learned-move page is acknowledged.
+    // `close_visible_special_boundary` resumes any suspended script then.
+    Ok(())
 }
 
 fn decline_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -1965,8 +2276,6 @@ fn decline_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
     let outcome = runtime_shell.shell.decline_pending_move_learn()?;
     let resolution = &outcome.resolution;
     let recipient_name = visible_party_pokemon_name(runtime_shell, resolution.party_index)?;
-    let snapshot = runtime_shell.shell.snapshot()?;
-    let learned_move_name = battle_move_display_name(&snapshot, &resolution.learned_move);
     runtime_shell.party_move_cursor = None;
     runtime_shell.move_learn_decision_cursor = None;
     runtime_shell.move_learn_decision = None;
@@ -1975,11 +2284,13 @@ fn decline_visible_pending_move_learn(runtime_shell: &mut BevyRuntimeShell) -> R
         "pending move learn declined party_index={} learned={}",
         resolution.party_index, resolution.learned_move
     ));
-    runtime_shell.battle_messages.push_back(format!(
-        "{}\ndid not learn\n{}.",
-        recipient_name,
-        learned_move_name
-    ));
+    runtime_shell.battle_messages.extend(visible_move_learning_text_pages(
+        runtime_shell,
+        "_DidNotLearnMoveText",
+        &recipient_name,
+        &recipient_name,
+        &resolution.learned_move,
+    )?);
     push_visible_deferred_evolution_events(
         runtime_shell,
         outcome.deferred_evolution.as_ref(),
@@ -2028,7 +2339,6 @@ fn push_visible_deferred_evolution_events(
         return Ok(());
     };
     let recipient_name = visible_party_pokemon_name(runtime_shell, party_index)?;
-    let snapshot = runtime_shell.shell.snapshot()?;
     if let Some(target_species) = evolution.target_species.as_ref() {
         let evolving_message = format!("What? {} is evolving!", recipient_name);
         let evolved_message = format!(
@@ -2038,17 +2348,14 @@ fn push_visible_deferred_evolution_events(
         );
         runtime_shell.battle_messages.push_back(evolving_message.clone());
         runtime_shell.battle_messages.push_back(evolved_message.clone());
-        let pending_move_messages = evolution
-            .pending_move_learns
-            .iter()
-            .map(|learned| {
-                format!(
-                    "{} is\ntrying to learn\n{}.",
-                    recipient_name,
-                    battle_move_display_name(&snapshot, &learned.name)
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut pending_move_messages = Vec::new();
+        for learned in &evolution.pending_move_learns {
+            pending_move_messages.extend(visible_pending_move_learn_intro_pages(
+                runtime_shell,
+                &recipient_name,
+                &learned.name,
+            )?);
+        }
         if evolution.cancel_snapshot.is_some() {
             runtime_shell.battle_evolution_cancellations.push_back(
                 VisibleEvolutionCancellation {
@@ -2071,11 +2378,13 @@ fn push_visible_deferred_evolution_events(
             .push(format!("deferred evolution evolved {target_species}"));
     }
     for learned in &evolution.pending_move_learns {
-        let move_name = battle_move_display_name(&snapshot, &learned.name);
-        runtime_shell.battle_messages.push_back(format!(
-            "{} is\ntrying to learn\n{}.",
-            recipient_name, move_name
-        ));
+        runtime_shell.battle_messages.extend(
+            visible_pending_move_learn_intro_pages(
+                runtime_shell,
+                &recipient_name,
+                &learned.name,
+            )?,
+        );
         runtime_shell.last_audio_events.push(format!(
             "deferred evolution pending move learn {}",
             learned.name
@@ -2387,7 +2696,7 @@ fn move_visible_fly_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isize) -
     move_visible_cursor_slot(
         &mut runtime_shell.fly_cursor,
         "fly:destinations".to_string(),
-        active_fly_destinations(&snapshot, &runtime_shell.shell).len(),
+        active_fly_destinations(&snapshot, &runtime_shell.shell)?.len(),
         delta,
         &mut runtime_shell.last_audio_events,
     )
@@ -2583,11 +2892,12 @@ fn selected_current_box_slot_index(runtime_shell: &mut BevyRuntimeShell) -> Resu
     } else {
         current_box.slots.len()
     };
-    let slot_offset = visible_cursor_index(
-        &mut runtime_shell.storage_cursor,
+    let slot_offset = strict_readonly_cursor_index(
+        &runtime_shell.storage_cursor,
         &surface_id,
         option_count,
-    );
+    )
+    .with_context(|| format!("PC storage surface {surface_id} is active without a valid cursor"))?;
     if runtime_shell.bill_pc_move_open {
         Ok(slot_offset)
     } else {
@@ -2606,11 +2916,12 @@ fn selected_pc_move_slot_index(runtime_shell: &mut BevyRuntimeShell) -> Result<u
     } else {
         count.max(1)
     };
-    Ok(visible_cursor_index(
-        &mut runtime_shell.storage_cursor,
+    strict_readonly_cursor_index(
+        &runtime_shell.storage_cursor,
         pc_move_party_surface_id(),
         option_count,
-    ))
+    )
+    .context("PC MOVE party surface pc:move-party is active without a valid cursor")
 }
 
 fn current_storage_box(snapshot: &RuntimeShellSnapshot) -> Result<&crate::RuntimePcBoxSnapshot> {
@@ -2654,7 +2965,7 @@ fn move_visible_sell_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isize) 
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    move_visible_cursor_slot(
+    move_visible_mart_cursor_slot(
         &mut runtime_shell.sell_cursor,
         "sell:bag".to_string(),
         sellable.len(),
@@ -2708,11 +3019,12 @@ fn move_visible_2d_menu_cursor(
 ) -> Result<()> {
     let rows = target.rows.context("2D menu is missing its row count")?;
     let columns = target.columns.context("2D menu is missing its column count")?;
-    let current = visible_cursor_index(
-        &mut runtime_shell.menu_cursor,
+    let current = strict_readonly_cursor_index(
+        &runtime_shell.menu_cursor,
         &target.surface_id,
         target.option_count,
-    );
+    )
+    .with_context(|| format!("2D menu {} has no valid cursor", target.surface_id))?;
     let row = current / columns;
     let column = current % columns;
     let (next_row, next_column) = if horizontal {
@@ -2737,13 +3049,43 @@ fn move_visible_shop_buy_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isi
     let Some(shop) = snapshot.pending_shop else {
         return handle_visible_no_active_shop(runtime_shell, "buy_cursor");
     };
-    move_visible_cursor_slot(
+    move_visible_mart_cursor_slot(
         &mut runtime_shell.menu_cursor,
         shop_cursor_surface_id(&shop),
         shop.inventory.len(),
         delta,
         &mut runtime_shell.last_audio_events,
     )
+}
+
+/// Mart lists stop at their first and last entries. Unlike ordinary vertical
+/// menus, the TypeScript/ASM mart flow does not wrap the cursor on Up/Down.
+fn move_visible_mart_cursor_slot(
+    cursor_slot: &mut Option<MenuCursor>,
+    surface_id: String,
+    option_count: usize,
+    delta: isize,
+    event_log: &mut Vec<String>,
+) -> Result<()> {
+    if option_count == 0 {
+        anyhow::bail!("{surface_id} has no selectable options");
+    }
+    let current = strict_readonly_cursor_index(cursor_slot, &surface_id, option_count)
+        .with_context(|| format!("menu {surface_id} has no valid cursor"))?;
+    let next = if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize).min(option_count - 1)
+    };
+    *cursor_slot = Some(MenuCursor {
+        surface_id,
+        option_index: next,
+    });
+    if next != current {
+        event_log.push(format!("cursor {}->{}", current + 1, next + 1));
+        trim_event_log(event_log);
+    }
+    Ok(())
 }
 
 fn move_visible_cursor_for_surface(
@@ -2771,7 +3113,8 @@ fn move_visible_cursor_slot(
     if option_count == 0 {
         anyhow::bail!("{surface_id} has no selectable options");
     }
-    let current = visible_cursor_index(cursor_slot, &surface_id, option_count);
+    let current = strict_readonly_cursor_index(cursor_slot, &surface_id, option_count)
+        .with_context(|| format!("menu {surface_id} has no valid cursor"))?;
     let next = if delta.is_negative() {
         current
             .checked_sub(delta.unsigned_abs())
@@ -2819,28 +3162,32 @@ fn active_menu_target(
     let Some(menu) = &snapshot.ui.menu else {
         anyhow::bail!("no active menu");
     };
-    if let Some(cursor) = cursor {
-        if let Some(vertical) = menu
-            .layout
-            .vertical_menus
-            .iter()
-            .find(|vertical| vertical_menu_surface_id(menu, vertical) == cursor.surface_id)
-        {
-            if vertical.options.is_empty() {
-                anyhow::bail!("menu {} vertical menu has no options", menu.menu_id);
-            }
-            return Ok(ActiveMenuTarget {
-                surface_id: cursor.surface_id.clone(),
-                option_count: vertical.options.len(),
-                two_dimensional: vertical.two_dimensional,
-                rows: vertical.rows,
-                columns: vertical.columns,
-            });
-        }
+    active_menu_target_from_live_cursor(menu, cursor)
+}
+
+fn active_menu_target_from_live_cursor(
+    menu: &crate::RuntimeMenuSnapshot,
+    cursor: &Option<MenuCursor>,
+) -> Result<ActiveMenuTarget> {
+    let cursor = cursor
+        .as_ref()
+        .with_context(|| format!("menu {} is active without a live cursor", menu.menu_id))?;
+    let vertical = menu
+        .layout
+        .vertical_menus
+        .iter()
+        .find(|vertical| vertical_menu_surface_id(menu, vertical) == cursor.surface_id)
+        .with_context(|| {
+            format!(
+                "menu {} has no vertical surface {}",
+                menu.menu_id, cursor.surface_id
+            )
+        })?;
+    if vertical.options.is_empty() {
+        anyhow::bail!("menu {} vertical menu has no options", menu.menu_id);
     }
-    let vertical = first_selectable_vertical_menu(menu)?;
     Ok(ActiveMenuTarget {
-        surface_id: vertical_menu_surface_id(menu, vertical),
+        surface_id: cursor.surface_id.clone(),
         option_count: vertical.options.len(),
         two_dimensional: vertical.two_dimensional,
         rows: vertical.rows,
@@ -2862,17 +3209,19 @@ fn selected_vertical_menu<'a>(
     menu: &'a crate::RuntimeMenuSnapshot,
     cursor: &Option<MenuCursor>,
 ) -> Result<&'a crate::RuntimeVerticalMenuSnapshot> {
-    if let Some(cursor) = cursor {
-        if let Some(vertical) = menu
-            .layout
-            .vertical_menus
-            .iter()
-            .find(|vertical| vertical_menu_surface_id(menu, vertical) == cursor.surface_id)
-        {
-            return Ok(vertical);
-        }
-    }
-    first_selectable_vertical_menu(menu)
+    let cursor = cursor
+        .as_ref()
+        .with_context(|| format!("menu {} is active without a live cursor", menu.menu_id))?;
+    menu.layout
+        .vertical_menus
+        .iter()
+        .find(|vertical| vertical_menu_surface_id(menu, vertical) == cursor.surface_id)
+        .with_context(|| {
+            format!(
+                "menu {} has no vertical surface {}",
+                menu.menu_id, cursor.surface_id
+            )
+        })
 }
 
 fn vertical_menu_surface_id(
@@ -2917,36 +3266,17 @@ fn visible_local_link_descriptor(
 }
 
 fn explicit_script_runtime_inputs(
-    runtime_shell: &BevyRuntimeShell,
+    _runtime_shell: &BevyRuntimeShell,
     command: &str,
-    args: &[String],
+    _args: &[String],
     _command_index: usize,
 ) -> Result<ScriptRuntimeInputs> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    let (random_value, rng_seed_after) = if command == "random" {
-        let bound_token = args
-            .first()
-            .with_context(|| "compiled random command is missing bound argument")?;
-        let bound = bound_token
-            .parse::<u32>()
-            .with_context(|| format!("compiled random bound '{bound_token}' is not a u32"))?;
-        if bound == 0 {
-            anyhow::bail!("compiled random command has zero bound");
-        }
-        let mut rng = Random::new_crystal(snapshot.progression.rng_seed);
-        let value = rng.randrange(bound);
-        (Some(value), Some(rng.seed()))
-    } else {
-        (None, None)
-    };
     let game_version = if command == "checkver" {
         Some("0".to_string())
     } else {
         None
     };
     Ok(ScriptRuntimeInputs {
-        random_value,
-        rng_seed_after,
         game_version,
         ..ScriptRuntimeInputs::default()
     })
@@ -3346,14 +3676,55 @@ fn take_visible_pending_map_load(runtime_shell: &mut BevyRuntimeShell) -> Result
     let request = runtime_shell
         .shell
         .take_pending_script_request(RuntimePendingScriptRequestKind::MapLoad)?;
-    let reload_current_map = matches!(
+    let RuntimePendingScriptRequest::MapLoad(load) = &request else {
+        anyhow::bail!("pending map-load request resolved to a different request kind");
+    };
+    let reload_current_map = matches!(load.command.as_str(), "reloadmap" | "reloadmapafterbattle");
+    let map_setup = if reload_current_map {
+        "MAPSETUP_RELOADMAP"
+    } else {
+        load.map_setup
+            .as_deref()
+            .with_context(|| format!("{} is missing its map setup", load.command))?
+    };
+    map_setup_callback_kinds(map_setup)
+        .with_context(|| format!("unknown map setup callback path {map_setup}"))?;
+    let new_map_load = matches!(
         &request,
-        RuntimePendingScriptRequest::MapLoad(load)
-            if matches!(
-                load.command.as_str(),
-                "reloadmap" | "reloadmappart" | "reloadmapafterbattle"
-            )
+        RuntimePendingScriptRequest::MapLoad(load) if load.command == "newloadmap"
     );
+    if new_map_load {
+        if runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_field_travel
+            .is_some()
+        {
+            let committed = runtime_shell.shell.commit_pending_field_travel()?;
+            runtime_shell.last_audio_events.push(format!(
+                "newloadmap committed field travel move={} destination={} tile=({}, {})",
+                committed.move_id,
+                committed.destination_map,
+                committed.destination_tile.x,
+                committed.destination_tile.y
+            ));
+        } else if runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_script_warp
+            .is_some()
+        {
+            let warp = runtime_shell.shell.execute_pending_script_warp()?;
+            runtime_shell.last_audio_events.push(format!(
+                "newloadmap committed staged warp destination={} tile=({}, {})",
+                warp.target_map, warp.tile.x, warp.tile.y
+            ));
+        }
+    }
     let reload_return_cursor = reload_current_map
         .then(|| visible_active_compiled_script_cursor(runtime_shell))
         .flatten();
@@ -3364,15 +3735,12 @@ fn take_visible_pending_map_load(runtime_shell: &mut BevyRuntimeShell) -> Result
     if reload_current_map {
         // MAPSETUP_RELOADMAP preserves the live object buffer and does not
         // run the map's scene, NEWMAP, OBJECTS, or CMDQUEUE callbacks. Its
-        // LoadBlockData step invokes only MAPCALLBACK_TILES.
+        // LoadBlockData and LoadMapGraphics steps invoke TILES then SPRITES.
         runtime_shell.pending_scene_script = None;
-        runtime_shell.map_callback_return_cursor = None;
         runtime_shell.map_reload_return_cursor = reload_return_cursor;
-        runtime_shell.pending_map_callbacks = visible_current_map_callback_scripts(
-            runtime_shell,
-            Some("MAPCALLBACK_TILES"),
-        )?;
-        take_next_visible_map_callback(runtime_shell)?;
+        runtime_shell
+            .shell
+            .apply_current_map_setup_callbacks(map_setup)?;
         continue_visible_script_after_prompt(runtime_shell)?;
         runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::MapReloadFadeIn);
         runtime_shell.screen_fade = Some(VisibleScreenFade::new(
@@ -3381,8 +3749,13 @@ fn take_visible_pending_map_load(runtime_shell: &mut BevyRuntimeShell) -> Result
             8,
         ));
     } else {
+        if matches!(map_setup, "MAPSETUP_BADWARP" | "MAPSETUP_LINKRETURN") {
+            runtime_shell
+                .shell
+                .apply_current_map_setup_callbacks(map_setup)?;
+        }
         arm_visible_current_scene_script(runtime_shell, "map_load")?;
-        arm_visible_current_map_callbacks(runtime_shell, "map_load")?;
+        take_visible_pending_scene_script(runtime_shell)?;
     }
     queue_visible_current_music(runtime_shell)?;
     if !reload_current_map {
@@ -3399,15 +3772,8 @@ fn take_visible_pending_map_refresh(runtime_shell: &mut BevyRuntimeShell) -> Res
     runtime_shell
         .last_audio_events
         .push(format!("took pending map refresh {:?}", request));
-    runtime_shell.map_callback_return_cursor = visible_active_compiled_script_cursor(runtime_shell);
-    runtime_shell.active_script_cursor = None;
-    runtime_shell.pending_map_callbacks.clear();
-    runtime_shell.pending_scene_script = None;
-    runtime_shell.script_command_cursor = 0;
     reset_visible_selection_cursors(runtime_shell);
-    arm_visible_current_map_callbacks(runtime_shell, "map_refresh")?;
     continue_visible_script_after_prompt(runtime_shell)?;
-    queue_visible_current_music(runtime_shell)?;
     Ok(())
 }
 
@@ -3430,74 +3796,4 @@ fn arm_visible_current_scene_script(
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
-}
-
-fn arm_visible_current_map_callbacks(
-    runtime_shell: &mut BevyRuntimeShell,
-    reason: &str,
-) -> Result<()> {
-    arm_visible_current_map_callbacks_of_kind(runtime_shell, reason, None, true)
-}
-
-fn arm_visible_current_map_callbacks_of_kind(
-    runtime_shell: &mut BevyRuntimeShell,
-    reason: &str,
-    callback_kind: Option<&str>,
-    take_scene_when_empty: bool,
-) -> Result<()> {
-    let map_name = runtime_shell.shell.current_map_name().to_string();
-    runtime_shell.pending_map_callbacks =
-        visible_current_map_callback_scripts(runtime_shell, callback_kind)?;
-    if runtime_shell.pending_map_callbacks.is_empty() {
-        runtime_shell
-            .last_audio_events
-            .push(format!("map callbacks none map={map_name} reason={reason}"));
-        trim_event_log(&mut runtime_shell.last_audio_events);
-        return if take_scene_when_empty {
-            take_visible_pending_scene_script(runtime_shell)
-        } else {
-            Ok(())
-        };
-    }
-    runtime_shell.last_audio_events.push(format!(
-        "map callbacks armed map={} reason={} count={}",
-        map_name,
-        reason,
-        runtime_shell.pending_map_callbacks.len()
-    ));
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    take_next_visible_map_callback(runtime_shell)
-}
-
-fn visible_current_map_callback_scripts(
-    runtime_shell: &BevyRuntimeShell,
-    callback_kind: Option<&str>,
-) -> Result<Vec<String>> {
-    let map_name = runtime_shell.shell.current_map_name().to_string();
-    let mut callbacks = runtime_shell
-        .shell
-        .map_script_section_command_keys()
-        .into_iter()
-        .filter(|key| {
-            key.map_name == map_name
-                && key.command == "callback"
-                && callback_kind.map_or(true, |kind| {
-                    key.args.first().is_some_and(|candidate| candidate == kind)
-                })
-        })
-        .collect::<Vec<_>>();
-    callbacks.sort_by_key(|key| key.command_index);
-    let mut scripts = Vec::with_capacity(callbacks.len());
-    for callback in callbacks {
-        if callback.args.len() != 2 {
-            anyhow::bail!(
-                "compiled map callback {}:{} has {} args, expected 2",
-                callback.map_name,
-                callback.command_index,
-                callback.args.len()
-            );
-        }
-        scripts.push(callback.args[1].clone());
-    }
-    Ok(scripts)
 }

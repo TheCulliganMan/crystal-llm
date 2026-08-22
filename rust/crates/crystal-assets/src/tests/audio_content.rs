@@ -99,13 +99,13 @@
         let mut data = GameDataSet::default();
         data.apply_content_pack_payload(
             ContentPackCategory::PermanentPhoneNumbers,
-            serde_json::json!({"PHONE_ELM": {}}),
+            serde_json::json!({"PHONE_ELM": {"listIndex": 0}}),
         )
         .expect("first permanent phone payload");
         let error = data
             .apply_content_pack_payload(
                 ContentPackCategory::PermanentPhoneNumbers,
-                serde_json::json!({"PHONE_ELM": {}}),
+                serde_json::json!({"PHONE_ELM": {"listIndex": 0}}),
             )
             .expect_err("duplicate permanent phone payload must not be accepted");
         assert!(
@@ -116,13 +116,27 @@
         let mut data = GameDataSet::default();
         data.apply_content_pack_payload(
             ContentPackCategory::SpecialPhoneCalls,
-            serde_json::json!({"SPECIALCALL_POKERUS": {}}),
+            serde_json::json!({
+                "SPECIALCALL_POKERUS": {
+                    "value": 1,
+                    "condition": "SpecialCallOnlyWhenOutside",
+                    "contactId": "PHONE_ELM",
+                    "callerScript": "ElmPhoneCallerScript"
+                }
+            }),
         )
         .expect("first special phone call payload");
         let error = data
             .apply_content_pack_payload(
                 ContentPackCategory::SpecialPhoneCalls,
-                serde_json::json!({"SPECIALCALL_POKERUS": {}}),
+                serde_json::json!({
+                    "SPECIALCALL_POKERUS": {
+                        "value": 1,
+                        "condition": "SpecialCallOnlyWhenOutside",
+                        "contactId": "PHONE_ELM",
+                        "callerScript": "ElmPhoneCallerScript"
+                    }
+                }),
             )
             .expect_err("duplicate special phone call payload must not be accepted");
         assert!(
@@ -133,7 +147,7 @@
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::PermanentPhoneNumbers,
-                serde_json::json!({"PHONE MOM": {}}),
+                serde_json::json!({"PHONE MOM": {"listIndex": 0}}),
             )
             .expect_err("permanent phone number ids must be exact tokens");
         assert!(
@@ -162,7 +176,14 @@
         let error = GameDataSet::default()
             .apply_content_pack_payload(
                 ContentPackCategory::SpecialPhoneCalls,
-                serde_json::json!({"SPECIALCALL POKERUS": {}}),
+                serde_json::json!({
+                    "SPECIALCALL POKERUS": {
+                        "value": 1,
+                        "condition": "SpecialCallOnlyWhenOutside",
+                        "contactId": "PHONE_ELM",
+                        "callerScript": "ElmPhoneCallerScript"
+                    }
+                }),
             )
             .expect_err("special phone call ids must be exact tokens");
         assert!(
@@ -476,7 +497,7 @@
                 serde_json::json!({
                     "Route29": {
                         "Route29_MapScripts": [
-                            {"command":"jump","args":[" Route29Script"]}
+                            {"command":"sjump","args":[" Route29Script"]}
                         ]
                     }
                 }),
@@ -495,7 +516,7 @@
                 serde_json::json!({
                     "Route29": {
                         "Route29_MapScripts": [
-                            {"command":"jump","args":["Route29Script "]}
+                            {"command":"sjump","args":["Route29Script "]}
                         ]
                     }
                 }),
@@ -514,7 +535,7 @@
                 serde_json::json!({
                     "Route29": {
                         "Route29_MapScripts": [
-                            {"command":"jump","args":["Route29Script"],"fallback_args":["DefaultScript"]}
+                            {"command":"sjump","args":["Route29Script"],"fallback_args":["DefaultScript"]}
                         ]
                     }
                 }),
@@ -530,7 +551,7 @@
                 ContentPackCategory::PhoneScripts,
                 serde_json::json!({
                     "PhoneScript_Elm": [
-                        {"command":"jump","args":[],"legacyArgs":[]}
+                        {"command":"sjump","args":[],"legacyArgs":[]}
                     ]
                 }),
             )
@@ -1963,7 +1984,7 @@
             .apply_content_pack_payload(ContentPackCategory::MagikarpLengths, short)
             .expect_err("Magikarp table must contain exactly fourteen source rows");
         assert!(
-            format!("{error:#}").contains("exactly 14 entries"),
+            format!("{error:#}").contains("exactly 14 source rows"),
             "{error:#}"
         );
     }
@@ -3888,7 +3909,16 @@
             "max_level": 100,
             "wild_exp_divisor": 7,
             "trainer_exp_numerator": 3,
-            "trainer_exp_denominator": 2
+            "trainer_exp_denominator": 2,
+            "mom_money_increment": 2300,
+            "mom_random_items": [{
+                "trigger": 0, "cost": 600, "kind": "item",
+                "target": "SUPER_POTION", "decoration_flag": null
+            }],
+            "mom_progression_items": [{
+                "trigger": 900, "cost": 600, "kind": "item",
+                "target": "SUPER_POTION", "decoration_flag": null
+            }]
         });
         data.apply_content_pack_payload(ContentPackCategory::BattleRewardRules, payload.clone())
             .expect("initial battle reward rules table should load");
@@ -3914,7 +3944,16 @@
                     "max_level": 100,
                     "wild_exp_divisor": 0,
                     "trainer_exp_numerator": 3,
-                    "trainer_exp_denominator": 2
+                    "trainer_exp_denominator": 2,
+                    "mom_money_increment": 2300,
+                    "mom_random_items": [{
+                        "trigger": 0, "cost": 600, "kind": "item",
+                        "target": "SUPER_POTION", "decoration_flag": null
+                    }],
+                    "mom_progression_items": [{
+                        "trigger": 900, "cost": 600, "kind": "item",
+                        "target": "SUPER_POTION", "decoration_flag": null
+                    }]
                 }),
             )
             .expect_err("invalid battle reward rules must fail during pack load");
@@ -3931,7 +3970,10 @@
                     "max_level": 0,
                     "wild_exp_divisor": 0,
                     "trainer_exp_numerator": 0,
-                    "trainer_exp_denominator": 0
+                    "trainer_exp_denominator": 0,
+                    "mom_money_increment": 0,
+                    "mom_random_items": [],
+                    "mom_progression_items": []
                 }),
             )
             .expect_err("all-zero battle reward rules must not be accepted as defaults");
@@ -4155,6 +4197,7 @@
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_SHORE": {
+                            "source_index": 1,
                             "bite_threshold": 255,
                             "rod_tables": {
                                 "OLD_ROD": {
@@ -4184,6 +4227,7 @@
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_SHORE": {
+                            "source_index": 1,
                             "bite_threshold": 255,
                             "rod_tables": {
                                 "OLD_ROD": {
@@ -4212,6 +4256,7 @@
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_SHORE": {
+                            "source_index": 1,
                             "bite_threshold": 255,
                             "rod_tables": {
                                 "OLD_ROD": {
@@ -4246,6 +4291,7 @@
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_BASE": {
+                            "source_index": 1,
                             "bite_threshold": 255,
                             "rod_tables": {}
                         }
@@ -4467,6 +4513,20 @@
             },
             squirtbottle: FieldItemRule {
                 item_id: "SQUIRTBOTTLE".to_string(),
+            },
+            card_key: crystal_core::systems::field_moves::FieldStoryKeyRule {
+                item_id: "CARD_KEY".to_string(),
+                map_name: "RadioTower3F".to_string(),
+                required_facing: Some(Direction::Up),
+                target_tile: TilePosition::new(14, 2),
+                target_script: "CardKeySlotScript".to_string(),
+            },
+            basement_key: crystal_core::systems::field_moves::FieldStoryKeyRule {
+                item_id: "BASEMENT_KEY".to_string(),
+                map_name: "GoldenrodUnderground".to_string(),
+                required_facing: None,
+                target_tile: TilePosition::new(18, 6),
+                target_script: "BasementDoorScript".to_string(),
             },
             coin_case: FieldItemRule {
                 item_id: "COIN_CASE".to_string(),

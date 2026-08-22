@@ -123,7 +123,7 @@ fn pokemon_colorkey_preserves_enclosed_palette_zero_pixels() {
     source.put_pixel(2, 2, image::Rgba([255, 255, 255, 255]));
     let palette = [[255, 255, 255], [132, 165, 206], [140, 66, 115], [0, 0, 0]];
     let mut target = vec![0_u8; 5 * 5 * 4];
-    copy_pokemon_frame_rgba(&source, 5, 5, &palette, &mut target);
+    copy_pokemon_frame_rgba(&source, 5, 5, &palette, &palette, &mut target);
     assert_eq!(
         target[3], 0,
         "border-connected background must be transparent"
@@ -136,6 +136,53 @@ fn pokemon_colorkey_preserves_enclosed_palette_zero_pixels() {
     );
     let outline = (1 * 5 + 1) * 4;
     assert_eq!(&target[outline..outline + 4], &[0, 0, 0, 255]);
+}
+
+#[test]
+fn colorized_pokemon_png_uses_the_species_palette_indices() {
+    let source_palette = [[255, 255, 255], [173, 189, 99], [24, 165, 0], [0, 0, 0]];
+    let target_palette = [[255, 255, 255], [10, 20, 30], [40, 50, 60], [0, 0, 0]];
+    let mut source = image::RgbaImage::from_pixel(3, 3, image::Rgba([255, 255, 255, 255]));
+    source.put_pixel(1, 1, image::Rgba([24, 165, 0, 255]));
+    let mut target = vec![0_u8; 3 * 3 * 4];
+
+    copy_pokemon_frame_rgba(
+        &source,
+        3,
+        3,
+        &source_palette,
+        &target_palette,
+        &mut target,
+    );
+
+    let center = (1 * 3 + 1) * 4;
+    assert_eq!(&target[center..center + 4], &[40, 50, 60, 255]);
+}
+
+#[test]
+fn battle_player_backpic_keys_palette_zero_transparent() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut images = Assets::<Image>::default();
+    let frame = load_oak_intro_frame(
+        &asset_root,
+        "battle-player:chris_back",
+        &mut images,
+    )
+    .expect("load Chris battle backpic");
+    let image = images.get(&frame.handle).expect("Chris battle backpic image");
+
+    assert!(
+        image.data.chunks_exact(4).any(|pixel| pixel[3] == 0),
+        "battle backpic background must reveal the battle canvas"
+    );
+    assert!(
+        image.data.chunks_exact(4).any(|pixel| pixel[3] == 255),
+        "battle backpic artwork must remain visible"
+    );
 }
 
 #[test]
@@ -286,6 +333,25 @@ fn script_text_renderer_resolves_runtime_named_buffers() {
 }
 
 #[test]
+fn asm_text_renderer_resolves_exact_text_ram_operand_names() {
+    let named_buffers = BTreeMap::from([
+        ("wSeerNickname".to_string(), "EMBER".to_string()),
+        ("wStringBuffer2 + 1".to_string(), "12".to_string()),
+    ]);
+
+    assert_eq!(
+        render_visible_asm_text_pages(
+            "Hm… I see you met\n<RAM:wSeerNickname> at level <DECIMAL:wStringBuffer2 + 1, 1, 3>!",
+            &named_buffers,
+            "CHRIS",
+            "RIVAL",
+            0,
+        ),
+        vec!["Hm… I see you met\nEMBER at level 12!"]
+    );
+}
+
+#[test]
 fn missing_script_text_buffers_render_blank_instead_of_host_diagnostics() {
     let body = ScriptTextBody {
         label: "MissingRuntimeBufferText".to_string(),
@@ -300,6 +366,26 @@ fn missing_script_text_buffers_render_blank_instead_of_host_diagnostics() {
     assert_eq!(
         render_visible_script_text_pages(&body, &BTreeMap::new(), "CHRIS", "RIVAL", 0),
         vec![String::new()]
+    );
+}
+
+#[test]
+fn flattened_asm_text_resolves_runtime_buffers_before_glyph_rendering() {
+    let named_buffers = BTreeMap::from([(
+        "STRING_BUFFER_4".to_string(),
+        "#GEAR".to_string(),
+    )]);
+
+    assert_eq!(
+        render_visible_asm_text_pages(
+            "<PLAYER> received\n<STRING_BUFFER_4>.",
+            &named_buffers,
+            "KRIS",
+            "RIVAL",
+            0,
+        ),
+        vec!["KRIS received\nPOKéGEAR.".to_string()],
+        "the flattened ASM text path must not print a buffer token as player-visible glyphs",
     );
 }
 
@@ -344,11 +430,263 @@ fn visible_script_text_keeps_asm_paragraphs_as_player_advanced_pages() {
     assert_eq!(
         render_visible_script_text_pages(&body, &BTreeMap::new(), "CHRIS", "RIVAL", 0),
         vec![
-            "POKéMON GEAR, or\n\njust POKéGEAR.",
-            "It's essential if\n\nyou want to be a",
-            "you want to be a\n\ngood trainer.",
+            "POKéMON GEAR, or\njust POKéGEAR.",
+            "It's essential if\nyou want to be a",
+            "you want to be a\ngood trainer.",
         ],
-        "ASM para and cont must preserve their player-acknowledged clear/scroll boundaries"
+        "ASM field pages contain two text baselines; their intervening tile row is layout, not text"
+    );
+}
+
+#[test]
+fn cont_scroll_keeps_the_carried_line_without_printing_it_twice() {
+    let previous = "It's essential if\nyou want to be a";
+    let next = "you want to be a\ngood trainer.";
+
+    assert_eq!(
+        visible_field_page_initial_chars(previous, next),
+        "you want to be a\n".chars().count(),
+        "ASM <CONT> scrolls the existing bottom line to the top before printing only the new line"
+    );
+    assert_eq!(
+        &next["you want to be a\n".len()..],
+        "good trainer.",
+        "the newly printed suffix must not contain the carried words"
+    );
+}
+
+#[test]
+fn text_chunks_and_ram_buffers_share_the_current_asm_cursor() {
+    let body = ScriptTextBody {
+        label: "Text_PlayerGotFive".to_string(),
+        commands: vec![
+            ScriptTextBodyCommand {
+                command: "text".to_string(),
+                args: vec!["<PLAYER> got five".to_string()],
+                command_index: 0,
+            },
+            ScriptTextBodyCommand {
+                command: "line".to_string(),
+                args: vec!["@".to_string()],
+                command_index: 1,
+            },
+            ScriptTextBodyCommand {
+                command: "text_ram".to_string(),
+                args: vec!["wStringBuffer4".to_string()],
+                command_index: 2,
+            },
+            ScriptTextBodyCommand {
+                command: "text".to_string(),
+                args: vec!["!@".to_string()],
+                command_index: 3,
+            },
+            ScriptTextBodyCommand {
+                command: "text_end".to_string(),
+                args: Vec::new(),
+                command_index: 4,
+            },
+        ],
+    };
+    let named_buffers = BTreeMap::from([("wStringBuffer4".to_string(), "RARE CANDY".to_string())]);
+
+    assert_eq!(
+        render_visible_script_text_pages(&body, &named_buffers, "CHRIS", "RIVAL", 0),
+        vec!["CHRIS got five\nRARE CANDY!".to_string()],
+        "ASM @ terminates a source string and text/text_ram continue at the same cursor"
+    );
+}
+
+#[test]
+fn low_pause_and_today_follow_their_asm_cursor_semantics() {
+    let body = ScriptTextBody {
+        label: "OpcodeParityText".to_string(),
+        commands: vec![
+            ScriptTextBodyCommand {
+                command: "text".to_string(),
+                args: vec!["<PLAYER> used the@".to_string()],
+                command_index: 0,
+            },
+            ScriptTextBodyCommand {
+                command: "text_low".to_string(),
+                args: Vec::new(),
+                command_index: 1,
+            },
+            ScriptTextBodyCommand {
+                command: "text_ram".to_string(),
+                args: vec!["wStringBuffer2".to_string()],
+                command_index: 2,
+            },
+            ScriptTextBodyCommand {
+                command: "text_pause".to_string(),
+                args: Vec::new(),
+                command_index: 3,
+            },
+            ScriptTextBodyCommand {
+                command: "text".to_string(),
+                args: vec!["\" on @\"".to_string()],
+                command_index: 4,
+            },
+            ScriptTextBodyCommand {
+                command: "text_today".to_string(),
+                args: Vec::new(),
+                command_index: 5,
+            },
+            ScriptTextBodyCommand {
+                command: "done".to_string(),
+                args: Vec::new(),
+                command_index: 6,
+            },
+        ],
+    };
+    let named_buffers = BTreeMap::from([("wStringBuffer2".to_string(), "BICYCLE".to_string())]);
+
+    assert_eq!(
+        render_visible_script_text_pages(&body, &named_buffers, "CHRIS", "RIVAL", 2),
+        vec!["CHRIS used the\nBICYCLE on TUE".to_string()],
+        "TX_LOW moves to the bottom baseline, TX_PAUSE prints no glyph, and TX_DAY appends the weekday at the current cursor"
+    );
+}
+
+#[test]
+fn every_exported_script_text_body_fits_the_asm_two_baseline_machine() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let runtime = CrystalRuntime::load_from_compiled_pack(
+        &AssetRoot::new(repo_root),
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load canonical compiled pack");
+    let bodies = runtime.script_text_body_keys();
+    assert!(
+        bodies.len() > 1_000,
+        "audit must cover the complete text corpus"
+    );
+
+    let mut audited_pages = 0usize;
+    let mut audited_continuations = 0usize;
+    for key in bodies {
+        let has_far_text = key
+            .commands
+            .iter()
+            .any(|command| command.command == "text_far");
+        let named_buffers = key
+            .commands
+            .iter()
+            .filter(|command| matches!(command.command.as_str(), "text_ram" | "text_decimal"))
+            .filter_map(|command| command.args.first())
+            .map(|buffer| (buffer.clone(), "BUFFER".to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let body = ScriptTextBody {
+            label: key.label.clone(),
+            commands: key
+                .commands
+                .into_iter()
+                .map(|command| ScriptTextBodyCommand {
+                    command: command.command,
+                    args: command.args,
+                    command_index: command.command_index,
+                })
+                .collect(),
+        };
+        let pages = render_visible_script_text_pages(&body, &named_buffers, "CHRIS", "RIVAL", 0);
+        let continuation_page_indexes = body
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| command.command == "cont")
+            .map(|(command_index, _)| {
+                let prefix = ScriptTextBody {
+                    label: body.label.clone(),
+                    commands: body.commands[..=command_index].to_vec(),
+                };
+                render_visible_script_text_pages(&prefix, &named_buffers, "CHRIS", "RIVAL", 0).len()
+                    - 1
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        audited_pages += pages.len();
+        for (page_index, page) in pages.iter().enumerate() {
+            assert!(
+                page.lines().count() <= 2,
+                "{}:{} page {page_index} exceeds ASM's two printable baselines: {page:?}",
+                key.map_name,
+                key.label,
+            );
+            if page_index == 0 {
+                continue;
+            }
+            if continuation_page_indexes.contains(&page_index) {
+                let carried_chars = visible_field_page_initial_chars(&pages[page_index - 1], page);
+                audited_continuations += 1;
+                assert!(
+                    carried_chars > 0,
+                    "{}:{} authored <CONT> page {page_index} did not retain its previous baseline: {page:?}",
+                    key.map_name,
+                    key.label,
+                );
+                assert!(
+                    carried_chars < page.chars().count(),
+                    "{}:{} continuation must add new text after its carried line: {page:?}",
+                    key.map_name,
+                    key.label,
+                );
+            }
+        }
+        if !has_far_text {
+            assert_eq!(
+                continuation_page_indexes.len(),
+                body.commands
+                    .iter()
+                    .filter(|command| command.command == "cont")
+                    .count(),
+                "{}:{} every authored <CONT> must map to one rendered continuation page",
+                key.map_name,
+                key.label,
+            );
+        }
+    }
+    assert!(
+        audited_pages > 5_000,
+        "audit did not traverse the full page corpus"
+    );
+    assert!(
+        audited_continuations > 1_000,
+        "audit did not exercise the exported <CONT> corpus"
+    );
+}
+
+#[test]
+fn inspect_route29_fruit_tree_runtime_flow() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = CrystalRuntime::load_from_compiled_pack(
+        &asset_root,
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load compiled pack");
+    let mut shell =
+        RuntimeGameShell::new_game_at_runtime_tile(asset_root, runtime, 1, "Route29", 0, 0)
+            .expect("start Route 29 shell");
+    let run = shell
+        .run_compiled_script_until_boundary(
+            RuntimeCompiledScriptCursor {
+                origin_map_name: "Route29".to_string(),
+                source_script: "Route29FruitTree".to_string(),
+                command_index: 0,
+            },
+            32,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("run Route 29 fruit tree");
+    eprintln!("fruit_tree_run={run:#?}");
+    eprintln!(
+        "fruit_tree_snapshot={:#?}",
+        shell.snapshot().expect("snapshot")
     );
 }
 

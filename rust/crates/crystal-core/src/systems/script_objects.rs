@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::state::{EventFlagError, GameState, ScriptRuntimeEmote};
 use crate::systems::script_runtime::script_label_parent;
+use crate::timing::wrapping_byte_counter_ticks;
 use crate::world::session::{
     FollowQueuedStep, OverworldFollowState, OverworldSession,
     raw_event_tile_to_runtime_tile_checked,
@@ -232,6 +233,8 @@ pub enum ScriptObjectCommandError {
     MissingDirection { command: String },
     #[error("script object command '{command}' is missing emote payload")]
     MissingEmote { command: String },
+    #[error("showemote duration {duration} does not fit the script byte")]
+    EmoteDurationOutOfByteRange { duration: u16 },
     #[error("unknown script direction '{direction}'")]
     UnknownDirection { direction: String },
     #[error("applymovement for '{object_id}' is missing a movement label")]
@@ -290,6 +293,27 @@ pub enum ScriptObjectCommandError {
         index: usize,
     },
     #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} has unexpected duration payload"
+    )]
+    MovementUnexpectedDuration {
+        movement: String,
+        command: String,
+        index: usize,
+    },
+    #[error(
+        "movement command '{command}' in movement '{movement}' at index {index} has duration {duration}, which does not fit its byte parameter"
+    )]
+    MovementDurationOutOfByteRange {
+        movement: String,
+        command: String,
+        index: usize,
+        duration: u16,
+    },
+    #[error(
+        "movement command 'step_sleep' in movement '{movement}' at index {index} cannot encode source duration zero"
+    )]
+    MovementZeroSleepDuration { movement: String, index: usize },
+    #[error(
         "movement command '{command}' in movement '{movement}' at index {index} overflows supported runtime coordinates from ({x}, {y})"
     )]
     MovementRuntimeTileOverflow {
@@ -328,8 +352,11 @@ pub enum ScriptObjectCommandError {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMovementStepIssue {
     UnexpectedDirection,
+    UnexpectedDuration,
     MissingDirection,
     MissingDuration,
+    DurationOutOfByteRange { duration: u16 },
+    ZeroSleepDuration,
     UnknownDirection { direction: String },
     UnsupportedCommand,
 }
@@ -426,6 +453,11 @@ pub enum ScriptObjectCommandIssue {
         source_script: String,
         command_index: usize,
     },
+    EmoteDurationOutOfByteRange {
+        source_script: String,
+        command_index: usize,
+        duration: u16,
+    },
     UnknownCommand {
         source_script: String,
         command_index: usize,
@@ -442,11 +474,11 @@ pub const SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS: &[&str] = &["applymovemen
 pub const SCRIPT_OBJECT_MOVEMENT_COMMANDS: &[&str] = &["applymovement", "applymovementlasttalked"];
 pub const SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS: &[&str] = &["faceplayer", "stopfollow"];
 pub const SCRIPT_OBJECT_EMOTE_COMMANDS: &[&str] = &["showemote"];
+pub const SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION: &str = "PLAYER_FACING";
 
 pub const SCRIPT_MOVEMENT_DIRECTION_COMMANDS: &[&str] = &[
     "step",
     "slow_step",
-    "fast_step",
     "big_step",
     "turn_step",
     "jump_step",
@@ -461,26 +493,8 @@ pub const SCRIPT_MOVEMENT_DIRECTION_COMMANDS: &[&str] = &[
     "turn_in",
     "turn_waterfall",
 ];
-pub const SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS: &[&str] = &["step_sleep"];
-pub const SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS: &[&str] = &[
-    "step_sleep_1",
-    "step_sleep_2",
-    "step_sleep_3",
-    "step_sleep_4",
-    "step_sleep_5",
-    "step_sleep_6",
-    "step_sleep_7",
-    "step_sleep_8",
-    "step_sleep_9",
-    "step_sleep_10",
-    "step_sleep_11",
-    "step_sleep_12",
-    "step_sleep_13",
-    "step_sleep_14",
-    "step_sleep_15",
-    "step_sleep_16",
-];
 pub const SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS: &[&str] = &[
+    "step_sleep",
     "step_wait_end",
     "step_dig",
     "step_shake",
@@ -511,7 +525,6 @@ pub const SCRIPT_MOVEMENT_NO_ARG_COMMANDS: &[&str] = &[
 pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "step",
     "slow_step",
-    "fast_step",
     "big_step",
     "turn_step",
     "jump_step",
@@ -526,22 +539,6 @@ pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
     "turn_in",
     "turn_waterfall",
     "step_sleep",
-    "step_sleep_1",
-    "step_sleep_2",
-    "step_sleep_3",
-    "step_sleep_4",
-    "step_sleep_5",
-    "step_sleep_6",
-    "step_sleep_7",
-    "step_sleep_8",
-    "step_sleep_9",
-    "step_sleep_10",
-    "step_sleep_11",
-    "step_sleep_12",
-    "step_sleep_13",
-    "step_sleep_14",
-    "step_sleep_15",
-    "step_sleep_16",
     "step_wait_end",
     "step_end",
     "step_loop",
@@ -580,6 +577,13 @@ pub fn is_known_script_object_command(command: &str) -> bool {
 
 pub fn is_known_script_movement_command(command: &str) -> bool {
     SCRIPT_MOVEMENT_COMMANDS.contains(&command)
+}
+
+pub fn is_script_movement_terminator(command: &str) -> bool {
+    matches!(
+        command,
+        "step_end" | "step_wait_end" | "remove_object" | "step_stop" | "step_loop"
+    )
 }
 
 fn validate_script_object_command_shape(command: &ScriptObjectCommand) -> Result<(), String> {
@@ -655,6 +659,14 @@ fn validate_script_object_command_shape(command: &ScriptObjectCommand) -> Result
             if command.emote.is_none() || command.duration.is_none() {
                 return Err(format!(
                     "script object command {command_name} requires emote and duration"
+                ));
+            }
+            if command
+                .duration
+                .is_some_and(|duration| duration > u16::from(u8::MAX))
+            {
+                return Err(format!(
+                    "script object command {command_name} duration does not fit a byte"
                 ));
             }
             reject_coordinates(command, command_name)?;
@@ -877,6 +889,15 @@ pub fn script_object_command_issues(
             issues.push(ScriptObjectCommandIssue::MissingEmote {
                 source_script: command.source_script.clone(),
                 command_index: command.command_index,
+            });
+        } else if let Some(duration) = command
+            .duration
+            .filter(|duration| *duration > u16::from(u8::MAX))
+        {
+            issues.push(ScriptObjectCommandIssue::EmoteDurationOutOfByteRange {
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+                duration,
             });
         }
     } else if !is_known_script_object_command(&command.command) {
@@ -1109,31 +1130,48 @@ fn validate_script_object_command_source(
 
 pub fn script_movement_step_issues(step: &ScriptMovementStep) -> Vec<ScriptMovementStepIssue> {
     let command = step.command.as_str();
-    if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command)
-        || SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS.contains(&command)
-        || SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS.contains(&command)
-    {
+    if SCRIPT_MOVEMENT_NO_ARG_COMMANDS.contains(&command) {
+        let mut issues = Vec::new();
         if step.direction.is_some() {
-            vec![ScriptMovementStepIssue::UnexpectedDirection]
-        } else {
-            Vec::new()
+            issues.push(ScriptMovementStepIssue::UnexpectedDirection);
         }
+        if step.duration.is_some() {
+            issues.push(ScriptMovementStepIssue::UnexpectedDuration);
+        }
+        issues
     } else if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&command) {
+        let mut issues = Vec::new();
         if step.direction.is_some() {
-            vec![ScriptMovementStepIssue::UnexpectedDirection]
-        } else if step.duration.is_none() {
-            vec![ScriptMovementStepIssue::MissingDuration]
-        } else {
-            Vec::new()
+            issues.push(ScriptMovementStepIssue::UnexpectedDirection);
         }
+        match step.duration {
+            None => issues.push(ScriptMovementStepIssue::MissingDuration),
+            Some(duration) if duration > u16::from(u8::MAX) => {
+                issues.push(ScriptMovementStepIssue::DurationOutOfByteRange { duration });
+            }
+            Some(0) if command == "step_sleep" => {
+                issues.push(ScriptMovementStepIssue::ZeroSleepDuration);
+            }
+            Some(_) => {}
+        }
+        issues
     } else if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) {
-        match step.direction.as_deref() {
-            Some(direction) if parse_script_direction(direction).is_ok() => Vec::new(),
+        let mut issues = match step.direction.as_deref() {
+            Some(direction)
+                if direction == SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION
+                    || parse_script_direction(direction).is_ok() =>
+            {
+                Vec::new()
+            }
             Some(direction) => vec![ScriptMovementStepIssue::UnknownDirection {
                 direction: direction.to_string(),
             }],
             None => vec![ScriptMovementStepIssue::MissingDirection],
+        };
+        if step.duration.is_some() {
+            issues.push(ScriptMovementStepIssue::UnexpectedDuration);
         }
+        issues
     } else {
         vec![ScriptMovementStepIssue::UnsupportedCommand]
     }
@@ -1312,9 +1350,13 @@ pub fn apply_script_movement(
             }
             command if movement_step_moves_object(command) => {
                 executed_steps.push(step.clone());
-                let direction = movement_step_direction(movement, step)?;
+                let direction = movement_step_direction(movement, step, facing)?;
                 if !fixed_facing {
-                    facing = direction;
+                    facing = if command == "turn_away" {
+                        opposite_direction(direction)
+                    } else {
+                        direction
+                    };
                 }
                 let stride = movement_step_stride(movement, step)?;
                 if let (
@@ -1364,7 +1406,7 @@ pub fn apply_script_movement(
             }
             command if movement_step_turns_without_moving(command) => {
                 executed_steps.push(step.clone());
-                let direction = movement_step_direction(movement, step)?;
+                let direction = movement_step_direction(movement, step, facing)?;
                 facing = match command {
                     "turn_away" => opposite_direction(direction),
                     _ => direction,
@@ -1384,6 +1426,9 @@ pub fn apply_script_movement(
                     index: step.index,
                 });
                 steps_applied += movement_step_tick_count(movement, step)?;
+                if matches!(command, "step_wait_end" | "remove_object") {
+                    break;
+                }
             }
             command => {
                 return Err(ScriptObjectCommandError::UnsupportedMovementCommand {
@@ -1475,6 +1520,27 @@ fn script_movement_step_issue_error(
             ScriptObjectCommandError::MovementMissingDuration {
                 movement: movement.label.clone(),
                 command: step.command.clone(),
+                index: step.index,
+            }
+        }
+        ScriptMovementStepIssue::UnexpectedDuration => {
+            ScriptObjectCommandError::MovementUnexpectedDuration {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+            }
+        }
+        ScriptMovementStepIssue::DurationOutOfByteRange { duration } => {
+            ScriptObjectCommandError::MovementDurationOutOfByteRange {
+                movement: movement.label.clone(),
+                command: step.command.clone(),
+                index: step.index,
+                duration,
+            }
+        }
+        ScriptMovementStepIssue::ZeroSleepDuration => {
+            ScriptObjectCommandError::MovementZeroSleepDuration {
+                movement: movement.label.clone(),
                 index: step.index,
             }
         }
@@ -1739,6 +1805,8 @@ fn apply_showemote_command(
         .ok_or_else(|| ScriptObjectCommandError::MissingEmote {
             command: command.command.clone(),
         })?;
+    let duration_byte = u8::try_from(duration)
+        .map_err(|_| ScriptObjectCommandError::EmoteDurationOutOfByteRange { duration })?;
     state
         .script_runtime
         .pending_emotes
@@ -1746,6 +1814,7 @@ fn apply_showemote_command(
             emote,
             object: object_id.clone(),
             duration,
+            frames: crate::timing::wrapping_byte_counter_frames(duration_byte, 2),
             source_script: command.source_script.clone(),
             command_index: command.command_index,
         });
@@ -1891,6 +1960,7 @@ fn validate_follow_after_script_movement(
 fn movement_step_direction(
     movement: &ScriptMovement,
     step: &ScriptMovementStep,
+    current_facing: Direction,
 ) -> Result<Direction, ScriptObjectCommandError> {
     step.direction
         .as_deref()
@@ -1899,7 +1969,13 @@ fn movement_step_direction(
             command: step.command.clone(),
             index: step.index,
         })
-        .and_then(parse_script_direction)
+        .and_then(|direction| {
+            if direction == SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION {
+                Ok(current_facing)
+            } else {
+                parse_script_direction(direction)
+            }
+        })
 }
 
 fn movement_step_moves_object(command: &str) -> bool {
@@ -1907,7 +1983,6 @@ fn movement_step_moves_object(command: &str) -> bool {
         command,
         "step"
             | "slow_step"
-            | "fast_step"
             | "big_step"
             | "turn_step"
             | "jump_step"
@@ -1916,6 +1991,9 @@ fn movement_step_moves_object(command: &str) -> bool {
             | "slide_step"
             | "fast_slide_step"
             | "slow_slide_step"
+            | "turn_away"
+            | "turn_in"
+            | "turn_waterfall"
     )
 }
 
@@ -1961,47 +2039,37 @@ fn movement_step_tick_count(
     movement: &ScriptMovement,
     step: &ScriptMovementStep,
 ) -> Result<usize, ScriptObjectCommandError> {
-    if let Some(duration) = exact_sleep_command_duration(step.command.as_str()) {
-        Ok(duration)
-    } else if let Some(duration) = exact_stationary_effect_duration(step.command.as_str()) {
+    if let Some(duration) = exact_stationary_effect_duration(step.command.as_str()) {
         Ok(duration)
     } else if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&step.command.as_str()) {
-        step.duration.map(usize::from).ok_or_else(|| {
-            ScriptObjectCommandError::MovementMissingDuration {
+        let duration =
+            step.duration
+                .ok_or_else(|| ScriptObjectCommandError::MovementMissingDuration {
+                    movement: movement.label.clone(),
+                    command: step.command.clone(),
+                    index: step.index,
+                })?;
+        let duration = u8::try_from(duration).map_err(|_| {
+            ScriptObjectCommandError::MovementDurationOutOfByteRange {
                 movement: movement.label.clone(),
                 command: step.command.clone(),
                 index: step.index,
+                duration,
             }
-        })
+        })?;
+        let counter = if step.command == "step_shake" {
+            duration & 0x3f
+        } else {
+            duration
+        };
+        Ok(usize::from(wrapping_byte_counter_ticks(counter)))
     } else {
         Ok(step.duration.map(usize::from).unwrap_or(1))
     }
 }
 
 fn movement_step_sleeps(command: &str) -> bool {
-    command == "step_sleep" || SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS.contains(&command)
-}
-
-fn exact_sleep_command_duration(command: &str) -> Option<usize> {
-    match command {
-        "step_sleep_1" => Some(1),
-        "step_sleep_2" => Some(2),
-        "step_sleep_3" => Some(3),
-        "step_sleep_4" => Some(4),
-        "step_sleep_5" => Some(5),
-        "step_sleep_6" => Some(6),
-        "step_sleep_7" => Some(7),
-        "step_sleep_8" => Some(8),
-        "step_sleep_9" => Some(9),
-        "step_sleep_10" => Some(10),
-        "step_sleep_11" => Some(11),
-        "step_sleep_12" => Some(12),
-        "step_sleep_13" => Some(13),
-        "step_sleep_14" => Some(14),
-        "step_sleep_15" => Some(15),
-        "step_sleep_16" => Some(16),
-        _ => None,
-    }
+    command == "step_sleep"
 }
 
 fn exact_stationary_effect_duration(command: &str) -> Option<usize> {
@@ -2019,10 +2087,7 @@ fn exact_stationary_effect_duration(command: &str) -> Option<usize> {
 }
 
 fn movement_step_turns_without_moving(command: &str) -> bool {
-    matches!(
-        command,
-        "turn_head" | "turn_away" | "turn_in" | "turn_waterfall" | "step_bump"
-    )
+    matches!(command, "turn_head" | "step_bump")
 }
 
 fn movement_step_ends_sequence(command: &str) -> bool {
@@ -2498,7 +2563,6 @@ mod tests {
             &[
                 "step",
                 "slow_step",
-                "fast_step",
                 "big_step",
                 "turn_step",
                 "jump_step",
@@ -2514,31 +2578,10 @@ mod tests {
                 "turn_waterfall"
             ]
         );
-        assert_eq!(SCRIPT_MOVEMENT_OPTIONAL_DURATION_COMMANDS, &["step_sleep"]);
-        assert_eq!(
-            SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS,
-            &[
-                "step_sleep_1",
-                "step_sleep_2",
-                "step_sleep_3",
-                "step_sleep_4",
-                "step_sleep_5",
-                "step_sleep_6",
-                "step_sleep_7",
-                "step_sleep_8",
-                "step_sleep_9",
-                "step_sleep_10",
-                "step_sleep_11",
-                "step_sleep_12",
-                "step_sleep_13",
-                "step_sleep_14",
-                "step_sleep_15",
-                "step_sleep_16"
-            ]
-        );
         assert_eq!(
             SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS,
             &[
+                "step_sleep",
                 "step_wait_end",
                 "step_dig",
                 "step_shake",
@@ -2575,7 +2618,8 @@ mod tests {
         assert!(is_known_script_movement_command("fast_slide_step"));
         assert!(is_known_script_movement_command("step_dig"));
         assert!(is_known_script_movement_command("rock_smash"));
-        assert!(is_known_script_movement_command("step_sleep_8"));
+        assert!(!is_known_script_movement_command("fast_step"));
+        assert!(!is_known_script_movement_command("step_sleep_8"));
         assert!(is_known_script_movement_command("hide_object"));
         assert!(!is_known_script_movement_command("step_sleep_17"));
         assert!(!is_known_script_movement_command("spin_forever"));
@@ -2690,6 +2734,26 @@ mod tests {
         );
         assert_eq!(
             script_movement_step_issues(&ScriptMovementStep {
+                command: "step_sleep".to_string(),
+                direction: None,
+                duration: None,
+                index: 6,
+            }),
+            vec![ScriptMovementStepIssue::MissingDuration]
+        );
+        for non_opcode in ["fast_step", "step_sleep_1", "step_sleep_8", "step_sleep_16"] {
+            assert_eq!(
+                script_movement_step_issues(&ScriptMovementStep {
+                    command: non_opcode.to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 7,
+                }),
+                vec![ScriptMovementStepIssue::UnsupportedCommand]
+            );
+        }
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
                 command: "rock_smash".to_string(),
                 direction: None,
                 duration: Some(10),
@@ -2705,6 +2769,42 @@ mod tests {
                 index: 7,
             }),
             Vec::<ScriptMovementStepIssue>::new()
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step_end".to_string(),
+                direction: None,
+                duration: Some(1),
+                index: 8,
+            }),
+            vec![ScriptMovementStepIssue::UnexpectedDuration]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("UP".to_string()),
+                duration: Some(1),
+                index: 9,
+            }),
+            vec![ScriptMovementStepIssue::UnexpectedDuration]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step_shake".to_string(),
+                direction: None,
+                duration: Some(256),
+                index: 10,
+            }),
+            vec![ScriptMovementStepIssue::DurationOutOfByteRange { duration: 256 }]
+        );
+        assert_eq!(
+            script_movement_step_issues(&ScriptMovementStep {
+                command: "step_sleep".to_string(),
+                direction: None,
+                duration: Some(0),
+                index: 11,
+            }),
+            vec![ScriptMovementStepIssue::ZeroSleepDuration]
         );
     }
 
@@ -3370,7 +3470,7 @@ mod tests {
 
         assert_eq!(
             error,
-            ScriptObjectCommandError::FollowObjectMissing {
+            ScriptObjectCommandError::UnknownObject {
                 object_id: "MISSING_FOLLOWER".to_string(),
             }
         );
@@ -3437,6 +3537,7 @@ mod tests {
             "ROUTE43GATE_ROCKET1"
         );
         assert_eq!(state.script_runtime.pending_emotes[0].duration, 15);
+        assert_eq!(state.script_runtime.pending_emotes[0].frames, 30);
         assert_eq!(
             state.script_runtime.pending_emotes[0].source_script,
             "Script"
@@ -3494,6 +3595,26 @@ mod tests {
                 object_id: "MISSING_NURSE".to_string()
             }
         );
+    }
+
+    #[test]
+    fn showemote_rejects_duration_outside_the_script_byte_without_mutation() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object(
+            "ROUTE43GATE_ROCKET1",
+            "EVENT_ROUTE43GATE_ROCKETS",
+            4,
+            4,
+        )]);
+        let mut command = command("showemote", "ROUTE43GATE_ROCKET1");
+        command.emote = Some("EMOTE_SHOCK".to_string());
+        command.duration = Some(256);
+
+        assert_eq!(
+            apply_script_object_mutation(&mut state, &mut session, &command),
+            Err(ScriptObjectCommandError::EmoteDurationOutOfByteRange { duration: 256 })
+        );
+        assert!(state.script_runtime.pending_emotes.is_empty());
     }
 
     #[test]
@@ -3712,7 +3833,7 @@ mod tests {
     #[test]
     fn applymovement_guide_tour_follow_path_ends_on_last_leader_step() {
         let mut session = session(vec![object("CHERRYGROVECITY_GRAMPS", "-1", 32, 6)]);
-        session.player.tile = TilePosition::new(31, 5);
+        session.player.tile = TilePosition::new(32, 7);
         session.following = Some(OverworldFollowState {
             leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
             follower_object_id: "PLAYER".to_string(),
@@ -4042,6 +4163,42 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_surf_step_uses_the_players_live_facing_direction() {
+        let mut session = session(Vec::new());
+        session.player.tile = TilePosition::new(4, 4);
+        session.player.facing = Direction::Right;
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("wMovementBuffer".to_string());
+        let movement = ScriptMovement {
+            label: "wMovementBuffer".to_string(),
+            source_script: Some("UsedSurfScript".to_string()),
+            steps: vec![
+                ScriptMovementStep {
+                    command: "slow_step".to_string(),
+                    direction: Some(SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION.to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let outcome = apply_script_movement(&mut session, &command, &movement)
+            .expect("dynamic Surf movement applies");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(4, 4));
+        assert_eq!(outcome.tile, TilePosition::new(5, 4));
+        assert_eq!(session.player.tile, TilePosition::new(5, 4));
+        assert_eq!(outcome.facing, Direction::Right);
+        assert_eq!(outcome.steps_applied, 1);
+    }
+
+    #[test]
     fn applymovement_moves_objects_by_runtime_stride_and_saves_raw_event_coordinates() {
         let mut session = session(vec![object("ROUTE29_YOUNGSTER", "-1", 1, 1)]);
         let mut command = command("applymovement", "ROUTE29_YOUNGSTER");
@@ -4261,9 +4418,9 @@ mod tests {
                     index: 14,
                 },
                 ScriptMovementStep {
-                    command: "step_sleep_8".to_string(),
+                    command: "step_sleep".to_string(),
                     direction: None,
-                    duration: None,
+                    duration: Some(8),
                     index: 15,
                 },
                 ScriptMovementStep {
@@ -4284,7 +4441,7 @@ mod tests {
         let outcome =
             apply_script_movement(&mut session, &command, &movement).expect("visuals apply");
         assert_eq!(outcome.tile, TilePosition::new(0, 0));
-        assert_eq!(outcome.steps_applied, 260);
+        assert_eq!(outcome.steps_applied, 248);
         assert_eq!(
             outcome
                 .executed_steps
@@ -4305,9 +4462,7 @@ mod tests {
                 ("tree_shake", None),
                 ("rock_smash", Some(10)),
                 ("return_dig", Some(32)),
-                ("remove_object", None),
-                ("step_wait_end", Some(4)),
-                ("step_sleep_8", None)
+                ("remove_object", None)
             ]
         );
         assert_eq!(
@@ -4368,14 +4523,6 @@ mod tests {
                 ScriptMovementEffect {
                     command: "remove_object".to_string(),
                     index: 13,
-                },
-                ScriptMovementEffect {
-                    command: "step_wait_end".to_string(),
-                    index: 14,
-                },
-                ScriptMovementEffect {
-                    command: "step_sleep_8".to_string(),
-                    index: 15,
                 },
             ]
         );
@@ -4453,6 +4600,58 @@ mod tests {
     }
 
     #[test]
+    fn terminal_movement_effects_do_not_execute_following_bytes() {
+        for (label, terminal) in [
+            (
+                "WaitEnd",
+                ScriptMovementStep {
+                    command: "step_wait_end".to_string(),
+                    direction: None,
+                    duration: Some(4),
+                    index: 0,
+                },
+            ),
+            (
+                "Remove",
+                ScriptMovementStep {
+                    command: "remove_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+            ),
+        ] {
+            let mut session = session(Vec::new());
+            let mut command = command("applymovement", "PLAYER");
+            command.movement = Some(label.to_string());
+            let movement = ScriptMovement {
+                label: label.to_string(),
+                source_script: None,
+                steps: vec![
+                    terminal,
+                    ScriptMovementStep {
+                        command: "step".to_string(),
+                        direction: Some("RIGHT".to_string()),
+                        duration: None,
+                        index: 1,
+                    },
+                    ScriptMovementStep {
+                        command: "step_end".to_string(),
+                        direction: None,
+                        duration: None,
+                        index: 2,
+                    },
+                ],
+            };
+
+            let outcome = apply_script_movement(&mut session, &command, &movement)
+                .expect("terminal movement applies");
+            assert_eq!(outcome.tile, TilePosition::new(0, 0));
+            assert_eq!(outcome.executed_steps.len(), 1);
+        }
+    }
+
+    #[test]
     fn applymovement_supports_slide_fast_bump_and_turn_away_opcodes() {
         let mut session = session(Vec::new());
         session.player.tile = TilePosition::new(2, 2);
@@ -4464,7 +4663,7 @@ mod tests {
             source_script: None,
             steps: vec![
                 ScriptMovementStep {
-                    command: "fast_step".to_string(),
+                    command: "big_step".to_string(),
                     direction: Some("RIGHT".to_string()),
                     duration: None,
                     index: 0,
@@ -4536,7 +4735,7 @@ mod tests {
             .expect("extended movement opcodes apply");
 
         assert_eq!(outcome.previous_tile, TilePosition::new(2, 2));
-        assert_eq!(outcome.tile, TilePosition::new(2, 2));
+        assert_eq!(outcome.tile, TilePosition::new(1, 0));
         assert_eq!(outcome.facing, Direction::Up);
         assert_eq!(outcome.steps_applied, 10);
         assert_eq!(

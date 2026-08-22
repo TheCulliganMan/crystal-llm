@@ -726,6 +726,7 @@ fn verify_solubility(
 fn runtime_module_script_subset<'a>(
     all_scripts: &BTreeMap<String, Value>,
     seeds: impl IntoIterator<Item = &'a str>,
+    follow_callasm_definitions: bool,
 ) -> BTreeMap<String, Value> {
     let mut scripts = BTreeMap::new();
     let mut pending: Vec<String> = seeds.into_iter().map(str::to_string).collect();
@@ -737,7 +738,12 @@ fn runtime_module_script_subset<'a>(
             continue;
         };
         scripts.insert(label.clone(), payload.clone());
-        for reference in script_payload_references(&label, payload, all_scripts) {
+        for reference in script_payload_references(
+            &label,
+            payload,
+            all_scripts,
+            follow_callasm_definitions,
+        ) {
             if !scripts.contains_key(&reference) {
                 pending.push(reference);
             }
@@ -750,26 +756,86 @@ fn script_payload_references(
     current_label: &str,
     payload: &Value,
     all_scripts: &BTreeMap<String, Value>,
+    follow_callasm_definitions: bool,
 ) -> Vec<String> {
     let Some(commands) = payload.as_array() else {
         return Vec::new();
     };
     let mut references = Vec::new();
     for command in commands {
+        let Some(command_name) = command.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        if command_name == "callasm" && !follow_callasm_definitions {
+            continue;
+        }
+        if matches!(
+            command_name,
+            "adc"
+                | "add"
+                | "and"
+                | "bit"
+                | "call"
+                | "ccf"
+                | "cp"
+                | "cpl"
+                | "daa"
+                | "dec"
+                | "di"
+                | "ei"
+                | "farcall"
+                | "inc"
+                | "jp"
+                | "jr"
+                | "ld"
+                | "ldh"
+                | "nop"
+                | "or"
+                | "pop"
+                | "push"
+                | "res"
+                | "ret"
+                | "reti"
+                | "rl"
+                | "rla"
+                | "rlc"
+                | "rlca"
+                | "rr"
+                | "rra"
+                | "rrc"
+                | "rrca"
+                | "rst"
+                | "sbc"
+                | "scf"
+                | "set"
+                | "sla"
+                | "sra"
+                | "srl"
+                | "sub"
+                | "swap"
+                | "xor"
+        ) {
+            continue;
+        }
         let Some(args) = command.get("args").and_then(Value::as_array) else {
             continue;
         };
         for arg in args.iter().filter_map(Value::as_str) {
-            if all_scripts.contains_key(arg) {
-                references.push(arg.to_string());
-                continue;
-            }
             if arg.starts_with('.') {
                 let parent_label = script_label_parent(current_label);
-                let scoped = format!("{arg}@{parent_label}");
+                let scoped = if arg.contains('@') {
+                    if script_label_parent(arg) != parent_label {
+                        continue;
+                    }
+                    arg.to_string()
+                } else {
+                    format!("{arg}@{parent_label}")
+                };
                 if all_scripts.contains_key(&scoped) {
                     references.push(scoped);
                 }
+            } else if all_scripts.contains_key(arg) {
+                references.push(arg.to_string());
             }
         }
     }
@@ -967,6 +1033,46 @@ pub struct FlyDestination {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecorationSide {
+    Right,
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DecorationActionOutcome {
+    SetUp { decoration: String },
+    Replaced { decoration: String, previous: String },
+    PutAway { decoration: String },
+    AlreadySetUp { decoration: String },
+    NothingToPutAway,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDecorationSetupCommand {
+    pub decoration_id: String,
+    pub side: Option<DecorationSide>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDecorationPutAwayCommand {
+    pub category: DecorationCategory,
+    pub side: Option<DecorationSide>,
+}
+
+impl DecorationActionOutcome {
+    pub fn changed(&self) -> bool {
+        matches!(
+            self,
+            Self::SetUp { .. } | Self::Replaced { .. } | Self::PutAway { .. }
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataSet {
@@ -992,6 +1098,7 @@ pub struct GameDataSet {
     pub fruit_trees: FruitTreeCatalog,
     pub field_moves: FieldMoveCatalog,
     pub field_box_items: BTreeMap<String, FieldBoxItemRule>,
+    pub decorations: DecorationCatalog,
     pub runtime_title_screen: RuntimeTitleScreen,
     pub fly_destinations: BTreeMap<String, FlyDestination>,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
@@ -1229,6 +1336,13 @@ pub struct RuntimeFieldPartyCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeHeadbuttScriptCommand {
+    pub party_index: usize,
+    pub from_menu: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeFlyCommand {
     pub party_index: usize,
     pub destination_spawn_identifier: u16,
@@ -1237,38 +1351,32 @@ pub struct RuntimeFlyCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeHeadbuttFieldEncounterCommand {
-    pub party_index: usize,
-    pub player_id: u16,
-    pub rng_seed_after: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuntimeBattleTurnCommand {
     pub player_action: BattleAction,
     pub enemy_action: BattleAction,
-    pub rng_seed_after: u32,
+    pub enemy_ai_divider_trace: RuntimeDividerTrace,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleEnemyActionCommand {
     pub enemy_action: BattleAction,
-    pub rng_seed_after: u32,
+    pub enemy_ai_divider_trace: RuntimeDividerTrace,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleEscapeCommand {
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleItemCommand {
     pub item_id: String,
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1292,10 +1400,23 @@ pub struct RuntimeGiftPokemonCommand {
     pub command: RuntimeScriptCommandRef,
     pub original_trainer_name: String,
     pub original_trainer_id: u16,
-    pub dvs: Dv,
-    pub rng_seed_after: u32,
     pub nickname_accepted: bool,
     pub nickname: Option<String>,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRandomScriptCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRandomScriptMapCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1318,8 +1439,22 @@ pub struct RuntimeDividerTrace {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeSweetScentFieldMoveCommand {
-    pub party_index: usize,
+pub struct RuntimeSweetScentEncounterCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFishingCommand {
+    pub rod: String,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFishingItemCommand {
+    pub item_id: String,
     pub divider_trace: RuntimeDividerTrace,
 }
 
@@ -1334,6 +1469,13 @@ impl RuntimeDividerTrace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRockMonEncounterCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTreeMonEncounterCommand {
     pub command: RuntimeScriptCommandRef,
     pub divider_trace: RuntimeDividerTrace,
 }
@@ -1374,6 +1516,24 @@ pub struct RuntimeRockSmashMenuOutcome {
     pub next_script: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHeadbuttScriptOutcome {
+    pub party_index: usize,
+    pub next_script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStrengthMenuOutcome {
+    pub party_index: usize,
+    pub next_script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSweetScentMenuOutcome {
+    pub party_index: usize,
+    pub next_script: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRandomSpecialRoutineCommand {
@@ -1396,6 +1556,20 @@ pub struct RuntimeTrainerBattleCompletionCommand {
     pub won: bool,
     pub can_lose: bool,
     pub divider_trace: RuntimeDividerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeMapTrainerInteractionCommand {
+    pub command: RuntimeScriptCommandRef,
+    pub defer_battle_start: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeMapTrainerInteractionOutcome {
+    ReadyForSeenText,
+    BattleStarted(TrainerBattleStartStatus),
+    AlreadyDefeated { callback: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1465,6 +1639,7 @@ pub enum RuntimeDayCareCaretaker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeDayCareAction {
+    Open,
     Deposit,
     Withdraw,
     Inspect,
@@ -1536,25 +1711,13 @@ pub enum RuntimeGameCornerService {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeGameCornerCommand {
     pub service: RuntimeGameCornerService,
-    pub divider_trace: Option<RuntimeDividerTrace>,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 fn runtime_game_corner_divider_trace(
     command: &RuntimeGameCornerCommand,
-) -> Result<Option<&RuntimeDividerTrace>> {
-    match command.service {
-        RuntimeGameCornerService::CardFlip => command
-            .divider_trace
-            .as_ref()
-            .map(Some)
-            .with_context(|| "Card Flip command requires divider_trace"),
-        RuntimeGameCornerService::SlotMachine => {
-            if command.divider_trace.is_some() {
-                anyhow::bail!("Slot Machine command must not declare divider_trace");
-            }
-            Ok(None)
-        }
-    }
+) -> &RuntimeDividerTrace {
+    &command.divider_trace
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1729,6 +1892,7 @@ pub struct RuntimeDayCareCommand {
     pub caretaker: RuntimeDayCareCaretaker,
     pub action: RuntimeDayCareAction,
     pub party_index: Option<usize>,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 fn runtime_day_care_party_slot(command: &RuntimeDayCareCommand) -> Result<Option<usize>> {
@@ -1737,7 +1901,8 @@ fn runtime_day_care_party_slot(command: &RuntimeDayCareCommand) -> Result<Option
             .party_index
             .map(Some)
             .with_context(|| "Day Care deposit command requires party_index"),
-        RuntimeDayCareAction::Withdraw
+        RuntimeDayCareAction::Open
+        | RuntimeDayCareAction::Withdraw
         | RuntimeDayCareAction::Inspect
         | RuntimeDayCareAction::CollectEgg => {
             if command.party_index.is_some() {
@@ -1753,6 +1918,7 @@ fn runtime_day_care_party_slot(command: &RuntimeDayCareCommand) -> Result<Option
 
 fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
     match action {
+        RuntimeDayCareAction::Open => "open",
         RuntimeDayCareAction::Deposit => "deposit",
         RuntimeDayCareAction::Withdraw => "withdraw",
         RuntimeDayCareAction::Inspect => "inspect",
@@ -1761,37 +1927,41 @@ fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeBugContestCommand {
-    pub action: RuntimeBugContestAction,
-    pub divider_trace: Option<RuntimeDividerTrace>,
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeBugContestCommand {
+    GiveParkBalls {},
+    SelectContestants {
+        divider_trace: RuntimeDividerTrace,
+    },
+    DropOffMons {},
+    ReturnMons {},
+    CheckPartyFull {},
+    Judge {
+        divider_trace: RuntimeDividerTrace,
+    },
 }
 
-fn runtime_bug_contest_divider_trace(
-    command: &RuntimeBugContestCommand,
-) -> Result<Option<&RuntimeDividerTrace>> {
-    match command.action {
-        RuntimeBugContestAction::SelectContestants | RuntimeBugContestAction::Judge => command
-            .divider_trace
-            .as_ref()
-            .map(Some)
-            .with_context(|| {
-                format!(
-                    "Bug Contest {} command requires divider_trace",
-                    runtime_bug_contest_action_name(command.action)
-                )
-            }),
-        RuntimeBugContestAction::GiveParkBalls
-        | RuntimeBugContestAction::DropOffMons
-        | RuntimeBugContestAction::ReturnMons
-        | RuntimeBugContestAction::CheckPartyFull => {
-            if command.divider_trace.is_some() {
-                anyhow::bail!(
-                    "Bug Contest {} command must not declare divider_trace",
-                    runtime_bug_contest_action_name(command.action)
-                );
+impl RuntimeBugContestCommand {
+    pub(crate) fn action(&self) -> RuntimeBugContestAction {
+        match self {
+            Self::GiveParkBalls {} => RuntimeBugContestAction::GiveParkBalls,
+            Self::SelectContestants { .. } => RuntimeBugContestAction::SelectContestants,
+            Self::DropOffMons {} => RuntimeBugContestAction::DropOffMons,
+            Self::ReturnMons {} => RuntimeBugContestAction::ReturnMons,
+            Self::CheckPartyFull {} => RuntimeBugContestAction::CheckPartyFull,
+            Self::Judge { .. } => RuntimeBugContestAction::Judge,
+        }
+    }
+
+    pub(crate) fn divider_trace(&self) -> Option<&RuntimeDividerTrace> {
+        match self {
+            Self::SelectContestants { divider_trace } | Self::Judge { divider_trace } => {
+                Some(divider_trace)
             }
-            Ok(None)
+            Self::GiveParkBalls {}
+            | Self::DropOffMons {}
+            | Self::ReturnMons {}
+            | Self::CheckPartyFull {} => None,
         }
     }
 }
@@ -1829,41 +1999,14 @@ pub struct RuntimeBuenaPrizeCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeShuckieCommand {
-    pub action: RuntimeShuckieAction,
-    pub party_index: Option<usize>,
-    pub divider_trace: Option<RuntimeDividerTrace>,
-}
-
-fn runtime_shuckie_party_slot(command: &RuntimeShuckieCommand) -> Result<Option<usize>> {
-    match command.action {
-        RuntimeShuckieAction::Give => {
-            if command.party_index.is_some() {
-                anyhow::bail!("Shuckie give command must not declare party_index");
-            }
-            Ok(None)
-        }
-        RuntimeShuckieAction::Return => Ok(command.party_index),
-    }
-}
-
-fn runtime_shuckie_divider_trace(
-    command: &RuntimeShuckieCommand,
-) -> Result<Option<&RuntimeDividerTrace>> {
-    match command.action {
-        RuntimeShuckieAction::Give => command
-            .divider_trace
-            .as_ref()
-            .map(Some)
-            .with_context(|| "Shuckie give command requires divider_trace"),
-        RuntimeShuckieAction::Return => {
-            if command.divider_trace.is_some() {
-                anyhow::bail!("Shuckie return command must not declare divider_trace");
-            }
-            Ok(None)
-        }
-    }
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeShuckieCommand {
+    Give {
+        divider_trace: RuntimeDividerTrace,
+    },
+    Return {
+        party_index: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1969,6 +2112,12 @@ pub struct RuntimeOptionsCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimePokegearRadioTuningCommand {
+    pub tuning_knob: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeTrainerIdentityCommand {
     pub player_name: String,
     pub player_id: u16,
@@ -1989,6 +2138,13 @@ pub struct RuntimePartyNicknameCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeStoredPokemonNicknameCommand {
+    pub location: crystal_core::models::CaptureStorageLocation,
+    pub nickname: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimePartySlotCommand {
     pub party_index: usize,
 }
@@ -2004,6 +2160,14 @@ pub struct RuntimeMailboxSlotCommand {
 pub struct RuntimeMailboxPartyCommand {
     pub mailbox_index: usize,
     pub party_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeComposeMailCommand {
+    pub item_id: String,
+    pub party_index: usize,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2041,6 +2205,13 @@ pub struct RuntimePartyMoveSwapCommand {
 #[serde(deny_unknown_fields)]
 pub struct RuntimePcBoxCommand {
     pub box_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePcBoxNameCommand {
+    pub box_index: usize,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2095,8 +2266,7 @@ pub struct RuntimeHeldItemCommand {
 pub struct RuntimeHappinessServiceCommand {
     pub routine: RuntimeHappinessServiceRoutine,
     pub party_index: usize,
-    pub rng_roll: u8,
-    pub rng_seed_after: u32,
+    pub divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2165,6 +2335,19 @@ pub struct RuntimePhoneCallerCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimePokegearPhoneCallCommand {
+    pub contact_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePokegearPhoneCallOutcome {
+    pub contact_id: String,
+    pub callback_script: String,
+    pub callee_script: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeSpecialCryCommand {
     pub species_id: String,
 }
@@ -2201,55 +2384,20 @@ pub enum RuntimeBattleTowerMobileFlag {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleTowerActionCommand {
     pub action: String,
-    pub level_group: Option<u8>,
-    pub selected_reward: Option<String>,
 }
 
-fn runtime_battle_tower_action_inputs(
-    command: &RuntimeBattleTowerActionCommand,
-) -> Result<(Option<u8>, Option<String>)> {
-    match command.action.as_str() {
-        "BATTLETOWERACTION_SAVELEVELGROUP" => {
-            let level_group = command
-                .level_group
-                .with_context(|| "Battle Tower SAVELEVELGROUP command requires level_group")?;
-            reject_battle_tower_selected_reward(command)?;
-            Ok((Some(level_group), None))
-        }
-        "BATTLETOWERACTION_SAVEOPTIONS" => {
-            reject_battle_tower_level_group(command)?;
-            let selected_reward = command
-                .selected_reward
-                .clone()
-                .with_context(|| "Battle Tower SAVEOPTIONS command requires selected_reward")?;
-            Ok((None, Some(selected_reward)))
-        }
-        _ => {
-            reject_battle_tower_level_group(command)?;
-            reject_battle_tower_selected_reward(command)?;
-            Ok((None, None))
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBattleTowerChallengeMenuCommand {
+    pub english: bool,
+    pub selection: Option<u8>,
 }
 
-fn reject_battle_tower_level_group(command: &RuntimeBattleTowerActionCommand) -> Result<()> {
-    if command.level_group.is_some() {
-        anyhow::bail!(
-            "Battle Tower {} command must not declare level_group",
-            command.action
-        );
-    }
-    Ok(())
-}
-
-fn reject_battle_tower_selected_reward(command: &RuntimeBattleTowerActionCommand) -> Result<()> {
-    if command.selected_reward.is_some() {
-        anyhow::bail!(
-            "Battle Tower {} command must not declare selected_reward",
-            command.action
-        );
-    }
-    Ok(())
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBattleTowerRoomMenuCommand {
+    pub selection: Option<u8>,
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2261,8 +2409,6 @@ pub struct RuntimeBattleTowerBattleCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleTowerOpponentCommand {
-    pub trainer_id: String,
-    pub sprite_constant: String,
     pub target_object: String,
     pub divider_trace: RuntimeDividerTrace,
 }
@@ -2322,7 +2468,9 @@ pub enum RuntimeMutationCommand {
     ApplyScriptBlockChange(RuntimeScriptCommandRef),
     ApplyScriptAudio(RuntimeScriptCommandRef),
     ApplyScriptMap(RuntimeScriptCommandRef),
+    ApplyRandomScriptMap(RuntimeRandomScriptMapCommand),
     TransitionPendingScriptWarp,
+    ApplyMapSetupCallbacks { map_setup: String },
     ApplyScriptText(RuntimeScriptCommandRef),
     ApplyScriptVariableNow(RuntimeScriptCommandRef),
     ApplyScriptControl(RuntimeScriptCommandRef),
@@ -2332,13 +2480,13 @@ pub enum RuntimeMutationCommand {
         command: RuntimeScriptCommandRef,
         inputs: ScriptRuntimeInputs,
     },
+    ApplyRandomScriptRuntime(RuntimeRandomScriptCommand),
     TakeNextScript,
     DrainScriptEventQueue(RuntimeScriptEventDrainCommand),
     DrainScriptRuntimeQueue(RuntimeScriptRuntimeQueueDrainCommand),
     PopScriptCallStack,
     PopDeferredScript,
     TakeScriptEndState,
-    DrainScriptRuntimeRecordQueue(RuntimeScriptRuntimeRecordQueueDrainCommand),
     TakePendingScriptRequest(RuntimePendingScriptRequestCommand),
     ResolvePendingYesNo(RuntimePendingYesNoResolutionCommand),
     OpenVerticalMenu(RuntimeVerticalMenuOpenCommand),
@@ -2351,14 +2499,12 @@ pub enum RuntimeMutationCommand {
     CloseActiveMenu,
     CloseRuntimeWindow,
     CloseTextWindow,
-    ClearMenuCoords,
     CloseActivePokemonPicture,
     CloseScriptShop,
     BuyShopItem(RuntimeShopTransactionCommand),
     SellShopItem(RuntimeShopTransactionCommand),
     ApplySpecialRoutine {
         routine: String,
-        rng_seed_after: Option<u32>,
     },
     ApplyRandomSpecialRoutine(RuntimeRandomSpecialRoutineCommand),
     ResolveBugContestCaughtMon {
@@ -2368,6 +2514,7 @@ pub enum RuntimeMutationCommand {
     AddPartyPokemon(RuntimePartyPokemonCommand),
     StartScriptedWildBattle(RuntimeScriptedWildBattleStartCommand),
     StartScriptedTrainerBattle(RuntimeScriptCommandRef),
+    ResolveMapTrainerInteraction(RuntimeMapTrainerInteractionCommand),
     CompleteScriptedWildBattle(RuntimeScriptedWildBattleCompletionCommand),
     CompleteScriptedTrainerBattle(RuntimeTrainerBattleCompletionCommand),
     UseBagItem {
@@ -2381,6 +2528,7 @@ pub enum RuntimeMutationCommand {
     UseBagBicycleInField(RuntimeItemCommand),
     UseBagItemfinderInField(RuntimeItemCommand),
     UseBagSquirtbottleInField(RuntimeItemCommand),
+    UseBagStoryKeyInField(RuntimeItemCommand),
     UseBagCoinCaseInField(RuntimeItemCommand),
     UseBagBlueCardInField(RuntimeItemCommand),
     UseBagTownMapInField(RuntimeItemCommand),
@@ -2389,17 +2537,20 @@ pub enum RuntimeMutationCommand {
     UseBagEscapeRopeInField(RuntimeItemCommand),
     UseCutFieldMove(RuntimeFieldBlockMoveCommand),
     UseWhirlpoolFieldMove(RuntimeFieldBlockMoveCommand),
-    UseStrengthFieldMove(RuntimeFieldPartyCommand),
+    QueueStrengthFromMenu(RuntimeFieldPartyCommand),
     UseFlashFieldMove(RuntimeFieldPartyCommand),
     UseSurfFieldMove(RuntimeFieldPartyCommand),
     UseWaterfallFieldMove(RuntimeFieldPartyCommand),
     UseFlyFieldMove(RuntimeFlyCommand),
     UseDigFieldMove(RuntimeFieldPartyCommand),
     UseTeleportFieldMove(RuntimeFieldPartyCommand),
-    UseHeadbuttFieldMove(RuntimeHeadbuttFieldEncounterCommand),
+    CommitPendingFieldTravel,
+    QueueHeadbuttScript(RuntimeHeadbuttScriptCommand),
     QueueRockSmashFromMenu(RuntimeFieldPartyCommand),
     ResolveRockMonEncounter(RuntimeRockMonEncounterCommand),
-    UseSweetScentFieldMove(RuntimeSweetScentFieldMoveCommand),
+    ResolveTreeMonEncounter(RuntimeTreeMonEncounterCommand),
+    QueueSweetScentFromMenu(RuntimeFieldPartyCommand),
+    ResolveSweetScentEncounter(RuntimeSweetScentEncounterCommand),
     UseBagItemOnPartyPokemon(RuntimePartyItemCommand),
     UseBagItemOnWholeParty(RuntimeItemCommand),
     UseBagItemOnPartyMove(RuntimePartyMoveItemCommand),
@@ -2414,15 +2565,13 @@ pub enum RuntimeMutationCommand {
     ResolveActiveBattleCommand(RuntimeBattleTurnCommand),
     ResolveActiveBattleEnemyAction(RuntimeBattleEnemyActionCommand),
     AttemptEscapeActiveWildBattle(RuntimeBattleEscapeCommand),
-    UseBagItemToEscapeActiveWildBattle(RuntimeItemCommand),
+    UseBagItemToEscapeActiveWildBattle(RuntimeBattleItemCommand),
     UseBagGuardSpecInActiveBattle(RuntimeItemCommand),
     AdvanceActiveTrainerBattle,
     ClaimActiveTrainerBattleRewardsNow,
     ClaimActiveWildBattleRewardsNow(RuntimeDividerTrace),
-    CastFishingRod {
-        rod: String,
-    },
-    UseBagFishingRodInField(RuntimeItemCommand),
+    CastFishingRod(RuntimeFishingCommand),
+    UseBagFishingRodInField(RuntimeFishingItemCommand),
     AdvanceGameTimerVBlanks(RuntimeGameTimerAdvanceCommand),
     SetGameTimerCounting(RuntimeGameTimerCountingCommand),
     SetGameLogicPaused(RuntimeGameLogicPauseCommand),
@@ -2431,7 +2580,7 @@ pub enum RuntimeMutationCommand {
     ApplyScriptSwarm(RuntimeScriptCommandRef),
     ExecuteNextQueuedScriptCommand,
     UseDayCare(RuntimeDayCareCommand),
-    CheckDayCareManOutsideSpecial,
+    CheckDayCareManOutsideSpecial(RuntimeDividerTrace),
     CheckDayCareResidentSpecial(RuntimeDayCareCaretaker),
     UseBugContest(RuntimeBugContestCommand),
     UseKurtApricorn(RuntimeKurtApricornCommand),
@@ -2446,7 +2595,7 @@ pub enum RuntimeMutationCommand {
     ShowProfOaksPcBoot,
     ShowMagikarpHouseSign,
     ApplyBattleTowerAction(RuntimeBattleTowerActionCommand),
-    OpenBattleTowerRoomMenuSpecial,
+    UseBattleTowerRoomMenu(RuntimeBattleTowerRoomMenuCommand),
     StartBattleTowerBattleSpecial(RuntimeBattleTowerBattleCommand),
     LoadBattleTowerOpponentSpecial(RuntimeBattleTowerOpponentCommand),
     ShowBattleTowerMobileErrorSpecial,
@@ -2482,7 +2631,7 @@ pub enum RuntimeMutationCommand {
     OpenDisplayLinkRecordSpecial,
     OpenTrainerHouseSpecial,
     OpenPhotoStudioSpecial(RuntimePartySlotCommand),
-    CancelBattleTowerChallengeExplanationSpecial,
+    UseBattleTowerChallengeMenu(RuntimeBattleTowerChallengeMenuCommand),
     ApplyGraphicsSpecial(RuntimeGraphicsSpecial),
     ApplyPartyCheckSpecial(RuntimePartyCheckCommand),
     ApplyPhoneRandomSpecial(RuntimePhoneCallerCommand),
@@ -2494,6 +2643,7 @@ pub enum RuntimeMutationCommand {
     SetDayOfWeek,
     UpdateTime,
     SwitchCurrentPcBox(RuntimePcBoxCommand),
+    NamePcBox(RuntimePcBoxNameCommand),
     DepositPartyPokemonToCurrentBox(RuntimePcDepositCommand),
     WithdrawCurrentBoxPokemonToParty(RuntimePcWithdrawCommand),
     ReleaseCurrentBoxPokemon(RuntimePcReleaseCommand),
@@ -2501,7 +2651,10 @@ pub enum RuntimeMutationCommand {
     DepositBagItemToPc(RuntimePcItemCommand),
     WithdrawPcItemToBag(RuntimePcItemCommand),
     TossPcItem(RuntimePcItemCommand),
+    SetUpDecoration(RuntimeDecorationSetupCommand),
+    PutAwayDecoration(RuntimeDecorationPutAwayCommand),
     GiveBagItemToPartyPokemon(RuntimeHeldItemCommand),
+    ComposeBagMailToParty(RuntimeComposeMailCommand),
     TakeHeldItemFromPartyPokemon(RuntimePartySlotCommand),
     SendPartyMailToMailbox(RuntimePartySlotCommand),
     DiscardPartyMailToBag(RuntimePartySlotCommand),
@@ -2528,9 +2681,11 @@ pub enum RuntimeMutationCommand {
     AskMobileOrCableSpecial,
     CableClubCheckWhichChrisSpecial(RuntimeCableClubGenderCommand),
     SetOptions(RuntimeOptionsCommand),
+    SetPokegearRadioTuning(RuntimePokegearRadioTuningCommand),
     SetTrainerIdentity(RuntimeTrainerIdentityCommand),
     SetPlayerGender(RuntimePlayerGenderCommand),
     RenamePartyPokemon(RuntimePartyNicknameCommand),
+    RenameStoredPokemon(RuntimeStoredPokemonNicknameCommand),
     SetPartyPokemonRecoveryState(RuntimePartyRecoverySetupCommand),
     TransferPartyPokemonHp(RuntimePartyHpTransferCommand),
     FullHealPartyPokemon(RuntimePartySlotCommand),
@@ -2539,6 +2694,7 @@ pub enum RuntimeMutationCommand {
     SwapPartyPokemon(RuntimePartySwapCommand),
     SwapPartyPokemonMoves(RuntimePartyMoveSwapCommand),
     InitializePermanentPhoneNumbers,
+    StartPokegearPhoneCall(RuntimePokegearPhoneCallCommand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2567,38 +2723,15 @@ pub enum RuntimeScriptRuntimeQueue {
     PendingEarthquake,
     PendingEmote,
     Command,
-    Stack,
     CallStack,
     DeferredScript,
+    MapReentryScript,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeScriptRuntimeQueueDrainCommand {
     pub queue: RuntimeScriptRuntimeQueue,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeScriptRuntimeRecordQueue {
-    VariableWrite,
-    Effect,
-    AsmDirective,
-    NumericBufferWrite,
-    ElevatorFloor,
-    StoneTableEntry,
-    DecorationDescription,
-    SpecialPhoneCall,
-    CompletedTrade,
-    CatchTutorial,
-    CheckedMailTarget,
-    GivenMailTarget,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeScriptRuntimeRecordQueueDrainCommand {
-    pub queue: RuntimeScriptRuntimeRecordQueue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2666,7 +2799,6 @@ pub enum RuntimeScriptRuntimeFlag {
     MapMusicRestartDisabled,
     MapMusicRequested,
     WaitingForSoundEffect,
-    WarpCheckRequested,
     ItemNotifyQueued,
     WarpSoundQueued,
     TeleportFromQueued,
@@ -2675,8 +2807,6 @@ pub enum RuntimeScriptRuntimeFlag {
     ResetRequested,
     Menu2dRequested,
     VersionCheckRequested,
-    BlackoutMod,
-    BattleTowerText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2736,26 +2866,9 @@ pub enum RuntimeScriptRuntimeQueueDrainResult {
     PendingEarthquake(Vec<ScriptRuntimeEarthquake>),
     PendingEmote(Vec<ScriptRuntimeEmote>),
     Command(Vec<ScriptRuntimeQueuedCommand>),
-    Stack(Vec<String>),
     CallStack(Vec<ScriptReturnFrame>),
     DeferredScript(Vec<ScriptLocation>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeScriptRuntimeRecordQueueDrainResult {
-    VariableWrite(Vec<ScriptRuntimeVariableWrite>),
-    Effect(Vec<ScriptRuntimeEffect>),
-    AsmDirective(Vec<ScriptRuntimeAsmDirective>),
-    NumericBufferWrite(Vec<ScriptRuntimeNumericBufferWrite>),
-    ElevatorFloor(Vec<ScriptRuntimeElevatorFloor>),
-    StoneTableEntry(Vec<ScriptRuntimeStoneTableEntry>),
-    DecorationDescription(Vec<ScriptRuntimeDecorationDescription>),
-    SpecialPhoneCall(Vec<String>),
-    CompletedTrade(Vec<String>),
-    CatchTutorial(Vec<String>),
-    CheckedMailTarget(Vec<String>),
-    GivenMailTarget(Vec<String>),
+    MapReentryScript(Vec<ScriptLocation>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2820,7 +2933,6 @@ pub enum RuntimeScriptRuntimeFlagValue {
     MapMusicRestartDisabled,
     MapMusicRequested,
     WaitingForSoundEffect,
-    WarpCheckRequested,
     ItemNotifyQueued,
     WarpSoundQueued,
     TeleportFromQueued,
@@ -2829,8 +2941,6 @@ pub enum RuntimeScriptRuntimeFlagValue {
     ResetRequested,
     Menu2dRequested,
     VersionCheckRequested,
-    BlackoutMod(String),
-    BattleTowerText(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2851,7 +2961,7 @@ pub enum RuntimeScriptRuntimeMemoryEntryRemoved {
     PhoneNumber { key: String },
 }
 
-pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v5";
+pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v47";
 
 pub fn encode_runtime_mutation_command_payload(
     command: &RuntimeMutationCommand,
@@ -2916,6 +3026,13 @@ pub fn decode_runtime_mutation_command_frame(
 pub struct RuntimeStorageBoxSwitchOutcome {
     pub box_index_before: usize,
     pub box_index_after: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStorageBoxNameOutcome {
+    pub box_index: usize,
+    pub previous_name: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3022,6 +3139,12 @@ pub struct RuntimeOptionsSetOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePokegearRadioTuningOutcome {
+    pub tuning_knob_before: u8,
+    pub tuning_knob_after: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTrainerIdentityOutcome {
     pub player_name_before: String,
     pub player_id_before: u16,
@@ -3038,6 +3161,14 @@ pub struct RuntimePlayerGenderOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePartyNicknameOutcome {
     pub party_index: usize,
+    pub species_id: String,
+    pub nickname_before: String,
+    pub nickname_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStoredPokemonNicknameOutcome {
+    pub location: crystal_core::models::CaptureStorageLocation,
     pub species_id: String,
     pub nickname_before: String,
     pub nickname_after: String,
@@ -3401,6 +3532,7 @@ pub enum RuntimeMutationResult {
     ScriptAudioApplied(ScriptAudioCue),
     ScriptMapApplied(ScriptMapAction),
     PendingScriptWarpTransitioned(ScriptWarpRequest),
+    MapSetupCallbacksApplied(String),
     ScriptTextApplied(ScriptTextAction),
     ScriptVariableApplied(ScriptVariableOutcome),
     ScriptControlApplied(ScriptControlAction),
@@ -3413,7 +3545,6 @@ pub enum RuntimeMutationResult {
     ScriptCallStackPopped(ScriptReturnFrame),
     DeferredScriptPopped(ScriptLocation),
     ScriptEndStateTaken(ScriptEndState),
-    ScriptRuntimeRecordQueueDrained(RuntimeScriptRuntimeRecordQueueDrainResult),
     PendingScriptRequestTaken(RuntimePendingScriptRequest),
     PendingYesNoResolved(RuntimePendingYesNoResolution),
     VerticalMenuOpened(RuntimeVerticalMenuOpen),
@@ -3426,7 +3557,6 @@ pub enum RuntimeMutationResult {
     ActiveMenuClosed(String),
     RuntimeWindowClosed,
     TextWindowClosed,
-    MenuCoordsCleared([i16; 4]),
     ActivePokemonPictureClosed(String),
     ScriptShopClosed(crystal_core::state::ScriptShopRequest),
     ShopItemBought(ShopResult),
@@ -3436,6 +3566,7 @@ pub enum RuntimeMutationResult {
     PartyPokemonAdded(GiftPokemonOutcome),
     ScriptedWildBattleStarted(StaticWildBattleStart),
     ScriptedTrainerBattleStarted(TrainerBattleStartStatus),
+    MapTrainerInteractionResolved(RuntimeMapTrainerInteractionOutcome),
     ScriptedWildBattleCompleted,
     ScriptedTrainerBattleCompleted(TrainerBattleCompletionOutcome),
     BagItemUsed(ItemUseOutcome),
@@ -3446,6 +3577,7 @@ pub enum RuntimeMutationResult {
     FieldBicycleUsed(FieldBicycleItemUseOutcome),
     FieldItemfinderUsed(FieldItemfinderUseOutcome),
     FieldSquirtbottleUsed(FieldSquirtBottleUseOutcome),
+    FieldStoryKeyUsed(FieldStoryKeyUseOutcome),
     FieldCoinCaseUsed(FieldKeyItemBalanceUseOutcome),
     FieldBlueCardUsed(FieldKeyItemBalanceUseOutcome),
     FieldTownMapUsed(FieldTownMapUseOutcome),
@@ -3454,17 +3586,20 @@ pub enum RuntimeMutationResult {
     FieldEscapeRopeUsed(FieldEscapeRopeUseOutcome),
     CutFieldMoveUsed(FieldMoveBlockOutcome),
     WhirlpoolFieldMoveUsed(FieldMoveBlockOutcome),
-    StrengthFieldMoveUsed(FieldMoveFlagOutcome),
+    StrengthFromMenuQueued(RuntimeStrengthMenuOutcome),
     FlashFieldMoveUsed(FieldMoveFlagOutcome),
     SurfFieldMoveUsed(FieldMoveTravelOutcome),
     WaterfallFieldMoveUsed(FieldMoveTravelOutcome),
     FlyFieldMoveUsed(FlyFieldMoveOutcome),
     DigFieldMoveUsed(DigFieldMoveOutcome),
     TeleportFieldMoveUsed(TeleportFieldMoveOutcome),
-    HeadbuttFieldMoveUsed(DirectFieldEncounterMoveOutcome),
+    FieldTravelCommitted(PendingFieldTravel),
+    HeadbuttScriptQueued(RuntimeHeadbuttScriptOutcome),
     RockSmashFromMenuQueued(RuntimeRockSmashMenuOutcome),
     RockMonEncounterResolved(RockMonEncounterOutcome),
-    SweetScentFieldMoveUsed(SweetScentFieldMoveOutcome),
+    TreeMonEncounterResolved(HeadbuttEncounterOutcome),
+    SweetScentFromMenuQueued(RuntimeSweetScentMenuOutcome),
+    SweetScentEncounterResolved(SweetScentEncounterOutcome),
     PartyPokemonItemUsed(ItemUseOutcome, BattleItemOutcome),
     WholePartyItemUsed(ItemUseOutcome, PartyItemOutcome),
     PartyMoveItemUsed(ItemUseOutcome, BattleItemOutcome),
@@ -3509,7 +3644,7 @@ pub enum RuntimeMutationResult {
     ProfOaksPcBootShown(SpecialRoutineOutcome),
     MagikarpHouseSignShown(SpecialRoutineOutcome),
     BattleTowerActionApplied(SpecialRoutineOutcome),
-    BattleTowerRoomMenuOpened(SpecialRoutineOutcome),
+    BattleTowerRoomMenuUsed(SpecialRoutineOutcome),
     BattleTowerBattleStarted(SpecialRoutineOutcome),
     BattleTowerOpponentLoaded(SpecialRoutineOutcome),
     BattleTowerMobileErrorShown(SpecialRoutineOutcome),
@@ -3545,7 +3680,7 @@ pub enum RuntimeMutationResult {
     DisplayLinkRecordOpened(SpecialRoutineOutcome),
     TrainerHouseOpened(SpecialRoutineOutcome),
     PhotoStudioOpened(SpecialRoutineOutcome),
-    BattleTowerChallengeExplanationCancelled(SpecialRoutineOutcome),
+    BattleTowerChallengeMenuUsed(SpecialRoutineOutcome),
     GraphicsSpecialApplied(SpecialRoutineOutcome),
     PartyCheckSpecialApplied(SpecialRoutineOutcome),
     PhoneRandomSpecialApplied(SpecialRoutineOutcome),
@@ -3557,6 +3692,7 @@ pub enum RuntimeMutationResult {
     DayOfWeekSet(SpecialRoutineOutcome),
     TimeUpdated(SpecialRoutineOutcome),
     CurrentPcBoxSwitched(RuntimeStorageBoxSwitchOutcome),
+    PcBoxNamed(RuntimeStorageBoxNameOutcome),
     PartyPokemonDeposited(RuntimeStorageDepositOutcome),
     PcPokemonWithdrawn(RuntimeStorageWithdrawOutcome),
     PcPokemonReleased(RuntimeStorageReleaseOutcome),
@@ -3564,7 +3700,10 @@ pub enum RuntimeMutationResult {
     BagItemDepositedToPc(RuntimePcItemTransferOutcome),
     PcItemWithdrawnToBag(RuntimePcItemTransferOutcome),
     PcItemTossed(RuntimePcItemTransferOutcome),
+    DecorationSetUp(DecorationActionOutcome),
+    DecorationPutAway(DecorationActionOutcome),
     PartyPokemonHeldItemGiven(RuntimeHeldItemTransferOutcome),
+    PartyMailComposed(RuntimeMailTransferOutcome),
     PartyPokemonHeldItemTaken(RuntimeHeldItemTransferOutcome),
     PartyMailSentToMailbox(RuntimeMailTransferOutcome),
     PartyMailDiscardedToBag(RuntimeMailTransferOutcome),
@@ -3591,9 +3730,11 @@ pub enum RuntimeMutationResult {
     MobileOrCableAsked(SpecialRoutineOutcome),
     CableClubChrisChecked(SpecialRoutineOutcome),
     OptionsSet(RuntimeOptionsSetOutcome),
+    PokegearRadioTuningSet(RuntimePokegearRadioTuningOutcome),
     TrainerIdentitySet(RuntimeTrainerIdentityOutcome),
     PlayerGenderSet(RuntimePlayerGenderOutcome),
     PartyPokemonRenamed(RuntimePartyNicknameOutcome),
+    StoredPokemonRenamed(RuntimeStoredPokemonNicknameOutcome),
     PartyPokemonRecoveryStateSet(RuntimePartyRecoverySetupOutcome),
     PartyPokemonHpTransferred(RuntimePartyHpTransferOutcome),
     PartyPokemonFullHealed(PartyRecoveryOutcome),
@@ -3602,6 +3743,7 @@ pub enum RuntimeMutationResult {
     PartyPokemonSwapped(RuntimePartySwapOutcome),
     PartyPokemonMovesSwapped(RuntimePartyMoveSwapOutcome),
     PermanentPhoneNumbersInitialized(Vec<String>),
+    PokegearPhoneCallStarted(RuntimePokegearPhoneCallOutcome),
 }
 
 impl RuntimeMutationResult {
@@ -3621,6 +3763,7 @@ impl RuntimeMutationResult {
             Self::ScriptAudioApplied(_) => "script_audio_applied",
             Self::ScriptMapApplied(_) => "script_map_applied",
             Self::PendingScriptWarpTransitioned(_) => "pending_script_warp_transitioned",
+            Self::MapSetupCallbacksApplied(_) => "map_setup_callbacks_applied",
             Self::ScriptTextApplied(_) => "script_text_applied",
             Self::ScriptVariableApplied(_) => "script_variable_applied",
             Self::ScriptControlApplied(_) => "script_control_applied",
@@ -3633,7 +3776,6 @@ impl RuntimeMutationResult {
             Self::ScriptCallStackPopped(_) => "script_call_stack_popped",
             Self::DeferredScriptPopped(_) => "deferred_script_popped",
             Self::ScriptEndStateTaken(_) => "script_end_state_taken",
-            Self::ScriptRuntimeRecordQueueDrained(_) => "script_runtime_record_queue_drained",
             Self::PendingScriptRequestTaken(_) => "pending_script_request_taken",
             Self::PendingYesNoResolved(_) => "pending_yes_no_resolved",
             Self::VerticalMenuOpened(_) => "vertical_menu_opened",
@@ -3646,7 +3788,6 @@ impl RuntimeMutationResult {
             Self::ActiveMenuClosed(_) => "active_menu_closed",
             Self::RuntimeWindowClosed => "runtime_window_closed",
             Self::TextWindowClosed => "text_window_closed",
-            Self::MenuCoordsCleared(_) => "menu_coords_cleared",
             Self::ActivePokemonPictureClosed(_) => "active_pokemon_picture_closed",
             Self::ScriptShopClosed(_) => "script_shop_closed",
             Self::ShopItemBought(_) => "shop_item_bought",
@@ -3656,6 +3797,7 @@ impl RuntimeMutationResult {
             Self::PartyPokemonAdded(_) => "party_pokemon_added",
             Self::ScriptedWildBattleStarted(_) => "scripted_wild_battle_started",
             Self::ScriptedTrainerBattleStarted(_) => "scripted_trainer_battle_started",
+            Self::MapTrainerInteractionResolved(_) => "map_trainer_interaction_resolved",
             Self::ScriptedWildBattleCompleted => "scripted_wild_battle_completed",
             Self::ScriptedTrainerBattleCompleted(_) => "scripted_trainer_battle_completed",
             Self::BagItemUsed(_) => "bag_item_used",
@@ -3666,6 +3808,7 @@ impl RuntimeMutationResult {
             Self::FieldBicycleUsed(_) => "field_bicycle_used",
             Self::FieldItemfinderUsed(_) => "field_itemfinder_used",
             Self::FieldSquirtbottleUsed(_) => "field_squirtbottle_used",
+            Self::FieldStoryKeyUsed(_) => "field_story_key_used",
             Self::FieldCoinCaseUsed(_) => "field_coin_case_used",
             Self::FieldBlueCardUsed(_) => "field_blue_card_used",
             Self::FieldTownMapUsed(_) => "field_town_map_used",
@@ -3674,17 +3817,20 @@ impl RuntimeMutationResult {
             Self::FieldEscapeRopeUsed(_) => "field_escape_rope_used",
             Self::CutFieldMoveUsed(_) => "cut_field_move_used",
             Self::WhirlpoolFieldMoveUsed(_) => "whirlpool_field_move_used",
-            Self::StrengthFieldMoveUsed(_) => "strength_field_move_used",
+            Self::StrengthFromMenuQueued(_) => "strength_from_menu_queued",
             Self::FlashFieldMoveUsed(_) => "flash_field_move_used",
             Self::SurfFieldMoveUsed(_) => "surf_field_move_used",
             Self::WaterfallFieldMoveUsed(_) => "waterfall_field_move_used",
             Self::FlyFieldMoveUsed(_) => "fly_field_move_used",
             Self::DigFieldMoveUsed(_) => "dig_field_move_used",
             Self::TeleportFieldMoveUsed(_) => "teleport_field_move_used",
-            Self::HeadbuttFieldMoveUsed(_) => "headbutt_field_move_used",
+            Self::FieldTravelCommitted(_) => "field_travel_committed",
+            Self::HeadbuttScriptQueued(_) => "headbutt_script_queued",
             Self::RockSmashFromMenuQueued(_) => "rock_smash_from_menu_queued",
             Self::RockMonEncounterResolved(_) => "rock_mon_encounter_resolved",
-            Self::SweetScentFieldMoveUsed(_) => "sweet_scent_field_move_used",
+            Self::TreeMonEncounterResolved(_) => "tree_mon_encounter_resolved",
+            Self::SweetScentFromMenuQueued(_) => "sweet_scent_from_menu_queued",
+            Self::SweetScentEncounterResolved(_) => "sweet_scent_encounter_resolved",
             Self::PartyPokemonItemUsed(_, _) => "party_pokemon_item_used",
             Self::WholePartyItemUsed(_, _) => "whole_party_item_used",
             Self::PartyMoveItemUsed(_, _) => "party_move_item_used",
@@ -3729,7 +3875,7 @@ impl RuntimeMutationResult {
             Self::ProfOaksPcBootShown(_) => "prof_oaks_pc_boot_shown",
             Self::MagikarpHouseSignShown(_) => "magikarp_house_sign_shown",
             Self::BattleTowerActionApplied(_) => "battle_tower_action_applied",
-            Self::BattleTowerRoomMenuOpened(_) => "battle_tower_room_menu_opened",
+            Self::BattleTowerRoomMenuUsed(_) => "battle_tower_room_menu_used",
             Self::BattleTowerBattleStarted(_) => "battle_tower_battle_started",
             Self::BattleTowerOpponentLoaded(_) => "battle_tower_opponent_loaded",
             Self::BattleTowerMobileErrorShown(_) => "battle_tower_mobile_error_shown",
@@ -3765,9 +3911,7 @@ impl RuntimeMutationResult {
             Self::DisplayLinkRecordOpened(_) => "display_link_record_opened",
             Self::TrainerHouseOpened(_) => "trainer_house_opened",
             Self::PhotoStudioOpened(_) => "photo_studio_opened",
-            Self::BattleTowerChallengeExplanationCancelled(_) => {
-                "battle_tower_challenge_explanation_cancelled"
-            }
+            Self::BattleTowerChallengeMenuUsed(_) => "battle_tower_challenge_menu_used",
             Self::GraphicsSpecialApplied(_) => "graphics_special_applied",
             Self::PartyCheckSpecialApplied(_) => "party_check_special_applied",
             Self::PhoneRandomSpecialApplied(_) => "phone_random_special_applied",
@@ -3779,6 +3923,7 @@ impl RuntimeMutationResult {
             Self::DayOfWeekSet(_) => "day_of_week_set",
             Self::TimeUpdated(_) => "time_updated",
             Self::CurrentPcBoxSwitched(_) => "current_pc_box_switched",
+            Self::PcBoxNamed(_) => "pc_box_named",
             Self::PartyPokemonDeposited(_) => "party_pokemon_deposited",
             Self::PcPokemonWithdrawn(_) => "pc_pokemon_withdrawn",
             Self::PcPokemonReleased(_) => "pc_pokemon_released",
@@ -3786,7 +3931,10 @@ impl RuntimeMutationResult {
             Self::BagItemDepositedToPc(_) => "bag_item_deposited_to_pc",
             Self::PcItemWithdrawnToBag(_) => "pc_item_withdrawn_to_bag",
             Self::PcItemTossed(_) => "pc_item_tossed",
+            Self::DecorationSetUp(_) => "decoration_set_up",
+            Self::DecorationPutAway(_) => "decoration_put_away",
             Self::PartyPokemonHeldItemGiven(_) => "party_pokemon_held_item_given",
+            Self::PartyMailComposed(_) => "party_mail_composed",
             Self::PartyPokemonHeldItemTaken(_) => "party_pokemon_held_item_taken",
             Self::PartyMailSentToMailbox(_) => "party_mail_sent_to_mailbox",
             Self::PartyMailDiscardedToBag(_) => "party_mail_discarded_to_bag",
@@ -3813,9 +3961,11 @@ impl RuntimeMutationResult {
             Self::MobileOrCableAsked(_) => "mobile_or_cable_asked",
             Self::CableClubChrisChecked(_) => "cable_club_chris_checked",
             Self::OptionsSet(_) => "options_set",
+            Self::PokegearRadioTuningSet(_) => "pokegear_radio_tuning_set",
             Self::TrainerIdentitySet(_) => "trainer_identity_set",
             Self::PlayerGenderSet(_) => "player_gender_set",
             Self::PartyPokemonRenamed(_) => "party_pokemon_renamed",
+            Self::StoredPokemonRenamed(_) => "stored_pokemon_renamed",
             Self::PartyPokemonRecoveryStateSet(_) => "party_pokemon_recovery_state_set",
             Self::PartyPokemonHpTransferred(_) => "party_pokemon_hp_transferred",
             Self::PartyPokemonFullHealed(_) => "party_pokemon_full_healed",
@@ -3824,6 +3974,7 @@ impl RuntimeMutationResult {
             Self::PartyPokemonSwapped(_) => "party_pokemon_swapped",
             Self::PartyPokemonMovesSwapped(_) => "party_pokemon_moves_swapped",
             Self::PermanentPhoneNumbersInitialized(_) => "permanent_phone_numbers_initialized",
+            Self::PokegearPhoneCallStarted(_) => "pokegear_phone_call_started",
         }
     }
 }
@@ -3895,23 +4046,43 @@ fn reset_map_bike_flags(state: &mut GameState) -> Result<()> {
     Ok(())
 }
 
-fn ensure_runtime_command_rng_boundary(
-    context: &str,
-    actual_rng_seed_after: u32,
-    declared_rng_seed_after: u32,
-) -> Result<()> {
-    if actual_rng_seed_after != declared_rng_seed_after {
-        anyhow::bail!(
-            "{context} rng_seed_after {declared_rng_seed_after} does not match resolved rng_seed_after {actual_rng_seed_after}"
-        );
+fn movement_mode_script_byte(mode: MovementMode) -> u8 {
+    match mode {
+        MovementMode::Normal => 0,
+        MovementMode::Bike => 1,
+        MovementMode::Skate => 2,
+        MovementMode::Surf => 4,
+        MovementMode::SurfPika => 8,
     }
-    Ok(())
+}
+
+fn movement_mode_from_script_value(value: &str) -> Result<MovementMode> {
+    let numeric = match value {
+        "PLAYER_NORMAL" => 0,
+        "PLAYER_BIKE" => 1,
+        "PLAYER_SKATE" => 2,
+        "PLAYER_SURF" => 4,
+        "PLAYER_SURF_PIKA" => 8,
+        _ => parse_script_i32(value)
+            .with_context(|| format!("VAR_MOVEMENT value {value:?} is not an exact source byte"))?,
+    };
+    match numeric {
+        0 => Ok(MovementMode::Normal),
+        1 => Ok(MovementMode::Bike),
+        2 => Ok(MovementMode::Skate),
+        4 => Ok(MovementMode::Surf),
+        8 => Ok(MovementMode::SurfPika),
+        _ => anyhow::bail!(
+            "VAR_MOVEMENT value {value:?} resolves to unsupported wPlayerState byte {numeric}"
+        ),
+    }
 }
 
 pub fn runtime_special_routine_requires_divider_trace(routine: &str) -> bool {
     matches!(
         routine,
         "SampleKenjiBreakCountdown"
+            | "BattleTowerAction"
             | "ResetLuckyNumberShowFlag"
             | "RandomUnseenWildMon"
             | "RandomPhoneWildMon"
@@ -3920,16 +4091,17 @@ pub fn runtime_special_routine_requires_divider_trace(routine: &str) -> bool {
             | "SelectRandomBugContestContestants"
             | "BugContestJudging"
             | "CardFlip"
+            | "SlotMachine"
+            | "UnusedMemoryGame"
+            | "MemoryGame"
+            | "DayCareMan"
+            | "DayCareLady"
+            | "DayCareManOutside"
             | "GiveShuckle"
             | "BuenasPassword"
             | "LoadOpponentTrainerAndPokemonWithOTSprite"
             | "GiveOddEgg"
     )
-}
-
-pub fn runtime_special_routine_requires_legacy_seed_boundary(routine: &str) -> bool {
-    let _ = routine;
-    false
 }
 
 fn compiled_standard_script_catalog(data: &GameDataSet) -> Result<&serde_json::Map<String, Value>> {
@@ -3989,6 +4161,237 @@ fn validate_compiled_standard_script_catalog(data: &GameDataSet) -> Result<()> {
             anyhow::bail!("compiled StdScripts pointer {label} has an empty command body");
         }
         standard_script_execution_path(label, body)?;
+    }
+    Ok(())
+}
+
+fn compiled_overworld_event_catalog(data: &GameDataSet) -> Result<&serde_json::Map<String, Value>> {
+    let mut overworld_events = data.story_events.iter().filter_map(|payload| {
+        payload
+            .as_object()
+            .and_then(|payload| payload.get("OverworldEvents"))
+            .and_then(Value::as_object)
+    });
+    let catalog = overworld_events
+        .next()
+        .context("compiled game pack is missing the OverworldEvents story-event catalog")?;
+    if overworld_events.next().is_some() {
+        anyhow::bail!("compiled game pack contains duplicate OverworldEvents catalogs");
+    }
+    Ok(catalog)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerEventExecutionPath {
+    CommonInterpreter,
+    TypedConsumer,
+}
+
+const PLAYER_EVENT_POINTER_LABELS: &[&str] = &[
+    "InvalidEventScript",
+    "SeenByTrainerScript",
+    "TalkToTrainerScript",
+    "FindItemInBallScript",
+    "EdgeWarpScript",
+    "WarpToNewMapScript",
+    "FallIntoMapScript",
+    "OverworldWhiteoutScript",
+    "HatchEggScript",
+    "ChangeDirectionScript",
+    "InvalidEventScript",
+];
+
+fn exact_player_event_pointer_labels(pointer_table: &[Value]) -> Result<Vec<String>> {
+    let pointer_entries = pointer_table
+        .iter()
+        .filter(|entry| entry.get("command").and_then(Value::as_str) == Some("dba"))
+        .collect::<Vec<_>>();
+    if pointer_entries.len() != PLAYER_EVENT_POINTER_LABELS.len() {
+        anyhow::bail!(
+            "compiled PlayerEventScriptPointers requires exactly {} dba pointers, found {}",
+            PLAYER_EVENT_POINTER_LABELS.len(),
+            pointer_entries.len()
+        );
+    }
+
+    pointer_entries
+        .iter()
+        .zip(PLAYER_EVENT_POINTER_LABELS)
+        .enumerate()
+        .map(|(index, (&entry, expected_label))| {
+            let command = entry
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("<invalid>");
+            let args = entry.get("args").and_then(Value::as_array);
+            let label = args
+                .filter(|args| args.len() == 1)
+                .and_then(|args| args[0].as_str())
+                .unwrap_or("<invalid>");
+            if command != "dba" || label != *expected_label {
+                anyhow::bail!(
+                    "compiled PlayerEventScriptPointers pointer {index} requires {expected_label} via dba, found {label} via {command}"
+                );
+            }
+            Ok(label.to_string())
+        })
+        .collect()
+}
+
+fn player_event_execution_path(
+    label: &str,
+    definitions: &BTreeMap<String, Value>,
+) -> Result<PlayerEventExecutionPath> {
+    const INVALID: &[(&str, &[&str])] = &[("end", &[])];
+    const EDGE_WARP: &[(&str, &[&str])] = &[("reloadend", &["MAPSETUP_CONNECTION"])];
+    const WARP_TO_NEW_MAP: &[(&str, &[&str])] = &[
+        ("warpsound", &[]),
+        ("newloadmap", &["MAPSETUP_DOOR"]),
+        ("end", &[]),
+    ];
+    const FALL_INTO_MAP: &[(&str, &[&str])] = &[
+        ("newloadmap", &["MAPSETUP_FALL"]),
+        ("playsound", &["SFX_KINESIS"]),
+        ("applymovement", &["PLAYER", ".SkyfallMovement"]),
+        ("playsound", &["SFX_STRENGTH"]),
+        ("scall", &["LandAfterPitfallScript"]),
+        ("end", &[]),
+    ];
+    const CHANGE_DIRECTION: &[(&str, &[&str])] = &[
+        ("deactivatefacing", &["3"]),
+        ("callasm", &["EnableWildEncounters"]),
+        ("end", &[]),
+    ];
+    const SEEN_BY_TRAINER: &[(&str, &[&str])] = &[
+        ("loadtemptrainer", &[]),
+        ("encountermusic", &[]),
+        ("showemote", &["EMOTE_SHOCK", "LAST_TALKED", "30"]),
+        ("callasm", &["TrainerWalkToPlayer"]),
+        ("applymovementlasttalked", &["wMovementBuffer"]),
+        ("writeobjectxy", &["LAST_TALKED"]),
+        ("faceobject", &["PLAYER", "LAST_TALKED"]),
+        ("sjump", &["StartBattleWithMapTrainerScript"]),
+    ];
+    const TALK_TO_TRAINER: &[(&str, &[&str])] = &[
+        ("faceplayer", &[]),
+        ("trainerflagaction", &["CHECK_FLAG"]),
+        ("iftrue", &["AlreadyBeatenTrainerScript"]),
+        ("loadtemptrainer", &[]),
+        ("encountermusic", &[]),
+        ("sjump", &["StartBattleWithMapTrainerScript"]),
+    ];
+    const FIND_ITEM: &[(&str, &[&str])] = &[
+        ("callasm", &[".TryReceiveItem"]),
+        ("iffalse", &[".no_room"]),
+        ("disappear", &["LAST_TALKED"]),
+        ("opentext", &[]),
+        ("writetext", &[".FoundItemText"]),
+        ("playsound", &["SFX_ITEM"]),
+        ("pause", &["60"]),
+        ("itemnotify", &[]),
+        ("closetext", &[]),
+        ("end", &[]),
+    ];
+    const WHITEOUT: &[(&str, &[&str])] = &[
+        ("reanchormap", &[]),
+        ("callasm", &["OverworldBGMap"]),
+        ("sjump", &["Script_Whiteout"]),
+    ];
+    const HATCH_EGG: &[(&str, &[&str])] =
+        &[("callasm", &["OverworldHatchEgg"]), ("end", &[])];
+
+    let (expected, path) = match label {
+        "InvalidEventScript" => (INVALID, PlayerEventExecutionPath::CommonInterpreter),
+        "EdgeWarpScript" => (EDGE_WARP, PlayerEventExecutionPath::CommonInterpreter),
+        "WarpToNewMapScript" => {
+            (WARP_TO_NEW_MAP, PlayerEventExecutionPath::CommonInterpreter)
+        }
+        "FallIntoMapScript" => (FALL_INTO_MAP, PlayerEventExecutionPath::CommonInterpreter),
+        "ChangeDirectionScript" => {
+            (CHANGE_DIRECTION, PlayerEventExecutionPath::CommonInterpreter)
+        }
+        "SeenByTrainerScript" => (SEEN_BY_TRAINER, PlayerEventExecutionPath::TypedConsumer),
+        "TalkToTrainerScript" => (TALK_TO_TRAINER, PlayerEventExecutionPath::TypedConsumer),
+        "FindItemInBallScript" => (FIND_ITEM, PlayerEventExecutionPath::TypedConsumer),
+        "OverworldWhiteoutScript" => (WHITEOUT, PlayerEventExecutionPath::TypedConsumer),
+        "HatchEggScript" => (HATCH_EGG, PlayerEventExecutionPath::TypedConsumer),
+        _ => return Ok(PlayerEventExecutionPath::CommonInterpreter),
+    };
+    certify_exact_callasm_body(definitions, label, expected).map_err(|error| {
+        let owner = match path {
+            PlayerEventExecutionPath::CommonInterpreter => "common interpreter",
+            PlayerEventExecutionPath::TypedConsumer => "typed consumer",
+        };
+        anyhow::anyhow!("player-event {owner} certificate failed for {label}: {error:?}")
+    })?;
+    if label == "FallIntoMapScript" {
+        for (target, target_expected) in [
+            (
+                ".SkyfallMovement@FallIntoMapScript",
+                &[("skyfall", &[][..]), ("step_end", &[][..])][..],
+            ),
+            (
+                "LandAfterPitfallScript",
+                &[("earthquake", &["16"][..]), ("end", &[][..])][..],
+            ),
+        ] {
+            certify_exact_callasm_body(definitions, target, target_expected).map_err(|error| {
+                anyhow::anyhow!(
+                    "player-event common interpreter certificate failed for FallIntoMapScript target {target}: {error:?}"
+                )
+            })?;
+        }
+    }
+    if label == "ChangeDirectionScript" {
+        const ENABLE_WILD_ENCOUNTERS: &[(&str, &[&str])] = &[
+            ("ld", &["hl", "wEnabledPlayerEvents"]),
+            (
+                "set",
+                &["PLAYEREVENTS_WILD_ENCOUNTERS", "[hl]"],
+            ),
+            ("ret", &[]),
+        ];
+        certify_exact_callasm_body(
+            definitions,
+            "EnableWildEncounters",
+            ENABLE_WILD_ENCOUNTERS,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "player-event common interpreter certificate failed for ChangeDirectionScript target EnableWildEncounters: {error:?}"
+            )
+        })?;
+    }
+    Ok(path)
+}
+
+fn validate_compiled_overworld_event_catalog(data: &GameDataSet) -> Result<()> {
+    let catalog = compiled_overworld_event_catalog(data)?;
+    let standard_catalog = compiled_standard_script_catalog(data)?;
+    let mut definitions = standard_catalog
+        .iter()
+        .filter(|(label, _)| *label != "StdScripts" && *label != "GlobalScriptRoots")
+        .map(|(label, body)| (label.clone(), body.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (label, body) in catalog {
+        if definitions.insert(label.clone(), body.clone()).is_some() {
+            anyhow::bail!("duplicate global player-event definition {label}");
+        }
+    }
+    let pointer_table = catalog
+        .get("PlayerEventScriptPointers")
+        .and_then(Value::as_array)
+        .context("compiled OverworldEvents catalog is missing PlayerEventScriptPointers")?;
+    for label in exact_player_event_pointer_labels(pointer_table)? {
+        let body = catalog
+            .get(&label)
+            .or_else(|| standard_catalog.get(&label))
+            .and_then(Value::as_array)
+            .with_context(|| format!("compiled player-event pointer {label} has no command body"))?;
+        if body.is_empty() {
+            anyhow::bail!("compiled player-event pointer {label} has an empty command body");
+        }
+        player_event_execution_path(&label, &definitions)?;
     }
     Ok(())
 }

@@ -101,6 +101,10 @@ fn teach_selected_tmhm_on(runtime_shell: &mut BevyRuntimeShell, party_index: usi
     } else {
         None
     };
+    let nickname = pokemon.pokemon.nickname.clone();
+    let replaced_move = replace_slot
+        .and_then(|slot| pokemon.pokemon.moves.get(slot))
+        .map(|learned| learned.name.clone());
     record_visible_runtime_action(
         runtime_shell,
         format!("party:tmhm:{item_id}:pokemon:{party_index}:replace:{replace_slot:?}"),
@@ -133,16 +137,16 @@ fn teach_selected_tmhm_on(runtime_shell: &mut BevyRuntimeShell, party_index: usi
     );
     runtime_shell.party_move_cursor = None;
     close_visible_field_pack_without_log(runtime_shell);
-    let learned_move = move_id
+    let learned_move_id = move_id
         .as_deref()
-        .map(|move_id| battle_move_display_name(&snapshot, move_id))
-        .unwrap_or_else(|| item_display_name(&snapshot, &item_id));
-    runtime_shell.field_notice = Some(format!(
-        "{} learned {}!",
-        pokemon.pokemon.nickname, learned_move
-    ));
+        .context("successful TM/HM use has no exported move id")?;
+    install_visible_move_learn_result_sequence(
+        runtime_shell,
+        &nickname,
+        replaced_move.as_deref(),
+        learned_move_id,
+    )?;
     mark_runtime_snapshot_dirty(runtime_shell);
-    continue_visible_script_after_prompt(runtime_shell)?;
     Ok(())
 }
 
@@ -282,11 +286,12 @@ fn selected_visible_battle_pack_action_item(runtime_shell: &mut BevyRuntimeShell
         return selected_tmhm(runtime_shell).map(|(item_id, _)| item_id);
     }
     let item_ids = carried_battle_non_ball_item_ids(&snapshot);
-    let index = visible_cursor_index(
-        &mut runtime_shell.bag_cursor,
+    let index = strict_readonly_cursor_index(
+        &runtime_shell.bag_cursor,
         "battle:bag-items",
         item_ids.len(),
-    );
+    )
+    .context("battle Pack surface battle:bag-items is active without a valid cursor")?;
     item_ids.get(index).cloned().context("battle Pack item cursor selected no item")
 }
 
@@ -308,11 +313,12 @@ fn execute_visible_battle_pack_action(runtime_shell: &mut BevyRuntimeShell) -> R
     let snapshot = runtime_shell.shell.snapshot()?;
     let pocket = active_visible_field_pack_pocket(runtime_shell);
     let actions = visible_selected_pack_item_actions(&snapshot, runtime_shell, &pocket, true)?;
-    let index = visible_cursor_index(
-        &mut runtime_shell.field_pack_action_cursor,
+    let index = strict_readonly_cursor_index(
+        &runtime_shell.field_pack_action_cursor,
         "pack:actions",
         actions.len(),
-    );
+    )
+    .context("battle Pack action surface pack:actions is active without a valid cursor")?;
     let action = actions[index];
     let item_id = selected_visible_battle_pack_action_item(runtime_shell)?;
     record_visible_runtime_action(
@@ -358,7 +364,7 @@ fn close_visible_field_pack_from_cancel(runtime_shell: &mut BevyRuntimeShell) ->
 fn open_visible_field_pack_action_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let pocket = active_visible_field_pack_pocket(runtime_shell);
-    if selected_field_pack_cancel_row(&snapshot, runtime_shell, &pocket) {
+    if selected_field_pack_cancel_row(&snapshot, runtime_shell, &pocket)? {
         return close_visible_field_pack_from_cancel(runtime_shell);
     }
     if runtime_shell.party_held_item_give_target.is_some() {
@@ -432,11 +438,12 @@ fn execute_visible_field_pack_action(runtime_shell: &mut BevyRuntimeShell) -> Re
     let snapshot = runtime_shell.shell.snapshot()?;
     let pocket = active_visible_field_pack_pocket(runtime_shell);
     let actions = visible_selected_pack_item_actions(&snapshot, runtime_shell, &pocket, false)?;
-    let index = visible_cursor_index(
-        &mut runtime_shell.field_pack_action_cursor,
+    let index = strict_readonly_cursor_index(
+        &runtime_shell.field_pack_action_cursor,
         "pack:actions",
         actions.len(),
-    );
+    )
+    .context("field Pack action surface pack:actions is active without a valid cursor")?;
     let action = actions[index];
     let item_id = selected_field_pack_item_id(runtime_shell)?;
     record_visible_runtime_action(
@@ -952,16 +959,12 @@ fn use_visible_field_bag_item_by_id(
         ));
         set_shell_action_status(runtime_shell, format!("ITEMFINDER {:?}", item_use.found));
         close_visible_field_pack_without_log(runtime_shell);
-        runtime_shell.field_notice = Some(visible_asm_text(
+        present_visible_itemfinder_feedback(
+            runtime_shell,
             &snapshot,
-            if item_use.found.is_some() {
-                "ItemfinderItemNearbyText"
-            } else {
-                "ItemfinderNopeText"
-            },
-        )?);
-        mark_runtime_snapshot_dirty(runtime_shell);
-        continue_visible_script_after_prompt(runtime_shell)?;
+            item_use.found.is_some(),
+            item_use.itemfinder_sound_cues,
+        )?;
         return Ok(());
     }
     if field_rule_item_matches(&runtime_shell.shell, "squirtbottle", &item_id) {
@@ -992,6 +995,33 @@ fn use_visible_field_bag_item_by_id(
                 item_use.target_object_identifier
             ),
         );
+        close_visible_field_pack_without_log(runtime_shell);
+        consume_visible_dispatched_field_script(runtime_shell)?;
+        return Ok(());
+    }
+    if field_rule_item_matches(&runtime_shell.shell, "card_key", &item_id)
+        || field_rule_item_matches(&runtime_shell.shell, "basement_key", &item_id)
+    {
+        let item_use = match runtime_shell.shell.use_bag_story_key_in_field(&item_id) {
+            Ok(item_use) => item_use,
+            Err(error) if party_field_move_error_is_play_refusal(&error) => {
+                return handle_visible_field_action_refusal(
+                    runtime_shell,
+                    &item_id,
+                    format!("{item_id} CAN'T BE USED HERE"),
+                    error,
+                );
+            }
+            Err(error) => return Err(error),
+        };
+        runtime_shell.last_audio_events.push(format!(
+            "field story key item={} map={} target={:?} script={} checksum={:?}",
+            item_id,
+            item_use.map_name,
+            item_use.target_tile,
+            item_use.target_script,
+            item_use.state_checksum
+        ));
         close_visible_field_pack_without_log(runtime_shell);
         consume_visible_dispatched_field_script(runtime_shell)?;
         return Ok(());
@@ -1118,6 +1148,78 @@ fn use_visible_field_bag_item_by_id(
     anyhow::bail!("field item {item_id} has no declared field payload")
 }
 
+fn present_visible_itemfinder_feedback(
+    runtime_shell: &mut BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+    found: bool,
+    sound_cues: usize,
+) -> Result<()> {
+    let expected_cues = if found { 8 } else { 0 };
+    if sound_cues != expected_cues {
+        anyhow::bail!(
+            "Itemfinder result requires {expected_cues} WaitPlaySFX cues, found {sound_cues}"
+        );
+    }
+    retain_visible_field_notice_scene(runtime_shell, snapshot);
+    let notice = visible_asm_text(
+        snapshot,
+        if found {
+            "_ItemfinderItemNearbyText"
+        } else {
+            "_ItemfinderNopeText"
+        },
+    )?;
+    if !found {
+        continue_visible_script_after_prompt(runtime_shell)?;
+        runtime_shell.field_notice = Some(notice);
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+
+    let sequence = (0..4).flat_map(|_| {
+        [
+            "SFX_SECOND_PART_OF_ITEMFINDER".to_string(),
+            "SFX_TRANSACTION".to_string(),
+        ]
+    });
+    begin_visible_wait_play_sfx_sequence(runtime_shell, sequence, notice)
+}
+
+fn begin_visible_wait_play_sfx_sequence(
+    runtime_shell: &mut BevyRuntimeShell,
+    audio_ids: impl IntoIterator<Item = String>,
+    completion_notice: String,
+) -> Result<()> {
+    begin_visible_wait_play_sfx_sequence_with_completion(
+        runtime_shell,
+        audio_ids,
+        VisibleWaitPlaySfxCompletion::FieldNotice(completion_notice),
+    )
+}
+
+fn begin_visible_wait_play_sfx_sequence_with_completion(
+    runtime_shell: &mut BevyRuntimeShell,
+    audio_ids: impl IntoIterator<Item = String>,
+    completion: VisibleWaitPlaySfxCompletion,
+) -> Result<()> {
+    if runtime_shell.visible_wait_sfx_boundary
+        || !runtime_shell.pending_wait_play_sfx.is_empty()
+        || runtime_shell.wait_play_sfx_completion.is_some()
+    {
+        anyhow::bail!("cannot start a WaitPlaySFX sequence while another sound wait is active");
+    }
+    let audio_ids = audio_ids.into_iter().collect::<VecDeque<_>>();
+    anyhow::ensure!(
+        !audio_ids.is_empty(),
+        "WaitPlaySFX sequence requires at least one sound effect"
+    );
+    runtime_shell.pending_wait_play_sfx = audio_ids;
+    runtime_shell.wait_play_sfx_completion = Some(completion);
+    runtime_shell.visible_wait_sfx_boundary = true;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
 fn field_item_error_is_play_refusal(error: &anyhow::Error) -> bool {
     let Some(item_error) = error.downcast_ref::<BattleItemError>() else {
         return false;
@@ -1224,7 +1326,7 @@ fn open_visible_battle_pack_target(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    normalize_visible_party_cursor(runtime_shell, &snapshot);
+    initialize_visible_party_cursor(runtime_shell, &snapshot);
     if mode == BattlePackTargetMode::PartyMove {
         runtime_shell.party_move_cursor = None;
     }
@@ -1401,8 +1503,14 @@ fn move_visible_battle_pack_target_cursor(
                 return move_visible_party_move_cursor(runtime_shell, delta);
             }
             let row_count = snapshot.party.slots.len() + 1;
+            anyhow::ensure!(
+                runtime_shell.party_cursor < row_count,
+                "battle Pack target party cursor {} is outside {} Pokemon/CANCEL rows",
+                runtime_shell.party_cursor,
+                row_count,
+            );
             runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor.min(row_count - 1),
+                runtime_shell.party_cursor,
                 row_count,
                 delta,
             );
@@ -1421,8 +1529,14 @@ fn move_visible_battle_pack_target_cursor(
                 return Ok(());
             }
             let row_count = snapshot.party.slots.len() + 1;
+            anyhow::ensure!(
+                runtime_shell.party_cursor < row_count,
+                "battle Pack target party cursor {} is outside {} Pokemon/CANCEL rows",
+                runtime_shell.party_cursor,
+                row_count,
+            );
             runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor.min(row_count - 1),
+                runtime_shell.party_cursor,
                 row_count,
                 delta,
             );
@@ -1476,8 +1590,14 @@ fn move_visible_battle_pack_target_secondary_cursor(
                 return Ok(());
             }
             let row_count = snapshot.party.slots.len() + 1;
+            anyhow::ensure!(
+                runtime_shell.party_cursor < row_count,
+                "battle Pack target party cursor {} is outside {} Pokemon/CANCEL rows",
+                runtime_shell.party_cursor,
+                row_count,
+            );
             runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor.min(row_count - 1),
+                runtime_shell.party_cursor,
                 row_count,
                 delta,
             );
@@ -1935,6 +2055,13 @@ fn complete_visible_scripted_trainer_battle(
     can_lose: bool,
 ) -> Result<()> {
     let battle_before_completion = runtime_shell.shell.snapshot()?;
+    if battle_before_completion
+        .battle
+        .as_ref()
+        .is_some_and(|battle| battle.battle_type == "BATTLETYPE_BATTLE_TOWER")
+    {
+        return complete_visible_battle_tower_battle(runtime_shell);
+    }
     let player_name = battle_before_completion.trainer.player_name.clone();
     let (active_trainer_class, active_trainer_id) = match battle_before_completion
         .battle
@@ -2023,6 +2150,20 @@ fn complete_visible_scripted_trainer_battle(
     Ok(())
 }
 
+fn complete_visible_battle_tower_battle(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let battle_result = runtime_shell.shell.session().state().battle_result & 0x3f;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("battle:complete_battle_tower:{battle_result}"),
+    )?;
+    runtime_shell
+        .shell
+        .start_battle_tower_battle_special(battle_result)?;
+    reset_visible_battle_exit_state(runtime_shell);
+    mark_runtime_snapshot_dirty(runtime_shell);
+    continue_visible_script_after_prompt(runtime_shell)
+}
+
 fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let Some(ref battle) = snapshot.battle else {
@@ -2090,9 +2231,12 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
             return Ok(());
         }
     }
-    let (enemy_action, enemy_rng_seed_after) =
-        selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &enemy_action)?;
+    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+        runtime_shell,
+        &snapshot,
+        battle,
+        BattleAction::Move { slot },
+    )?;
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         BattleAction::Switch { .. } => None,
@@ -2103,12 +2247,6 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
         format!("battle:move:{slot}:enemy:{enemy_action:?}"),
     )?;
     record_visible_battle_action_frame(runtime_shell, BattleAction::Move { slot })?;
-    let turn = resolve_active_battle_turn_with_enemy_rng(
-        runtime_shell,
-        enemy_rng_seed_after,
-        BattleAction::Move { slot },
-        enemy_action,
-    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
     let events = format_battle_turn_events(&turn.outcome.events);
@@ -2270,11 +2408,12 @@ fn selected_visible_battle_action(
     if actions.is_empty() {
         anyhow::bail!("active battle has no available player action");
     }
-    let index = visible_cursor_index(
-        &mut runtime_shell.battle_action_cursor,
+    let index = strict_readonly_cursor_index(
+        &runtime_shell.battle_action_cursor,
         "battle:actions",
         actions.len(),
-    );
+    )
+    .context("battle action surface battle:actions is active without a valid cursor")?;
     Ok(actions[index])
 }
 
@@ -2349,7 +2488,12 @@ fn finish_visible_wild_battle_with_first_move(runtime_shell: &mut BevyRuntimeShe
                 })
                 .unwrap_or_default();
             anyhow::bail!(
-                "visible wild battle smoke player Pokemon fainted before battle ended; moves={active_moves:?}"
+                "visible wild battle smoke player Pokemon fainted before battle ended; enemy_hp={}/{} moves={active_moves:?} queued_messages={} status={:?} recent_events={:?}",
+                battle.enemy_pokemon.hp,
+                battle.enemy_pokemon.max_hp,
+                runtime_shell.battle_messages.len(),
+                runtime_shell.last_action_status,
+                runtime_shell.last_audio_events,
             );
         }
         select_visible_battle_action(runtime_shell, VisibleBattleAction::Fight)?;
@@ -2877,18 +3021,15 @@ fn attempt_visible_battle_run(runtime_shell: &mut BevyRuntimeShell) -> Result<()
     }
     let battle_before_run = battle.clone();
     let scripted_static_wild = visible_static_wild_source(&snapshot, battle);
-    let (enemy_action, enemy_rng_seed_after) =
-        selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &enemy_action)?;
+    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+        runtime_shell,
+        &snapshot,
+        battle,
+        BattleAction::Run,
+    )?;
     let enemy_action_label = format!("enemy:{enemy_action:?}");
     record_visible_runtime_action(runtime_shell, "battle:run")?;
     record_visible_battle_action_frame(runtime_shell, BattleAction::Run)?;
-    let turn = resolve_active_battle_turn_with_enemy_rng(
-        runtime_shell,
-        enemy_rng_seed_after,
-        BattleAction::Run,
-        enemy_action,
-    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
     let events = format_battle_turn_events(&turn.outcome.events);
@@ -2987,11 +3128,12 @@ fn selected_battle_move_slot(runtime_shell: &mut BevyRuntimeShell) -> Result<usi
     if battle.commands.player_move_slots.is_empty() {
         anyhow::bail!("active battle has no available player moves");
     }
-    let cursor_index = visible_cursor_index(
-        &mut runtime_shell.battle_move_cursor,
+    let cursor_index = strict_readonly_cursor_index(
+        &runtime_shell.battle_move_cursor,
         "battle:moves",
         battle.commands.player_move_slots.len(),
-    );
+    )
+    .context("battle move surface battle:moves is active without a valid cursor")?;
     Ok(battle.commands.player_move_slots[cursor_index])
 }
 
@@ -3002,15 +3144,19 @@ fn selected_battle_move_cursor_is_cancel(
 ) -> Result<bool> {
     let total = battle_move_menu_option_count(snapshot, battle)
         .with_context(|| "active battle has no move menu option count")?;
-    let cursor_index =
-        visible_cursor_index(&mut runtime_shell.battle_move_cursor, "battle:moves", total);
+    let cursor_index = strict_readonly_cursor_index(
+        &runtime_shell.battle_move_cursor,
+        "battle:moves",
+        total,
+    )
+    .context("battle move surface battle:moves is active without a valid cursor")?;
     Ok(cursor_index >= battle.commands.player_move_slots.len())
 }
 
 fn selected_enemy_battle_move_slot_with_rng(
     snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<usize> {
     let commands = &battle.commands;
     if commands.enemy_move_slots.is_empty() {
@@ -3195,7 +3341,8 @@ fn selected_enemy_battle_action(
     snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
     trainer_items_used: &mut BTreeSet<String>,
-) -> Result<(BattleAction, u32)> {
+    rng: &mut dyn BattleRandomSource,
+) -> Result<BattleAction> {
     sync_persisted_trainer_item_usage(battle, trainer_items_used);
     let RuntimeBattleKind::Trainer {
         trainer_id,
@@ -3203,12 +3350,11 @@ fn selected_enemy_battle_action(
         ..
     } = &battle.kind
     else {
-        let mut rng = Random::new_crystal(snapshot.progression.rng_seed);
-        if wild_enemy_should_flee(battle, &mut rng) {
-            return Ok((BattleAction::Run, rng.seed()));
+        if wild_enemy_should_flee(battle, rng) {
+            return Ok(BattleAction::Run);
         }
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, &mut rng)?;
-        return Ok((BattleAction::Move { slot }, rng.seed()));
+        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
+        return Ok(BattleAction::Move { slot });
     };
     let switch_flags = if battle.battle_type == "BATTLETYPE_BATTLE_TOWER" {
         snapshot
@@ -3231,7 +3377,7 @@ fn selected_enemy_battle_action(
             .first()
             .copied()
             .unwrap_or(0);
-        return Ok((BattleAction::Move { slot }, snapshot.progression.rng_seed));
+        return Ok(BattleAction::Move { slot });
     }
 
     // Player CANT_RUN and enemy Wrap take the ASM DontSwitch path. Trainer
@@ -3243,16 +3389,14 @@ fn selected_enemy_battle_action(
         .transpose()?
         .flatten()
     else {
-        let (item, item_seed) = selected_enemy_trainer_item(
-            snapshot, battle, trainer_id, &switch_flags, trainer_items_used,
-            snapshot.progression.rng_seed,
+        let item = selected_enemy_trainer_item(
+            snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
         )?;
         if let Some(item_id) = item {
-            return Ok((BattleAction::Item { item_id }, item_seed));
+            return Ok(BattleAction::Item { item_id });
         }
-        let mut rng = Random::new_crystal(item_seed);
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, &mut rng)?;
-        return Ok((BattleAction::Move { slot }, rng.seed()));
+        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
+        return Ok(BattleAction::Move { slot });
     };
 
     // TrainerClassAttributes encodes SWITCH_OFTEN, SWITCH_RARELY, and
@@ -3261,18 +3405,15 @@ fn selected_enemy_battle_action(
     // consumes the boundary sample before the turn is resolved.
     let switch_mask = switch_flags & 0x07;
     if switch_mask == 0 {
-        let (item, item_seed) = selected_enemy_trainer_item(
-            snapshot, battle, trainer_id, &switch_flags, trainer_items_used,
-            snapshot.progression.rng_seed,
+        let item = selected_enemy_trainer_item(
+            snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
         )?;
         if let Some(item_id) = item {
-            return Ok((BattleAction::Item { item_id }, item_seed));
+            return Ok(BattleAction::Item { item_id });
         }
-        let mut rng = Random::new_crystal(item_seed);
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, &mut rng)?;
-        return Ok((BattleAction::Move { slot }, rng.seed()));
+        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
+        return Ok(BattleAction::Move { slot });
     }
-    let mut rng = Random::new_crystal(snapshot.progression.rng_seed);
     // Trainer switch thresholds use BattleRandom (hRandomSub), not
     // RandomRange's hRandomAdd register.  Using randrange(256) here shifts
     // the AI's decision stream and changes both switch odds and every later
@@ -3286,22 +3427,21 @@ fn selected_enemy_battle_action(
         match switch_tier { 0x10 => roll < 50, 0x20 => roll < 128, _ => roll >= 50 }
     };
     if should_switch {
-        return Ok((BattleAction::Switch { party_index }, rng.seed()));
+        return Ok(BattleAction::Switch { party_index });
     }
-    let (item, item_seed) = selected_enemy_trainer_item(
-        snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng.seed(),
+    let item = selected_enemy_trainer_item(
+        snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
     )?;
     if let Some(item_id) = item {
-        return Ok((BattleAction::Item { item_id }, item_seed));
+        return Ok(BattleAction::Item { item_id });
     }
-    let mut move_rng = Random::new_crystal(item_seed);
-    let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, &mut move_rng)?;
-    Ok((BattleAction::Move { slot }, move_rng.seed()))
+    let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
+    Ok(BattleAction::Move { slot })
 }
 
 fn wild_enemy_should_flee(
     battle: &crate::RuntimeBattleSnapshot,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> bool {
     const ALWAYS_FLEE: [&str; 2] = ["RAIKOU", "ENTEI"];
     const OFTEN_FLEE: [&str; 8] = [
@@ -3639,17 +3779,17 @@ fn selected_enemy_trainer_item(
     trainer_id: &str,
     ai_item_switch_flags: &u32,
     trainer_items_used: &mut BTreeSet<String>,
-    rng_seed: u32,
-) -> Result<(Option<String>, u32)> {
+    rng: &mut dyn BattleRandomSource,
+) -> Result<Option<String>> {
     if battle.battle_type == "BATTLETYPE_BATTLE_TOWER" {
-        return Ok((None, rng_seed));
+        return Ok(None);
     }
     let Some(trainer) = snapshot
         .trainers
         .iter()
         .find(|trainer| trainer.trainer_id == trainer_id)
     else {
-        return Ok((None, rng_seed));
+        return Ok(None);
     };
     let active_index = battle
         .active_enemy_party_index
@@ -3659,7 +3799,7 @@ fn selected_enemy_trainer_item(
         .get(active_index)
         .context("trainer item AI active enemy index is outside its party")?;
     if active.max_hp == 0 || active.hp == 0 {
-        return Ok((None, rng_seed));
+        return Ok(None);
     }
     // AI_TryItem is gated by IsHighestLevel in the original engine.  A
     // trainer's consumables are reserved for its highest-level party member.
@@ -3668,7 +3808,7 @@ fn selected_enemy_trainer_item(
         .iter()
         .any(|pokemon| pokemon.level > active.level)
     {
-        return Ok((None, rng_seed));
+        return Ok(None);
     }
 
     // The ASM item table is ordered from strongest to weakest healing/status
@@ -3683,8 +3823,7 @@ fn selected_enemy_trainer_item(
     let context_use = ai_item_switch_flags & (1 << 6) != 0;
     let always_use = ai_item_switch_flags & (1 << 4) != 0;
     let unknown_use = ai_item_switch_flags & (1 << 5) != 0;
-    let mut rng = Random::new_crystal(rng_seed);
-    let heal_item_usable = |rng: &mut Random| {
+    let heal_item_usable = |rng: &mut dyn BattleRandomSource| {
         if context_use {
             return below_quarter || (below_half && rng.battle_random_byte() < 50);
         }
@@ -3708,14 +3847,14 @@ fn selected_enemy_trainer_item(
         };
         let item_key = format!("{trainer_id}:{item_id}:{item_slot}");
         let usable = match item_id {
-            "FULL_RESTORE" => heal_item_usable(&mut rng)
+            "FULL_RESTORE" => heal_item_usable(rng)
                 || (context_use
                     && (matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
                         || (active.status.as_deref() == Some("BAD_POISON")
                             && battle.enemy_toxic_turns >= 4
                             && rng.battle_random_byte() < 128))),
             "MAX_POTION" | "HYPER_POTION" | "SUPER_POTION" | "POTION" => {
-                heal_item_usable(&mut rng)
+                heal_item_usable(rng)
             }
             "FULL_HEAL" if context_use => {
                 matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
@@ -3741,50 +3880,53 @@ fn selected_enemy_trainer_item(
             // The exact item effect is resolved by the core battle pipeline;
             // eligibility has already consumed the same AI RNG samples.
             trainer_items_used.insert(item_key);
-            return Ok((Some(item_id.to_string()), rng.seed()));
+            return Ok(Some(item_id.to_string()));
         }
     }
-    Ok((None, rng.seed()))
+    Ok(None)
 }
 
-fn resolve_active_battle_turn_with_enemy_rng(
+fn resolve_active_battle_turn_with_enemy_ai(
     runtime_shell: &mut BevyRuntimeShell,
-    enemy_rng_seed_after: u32,
+    snapshot: &RuntimeShellSnapshot,
+    battle: &crate::RuntimeBattleSnapshot,
     player_action: BattleAction,
-    enemy_action: BattleAction,
-) -> Result<crate::RuntimeBattleTurn> {
-    let mut preview = runtime_shell.shell.session.state.clone();
-    // Enemy AI consumes Crystal RNG before the core turn begins.  Seed the
-    // turn preview after that AI consumption, then commit the same starting
-    // seed to the authoritative session before applying the turn.  Previously
-    // this argument was ignored, so AI RNG calls vanished from battle state.
-    preview.rng_seed = enemy_rng_seed_after;
-    runtime_shell.runtime.data.resolve_active_battle_turn(
-        &mut preview,
-        player_action.clone(),
-        enemy_action.clone(),
-    )?;
-    runtime_shell.shell.session_mut().state_mut().rng_seed = enemy_rng_seed_after;
-    runtime_shell
+ ) -> Result<(BattleAction, crate::RuntimeBattleTurn)> {
+    let mut trainer_items_used = runtime_shell.trainer_items_used.clone();
+    let resolved = runtime_shell
         .shell
-        .resolve_active_battle_turn(player_action, enemy_action, preview.rng_seed)
+        .resolve_active_battle_turn_with_enemy_selector(player_action, |rng| {
+            selected_enemy_battle_action(
+                snapshot,
+                battle,
+                &mut trainer_items_used,
+                rng,
+            )
+        })?;
+    runtime_shell.trainer_items_used = trainer_items_used;
+    persist_selected_enemy_trainer_item(runtime_shell, battle, &resolved.0)?;
+    Ok(resolved)
 }
 
-fn resolve_active_battle_enemy_action_with_rng(
+fn resolve_active_battle_enemy_action_with_ai(
     runtime_shell: &mut BevyRuntimeShell,
-    enemy_rng_seed_after: u32,
-    enemy_action: BattleAction,
-) -> Result<crate::RuntimeBattleTurn> {
-    let mut preview = runtime_shell.shell.session.state.clone();
-    preview.rng_seed = enemy_rng_seed_after;
-    runtime_shell
-        .runtime
-        .data
-        .resolve_active_battle_enemy_action(&mut preview, enemy_action.clone())?;
-    runtime_shell.shell.session_mut().state_mut().rng_seed = enemy_rng_seed_after;
-    runtime_shell
+    snapshot: &RuntimeShellSnapshot,
+    battle: &crate::RuntimeBattleSnapshot,
+) -> Result<(BattleAction, crate::RuntimeBattleTurn)> {
+    let mut trainer_items_used = runtime_shell.trainer_items_used.clone();
+    let resolved = runtime_shell
         .shell
-        .resolve_active_battle_enemy_action(enemy_action, preview.rng_seed)
+        .resolve_active_battle_enemy_action_with_selector(|rng| {
+            selected_enemy_battle_action(
+                snapshot,
+                battle,
+                &mut trainer_items_used,
+                rng,
+            )
+        })?;
+    runtime_shell.trainer_items_used = trainer_items_used;
+    persist_selected_enemy_trainer_item(runtime_shell, battle, &resolved.0)?;
+    Ok(resolved)
 }
 
 fn battle_item_error_is_play_refusal(error: &anyhow::Error) -> bool {
@@ -3927,20 +4069,6 @@ fn handle_visible_no_field_pack_target(
     Ok(())
 }
 
-fn handle_visible_no_elevator_prompt(
-    runtime_shell: &mut BevyRuntimeShell,
-    action: &str,
-) -> Result<()> {
-    runtime_shell.elevator_cursor = None;
-    record_visible_runtime_action(runtime_shell, format!("ui:elevator:{action}:none_visible"))?;
-    runtime_shell
-        .last_audio_events
-        .push("no compiled elevator prompt is visible".to_string());
-    set_shell_action_status(runtime_shell, "NO ELEVATOR");
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    Ok(())
-}
-
 fn handle_visible_no_runtime_flag(
     runtime_shell: &mut BevyRuntimeShell,
     action: &str,
@@ -4072,9 +4200,8 @@ fn resolve_visible_battle_enemy_response_after_player_item(
         return settle_visible_battle_after_action(runtime_shell);
     }
     let battle_before_turn = battle.clone();
-    let (enemy_action, enemy_rng_seed_after) =
-        selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &enemy_action)?;
+    let (enemy_action, turn) =
+        resolve_active_battle_enemy_action_with_ai(runtime_shell, &snapshot, battle)?;
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         _ => None,
@@ -4082,11 +4209,6 @@ fn resolve_visible_battle_enemy_response_after_player_item(
     record_visible_runtime_action(
         runtime_shell,
         format!("battle:enemy_response:{item_id}:{enemy_action:?}"),
-    )?;
-    let turn = resolve_active_battle_enemy_action_with_rng(
-        runtime_shell,
-        enemy_rng_seed_after,
-        enemy_action,
     )?;
     stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
     let events = format_battle_turn_events(&turn.outcome.events);

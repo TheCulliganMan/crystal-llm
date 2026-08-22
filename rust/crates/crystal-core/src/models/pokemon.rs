@@ -119,6 +119,16 @@ impl Dv {
             Stat::Accuracy | Stat::Evasion => None,
         }
     }
+
+    /// Return Crystal's one-based Unown letter index derived from the four
+    /// non-HP DVs (`A = 1` through `Z = 26`).
+    pub const fn unown_letter(self) -> u8 {
+        let packed = ((self.attack & 0x06) >> 1) << 6
+            | ((self.defense & 0x06) >> 1) << 4
+            | ((self.speed & 0x06) >> 1) << 2
+            | ((self.special & 0x06) >> 1);
+        packed / 10 + 1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -489,12 +499,15 @@ pub struct CaughtData {
     pub location: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MailData {
     pub message: String,
     pub author: String,
+    pub nationality: u16,
+    pub author_id: u16,
     pub species: String,
+    pub mail_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -736,9 +749,25 @@ impl Pokemon {
             }
         }
         if let Some(mail) = &self.mail {
-            validate_exact_text("pokemon.mail.message", &mail.message)?;
+            validate_mail_message(&mail.message)?;
             validate_exact_text("pokemon.mail.author", &mail.author)?;
+            if mail.nationality > 4 {
+                return Err(format!(
+                    "pokemon.mail.nationality {} is outside Crystal language range 0..4",
+                    mail.nationality
+                ));
+            }
             validate_exact_token("pokemon.mail.species", &mail.species)?;
+            validate_exact_token("pokemon.mail.mail_type", &mail.mail_type)?;
+            if !crate::models::item::is_mail_item_id(&mail.mail_type) {
+                return Err(format!(
+                    "pokemon.mail.mail_type '{}' is not an ASM Mail item",
+                    mail.mail_type
+                ));
+            }
+            if self.item.as_deref() != Some(mail.mail_type.as_str()) {
+                return Err("pokemon Mail type does not match its held item".to_string());
+            }
         }
         if self.level == 0 || self.level > 100 {
             return Err(format!(
@@ -907,6 +936,23 @@ fn validate_exact_token(field: &str, value: &str) -> Result<(), String> {
 fn validate_exact_text(field: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err(format!("{field} has invalid text '{value}'"));
+    }
+    Ok(())
+}
+
+fn validate_mail_message(value: &str) -> Result<(), String> {
+    let mut lines = value.split('\n');
+    let first = lines.next().unwrap_or_default();
+    let second = lines.next();
+    if lines.next().is_some()
+        || first.chars().count() > 16
+        || second.is_some_and(|line| line.chars().count() > 16)
+        || value.chars().filter(|character| *character != '\n').count() > 32
+        || value
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        return Err(format!("pokemon.mail.message has invalid text '{value}'"));
     }
     Ok(())
 }
@@ -1467,10 +1513,17 @@ mod tests {
             location: 18,
         });
         pokemon.mail = Some(MailData {
-            message: "Please deliver this safely!".to_string(),
+            message: "DARK CAVE leads\nto another road".to_string(),
             author: "CHRIS".to_string(),
+            nationality: 0,
+            author_id: 1234,
             species: "SPEAROW".to_string(),
+            mail_type: "FLOWER_MAIL".to_string(),
         });
+        pokemon.item = Some("FLOWER_MAIL".to_string());
+        pokemon
+            .validate_saved_state()
+            .expect("source mail line break is valid saved text");
         let encoded = serde_json::to_string(&pokemon).expect("serialize metadata");
         let decoded: Pokemon = serde_json::from_str(&encoded).expect("deserialize metadata");
         assert_eq!(decoded.pokerus, 0xb4);
@@ -1545,6 +1598,7 @@ mod tests {
             (
                 "TACKLE".to_string(),
                 Move {
+                    source_index: 1,
                     name: "TACKLE".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 35,
@@ -1559,6 +1613,7 @@ mod tests {
             (
                 "GROWL".to_string(),
                 Move {
+                    source_index: 1,
                     name: "GROWL".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 0,

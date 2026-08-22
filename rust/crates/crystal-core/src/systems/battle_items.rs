@@ -546,10 +546,7 @@ fn has_intrinsic_field_item_payload(item: &Item) -> bool {
     item.repel_steps.is_some()
         || item.escape_rope_mode.is_some()
         || item.rare_candy_level_gain.is_some()
-        || matches!(
-            item.effect.as_str(),
-            "EVO_STONE" | "BASEMENT_KEY" | "CARD_KEY"
-        )
+        || item.effect == "EVO_STONE"
         || item.pocket == ITEM_POCKET_TM_HM
         || active_battle_item_effect_plan(item).is_some()
         || battle_pp_item_effect_plan(item).is_some()
@@ -3009,6 +3006,7 @@ mod tests {
         moves.insert(
             "RAZOR_LEAF".to_string(),
             Move {
+                source_index: 1,
                 name: "RAZOR_LEAF".to_string(),
                 move_type: pokemon_type("GRASS"),
                 power: 55,
@@ -3023,6 +3021,7 @@ mod tests {
         moves.insert(
             "THUNDERBOLT".to_string(),
             Move {
+                source_index: 1,
                 name: "THUNDERBOLT".to_string(),
                 move_type: pokemon_type("ELECTRIC"),
                 power: 95,
@@ -3043,6 +3042,21 @@ mod tests {
             wild_exp_divisor: 7,
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
+            mom_money_increment: 2_300,
+            mom_random_items: vec![crate::systems::battle_rewards::MomPurchaseRule {
+                trigger: 0,
+                cost: 600,
+                kind: crate::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
+            mom_progression_items: vec![crate::systems::battle_rewards::MomPurchaseRule {
+                trigger: 900,
+                cost: 600,
+                kind: crate::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
         }
     }
 
@@ -3095,6 +3109,7 @@ mod tests {
             (
                 "TACKLE".to_string(),
                 Move {
+                    source_index: 1,
                     name: "TACKLE".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 40,
@@ -3109,6 +3124,7 @@ mod tests {
             (
                 "GROWL".to_string(),
                 Move {
+                    source_index: 1,
                     name: "GROWL".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 0,

@@ -39,6 +39,15 @@ incremental = true
 [profile.dev.package."*"]
 opt-level = 2
 
+# Browser iteration should retain the responsive renderer settings from `dev`,
+# without paying the release profile's whole-program ThinLTO and single
+# codegen-unit cost. `debug = 0` also keeps the generated Wasm small enough
+# for quick local reloads; use `--release` for distributable builds.
+[profile.wasm-dev]
+inherits = "dev"
+debug = 0
+strip = "symbols"
+
 [workspace.package]
 edition = "2024"
 license = "ISC"

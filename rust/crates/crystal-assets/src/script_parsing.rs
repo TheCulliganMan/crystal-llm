@@ -54,6 +54,8 @@ fn parse_script_runtime_commands(
             let args = script_command_args(map_name, script_name, command_name, entry)?;
             let arity_is_valid = if command_name == "ret" {
                 args.len() <= 1
+            } else if command_name == "memcall" {
+                matches!(args.len(), 1 | 3)
             } else {
                 args.len() == *expected
             };
@@ -829,7 +831,7 @@ fn parse_script_text_commands(
                     }
                     commands.push(ScriptTextCommand {
                         command: command_name.to_string(),
-                        text_label: Some(resolve_local_script_label(script_name, args[0])),
+                        text_label: Some(resolve_local_script_label(script_name, args[0])?),
                         source_script: script_name.clone(),
                         command_index: index,
                     });
@@ -841,11 +843,19 @@ fn parse_script_text_commands(
     Ok(commands)
 }
 
-fn resolve_local_script_label(source_script: &str, label: &str) -> String {
-    if label.starts_with('.') {
-        format!("{label}@{}", script_label_parent(source_script))
+fn resolve_local_script_label(source_script: &str, label: &str) -> Result<String> {
+    if !label.starts_with('.') {
+        return Ok(label.to_string());
+    }
+    let parent_script = script_label_parent(source_script);
+    if label.contains('@') {
+        anyhow::ensure!(
+            script_label_parent(label) == parent_script,
+            "relative text reference {label} from {source_script} crosses ASM parent scope"
+        );
+        Ok(label.to_string())
     } else {
-        label.to_string()
+        Ok(format!("{label}@{parent_script}"))
     }
 }
 
@@ -895,6 +905,9 @@ fn parse_script_text_bodies(
                 args,
                 command_index: index,
             });
+            if command_name == "text_asm" {
+                break;
+            }
         }
         if !commands.is_empty() {
             bodies.insert(
@@ -1188,18 +1201,21 @@ fn resolve_menu_reference(
         return Ok(label.to_string());
     }
     let parent_script = script_label_parent(source_script);
-    let local = format!("{label}@{parent_script}");
-    let exact_exists = menus.contains_key(label);
-    let local_exists = menus.contains_key(&local);
-    match (exact_exists, local_exists) {
-        (true, false) => Ok(label.to_string()),
-        (false, true) => Ok(local),
-        (false, false) => anyhow::bail!(
-            "unresolved relative vertical menu reference {label} from {source_script}: neither {label} nor {local} exists"
-        ),
-        (true, true) => anyhow::bail!(
-            "ambiguous relative vertical menu reference {label} from {source_script}: both {label} and {local} exist"
-        ),
+    let local = if label.contains('@') {
+        anyhow::ensure!(
+            script_label_parent(label) == parent_script,
+            "relative vertical menu reference {label} from {source_script} crosses ASM parent scope"
+        );
+        label.to_string()
+    } else {
+        format!("{label}@{parent_script}")
+    };
+    if menus.contains_key(&local) {
+        Ok(local)
+    } else {
+        anyhow::bail!(
+            "unresolved relative vertical menu reference {label} from {source_script}: scoped label {local} does not exist"
+        )
     }
 }
 
@@ -1312,18 +1328,22 @@ fn resolve_script_reference(
     if !label.starts_with('.') {
         return Ok(label.to_string());
     }
-    let local = format!("{label}@{}", script_label_parent(source_script));
-    let exact_exists = scripts.contains_key(label);
-    let local_exists = scripts.contains_key(&local);
-    match (exact_exists, local_exists) {
-        (true, false) => Ok(label.to_string()),
-        (false, true) => Ok(local),
-        (false, false) => anyhow::bail!(
-            "unresolved relative script reference {label} from {source_script}: neither {label} nor {local} exists"
-        ),
-        (true, true) => anyhow::bail!(
-            "ambiguous relative script reference {label} from {source_script}: both {label} and {local} exist"
-        ),
+    let parent_script = script_label_parent(source_script);
+    let local = if label.contains('@') {
+        anyhow::ensure!(
+            script_label_parent(label) == parent_script,
+            "relative script reference {label} from {source_script} crosses ASM parent scope"
+        );
+        label.to_string()
+    } else {
+        format!("{label}@{parent_script}")
+    };
+    if scripts.contains_key(&local) {
+        Ok(local)
+    } else {
+        anyhow::bail!(
+            "unresolved relative script reference {label} from {source_script}: scoped label {local} does not exist"
+        )
     }
 }
 
@@ -1480,7 +1500,7 @@ fn parse_script_control_commands(
                         command_index: index,
                     });
                 }
-                "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall"
+                "iftrue" | "iffalse" | "sjump" | "farsjump" | "scall"
                 | "farscall" | "sdefer" => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
@@ -1549,15 +1569,17 @@ fn resolve_script_target_label(
     source_script: &str,
     target_label: &str,
 ) -> Option<String> {
-    if scripts.contains_key(target_label) {
-        return Some(target_label.to_string());
-    }
     if target_label.starts_with('.') {
         let parent_script = script_label_parent(source_script);
-        let local = format!("{target_label}@{parent_script}");
-        if scripts.contains_key(&local) {
-            return Some(local);
-        }
+        let local = if target_label.contains('@') {
+            (script_label_parent(target_label) == parent_script).then(|| target_label.to_string())?
+        } else {
+            format!("{target_label}@{parent_script}")
+        };
+        return scripts.contains_key(&local).then_some(local);
+    }
+    if scripts.contains_key(target_label) {
+        return Some(target_label.to_string());
     }
     None
 }
@@ -1575,35 +1597,76 @@ fn parse_script_movements(
     object_commands: &[ScriptObjectCommand],
 ) -> Result<Vec<ScriptMovement>> {
     let mut movements = Vec::new();
-    let movement_refs: BTreeSet<(&str, &str)> = object_commands
+    let mut movement_refs = BTreeMap::<(&str, &str), Vec<&ScriptObjectCommand>>::new();
+    for command in object_commands
         .iter()
         .filter(|command| SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command.command.as_str()))
-        .filter_map(|command| {
-            command
-                .movement
-                .as_deref()
-                .map(|movement| (movement, script_label_parent(&command.source_script)))
-        })
-        .collect();
-    for (movement_label, parent_script) in movement_refs {
-        let local_label = format!("{movement_label}@{parent_script}");
-        let exact_exists = scripts.contains_key(movement_label);
-        let local_exists = movement_label.starts_with('.') && scripts.contains_key(&local_label);
-        let script_key = match (exact_exists, local_exists) {
-            (true, false) => movement_label,
-            (false, true) => local_label.as_str(),
-            (false, false) => {
+    {
+        if let Some(movement) = command.movement.as_deref() {
+            movement_refs
+                .entry((movement, script_label_parent(&command.source_script)))
+                .or_default()
+                .push(command);
+        }
+    }
+    for ((movement_label, parent_script), commands) in movement_refs {
+        let script_key = if movement_label.starts_with('.') {
+            if movement_label.contains('@') {
+                anyhow::ensure!(
+                    script_label_parent(movement_label) == parent_script,
+                    "movement reference '{movement_label}' from {parent_script} on {map_name} crosses ASM parent scope"
+                );
+                movement_label.to_string()
+            } else {
+                format!("{movement_label}@{parent_script}")
+            }
+        } else {
+            movement_label.to_string()
+        };
+        if !scripts.contains_key(&script_key) {
+                if movement_label == "wMovementBuffer"
+                    && commands.iter().all(|command| {
+                        command.command == "applymovement"
+                            && command.object_id.as_deref() == Some("PLAYER")
+                            && scripts
+                                .get(&command.source_script)
+                                .and_then(Value::as_array)
+                                .and_then(|entries| command.command_index.checked_sub(1).and_then(|index| entries.get(index)))
+                                .is_some_and(|entry| {
+                                    entry.get("command").and_then(Value::as_str) == Some("special")
+                                        && entry.get("args").and_then(Value::as_array).is_some_and(|args| {
+                                            args.len() == 1 && args[0].as_str() == Some("SurfStartStep")
+                                        })
+                                })
+                    })
+                {
+                    movements.push(ScriptMovement {
+                        label: movement_label.to_string(),
+                        source_script: Some(parent_script.to_string()),
+                        steps: vec![
+                            ScriptMovementStep {
+                                command: "slow_step".to_string(),
+                                direction: Some(
+                                    SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION.to_string(),
+                                ),
+                                duration: None,
+                                index: 0,
+                            },
+                            ScriptMovementStep {
+                                command: "step_end".to_string(),
+                                direction: None,
+                                duration: None,
+                                index: 1,
+                            },
+                        ],
+                    });
+                    continue;
+                }
                 anyhow::bail!(
                     "movement reference '{movement_label}' from {parent_script} on {map_name} resolves to missing script"
                 );
-            }
-            (true, true) => {
-                anyhow::bail!(
-                    "ambiguous movement reference '{movement_label}' from {parent_script} on {map_name}: both {movement_label} and {local_label} exist"
-                );
-            }
-        };
-        let Some(payload) = scripts.get(script_key) else {
+        }
+        let Some(payload) = scripts.get(&script_key) else {
             anyhow::bail!("movement script {script_key} for {map_name} is missing");
         };
         let Some(entries) = payload.as_array() else {
@@ -1621,7 +1684,7 @@ fn parse_script_movements(
                     "Malformed movement script {script_key} for {map_name}: non-movement command '{command_name}' at index {index}."
                 );
             }
-            let args = script_command_args(map_name, script_key, command_name, entry)?;
+            let args = script_command_args(map_name, &script_key, command_name, entry)?;
             let (direction, duration) = match command_name {
                 command if SCRIPT_MOVEMENT_DIRECTION_COMMANDS.contains(&command) => {
                     if args.len() != 1 {
@@ -1631,32 +1694,6 @@ fn parse_script_movements(
                         );
                     }
                     (Some(args[0].to_string()), None)
-                }
-                "step_sleep" => {
-                    if args.len() > 1 {
-                        anyhow::bail!(
-                            "Malformed step_sleep movement in {script_key} for {map_name}: expected 0 or 1 args, found {}.",
-                            args.len()
-                        );
-                    }
-                    let duration = if let Some(duration) = args.first() {
-                        Some(parse_script_u16(duration)?)
-                    } else {
-                        None
-                    };
-                    (None, duration)
-                }
-                command
-                    if crystal_core::systems::script_objects::SCRIPT_MOVEMENT_EXACT_SLEEP_COMMANDS
-                        .contains(&command) =>
-                {
-                    if !args.is_empty() {
-                        anyhow::bail!(
-                            "Malformed {command_name} movement in {script_key} for {map_name}: expected 0 args, found {}.",
-                            args.len()
-                        );
-                    }
-                    (None, None)
                 }
                 command if SCRIPT_MOVEMENT_REQUIRED_DURATION_COMMANDS.contains(&command) => {
                     if args.len() != 1 {
@@ -1685,9 +1722,12 @@ fn parse_script_movements(
                 index,
             });
         }
-        if steps.last().map(|step| step.command.as_str()) != Some("step_end") {
+        if !steps
+            .last()
+            .is_some_and(|step| is_script_movement_terminator(&step.command))
+        {
             anyhow::bail!(
-                "Malformed movement script {script_key} for {map_name}: movement must end with step_end."
+                "Malformed movement script {script_key} for {map_name}: movement must end with a terminating opcode."
             );
         }
         movements.push(ScriptMovement {
@@ -2097,30 +2137,6 @@ fn script_warp_target_map(
             "{command_name} command in {script_name} for {map_name} references missing map constant {constant}"
         )
     })
-}
-
-#[cfg(test)]
-fn merge_exact_value_payload(
-    target: &mut Vec<Value>,
-    payload: Value,
-    description: &str,
-) -> Result<()> {
-    merge_exact_values(target, vec![payload], description)
-}
-
-#[cfg(test)]
-fn merge_exact_values(
-    target: &mut Vec<Value>,
-    source: Vec<Value>,
-    description: &str,
-) -> Result<()> {
-    for value in source {
-        if target.contains(&value) {
-            anyhow::bail!("duplicate {description} payload");
-        }
-        target.push(value);
-    }
-    Ok(())
 }
 
 fn item_key(item: &Item) -> Result<String> {

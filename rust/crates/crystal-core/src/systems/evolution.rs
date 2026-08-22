@@ -927,6 +927,7 @@ mod tests {
 
     fn move_data(name: &str, pp: u8) -> Move {
         Move {
+            source_index: 1,
             name: name.to_string(),
             move_type: pokemon_type("NORMAL"),
             power: 40,

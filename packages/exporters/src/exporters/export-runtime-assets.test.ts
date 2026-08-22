@@ -440,6 +440,10 @@ describe("exportRuntimeAssets", () => {
       "db SPRITE_YOUNGSTER\n",
     );
     writeFile(
+      path.join(mockDisassemblyRoot, "data", "trainers", "genders.asm"),
+      "db MALE ; YOUNGSTER\n",
+    );
+    writeFile(
       path.join(mockDisassemblyRoot, "data", "battle_tower", "classes.asm"),
       'bt_trainer YOUNGSTER, "JOEY"\n',
     );
@@ -644,6 +648,7 @@ describe("exportRuntimeAssets", () => {
     });
     expect(specialPhoneCalls).toEqual({
       SPECIALCALL_MASTERBALL: {
+        value: 1,
         condition: "SpecialCallOnlyWhenOutside",
         contactId: "PHONE_MOM",
         callerScript: "MomPhoneCallerScript",
@@ -1592,6 +1597,49 @@ describe("exportRuntimeAssets", () => {
       [
         "DEF BATTLETOWER_PARTY_LENGTH EQU 3",
         "DEF BATTLETOWER_STREAK_LENGTH EQU 7",
+        "DEF BATTLETOWER_REWARD_QUANTITY EQU 5",
+        "DEF BATTLETOWER_MIN_REWARD EQU HP_UP",
+        "DEF BATTLETOWER_MAX_REWARD EQU CALCIUM",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "constants", "item_constants.asm"),
+      [
+        "const_def",
+        "\tconst POTION",
+        "\tconst HP_UP",
+        "\tconst PROTEIN",
+        "\tconst IRON",
+        "\tconst CARBOS",
+        "\tconst LUCKY_PUNCH",
+        "\tconst CALCIUM",
+        "",
+      ].join("\n"),
+    );
+    writeFile(
+      path.join(
+        mockDisassemblyRoot,
+        "engine",
+        "events",
+        "battle_tower",
+        "battle_tower.asm",
+      ),
+      [
+        "BattleTower_GiveReward:",
+        "\tld a, [sBattleTowerReward]",
+        "\tld a, POTION",
+        "\tret",
+        "BattleTowerAction_1C:",
+        "\tret",
+        "BattleTower_RandomlyChooseReward:",
+        ".loop",
+        "\tcall Random",
+        "\tcp LUCKY_PUNCH",
+        "\tjr z, .loop",
+        "\tret",
+        "BattleTower_SaveOptions:",
+        "\tret",
         "",
       ].join("\n"),
     );
@@ -1664,6 +1712,26 @@ describe("exportRuntimeAssets", () => {
       },
       requiredPartyCount: 3,
       challengeStreakLength: 7,
+      rewardCandidates: [
+        "HP_UP",
+        "PROTEIN",
+        "IRON",
+        "CARBOS",
+        "LUCKY_PUNCH",
+        "CALCIUM",
+      ],
+      excludedRewardItems: ["LUCKY_PUNCH"],
+      rewardQuantity: 5,
+      rewardFailureSentinel: "POTION",
+      rewardItemValues: {
+        POTION: 0,
+        HP_UP: 1,
+        PROTEIN: 2,
+        IRON: 3,
+        CARBOS: 4,
+        LUCKY_PUNCH: 5,
+        CALCIUM: 6,
+      },
       minimumLevelGroup: 1,
       maximumLevelGroup: 10,
       levelGroupSize: 10,
@@ -1677,6 +1745,7 @@ describe("exportRuntimeAssets", () => {
           trainerClass: "YOUNGSTER",
           name: "JOEY",
           spriteConstant: "SPRITE_YOUNGSTER",
+          female: false,
         },
       ],
       monGroups: [

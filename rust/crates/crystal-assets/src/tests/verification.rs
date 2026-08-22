@@ -276,6 +276,32 @@
     }
 
     #[test]
+    fn verifier_rejects_duplicate_asm_move_source_indices() {
+        let data = GameDataSet {
+            moves: [
+                ("POUND".to_string(), test_move("POUND")),
+                ("KARATE_CHOP".to_string(), test_move("KARATE_CHOP")),
+            ]
+            .into_iter()
+            .collect(),
+            ..GameDataSet::default()
+        };
+
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &data,
+            &PlayabilityRules::default(),
+        );
+
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "duplicate_move_source_index"
+                && diagnostic.subject == "1"
+                && diagnostic.message.contains("KARATE_CHOP")
+                && diagnostic.message.contains("POUND")
+        }));
+    }
+
+    #[test]
     fn verifier_rejects_exact_move_effect_without_rust_runtime_mutation() {
         let mut move_data = test_move("AETHER_PULSE");
         move_data.move_type = pokemon_type("AETHER");
@@ -1750,7 +1776,7 @@
                 ContentPackCategory::MapScripts,
                 serde_json::json!({
                     "Route29_MapScripts": [
-                        {"command":"jump","args":[" Route29Script"]}
+                        {"command":"sjump","args":[" Route29Script"]}
                     ]
                 }),
             )
@@ -1767,7 +1793,7 @@
                 ContentPackCategory::MapScripts,
                 serde_json::json!({
                     "Route29_MapScripts": [
-                        {"command":"jump","args":["Route29Script"],"fallback_args":["DefaultScript"]}
+                        {"command":"sjump","args":["Route29Script"],"fallback_args":["DefaultScript"]}
                     ]
                 }),
             )
@@ -2297,7 +2323,7 @@
             "Route29_MapScripts".to_string(),
             serde_json::json!([
                 {
-                    "command": "jump",
+                    "command": "sjump",
                     "args": ["Route29Script"]
                 }
             ]),
@@ -2316,7 +2342,7 @@
             " Route29_MapScripts".to_string(),
             serde_json::json!([
                 {
-                    "command": "jump",
+                    "command": "sjump",
                     "args": ["Route29Script"]
                 }
             ]),
@@ -2342,7 +2368,7 @@
             "Route29_MapScripts".to_string(),
             serde_json::json!([
                 {
-                    "command": "jump"
+                    "command": "sjump"
                 }
             ]),
         );
@@ -2365,7 +2391,7 @@
             "Route29_MapScripts".to_string(),
             serde_json::json!([
                 {
-                    "command": "jump",
+                    "command": "sjump",
                     "args": [" Route29Script"]
                 }
             ]),
@@ -4166,7 +4192,7 @@
             .expect_err("movement scripts without step_end must not be accepted");
         assert!(
             format!("{error:#}").contains(
-                "Malformed movement script Route29Movement for Route29: movement must end with step_end."
+                "Malformed movement script Route29Movement for Route29: movement must end with a terminating opcode."
             ),
             "{error:#}"
         );
@@ -4245,23 +4271,110 @@
             (
                 ".SpinMovement".to_string(),
                 serde_json::json!([
+                    {"command": "turn_head", "args": ["DOWN"]},
                     {"command": "step_end", "args": []}
                 ]),
             ),
             (
                 ".SpinMovement@Route29Script".to_string(),
                 serde_json::json!([
+                    {"command": "turn_head", "args": ["UP"]},
                     {"command": "step_end", "args": []}
                 ]),
             ),
         ]);
-        let error = parse_script_movements("Route29", &scripts, &[movement_command])
-            .expect_err("ambiguous relative movement reference must reject");
-        assert!(
-            format!("{error:#}").contains(
-                "ambiguous movement reference '.SpinMovement' from Route29Script on Route29"
+        let movements = parse_script_movements("Route29", &scripts, &[movement_command])
+            .expect("relative movement must stay in its ASM parent scope");
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].label, ".SpinMovement");
+        assert_eq!(movements[0].steps[0].direction.as_deref(), Some("UP"));
+    }
+
+    #[test]
+    fn relative_menu_and_data_references_ignore_bare_local_collisions() {
+        let menus = BTreeMap::from([
+            (
+                ".Menu".to_string(),
+                ScriptMenuDefinition {
+                    label: ".Menu".to_string(),
+                    commands: Vec::new(),
+                },
             ),
-            "{error:#}"
+            (
+                ".Menu@ParentScript".to_string(),
+                ScriptMenuDefinition {
+                    label: ".Menu@ParentScript".to_string(),
+                    commands: Vec::new(),
+                },
+            ),
+        ]);
+        assert_eq!(
+            resolve_menu_reference(".Nested@ParentScript", ".Menu", &menus)
+                .expect("resolve scoped menu"),
+            ".Menu@ParentScript"
+        );
+
+        let scripts = BTreeMap::from([
+            (".Data".to_string(), serde_json::json!([])),
+            (
+                ".Data@ParentScript".to_string(),
+                serde_json::json!([]),
+            ),
+        ]);
+        assert_eq!(
+            resolve_script_reference(&scripts, ".Nested@ParentScript", ".Data")
+                .expect("resolve scoped data label"),
+            ".Data@ParentScript"
+        );
+        assert!(
+            resolve_script_reference(
+                &scripts,
+                ".Nested@ParentScript",
+                ".Data@OtherScript"
+            )
+            .expect_err("cross-parent local data reference must reject")
+            .to_string()
+            .contains("crosses ASM parent scope")
+        );
+
+        let trainer_scripts = BTreeMap::from([
+            (".After".to_string(), serde_json::json!([])),
+            (
+                ".After@ParentScript".to_string(),
+                serde_json::json!([]),
+            ),
+        ]);
+        assert_eq!(
+            resolve_trainer_command_reference(
+                &trainer_scripts,
+                ".Nested@ParentScript",
+                ".After",
+                "callback",
+            )
+            .expect("resolve scoped trainer callback"),
+            ".After@ParentScript"
+        );
+
+        let text_scripts = BTreeMap::from([
+            (
+                "ParentScript".to_string(),
+                serde_json::json!([
+                    {"command": "writetext", "args": [".Text@OtherScript"]}
+                ]),
+            ),
+            (
+                ".Text@OtherScript".to_string(),
+                serde_json::json!([
+                    {"command": "text", "args": ["Wrong parent"]},
+                    {"command": "done", "args": []}
+                ]),
+            ),
+        ]);
+        assert!(
+            parse_script_text_commands("Route29", &text_scripts)
+                .expect_err("cross-parent local text reference must reject")
+                .to_string()
+                .contains("crosses ASM parent scope")
         );
     }
 
@@ -4285,7 +4398,7 @@
             serde_json::json!([
                 {"command": "turn_waterfall", "args": ["UP"]},
                 {"command": "step_dig", "args": ["32"]},
-                {"command": "step_sleep_8", "args": []},
+                {"command": "step_sleep", "args": ["8"]},
                 {"command": "rock_smash", "args": ["10"]},
                 {"command": "return_dig", "args": ["32"]},
                 {"command": "step_end", "args": []}
@@ -4313,7 +4426,7 @@
             vec![
                 ("turn_waterfall", Some("UP"), None),
                 ("step_dig", None, Some(32)),
-                ("step_sleep_8", None, None),
+                ("step_sleep", None, Some(8)),
                 ("rock_smash", None, Some(10)),
                 ("return_dig", None, Some(32)),
                 ("step_end", None, None),
@@ -4404,6 +4517,66 @@
             ),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn text_asm_terminates_the_static_text_body_at_the_embedded_code_boundary() {
+        let scripts = BTreeMap::from([(
+            "UseFlashTextScript".to_string(),
+            serde_json::json!([
+                {"command": "text_far", "args": ["_BlindingFlashText"]},
+                {"command": "text_asm", "args": []},
+                {"command": "call", "args": ["WaitSFX"]},
+                {"command": "ld", "args": ["de", "SFX_FLASH"]},
+                {"command": "call", "args": ["PlaySFX"]},
+                {"command": "ld", "args": ["hl", ".BlankText"]},
+                {"command": "ret", "args": []}
+            ]),
+        )]);
+
+        let bodies = parse_script_text_bodies("GlobalScripts", &scripts)
+            .expect("parse exact TX_ASM boundary");
+        assert_eq!(
+            bodies["UseFlashTextScript"]
+                .commands
+                .iter()
+                .map(|command| command.command.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text_far", "text_asm"]
+        );
+    }
+
+    #[test]
+    fn raw_text_body_detection_keeps_tx_opcodes_and_rejects_charmap_next_data() {
+        let scripts = BTreeMap::from([
+            (
+                "OpcodeText".to_string(),
+                serde_json::json!([
+                    {"command": "text_low", "args": []},
+                    {"command": "text_pause", "args": []},
+                    {"command": "text_today", "args": []},
+                    {"command": "sound_caught_mon", "args": []},
+                    {"command": "sound_slot_machine_start", "args": []},
+                    {"command": "text_end", "args": []}
+                ]),
+            ),
+            (
+                "GiftSpearowMail".to_string(),
+                serde_json::json!([
+                    {"command": "db", "args": ["DARK CAVE leads"]},
+                    {"command": "next", "args": ["to another road@"]}
+                ]),
+            ),
+        ]);
+
+        let bodies = parse_script_text_bodies("Route35GoldenrodGate", &scripts)
+            .expect("canonical TX opcodes parse as one text body");
+        assert_eq!(
+            bodies.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["OpcodeText"],
+            "raw mail data's charmap `next` must not be mistaken for the TX text macro"
+        );
+        assert_eq!(bodies["OpcodeText"].commands.len(), 6);
     }
 
     #[test]

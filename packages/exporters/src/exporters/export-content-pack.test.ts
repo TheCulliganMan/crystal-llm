@@ -703,6 +703,13 @@ describe("export-core-content-pack", () => {
         wild_exp_divisor: 7,
         trainer_exp_numerator: 3,
         trainer_exp_denominator: 2,
+        mom_money_increment: 2300,
+        mom_random_items: [
+          { trigger: 0, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+        ],
+        mom_progression_items: [
+          { trigger: 900, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+        ],
       },
       battleEscapeRules: {
         player_speed_multiplier: 32,
@@ -1167,7 +1174,6 @@ describe("export-core-content-pack", () => {
           ],
           runtime_title_screen: [
             {
-              new_game_spawn_identifier: 0,
               title_music: "MUSIC_TITLE",
             },
           ],

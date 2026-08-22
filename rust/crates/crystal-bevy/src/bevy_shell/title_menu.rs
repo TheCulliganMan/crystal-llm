@@ -358,6 +358,11 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         12 => {
             clear_visible_intro_sprites(intro);
             spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_SUICUNE", 13 * 8 + 4, 11 * 8)?;
+            // IntroScene13 reloads the forest BG and then zeros hSCX/hSCY.
+            // Preserve that setup boundary so stale scroll cannot rearrange
+            // the otherwise-correct tilemap on the Suicune run.
+            intro.scroll_x = 0;
+            intro.scroll_y = 0;
             intro.global_anim_x_offset = 0;
             intro.palette_effect = VisibleIntroPaletteEffect::None;
             queue_visible_intro_music(runtime_shell, "MUSIC_CRYSTAL_OPENING")?;
@@ -1803,8 +1808,15 @@ fn drive_visible_oak_intro_phase(oak_intro: &mut VisibleOakIntroSequence) {
         VisibleOakIntroPhase::Cry => {
             if oak_intro.wooper_cry_queued {
                 oak_intro.scene_phase = VisibleOakIntroPhase::TextTwo;
-                queue_visible_oak_intro_text(oak_intro, &VISIBLE_OAK_INTRO_SCENES[1].2[2..]);
-                advance_visible_oak_intro_text_queue(oak_intro);
+                oak_intro.text_queue = VISIBLE_OAK_INTRO_SCENES[1].2[2..]
+                    .iter()
+                    .map(|page| (*page).to_string())
+                    .collect();
+                // ASM: OakText2 runs PlayMonCry/WaitSFX and then OakText3's
+                // text_promptbutton without clearing the displayed "#MON."
+                // page. Keep it visible until A or B acknowledges the prompt.
+                oak_intro.waiting_for_input = true;
+                oak_intro.blink_timer = 0;
             }
         }
         VisibleOakIntroPhase::FadeOut => {
@@ -1830,7 +1842,7 @@ fn drive_visible_oak_intro_text(oak_intro: &mut VisibleOakIntroSequence) {
         return;
     }
     if oak_intro.visible_chars >= oak_intro.current_text.chars().count() {
-        oak_intro.waiting_for_input = true;
+        finish_visible_oak_intro_page(oak_intro);
         return;
     }
     oak_intro.text_timer = oak_intro.text_timer.saturating_add(1);
@@ -1838,8 +1850,21 @@ fn drive_visible_oak_intro_text(oak_intro: &mut VisibleOakIntroSequence) {
         oak_intro.text_timer = 0;
         oak_intro.visible_chars = oak_intro.visible_chars.saturating_add(1);
         if oak_intro.visible_chars >= oak_intro.current_text.chars().count() {
-            oak_intro.waiting_for_input = true;
+            finish_visible_oak_intro_page(oak_intro);
         }
+    }
+}
+
+fn finish_visible_oak_intro_page(oak_intro: &mut VisibleOakIntroSequence) {
+    if oak_intro.scene_phase == VisibleOakIntroPhase::TextOne
+        && oak_intro.text_queue.is_empty()
+    {
+        // OakText2 terminates directly into the Wooper cry; its only prompt is
+        // OakText3 after WaitSFX, so there is no input wait before the cry.
+        oak_intro.waiting_for_input = false;
+        oak_intro.scene_phase = VisibleOakIntroPhase::Cry;
+    } else {
+        oak_intro.waiting_for_input = true;
     }
 }
 
@@ -1973,7 +1998,7 @@ fn press_visible_oak_intro_a_button(runtime_shell: &mut BevyRuntimeShell) -> Res
     };
     if !oak_intro.current_text.is_empty() && !visible_oak_intro_dialog_complete(&oak_intro) {
         oak_intro.visible_chars = oak_intro.current_text.chars().count();
-        oak_intro.waiting_for_input = true;
+        finish_visible_oak_intro_page(&mut oak_intro);
         runtime_shell.pending_oak_intro = Some(oak_intro);
         return Ok(());
     }
@@ -1993,6 +2018,12 @@ fn press_visible_oak_intro_b_button(runtime_shell: &mut BevyRuntimeShell) -> Res
     let Some(mut oak_intro) = runtime_shell.pending_oak_intro.take() else {
         return handle_visible_no_oak_intro(runtime_shell, "b");
     };
+    // PromptButton accepts either A or B in the ASM. Only retain the shell's
+    // B-to-skip convenience while no Oak text page is active.
+    if !oak_intro.current_text.is_empty() {
+        runtime_shell.pending_oak_intro = Some(oak_intro);
+        return press_visible_oak_intro_a_button(runtime_shell);
+    }
     if matches!(oak_intro.mode, VisibleOakIntroMode::Intro) {
         oak_intro.finished = true;
         return complete_visible_oak_intro(runtime_shell, oak_intro);
@@ -2595,11 +2626,6 @@ fn confirm_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> R
 const VISIBLE_CREDITS_SKIP_THRESHOLD: u16 = 0x0d;
 const VISIBLE_CREDITS_ALLOW_SKIP_BIT: u8 = 6;
 const VISIBLE_CREDITS_EXIT_BIT: u8 = 7;
-// SpawnPoints.asm: SPAWN_NEW_BARK follows the 0-based HOME/DEBUG and Kanto
-// entries.  Credits stores SPAWN_LANCE in wSpawnAfterChampion; Continue then
-// converts that marker to SPAWN_NEW_BARK before loading the overworld.
-const POST_CREDITS_NEW_BARK_SPAWN_IDENTIFIER: u16 = 14;
-const POST_CREDITS_MT_SILVER_SPAWN_IDENTIFIER: u16 = 26;
 const VISIBLE_TITLE_ENTRANCE_START_SCX: u8 = 112;
 const VISIBLE_TITLE_ENTRANCE_SCROLL_STEP: u8 = 4;
 const VISIBLE_TITLE_TIMEOUT_FRAMES: u16 = 73 * 60 + 36;
@@ -2626,6 +2652,8 @@ fn open_visible_credits_screen(
     runtime_shell.title_menu = None;
     runtime_shell.special_boundary = None;
     runtime_shell.special_boundary_queue.clear();
+    runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.pending_photo_studio_commit = None;
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;
     runtime_shell.credits_screen = Some(VisibleCreditsScreen {

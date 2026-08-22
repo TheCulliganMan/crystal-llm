@@ -7,7 +7,7 @@ use crate::battle::start::deactivate_battle_after_win;
 use crate::models::{
     Bag, CaptureStorageLocation, Item, MAX_BOX_MONS, PokedexState, Pokemon, PokemonStorage,
 };
-use crate::random::Random;
+use crate::random::{CrystalRandom, DividerSource, Random};
 use crate::state::{BattleMemory, GameState};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -226,6 +226,8 @@ pub enum CaptureError {
     InvalidBallRule { ball_id: String, message: String },
     #[error("missing capture wobble probability for catch rate {0}")]
     MissingWobbleProbability(u8),
+    #[error("unknown source held-effect ordering for '{0}'")]
+    UnknownHeldEffectOrder(String),
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -338,7 +340,6 @@ pub struct CaptureOutcome {
     pub wobble_count: u8,
     pub animation_shakes: u8,
     pub final_catch_rate: u8,
-    pub rng_seed_after: u32,
     /// The ball used by the bag-facing capture path. Direct oracle outcomes
     /// may leave this unset because they exercise only catch resolution.
     #[serde(default)]
@@ -359,6 +360,29 @@ pub struct CaptureCompletion {
     pub contest_pokemon: Option<Pokemon>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactCaptureError<E> {
+    Capture(CaptureError),
+    Divider(E),
+}
+
+impl<E> From<CaptureError> for ExactCaptureError<E> {
+    fn from(error: CaptureError) -> Self {
+        Self::Capture(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ExactCaptureError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capture(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "capture divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for ExactCaptureError<E> {}
+
 pub fn resolve_capture_attempt(
     player: &Pokemon,
     enemy: &Pokemon,
@@ -377,7 +401,6 @@ pub fn resolve_capture_attempt(
             wobble_count: 0,
             animation_shakes: 0,
             final_catch_rate: 0,
-            rng_seed_after: rng.seed(),
             ball_id: None,
         });
     }
@@ -390,7 +413,6 @@ pub fn resolve_capture_attempt(
             wobble_count: 3,
             animation_shakes: 4,
             final_catch_rate: 255,
-            rng_seed_after: rng.seed(),
             ball_id: None,
         });
     }
@@ -405,7 +427,6 @@ pub fn resolve_capture_attempt(
             wobble_count: 3,
             animation_shakes: 4,
             final_catch_rate,
-            rng_seed_after: rng.seed(),
             ball_id: None,
         });
     }
@@ -427,9 +448,169 @@ pub fn resolve_capture_attempt(
         wobble_count,
         animation_shakes: wobble_count,
         final_catch_rate,
-        rng_seed_after: rng.seed(),
         ball_id: None,
     })
+}
+
+/// Resolve `PokeBallEffect` with Crystal's exact caller flags at each `Random`
+/// boundary. The first roll inherits carry from the Level Ball/held-item path;
+/// every conditional wobble roll enters with carry clear after `cp b`.
+pub fn resolve_capture_attempt_exact<S>(
+    player: &Pokemon,
+    enemy: &Pokemon,
+    player_held_item: Option<&Item>,
+    context: &CaptureAttemptContext,
+    rules: &CaptureRules,
+    wobble_probabilities: &[CaptureWobbleProbability],
+    rng: &mut CrystalRandom<&mut S>,
+) -> Result<CaptureOutcome, ExactCaptureError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    validate_capture_attempt_context(context)?;
+    require_capture_runtime_rules(rules, wobble_probabilities)?;
+    if context.trainer_battle {
+        return Ok(CaptureOutcome {
+            caught: false,
+            blocked: true,
+            storage_full: false,
+            wobble_count: 0,
+            animation_shakes: 0,
+            final_catch_rate: 0,
+            ball_id: None,
+        });
+    }
+    if rules.guaranteed_capture_balls.contains(&context.ball_id) {
+        return Ok(CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 4,
+            final_catch_rate: 255,
+            ball_id: None,
+        });
+    }
+
+    let final_catch_rate = compute_final_catch_rate(player, enemy, context, rules)?;
+    let first_random_carry = capture_first_random_carry(
+        player,
+        enemy,
+        player_held_item,
+        context,
+        rules,
+        final_catch_rate,
+    )?;
+    let roll = rng
+        .random(first_random_carry)
+        .map_err(ExactCaptureError::Divider)?
+        .value;
+    if roll <= final_catch_rate {
+        return Ok(CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 4,
+            final_catch_rate,
+            ball_id: None,
+        });
+    }
+
+    let wobble_chance = wobble_chance_for_rate(final_catch_rate, wobble_probabilities)?;
+    let mut wobble_count = 0;
+    for _ in 0..3 {
+        if rng.random(false).map_err(ExactCaptureError::Divider)?.value < wobble_chance {
+            wobble_count += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(CaptureOutcome {
+        caught: false,
+        blocked: false,
+        storage_full: false,
+        wobble_count,
+        animation_shakes: wobble_count,
+        final_catch_rate,
+        ball_id: None,
+    })
+}
+
+fn capture_first_random_carry(
+    player: &Pokemon,
+    enemy: &Pokemon,
+    player_held_item: Option<&Item>,
+    context: &CaptureAttemptContext,
+    rules: &CaptureRules,
+    final_catch_rate: u8,
+) -> Result<bool, CaptureError> {
+    if apply_ball_multiplier(&context.ball_id, player, enemy, context, rules)?.skip_hp_calc {
+        // `cp LEVEL_BALL` reaches `.skip_hp_calc` with equality and no borrow.
+        return Ok(false);
+    }
+    let Some(item) = player_held_item else {
+        // GetItemHeldEffect returns HELD_NONE (0), and `cp HELD_CATCH_CHANCE`
+        // borrows because HELD_CATCH_CHANCE is $46.
+        return Ok(true);
+    };
+    match item.held_effect.as_str() {
+        "HELD_CATCH_CHANCE" => Ok(final_catch_rate.overflowing_add(item.parameter as u8).1),
+        // Exact constants after HELD_CATCH_CHANCE in
+        // constants/item_data_constants.asm. Their `cp` does not borrow.
+        "HELD_71" | "HELD_ESCAPE" | "HELD_CRITICAL_UP" | "HELD_QUICK_CLAW" | "HELD_FLINCH"
+        | "HELD_AMULET_COIN" | "HELD_BRIGHTPOWDER" | "HELD_FOCUS_BAND" => Ok(false),
+        // Every source held-effect constant in this arm precedes $46, so `cp`
+        // borrows.
+        "HELD_NONE"
+        | "HELD_BERRY"
+        | "HELD_2"
+        | "HELD_LEFTOVERS"
+        | "HELD_5"
+        | "HELD_RESTORE_PP"
+        | "HELD_CLEANSE_TAG"
+        | "HELD_HEAL_POISON"
+        | "HELD_HEAL_FREEZE"
+        | "HELD_HEAL_BURN"
+        | "HELD_HEAL_SLEEP"
+        | "HELD_HEAL_PARALYZE"
+        | "HELD_HEAL_STATUS"
+        | "HELD_HEAL_CONFUSION"
+        | "HELD_PREVENT_POISON"
+        | "HELD_PREVENT_BURN"
+        | "HELD_PREVENT_FREEZE"
+        | "HELD_PREVENT_SLEEP"
+        | "HELD_PREVENT_PARALYZE"
+        | "HELD_PREVENT_CONFUSE"
+        | "HELD_30"
+        | "HELD_ATTACK_UP"
+        | "HELD_DEFENSE_UP"
+        | "HELD_SPEED_UP"
+        | "HELD_SP_ATTACK_UP"
+        | "HELD_SP_DEFENSE_UP"
+        | "HELD_ACCURACY_UP"
+        | "HELD_EVASION_UP"
+        | "HELD_38"
+        | "HELD_METAL_POWDER"
+        | "HELD_NORMAL_BOOST"
+        | "HELD_FIGHTING_BOOST"
+        | "HELD_FLYING_BOOST"
+        | "HELD_POISON_BOOST"
+        | "HELD_GROUND_BOOST"
+        | "HELD_ROCK_BOOST"
+        | "HELD_BUG_BOOST"
+        | "HELD_GHOST_BOOST"
+        | "HELD_FIRE_BOOST"
+        | "HELD_WATER_BOOST"
+        | "HELD_GRASS_BOOST"
+        | "HELD_ELECTRIC_BOOST"
+        | "HELD_PSYCHIC_BOOST"
+        | "HELD_ICE_BOOST"
+        | "HELD_DRAGON_BOOST"
+        | "HELD_DARK_BOOST"
+        | "HELD_STEEL_BOOST" => Ok(true),
+        effect => Err(CaptureError::UnknownHeldEffectOrder(effect.to_string())),
+    }
 }
 
 pub fn throw_ball_from_bag(
@@ -735,12 +916,6 @@ pub fn complete_active_wild_capture_result(
     }
     if outcome.blocked {
         return Err("cannot complete capture from a blocked capture outcome".to_string());
-    }
-    if outcome.rng_seed_after != state.rng_seed {
-        return Err(format!(
-            "capture outcome rng seed {} does not match saved rng seed {}",
-            outcome.rng_seed_after, state.rng_seed
-        ));
     }
     let (mut enemy_pokemon, battle_type) = match &state.battle {
         BattleMemory::Wild {
@@ -1124,7 +1299,7 @@ mod tests {
         pokemon
     }
 
-    fn successful_capture_outcome(state: &GameState) -> CaptureOutcome {
+    fn successful_capture_outcome(_state: &GameState) -> CaptureOutcome {
         CaptureOutcome {
             caught: true,
             blocked: false,
@@ -1132,7 +1307,6 @@ mod tests {
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: state.rng_seed,
             ball_id: Some("ULTRA_BALL".to_string()),
         }
     }
@@ -1743,7 +1917,6 @@ mod tests {
         .expect("capture attempt should resolve");
         assert!(outcome.caught);
         assert_eq!(outcome.animation_shakes, 4);
-        assert_eq!(outcome.rng_seed_after, rng.seed());
 
         let mut trainer_context = CaptureAttemptContext::wild("MASTER_BALL");
         trainer_context.trainer_battle = true;
@@ -1758,6 +1931,93 @@ mod tests {
         .expect("trainer battle block should resolve");
         assert!(blocked.blocked);
         assert!(!blocked.caught);
+    }
+
+    #[test]
+    fn exact_capture_preserves_source_carry_divider_reads_and_zero_read_shortcuts() {
+        let player = pokemon("CHIKORITA", 45, 5, 20, 20);
+        let enemy = pokemon("PIDGEY", 255, 2, 1, 20);
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng =
+            CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut divider);
+        let caught = resolve_capture_attempt_exact(
+            &player,
+            &enemy,
+            None,
+            &CaptureAttemptContext::wild("POKE_BALL"),
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect("exact capture roll");
+        assert!(caught.caught);
+        assert_eq!(divider.consumed(), 2);
+
+        let mut trainer_context = CaptureAttemptContext::wild("MASTER_BALL");
+        trainer_context.trainer_battle = true;
+        let mut empty = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut empty);
+        let blocked = resolve_capture_attempt_exact(
+            &player,
+            &enemy,
+            None,
+            &trainer_context,
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect("trainer block consumes no DIV");
+        assert!(blocked.blocked);
+        assert_eq!(empty.consumed(), 0);
+
+        let mut short = crate::random::ReplayDivider::new([0]);
+        let mut rng = CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut short);
+        assert!(matches!(
+            resolve_capture_attempt_exact(
+                &player,
+                &enemy,
+                None,
+                &CaptureAttemptContext::wild("POKE_BALL"),
+                &capture_rules(),
+                &wobble_probabilities(),
+                &mut rng,
+            ),
+            Err(ExactCaptureError::Divider(_))
+        ));
+
+        let mut quick_claw = test_ball("QUICK_CLAW");
+        quick_claw.held_effect = "HELD_QUICK_CLAW".to_string();
+        let initial_state = crate::random::CrystalRandomState { add: 255, sub: 0 };
+        let mut clear_carry_trace = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(initial_state, &mut clear_carry_trace);
+        let held_item_catch = resolve_capture_attempt_exact(
+            &player,
+            &enemy,
+            Some(&quick_claw),
+            &CaptureAttemptContext::wild("POKE_BALL"),
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect("held effect after HELD_CATCH_CHANCE clears first-roll carry");
+        assert!(held_item_catch.caught);
+        assert_eq!(clear_carry_trace.consumed(), 2);
+
+        let mut inherited_carry_trace = crate::random::ReplayDivider::new([0, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(initial_state, &mut inherited_carry_trace);
+        let no_item_failure = resolve_capture_attempt_exact(
+            &player,
+            &enemy,
+            None,
+            &CaptureAttemptContext::wild("POKE_BALL"),
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut rng,
+        )
+        .expect("HELD_NONE comparison sets first-roll carry");
+        assert!(!no_item_failure.caught);
+        assert_eq!(no_item_failure.wobble_count, 0);
+        assert_eq!(inherited_carry_trace.consumed(), 4);
     }
 
     #[test]
@@ -1904,7 +2164,6 @@ mod tests {
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: 1,
             ball_id: Some("ULTRA_BALL".to_string()),
         };
 
@@ -2002,7 +2261,6 @@ mod tests {
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: state.rng_seed,
             ball_id: Some("FRIEND_BALL".to_string()),
         };
 
@@ -2058,7 +2316,6 @@ mod tests {
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: state.rng_seed,
             ball_id: Some("FRIEND_BALL".to_string()),
         };
 
@@ -2106,7 +2363,6 @@ mod tests {
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: 1,
             ball_id: None,
         };
 
@@ -2171,7 +2427,6 @@ mod tests {
                 wobble_count: 4,
                 animation_shakes: 4,
                 final_catch_rate: u8::MAX,
-                rng_seed_after: state.rng_seed,
                 ball_id: None,
             };
 
@@ -2193,7 +2448,6 @@ mod tests {
             wobble_count: 0,
             animation_shakes: 0,
             final_catch_rate: 1,
-            rng_seed_after: 1,
             ball_id: None,
         };
         let mut storage = PokemonStorage::default();
@@ -2313,7 +2567,6 @@ mod tests {
         assert!(outcome.blocked);
         assert!(!outcome.caught);
         assert_eq!(outcome.ball_id.as_deref(), Some("POKE_BALL"));
-        assert_eq!(outcome.rng_seed_after, rng.seed());
         assert_eq!(bag.quantity(&ball), 0);
 
         let mut empty_bag = Bag::default();

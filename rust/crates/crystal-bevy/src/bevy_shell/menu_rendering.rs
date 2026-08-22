@@ -13,6 +13,514 @@ const TITLE_MAIN_MENU_DAY_STRINGS: [&str; 7] =
     ["SUN", "MON", "TUES", "WEDNES", "THURS", "FRI", "SATUR"];
 const BOOT_UI_WHITE: [u8; 4] = [255, 255, 255, 255];
 
+const PACK_SCREEN_WIDTH_TILES: usize = 20;
+const PACK_SCREEN_HEIGHT_TILES: usize = 18;
+const PACK_BACKGROUND_TILE: u8 = 0x24;
+const PACK_TOP_BAR_FIRST_TILE: u8 = 0x28;
+const PACK_ICON_FIRST_TILE: u8 = 0x50;
+const PACK_ICON_TILES_PER_POCKET: usize = 15;
+
+fn load_visible_field_pack_frame(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    pocket: &FieldPackPocket,
+    items: &[(String, u16)],
+    selected: usize,
+    list_start: usize,
+    description: &str,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let assets = runtime_shell.asset_root.runtime_assets();
+    let root = assets.join("gfx/pack");
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
+        .context("decode Pack font PNG")?
+        .to_rgba8();
+    let frame = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
+        .context("decode Pack textbox frame PNG")?
+        .to_rgba8();
+    let menu_tiles = crate::read_runtime_asset(root.join("pack_menu.2bpp"))
+        .context("read canonical Pack menu tiles")?;
+    let up_arrow = crate::read_runtime_asset(assets.join("gfx/font/up_arrow.2bpp"))
+        .context("read canonical Pack scroll-up glyph")?;
+    let female = snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE;
+    let icon_tiles = crate::read_runtime_asset(root.join(if female {
+        "pack_f.2bpp"
+    } else {
+        "pack.2bpp"
+    }))
+    .context("read canonical Pack icon tiles")?;
+    let palette_source = crate::read_runtime_asset_to_string(root.join(if female {
+        "pack_f.pal"
+    } else {
+        "pack.pal"
+    }))
+    .context("read canonical Pack palettes")?;
+    let mut palettes = parse_palette_file(&palette_source, None)?;
+    anyhow::ensure!(palettes.len() >= 6, "Pack palette must contain six palettes");
+    while palettes.len() < 8 {
+        palettes.push(*palettes.last().expect("six palettes checked"));
+    }
+    anyhow::ensure!(menu_tiles.len() == 80 * 16, "Pack menu art must contain 80 tiles");
+    anyhow::ensure!(icon_tiles.len() == 60 * 16, "Pack icon art must contain four 15-tile pockets");
+    let label_map = crate::read_runtime_asset(root.join("pack_menu.tilemap"))
+        .context("read canonical Pack pocket-label tilemap")?;
+    anyhow::ensure!(label_map.len() == 60, "Pack pocket-label tilemap must contain 60 bytes");
+
+    let pocket_index = match pocket {
+        FieldPackPocket::TmHm => 0,
+        FieldPackPocket::Items => 1,
+        FieldPackPocket::KeyItems => 2,
+        FieldPackPocket::Balls => 3,
+        FieldPackPocket::Custom(pocket_id) => {
+            anyhow::bail!("custom Pack pocket {pocket_id} has no canonical ASM pocket art")
+        }
+    };
+    let icon_chunk = [1_usize, 3, 0, 2][pocket_index];
+    let mut tilemap = vec![NAME_ENTRY_SPACE_TILE; PACK_SCREEN_WIDTH_TILES * PACK_SCREEN_HEIGHT_TILES];
+    let mut attrmap = vec![0_u8; tilemap.len()];
+    for y in 1..12 {
+        for x in 0..PACK_SCREEN_WIDTH_TILES {
+            tilemap[y * PACK_SCREEN_WIDTH_TILES + x] = PACK_BACKGROUND_TILE;
+        }
+    }
+    for y in 1..12 {
+        for x in 5..PACK_SCREEN_WIDTH_TILES {
+            tilemap[y * PACK_SCREEN_WIDTH_TILES + x] = NAME_ENTRY_SPACE_TILE;
+        }
+    }
+    for x in 0..PACK_SCREEN_WIDTH_TILES {
+        tilemap[x] = PACK_TOP_BAR_FIRST_TILE + x as u8;
+        attrmap[x] = if x < 10 { 1 } else { 2 };
+    }
+    let label_offset = pocket_index * 15;
+    for y in 0..3 {
+        for x in 0..5 {
+            tilemap[(7 + y) * 20 + x] = label_map[label_offset + y * 5 + x];
+            attrmap[(7 + y) * 20 + x] = 4;
+        }
+    }
+    for y in 0..3 {
+        for x in 0..5 {
+            tilemap[(3 + y) * 20 + x] = PACK_ICON_FIRST_TILE + (y * 5 + x) as u8;
+            attrmap[(3 + y) * 20 + x] = 5;
+        }
+    }
+    for y in 2..11 {
+        attrmap[y * 20 + 7] = 3;
+    }
+
+    let mut write = |x: usize, y: usize, text: &str| -> Result<()> {
+        for (offset, token) in tokenize_name_entry_string(text).into_iter().enumerate() {
+            if x + offset >= 20 || y >= 18 {
+                break;
+            }
+            tilemap[y * 20 + x + offset] = name_entry_token_tile(&token)
+                .with_context(|| format!("unsupported Pack glyph {token:?}"))?;
+        }
+        Ok(())
+    };
+    for visible_index in 0..7 {
+        let index = list_start + visible_index;
+        if index > items.len() {
+            break;
+        }
+        let row = 2 + visible_index;
+        write(7, row, if index == selected { "▶" } else { " " })?;
+        if let Some((item_id, quantity)) = items.get(index) {
+            let name = compact_scene_label(&item_display_name(snapshot, item_id).to_uppercase(), 8);
+            write(8, row, &name)?;
+            if !matches!(pocket, FieldPackPocket::KeyItems) {
+                write(16, row, &format!("×{:02}", (*quantity).min(99)))?;
+            }
+        } else {
+            write(8, row, "CANCEL")?;
+        }
+    }
+    if list_start > 0 {
+        write(19, 2, "▲")?;
+    }
+    if list_start + 7 < items.len() + 1 {
+        write(19, 8, "▼")?;
+    }
+
+    let width = 20 * SOURCE_TILE_SIZE;
+    let height = 18 * SOURCE_TILE_SIZE;
+    let mut data = vec![0_u8; width * height * 4];
+    for (index, tile_id) in tilemap.iter().copied().enumerate() {
+        let x = index % 20;
+        let y = index / 20;
+        let palette = &palettes[usize::from(attrmap[index].min(7))];
+        if tile_id == NAME_ENTRY_SPACE_TILE {
+            fill_native_tile(&mut data, x, y, palette[0]);
+        } else if tile_id >= 0x80 {
+            draw_paletted_png_tile(&font, usize::from(tile_id - 0x80), palette, x, y, &mut data)?;
+        } else if tile_id == 0x61 {
+            draw_paletted_2bpp_tile(&up_arrow, 0, palette, x, y, &mut data)?;
+        } else if (PACK_ICON_FIRST_TILE..PACK_ICON_FIRST_TILE + 15).contains(&tile_id) {
+            let icon_index = icon_chunk * PACK_ICON_TILES_PER_POCKET
+                + usize::from(tile_id - PACK_ICON_FIRST_TILE);
+            draw_paletted_2bpp_tile(&icon_tiles, icon_index, palette, x, y, &mut data)?;
+        } else {
+            draw_paletted_2bpp_tile(&menu_tiles, usize::from(tile_id), palette, x, y, &mut data)?;
+        }
+    }
+    draw_time_set_window(&frame, 0, 12, 20, 6, &mut data)?;
+    for (line_index, line) in wrap_boot_text_for_box(description, 18, 3).iter().enumerate() {
+        draw_time_set_text(&font, line, 8, (14 + line_index) * 8, &mut data)?;
+    }
+    if let Some(cursor) = runtime_shell.field_pack_action_cursor.as_ref() {
+        let actions = visible_selected_pack_item_actions(snapshot, runtime_shell, pocket, false)?;
+        let choice = strict_readonly_cursor_index(
+            &Some(cursor.clone()),
+            "pack:actions",
+            actions.len(),
+        )
+        .context("Pack action cursor is invalid")?;
+        let top = match actions.len() { 5 => 1, 4 => 3, 3 => 5, 2 => 7, _ => 9 };
+        draw_time_set_window(&frame, 13, top, 7, actions.len() + 2, &mut data)?;
+        for (index, action) in actions.iter().enumerate() {
+            draw_time_set_text(
+                &font,
+                &format!(
+                    "{}{}",
+                    if index == choice { "▶" } else { " " },
+                    visible_field_pack_action_label(*action)
+                ),
+                14 * 8,
+                (top + 1 + index) * 8,
+                &mut data,
+            )?;
+        }
+    }
+    let mut image = Image::new(
+        Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame { handle: images.add(image), size: Vec2::new(width as f32, height as f32) })
+}
+
+fn fill_native_tile(target: &mut [u8], tile_x: usize, tile_y: usize, rgb: [u8; 3]) {
+    for y in tile_y * 8..tile_y * 8 + 8 {
+        for x in tile_x * 8..tile_x * 8 + 8 {
+            let offset = (y * 160 + x) * 4;
+            target[offset..offset + 3].copy_from_slice(&rgb);
+            target[offset + 3] = 255;
+        }
+    }
+}
+
+fn draw_paletted_2bpp_tile(
+    source: &[u8], tile_index: usize, palette: &Palette, tile_x: usize, tile_y: usize, target: &mut [u8],
+) -> Result<()> {
+    let start = tile_index * 16;
+    let tile = source.get(start..start + 16).with_context(|| format!("2bpp tile {tile_index} is missing"))?;
+    for row in 0..8 {
+        let lo = tile[row * 2];
+        let hi = tile[row * 2 + 1];
+        for col in 0..8 {
+            let bit = 7 - col;
+            let level = usize::from((lo >> bit) & 1 | (((hi >> bit) & 1) << 1));
+            let offset = (((tile_y * 8 + row) * 160) + tile_x * 8 + col) * 4;
+            target[offset..offset + 3].copy_from_slice(&palette[level]);
+            target[offset + 3] = 255;
+        }
+    }
+    Ok(())
+}
+
+fn draw_paletted_png_tile(
+    source: &image::RgbaImage, tile_index: usize, palette: &Palette, tile_x: usize, tile_y: usize, target: &mut [u8],
+) -> Result<()> {
+    let columns = source.width() as usize / 8;
+    anyhow::ensure!(columns > 0, "font tile sheet has no columns");
+    let source_x = tile_index % columns * 8;
+    let source_y = tile_index / columns * 8;
+    anyhow::ensure!(source_y + 8 <= source.height() as usize, "font tile {tile_index} is missing");
+    for row in 0..8 {
+        for col in 0..8 {
+            let gray = source.get_pixel((source_x + col) as u32, (source_y + row) as u32)[0];
+            let level = palette_index_from_gray(gray);
+            let offset = (((tile_y * 8 + row) * 160) + tile_x * 8 + col) * 4;
+            target[offset..offset + 3].copy_from_slice(&palette[level]);
+            target[offset + 3] = 255;
+        }
+    }
+    Ok(())
+}
+
+fn load_visible_field_party_frame(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    selected: usize,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let assets = runtime_shell.asset_root.runtime_assets();
+    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
+        .context("decode party-menu font PNG")?
+        .to_rgba8();
+    let window = crate::open_runtime_image(assets.join("gfx/frames/1.png"))
+        .context("decode party-menu window frame PNG")?
+        .to_rgba8();
+    let battle_extra = crate::read_runtime_asset(assets.join("gfx/font/font_battle_extra.2bpp"))
+        .context("read party-menu level glyphs")?;
+    let text_palette: Palette = [
+        [255, 255, 255],
+        [170, 170, 170],
+        [85, 85, 85],
+        [0, 0, 0],
+    ];
+    let width = 160;
+    let height = 144;
+    let mut data = vec![255_u8; width * height * 4];
+    for pixel in data.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    for (row_index, slot) in snapshot.party.slots.iter().take(6).enumerate() {
+        let name_row = 1 + row_index * 2;
+        draw_time_set_text(
+            &font,
+            if selected == row_index { "▶" } else { " " },
+            0,
+            name_row * 8,
+            &mut data,
+        )?;
+        if runtime_shell.party_switch_cursor.is_some() && runtime_shell.party_cursor == row_index {
+            draw_time_set_text(&font, "▷", 16, name_row * 8, &mut data)?;
+        }
+        if !slot.pokemon.is_egg {
+            draw_time_set_text(
+                &font,
+                &compact_scene_label(&slot.pokemon.nickname, 10),
+                3 * 8,
+                name_row * 8,
+                &mut data,
+            )?;
+            draw_time_set_text(
+                &font,
+                &format!("{:>3}/{:>3}", slot.pokemon.hp.min(999), slot.pokemon.max_hp.min(999)),
+                13 * 8,
+                name_row * 8,
+                &mut data,
+            )?;
+            let status_row = name_row + 1;
+            draw_time_set_text(&font, party_status_token(&slot.pokemon), 5 * 8, status_row * 8, &mut data)?;
+            draw_paletted_2bpp_tile(
+                &battle_extra,
+                usize::from(0x6e_u8 - 0x60),
+                &text_palette,
+                8,
+                status_row,
+                &mut data,
+            )?;
+            draw_time_set_text(
+                &font,
+                &format!("{:>2}", slot.pokemon.level.min(100)),
+                9 * 8,
+                status_row * 8,
+                &mut data,
+            )?;
+            draw_native_hp_bar(
+                &mut data,
+                11 * 8,
+                status_row * 8 + 2,
+                slot.pokemon.hp,
+                slot.pokemon.max_hp,
+            );
+        }
+    }
+    let cancel_row = 1 + snapshot.party.slots.len().min(6) * 2;
+    draw_time_set_text(
+        &font,
+        if selected >= snapshot.party.slots.len() { "▶CANCEL" } else { " CANCEL" },
+        8,
+        cancel_row * 8,
+        &mut data,
+    )?;
+    draw_time_set_window(&window, 0, 14, 20, 4, &mut data)?;
+    let prompt = if runtime_shell.party_hp_transfer_source.is_some() {
+        "Use on which"
+    } else if runtime_shell.party_switch_cursor.is_some() {
+        "Move to where?"
+    } else {
+        "Choose a POKéMON."
+    };
+    draw_time_set_text(&font, prompt, 8, 16 * 8, &mut data)?;
+    if runtime_shell.party_hp_transfer_source.is_some() {
+        draw_time_set_text(&font, "POKéMON?", 8, 17 * 8, &mut data)?;
+    }
+
+    if let Some(cursor) = runtime_shell.party_action_cursor.as_ref() {
+        let actions = visible_party_actions(snapshot, runtime_shell)?;
+        let action_selected = strict_readonly_cursor_index(
+            &Some(cursor.clone()),
+            "party:actions",
+            actions.len(),
+        )
+        .context("party action cursor is invalid")?;
+        draw_time_set_window(&window, 6, 0, 14, 18, &mut data)?;
+        for (index, action) in actions.iter().enumerate() {
+            let label = party_submenu_action_entry(
+                *action,
+                if index == action_selected { "▶" } else { " " },
+            );
+            draw_time_set_text(&font, &label, 7 * 8, (1 + index * 2) * 8, &mut data)?;
+        }
+    }
+    if let Some(cursor) = runtime_shell.party_give_take_cursor.as_ref() {
+        let mail_actions = cursor.surface_id == "party:mail-actions";
+        let (surface, labels): (&str, &[&str]) = if mail_actions {
+            ("party:mail-actions", &["READ", "TAKE", "QUIT"])
+        } else {
+            ("party:give-take", &["GIVE", "TAKE"])
+        };
+        let choice = strict_readonly_cursor_index(
+            &Some(cursor.clone()),
+            surface,
+            labels.len(),
+        )
+        .with_context(|| format!("{surface} cursor is invalid"))?;
+        let top = 18_usize.saturating_sub(labels.len() + 2);
+        draw_time_set_window(&window, 12, top, 8, labels.len() + 2, &mut data)?;
+        for (index, label) in labels.iter().enumerate() {
+            draw_time_set_text(
+                &font,
+                &format!("{}{}", if index == choice { "▶" } else { " " }, label),
+                13 * 8,
+                (top + 1 + index) * 8,
+                &mut data,
+            )?;
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame { handle: images.add(image), size: Vec2::new(width as f32, height as f32) })
+}
+
+fn draw_native_hp_bar(target: &mut [u8], x: usize, y: usize, hp: u16, max_hp: u16) {
+    let pixels = if max_hp == 0 || hp == 0 {
+        0
+    } else {
+        ((usize::from(hp.min(max_hp)) * 48) / usize::from(max_hp)).max(1)
+    };
+    let color = if pixels >= 24 {
+        [0, 189, 0]
+    } else if pixels >= 10 {
+        [255, 189, 0]
+    } else {
+        [255, 0, 0]
+    };
+    for row in 0..4 {
+        for col in 0..48 {
+            let offset = ((y + row) * 160 + x + col) * 4;
+            target[offset..offset + 3].copy_from_slice(if col < pixels { &color } else { &[180, 180, 180] });
+            target[offset + 3] = 255;
+        }
+    }
+}
+
+fn load_visible_party_summary_frame(
+    runtime_shell: &BevyRuntimeShell,
+    rows: &[(usize, f32, String)],
+    tint: [u8; 4],
+    page: u8,
+    hp: Option<(u16, u16)>,
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    let font = crate::open_runtime_image(
+        runtime_shell.asset_root.runtime_assets().join("gfx/font/font.png"),
+    )
+    .context("decode status-screen font PNG")?
+    .to_rgba8();
+    let width = 160;
+    let height = 144;
+    let mut data = vec![0_u8; width * height * 4];
+    for y in 0..height {
+        let color = if y < 8 * 8 { BOOT_UI_WHITE } else { tint };
+        for x in 0..width {
+            let offset = (y * width + x) * 4;
+            data[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+    // stats_screen.asm divides the fixed identity header from the active page.
+    for x in 0..width {
+        let offset = (7 * 8 * width + x) * 4;
+        data[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+    }
+    for (index, color) in [
+        [255, 158, 255, 255],
+        [173, 255, 115, 255],
+        [140, 255, 255, 255],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let left = (13 + index * 2) * 8;
+        for y in 5 * 8..7 * 8 {
+            for x in left..left + 2 * 8 {
+                let offset = (y * width + x) * 4;
+                data[offset..offset + 4].copy_from_slice(&color);
+            }
+        }
+        if usize::from(page.saturating_sub(1)) == index {
+            for y in 5 * 8..7 * 8 {
+                for x in left..left + 2 * 8 {
+                    if y == 5 * 8 || y == 7 * 8 - 1 || x == left || x == left + 2 * 8 - 1 {
+                        let offset = (y * width + x) * 4;
+                        data[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+                    }
+                }
+            }
+        }
+    }
+    draw_native_page_arrow(&mut data, 12 * 8, 6 * 8, false);
+    draw_native_page_arrow(&mut data, 19 * 8, 6 * 8, true);
+    if page == 1
+        && let Some((current_hp, max_hp)) = hp
+    {
+        draw_native_hp_bar(&mut data, 2 * 8, 9 * 8 + 2, current_hp, max_hp);
+    }
+    for (column, row, text) in rows {
+        draw_time_set_text(
+            &font,
+            &compact_scene_label(text, 18),
+            column * 8,
+            (*row as usize) * 8,
+            &mut data,
+        )?;
+    }
+    let mut image = Image::new(
+        Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame { handle: images.add(image), size: Vec2::new(width as f32, height as f32) })
+}
+
+fn draw_native_page_arrow(target: &mut [u8], x: usize, y: usize, right: bool) {
+    for row in 0..7 {
+        let half_width = if row <= 3 { row } else { 6 - row };
+        for offset in 0..=half_width {
+            let column = if right { offset } else { 6 - offset };
+            let pixel = ((y + row) * 160 + x + column) * 4;
+            target[pixel..pixel + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+    }
+}
+
 fn load_visible_title_main_menu_frame(
     runtime_shell: &BevyRuntimeShell,
     title: &TitleMenu,
@@ -1956,7 +2464,7 @@ fn draw_time_set_textbox(
 }
 
 fn wrap_boot_text_for_box(text: &str, max_chars_per_line: usize, max_lines: usize) -> Vec<String> {
-    if max_lines == 0 {
+    if max_chars_per_line == 0 || max_lines == 0 {
         return Vec::new();
     }
     let normalized = normalize_boot_text(text);
@@ -1992,6 +2500,36 @@ fn wrap_boot_text_for_box(text: &str, max_chars_per_line: usize, max_lines: usiz
             };
             if boot_text_tile_len(&candidate) <= max_chars_per_line {
                 current = candidate;
+            } else if boot_text_tile_len(&word) > max_chars_per_line {
+                if !current.is_empty() {
+                    let available = max_chars_per_line
+                        .saturating_sub(boot_text_tile_len(&current) + 1);
+                    if available > 0 {
+                        let (prefix, remainder) = split_boot_word_prefix(&word, available);
+                        current.push(' ');
+                        current.push_str(&prefix);
+                        word = remainder;
+                    }
+                    lines.push(current);
+                    current = String::new();
+                    if lines.len() >= max_lines {
+                        break;
+                    }
+                }
+                while boot_text_tile_len(&word) > max_chars_per_line {
+                    let (prefix, remainder) =
+                        split_boot_word_prefix(&word, max_chars_per_line);
+                    lines.push(prefix);
+                    word = remainder;
+                    if lines.len() >= max_lines {
+                        break;
+                    }
+                }
+                if lines.len() >= max_lines {
+                    current.clear();
+                    break;
+                }
+                current = word;
             } else {
                 if !current.is_empty() {
                     lines.push(current);
@@ -2018,6 +2556,21 @@ fn wrap_boot_text_for_box(text: &str, max_chars_per_line: usize, max_lines: usiz
     }
     lines.truncate(max_lines);
     lines
+}
+
+fn split_boot_word_prefix(word: &str, max_tiles: usize) -> (String, String) {
+    let mut split_at = 0;
+    for (index, ch) in word.char_indices() {
+        let end = index + ch.len_utf8();
+        if boot_text_tile_len(&word[..end]) > max_tiles {
+            break;
+        }
+        split_at = end;
+    }
+    if split_at == 0 {
+        split_at = word.chars().next().map(char::len_utf8).unwrap_or(0);
+    }
+    (word[..split_at].to_string(), word[split_at..].to_string())
 }
 
 fn normalize_boot_text(text: &str) -> String {
@@ -3222,6 +3775,13 @@ fn apply_visible_credits_line_scroll(credits: &VisibleCreditsScreen, target: &mu
     }
 }
 
+fn should_despawn_player_facing_entity(
+    retain_player_sprite: bool,
+    is_retained_player_sprite: bool,
+) -> bool {
+    !retain_player_sprite || !is_retained_player_sprite
+}
+
 fn visible_credits_screen_lines(credits: &VisibleCreditsScreen) -> Vec<String> {
     let mut lines = credits
         .lines
@@ -3310,11 +3870,13 @@ struct RenderEntityQueries<'w, 's> {
         'w,
         's,
         (
-            &'static VisibleObjectSprite,
+            Entity,
+            &'static mut VisibleObjectSprite,
+            &'static mut Handle<Image>,
             &'static mut Transform,
-            &'static Sprite,
+            &'static mut Sprite,
         ),
-        Without<PlayerMarker>,
+        (Without<PlayerMarker>, Without<VisibleIntroSurface>),
     >,
     events: Query<'w, 's, Entity, With<EventMarker>>,
     prompts: Query<'w, 's, Entity, With<FieldPromptMarker>>,
@@ -3400,58 +3962,16 @@ fn set_overworld_map_scroll(
         transform.translation.y = offset.y;
     }
 
-    // Only the edge uncovered by the moving exact-size front composite may
-    // show the old priority map.  Drawing its complete transparent surface
-    // above the destination would resurrect stale roofs/trees wherever the
-    // replacement priority pixels are transparent.
-    for (axis, mut transform, mut sprite) in map_backing_priorities.iter_mut() {
-        let exposure = match axis {
-            PlayfieldMapBackingPriorityAxis::X => offset.x.abs().min(PLAYFIELD_WIDTH),
-            PlayfieldMapBackingPriorityAxis::Y => offset.y.abs().min(PLAYFIELD_HEIGHT),
-        };
-        if exposure <= f32::EPSILON {
-            sprite.rect = None;
-            sprite.custom_size = Some(Vec2::ZERO);
-            transform.translation = Vec3::new(0.0, 0.0, 2.39);
-            continue;
-        }
-
-        match axis {
-            PlayfieldMapBackingPriorityAxis::X if offset.x > 0.0 => {
-                sprite.rect = Some(Rect::new(0.0, 0.0, exposure, PLAYFIELD_HEIGHT));
-                sprite.custom_size = Some(Vec2::new(exposure, PLAYFIELD_HEIGHT));
-                transform.translation =
-                    Vec3::new(-PLAYFIELD_WIDTH * 0.5 + exposure * 0.5, 0.0, 2.39);
-            }
-            PlayfieldMapBackingPriorityAxis::X => {
-                sprite.rect = Some(Rect::new(
-                    PLAYFIELD_WIDTH - exposure,
-                    0.0,
-                    PLAYFIELD_WIDTH,
-                    PLAYFIELD_HEIGHT,
-                ));
-                sprite.custom_size = Some(Vec2::new(exposure, PLAYFIELD_HEIGHT));
-                transform.translation =
-                    Vec3::new(PLAYFIELD_WIDTH * 0.5 - exposure * 0.5, 0.0, 2.39);
-            }
-            PlayfieldMapBackingPriorityAxis::Y if offset.y > 0.0 => {
-                sprite.rect = Some(Rect::new(
-                    0.0,
-                    PLAYFIELD_HEIGHT - exposure,
-                    PLAYFIELD_WIDTH,
-                    PLAYFIELD_HEIGHT,
-                ));
-                sprite.custom_size = Some(Vec2::new(PLAYFIELD_WIDTH, exposure));
-                transform.translation =
-                    Vec3::new(0.0, -PLAYFIELD_HEIGHT * 0.5 + exposure * 0.5, 2.39);
-            }
-            PlayfieldMapBackingPriorityAxis::Y => {
-                sprite.rect = Some(Rect::new(0.0, 0.0, PLAYFIELD_WIDTH, exposure));
-                sprite.custom_size = Some(Vec2::new(PLAYFIELD_WIDTH, exposure));
-                transform.translation =
-                    Vec3::new(0.0, PLAYFIELD_HEIGHT * 0.5 - exposure * 0.5, 2.39);
-            }
-        }
+    // The moving front surface carries one complete runtime tile of real map
+    // art beyond every LCD edge. Legacy cropped priority backings sampled the
+    // previous viewport in display-pixel coordinates and produced duplicated
+    // roofs/buildings at the leading edge. Keep those retained entities
+    // hidden; they remain only to preserve stable handles across old saves and
+    // tests while the halo itself supplies both base and priority pixels.
+    for (_, mut transform, mut sprite) in map_backing_priorities.iter_mut() {
+        sprite.rect = None;
+        sprite.custom_size = Some(Vec2::ZERO);
+        transform.translation = Vec3::new(0.0, 0.0, 2.39);
     }
 }
 
@@ -4253,6 +4773,7 @@ fn render_playfield(
         && snapshot.ui.active_pokemon_picture.is_none()
         && snapshot.pending_move_learn.is_none()
         && runtime_shell.pending_name_input.is_none()
+        && runtime_shell.pending_mail_input.is_none()
         && runtime_shell.pending_name_choice.is_none()
         && runtime_shell.pending_time_set.is_none()
         && runtime_shell.pending_oak_intro.is_none()
@@ -4403,6 +4924,7 @@ fn render_playfield(
         && runtime_shell.special_boundary.is_none()
         && snapshot.pending_move_learn.is_none()
         && runtime_shell.pending_name_input.is_none()
+        && runtime_shell.pending_mail_input.is_none()
         && runtime_shell.pending_name_choice.is_none()
         && runtime_shell.pending_time_set.is_none()
         && runtime_shell.pending_oak_intro.is_none()
@@ -4468,6 +4990,7 @@ fn render_playfield(
     }
     if rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && rendered.tile == Some(snapshot.overworld.tile)
+        && rendered.world_key == Some(world_key)
         && rendered.state_hash == Some(state_hash)
         && rendered.shell_render_key == Some(shell_render_key)
         && snapshot.ui.active_pokemon_picture.is_none()
@@ -4499,16 +5022,41 @@ fn render_playfield(
     // clearing every marker query queued the same entity more than once.
     // Native dialogue then emitted thousands of B0003 warnings and slowed
     // down further on every page. Queue each entity exactly once per frame.
-    if !retain_player_sprite {
-        for entity in players.iter() {
+    // PlayerFacingMarker also owns short-lived OAM effects (grass rustle,
+    // ledge shadow, fishing frames, and the optional facing overlay). Keep
+    // only the real PlayerMarker entity on same-map redraws. Retaining every
+    // PlayerFacingMarker caused one new grass tile to accumulate on every
+    // animation tick until the overlapping sprites formed a giant smear.
+    for entity in players.iter() {
+        if should_despawn_player_facing_entity(
+            retain_player_sprite,
+            player_sprites.contains(entity),
+        ) {
             queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
         }
     }
-    let retain_object_sprites =
-        retain_walking_viewport && runtime_shell.player_walk_frame_ticks > 0;
-    if !retain_object_sprites && runtime_shell.visible_fly_animation.is_none() {
+    // Same-map object sprites are part of the retained LCD just like the
+    // player and map surfaces. Ambient tile animation, follower-only walks,
+    // and script bookkeeping all reach this full-render boundary; replacing
+    // every NPC there makes the extracted 2D frame intermittently contain no
+    // objects while the new entities/textures are prepared. Reconcile the
+    // existing entities in place below and only add/remove objects whose
+    // actual visible identity changed.
+    let retain_object_sprites = retain_walking_viewport;
+    if !retain_object_sprites {
         for entity in objects.iter() {
             queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
+        }
+    } else {
+        // Temporary effects (including Fly leaves and the bird) also carry
+        // ObjectMarker but not the stable VisibleObjectSprite identity used
+        // by the reconciler. Retire those every redraw so a multi-frame field
+        // animation cannot accumulate prior-frame OAM while the map NPCs stay
+        // retained beneath it.
+        for entity in objects.iter() {
+            if object_sprites.get(entity).is_err() {
+                queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
+            }
         }
     }
     for entity in events.iter() {
@@ -4567,7 +5115,10 @@ fn render_playfield(
         commands.spawn((
             SpriteBundle {
                 sprite: Sprite {
-                    color: Color::rgb(248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0),
+                    // Pokemon palette color zero expands to full white. Keep
+                    // the battle canvas identical so enclosed white sprite
+                    // details do not show as a mismatched rectangle/halo.
+                    color: Color::WHITE,
                     custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                     ..default()
                 },
@@ -4778,6 +5329,7 @@ fn render_playfield(
         && snapshot.pending_move_learn.is_none()
         && runtime_shell.last_error.is_none()
         && runtime_shell.pending_name_input.is_none()
+        && runtime_shell.pending_mail_input.is_none()
         && runtime_shell.pending_name_choice.is_none()
         // These effects add independent OAM sprites. The position-only fast
         // path updates player/NPC transforms and returns before spawning
@@ -4944,10 +5496,10 @@ fn render_playfield(
     // every camera step and was the reason the shell could fall to one FPS.
     // Objects, player, dialog, and battle overlays remain separate layers.
     let mut viewport_tile_handles = Vec::with_capacity(
-        usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
+        usize::try_from(CLASSIC_SCROLL_TILES_X * CLASSIC_SCROLL_TILES_Y).unwrap_or_default(),
     );
     let mut priority_viewport_tiles = Vec::with_capacity(
-        usize::try_from(VIEWPORT_TILES_X * VIEWPORT_TILES_Y).unwrap_or_default(),
+        usize::try_from(CLASSIC_SCROLL_TILES_X * CLASSIC_SCROLL_TILES_Y).unwrap_or_default(),
     );
     let mut visual_tiles = Vec::with_capacity(
         usize::try_from(VISUAL_WORLD_TILES_X * VISUAL_WORLD_TILES_Y).unwrap_or_default(),
@@ -4961,7 +5513,10 @@ fn render_playfield(
         for visual_x in 0..VISUAL_WORLD_TILES_X {
             let x = visual_x - VISUAL_WORLD_HALO_TILES;
             let y = visual_y - VISUAL_WORLD_HALO_TILES;
-            let inside_viewport = x >= 0 && y >= 0 && x < VIEWPORT_TILES_X && y < VIEWPORT_TILES_Y;
+            let inside_scroll_surface = x >= -CLASSIC_SCROLL_HALO_TILES
+                && y >= -CLASSIC_SCROLL_HALO_TILES
+                && x < VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES
+                && y < VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES;
             let map_x = i32::from(start_x) + i32::from(x);
             let map_y = i32::from(start_y) + i32::from(y);
             let (source_map, source_x, source_y) =
@@ -5046,7 +5601,7 @@ fn render_playfield(
                 );
                 return;
             };
-            if inside_viewport {
+            if inside_scroll_surface {
                 viewport_tile_handles.push(tile_handle.clone());
             }
             #[cfg(feature = "voxel-view")]
@@ -5135,7 +5690,7 @@ fn render_playfield(
             } else {
                 None
             };
-            if inside_viewport {
+            if inside_scroll_surface {
                 priority_viewport_tiles.push(priority_spec);
             }
         }
@@ -5197,8 +5752,10 @@ fn render_playfield(
             .clone()
             .expect("facing-only redraw retains an initialized base texture")
     } else {
-        compose_viewport_tiles(
+        compose_tile_grid(
             &viewport_tile_handles,
+            CLASSIC_SCROLL_TILES_X as usize,
+            CLASSIC_SCROLL_TILES_Y as usize,
             rendered.map_texture.clone(),
             &mut images,
         )
@@ -5209,8 +5766,10 @@ fn render_playfield(
             .clone()
             .expect("facing-only redraw retains an initialized priority texture")
     } else {
-        compose_priority_viewport_tiles(
+        compose_priority_tile_grid(
             &priority_viewport_tiles,
+            CLASSIC_SCROLL_TILES_X as usize,
+            CLASSIC_SCROLL_TILES_Y as usize,
             rendered.map_priority_texture.clone(),
             &mut images,
         )
@@ -5338,7 +5897,7 @@ fn render_playfield(
             SpriteBundle {
                 texture: viewport_texture,
                 sprite: Sprite {
-                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    custom_size: Some(Vec2::new(CLASSIC_SCROLL_WIDTH, CLASSIC_SCROLL_HEIGHT)),
                     ..default()
                 },
                 // Image pixel (0, 0) is already the playfield's top-left;
@@ -5352,7 +5911,7 @@ fn render_playfield(
             SpriteBundle {
                 texture: priority_viewport_texture,
                 sprite: Sprite {
-                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+                    custom_size: Some(Vec2::new(CLASSIC_SCROLL_WIDTH, CLASSIC_SCROLL_HEIGHT)),
                     ..default()
                 },
                 transform: Transform::from_xyz(0.0, 0.0, 2.4),
@@ -5404,7 +5963,8 @@ fn render_playfield(
         }
     }
 
-    if !retain_object_sprites {
+    {
+        let mut reconciled_object_entities = std::collections::HashSet::new();
         // `LoadAndSortSprites` in the ASM/TypeScript renderer orders objects by
         // their live runtime Y coordinate, then X. Declaration order is not a
         // rendering order: using it makes NPCs draw in front of characters they
@@ -5556,6 +6116,20 @@ fn render_playfield(
             }
             if let Some(frame) = sprite_frame {
                 let animated = object_sprite_is_animated(&object.spritemovedata);
+                let walk_phase = object
+                    .object_identifier
+                    .as_ref()
+                    .and_then(|object_id| runtime_shell.object_walk_phases.get(object_id).copied());
+                let uses_action_frame = walking_from.is_some()
+                    && walk_phase.map_or(
+                        !runtime_shell.object_walk_stride,
+                        object_walk_uses_action_frame,
+                    );
+                let display_frame = if uses_action_frame {
+                    walking_frame.as_ref().unwrap_or(&frame)
+                } else {
+                    &frame
+                };
                 let (object_x, object_y) = if let Some(from) = walking_from {
                     let trainer_is_walking =
                         object.object_identifier.as_ref().is_some_and(|object_id| {
@@ -5635,54 +6209,77 @@ fn render_playfield(
                     // this stride. A static-position viewport clamp here would
                     // collapse that valid offscreen origin to the destination.
                     let from = render_tile_playfield_position(from_view_x, from_view_y);
-                    let total = f32::from(total_ticks);
-                    let progress = (total - f32::from(remaining)) / total;
+                    let progress = visible_movement_progress(remaining, total_ticks);
                     overworld_sprite_position_from_base(
                         from.0 + (target.0 - from.0) * progress,
                         from.1 + (target.1 - from.1) * progress,
-                        frame.size,
+                        display_frame.size,
                     )
                 } else {
-                    overworld_sprite_position(view_x, view_y, frame.size)
+                    overworld_sprite_position(view_x, view_y, display_frame.size)
                 };
-                commands.spawn((
-                    SpriteBundle {
-                        texture: frame.handle.clone(),
-                        sprite: Sprite {
-                            custom_size: Some(frame.size),
+                let next_sprite = Sprite {
+                    custom_size: Some(display_frame.size),
+                    flip_x: uses_action_frame
+                        && matches!(direction, Direction::Up | Direction::Down)
+                        && walk_phase.map_or(
+                            !runtime_shell.object_walk_stride,
+                            object_walk_uses_mirrored_action_frame,
+                        ),
+                    ..default()
+                };
+                // Match LoadAndSortSprites: objects farther down the map are
+                // nearer the camera and must draw over objects above them.
+                let next_transform = Transform::from_xyz(
+                    object_x + camera_offset.x,
+                    object_y + camera_offset.y,
+                    if objects_above_priority.contains(&index) {
+                        2.41
+                    } else {
+                        overworld_entity_depth(
+                            object_tile,
+                            Some(source_object_slot),
+                            (start_x, start_y),
+                        )
+                    },
+                );
+                let next_visible = VisibleObjectSprite {
+                    object_index: index,
+                    object_identifier: object.object_identifier.clone(),
+                    source_id: Arc::from(render_sprite_id.as_str()),
+                    above_priority: objects_above_priority.contains(&index),
+                    standing: frame.handle.clone(),
+                    walking: walking_frame.as_ref().map(|frame| frame.handle.clone()),
+                    mirror_walking: matches!(direction, Direction::Up | Direction::Down),
+                    animated,
+                };
+                let retained = retain_object_sprites
+                    .then(|| {
+                        object_sprites
+                            .iter_mut()
+                            .find(|(_, rendered, _, _, _)| rendered.object_index == index)
+                    })
+                    .flatten();
+                if let Some((entity, mut rendered, mut texture, mut transform, mut sprite)) =
+                    retained
+                {
+                    *rendered = next_visible;
+                    *texture = display_frame.handle.clone();
+                    *transform = next_transform;
+                    *sprite = next_sprite;
+                    reconciled_object_entities.insert(entity);
+                } else {
+                    commands.spawn((
+                        SpriteBundle {
+                            texture: display_frame.handle.clone(),
+                            sprite: next_sprite,
+                            transform: next_transform,
                             ..default()
                         },
-                        // Match LoadAndSortSprites: objects farther down the map
-                        // are nearer the camera and must draw over objects above
-                        // them.  The tiny epsilon keeps the 2-D layer ordering
-                        // deterministic without changing screen coordinates.
-                        transform: Transform::from_xyz(
-                            object_x + camera_offset.x,
-                            object_y + camera_offset.y,
-                            if objects_above_priority.contains(&index) {
-                                2.41
-                            } else {
-                                overworld_entity_depth(
-                                    object_tile,
-                                    Some(source_object_slot),
-                                    (start_x, start_y),
-                                )
-                            },
-                        ),
-                        ..default()
-                    },
-                    ObjectMarker,
-                    VisibleObjectSprite {
-                        object_index: index,
-                        object_identifier: object.object_identifier.clone(),
-                        source_id: Arc::from(render_sprite_id.as_str()),
-                        above_priority: objects_above_priority.contains(&index),
-                        standing: frame.handle.clone(),
-                        walking: walking_frame.map(|frame| frame.handle),
-                        mirror_walking: matches!(direction, Direction::Up | Direction::Down),
-                        animated,
-                    },
-                ));
+                        ObjectMarker,
+                        next_visible,
+                    ));
+                }
             } else {
                 let key = SpriteArtKey {
                     sprite_id: render_sprite_id.clone(),
@@ -5709,6 +6306,13 @@ fn render_playfield(
             if runtime_debug_overlays_enabled() {
                 let (object_tile_x, object_tile_y) = render_tile_playfield_position(view_x, view_y);
                 spawn_object_label(&mut commands, object, object_tile_x, object_tile_y);
+            }
+        }
+        if retain_object_sprites {
+            for (entity, _, _, _, _) in object_sprites.iter_mut() {
+                if !reconciled_object_entities.contains(&entity) {
+                    queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
+                }
             }
         }
     }
@@ -5970,7 +6574,7 @@ fn render_playfield(
                 start_x,
                 start_y,
                 tile,
-                Color::rgb(0.18, 0.42, 0.96),
+                Color::srgb(0.18, 0.42, 0.96),
                 TILE_SIZE * 0.34,
                 1.1,
             );
@@ -5985,7 +6589,7 @@ fn render_playfield(
                 start_x,
                 start_y,
                 tile,
-                Color::rgb(0.92, 0.92, 0.86),
+                Color::srgb(0.92, 0.92, 0.86),
                 TILE_SIZE * 0.26,
                 1.2,
             );
@@ -6000,7 +6604,7 @@ fn render_playfield(
                 start_x,
                 start_y,
                 tile,
-                Color::rgb(0.74, 0.42, 0.94),
+                Color::srgb(0.74, 0.42, 0.94),
                 TILE_SIZE * 0.42,
                 1.3,
             );
@@ -6138,9 +6742,7 @@ fn render_playfield(
         } else {
             None
         };
-        let frame = if let Some(frame) = fishing_frame.as_ref() {
-            frame
-        } else if !runtime_shell
+        let player_is_moving = !runtime_shell
             .visible_script_movement
             .as_ref()
             .is_some_and(|movement| {
@@ -6150,8 +6752,12 @@ fn render_playfield(
                         && runtime_shell.player_walk_frame_ticks > 0)
             })
             && (runtime_shell.visible_ledge_jump.is_some()
-                || runtime_shell.player_walk_frame_ticks > 0)
-        {
+                || runtime_shell.player_walk_frame_ticks > 0);
+        let player_uses_action_frame =
+            player_is_moving && player_walk_uses_action_frame(runtime_shell.player_walk_stride);
+        let frame = if let Some(frame) = fishing_frame.as_ref() {
+            frame
+        } else if player_uses_action_frame {
             walking_frame.as_ref().unwrap_or(&standing_frame)
         } else {
             &standing_frame
@@ -6223,9 +6829,8 @@ fn render_playfield(
                 LedgeShadowMarker,
             ));
         }
-        let player_flip_x = (runtime_shell.player_walk_frame_ticks > 0
-            || runtime_shell.visible_ledge_jump.is_some())
-            && !runtime_shell.player_walk_stride
+        let player_flip_x = player_uses_action_frame
+            && runtime_shell.player_walk_mirror_stride
             && matches!(snapshot.overworld.facing, Direction::Up | Direction::Down);
         if retain_player_sprite && runtime_shell.visible_fly_animation.is_none() {
             if let Ok((mut texture, mut transform, mut sprite, mut frames)) =
@@ -6362,7 +6967,7 @@ fn render_playfield(
         commands.spawn((
             SpriteBundle {
                 sprite: Sprite {
-                    color: Color::rgb(1.0, 0.95, 0.32),
+                    color: Color::srgb(1.0, 0.95, 0.32),
                     custom_size: Some(player_facing_marker_size(facing_dx, facing_dy)),
                     ..default()
                 },
@@ -6605,7 +7210,9 @@ fn render_playfield(
                 return;
             }
         }
-    } else if !scene_dialog_surface_active(&snapshot, &runtime_shell) {
+    } else if runtime_shell.pokegear_menu_open
+        || !scene_dialog_surface_active(&snapshot, &runtime_shell)
+    {
         if runtime_debug_overlays_enabled() {
             spawn_field_prompt_marker(
                 &mut commands,

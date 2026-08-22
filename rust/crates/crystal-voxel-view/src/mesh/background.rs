@@ -12,6 +12,7 @@ use super::*;
 // much larger presentation-only apron beyond it so perspective views and
 // future camera yaw cannot reach the clear color in any direction.
 const BACKGROUND_APRON_TILES: isize = 96;
+#[cfg(test)]
 const METATILE_PERIOD: usize = 4;
 const BACKGROUND_HEIGHT: f32 = -0.04;
 
@@ -88,6 +89,7 @@ fn dominant_flat_source(
         .map(|(_, column, row)| (column, row))
 }
 
+#[cfg(test)]
 fn nearest_flat_source(
     nominal_column: usize,
     nominal_row: usize,
@@ -134,6 +136,7 @@ fn nearest_flat_source(
     None
 }
 
+#[cfg(test)]
 fn repeated_edge_coordinate(coordinate: isize, length: usize) -> usize {
     let period = length.min(METATILE_PERIOD);
     debug_assert!(period > 0);

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,8 @@ pub enum TmHmLearnError {
     UnexpectedReplacementSlot { slot: usize },
     #[error("replacement slot {slot} is outside the Pokemon move list")]
     InvalidReplacementSlot { slot: usize },
+    #[error("HM move '{move_id}' cannot be forgotten")]
+    CannotForgetHmMove { move_id: String },
     #[error("saved bag.tm_hm has {slots} slots, compiled TM/HM max index is {max_index}")]
     SavedTmHmSlotsExceedCompiledMax { slots: usize, max_index: usize },
     #[error("saved bag.tm_hm has {slots} slots, fewer than compiled TM/HM max index {max_index}")]
@@ -58,6 +60,7 @@ pub fn teach_tmhm_move(
     pokemon: &mut Pokemon,
     item: &Item,
     moves: &BTreeMap<String, Move>,
+    hm_moves: &BTreeSet<String>,
     replace_slot: Option<usize>,
     consumed: bool,
 ) -> Result<TmHmLearnOutcome, TmHmLearnError> {
@@ -119,6 +122,11 @@ pub fn teach_tmhm_move(
             .moves
             .get_mut(slot)
             .ok_or(TmHmLearnError::InvalidReplacementSlot { slot })?;
+        if hm_moves.contains(&existing.name) {
+            return Err(TmHmLearnError::CannotForgetHmMove {
+                move_id: existing.name.clone(),
+            });
+        }
         let replaced = std::mem::replace(existing, learned).name;
         (Some(slot), Some(replaced))
     };
@@ -215,6 +223,7 @@ mod tests {
 
     fn test_move(name: &str, pp: u8) -> Move {
         Move {
+            source_index: 1,
             name: name.to_string(),
             move_type: pokemon_type("NORMAL"),
             power: 40,
@@ -334,8 +343,8 @@ mod tests {
         let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
 
-        let outcome =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), None, true).expect("teach TM move");
+        let outcome = teach_tmhm_move(&mut pokemon, &item, &moves(), &BTreeSet::new(), None, true)
+            .expect("teach TM move");
 
         assert_eq!(outcome.learned_move, "HEADBUTT");
         assert_eq!(outcome.tmhm_index, 1);
@@ -350,8 +359,15 @@ mod tests {
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
         let before = pokemon.clone();
 
-        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), Some(0), true)
-            .expect_err("open move slot must not receive replacement choice");
+        let error = teach_tmhm_move(
+            &mut pokemon,
+            &item,
+            &moves(),
+            &BTreeSet::new(),
+            Some(0),
+            true,
+        )
+        .expect_err("open move slot must not receive replacement choice");
 
         assert_eq!(error, TmHmLearnError::UnexpectedReplacementSlot { slot: 0 });
         assert_eq!(pokemon, before);
@@ -362,8 +378,8 @@ mod tests {
         let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["CUT"], &["TACKLE"]);
 
-        let error =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), None, false).expect_err("cannot learn");
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), &BTreeSet::new(), None, false)
+            .expect_err("cannot learn");
 
         assert!(matches!(error, TmHmLearnError::CannotLearn { .. }));
         assert_eq!(pokemon.moves.len(), 1);
@@ -374,8 +390,8 @@ mod tests {
         let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["HEADBUTT"], &["HEADBUTT"]);
 
-        let error =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), None, false).expect_err("already knows");
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), &BTreeSet::new(), None, false)
+            .expect_err("already knows");
 
         assert_eq!(
             error,
@@ -390,8 +406,8 @@ mod tests {
         let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE", "GROWL", "TAIL_WHIP", "LEER"]);
 
-        let error =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), None, false).expect_err("must replace");
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), &BTreeSet::new(), None, false)
+            .expect_err("must replace");
 
         assert_eq!(error, TmHmLearnError::MoveListFull);
     }
@@ -401,12 +417,38 @@ mod tests {
         let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE", "GROWL", "TAIL_WHIP", "LEER"]);
 
-        let outcome =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), Some(2), true).expect("replace move");
+        let outcome = teach_tmhm_move(
+            &mut pokemon,
+            &item,
+            &moves(),
+            &BTreeSet::new(),
+            Some(2),
+            true,
+        )
+        .expect("replace move");
 
         assert_eq!(outcome.replaced_slot, Some(2));
         assert_eq!(outcome.replaced_move.as_deref(), Some("TAIL_WHIP"));
         assert_eq!(pokemon.moves[2].name, "HEADBUTT");
+    }
+
+    #[test]
+    fn rejects_replacing_an_hm_move_without_mutation() {
+        let item = item("TM_HEADBUTT", 1, "HEADBUTT", true);
+        let mut pokemon = pokemon(&["HEADBUTT"], &["CUT", "GROWL", "TAIL_WHIP", "LEER"]);
+        let before = pokemon.clone();
+        let hm_moves = BTreeSet::from(["CUT".to_string()]);
+
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), &hm_moves, Some(0), true)
+            .expect_err("HM moves cannot be replaced");
+
+        assert_eq!(
+            error,
+            TmHmLearnError::CannotForgetHmMove {
+                move_id: "CUT".to_string(),
+            }
+        );
+        assert_eq!(pokemon, before);
     }
 
     #[test]
@@ -415,8 +457,8 @@ mod tests {
         item.tmhm_move = None;
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
 
-        let error =
-            teach_tmhm_move(&mut pokemon, &item, &moves(), None, false).expect_err("missing move");
+        let error = teach_tmhm_move(&mut pokemon, &item, &moves(), &BTreeSet::new(), None, false)
+            .expect_err("missing move");
 
         assert_eq!(
             error,
@@ -430,8 +472,15 @@ mod tests {
     fn rejects_malformed_tmhm_ids_before_unknown_or_missing_fallbacks() {
         let mut bad_item_id = item("TM HEADBUTT", 1, "HEADBUTT", true);
         let mut pokemon = pokemon(&["HEADBUTT"], &["TACKLE"]);
-        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
-            .expect_err("malformed item ids are invalid pack data");
+        let error = teach_tmhm_move(
+            &mut pokemon,
+            &bad_item_id,
+            &moves(),
+            &BTreeSet::new(),
+            None,
+            false,
+        )
+        .expect_err("malformed item ids are invalid pack data");
         assert_eq!(
             error,
             TmHmLearnError::InvalidItemId {
@@ -442,8 +491,15 @@ mod tests {
 
         bad_item_id.script_name = "TM_HEADBUTT".to_string();
         bad_item_id.tmhm_move = Some("HEAD BUTT".to_string());
-        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
-            .expect_err("malformed move ids are invalid pack data");
+        let error = teach_tmhm_move(
+            &mut pokemon,
+            &bad_item_id,
+            &moves(),
+            &BTreeSet::new(),
+            None,
+            false,
+        )
+        .expect_err("malformed move ids are invalid pack data");
         assert_eq!(
             error,
             TmHmLearnError::InvalidMoveId {
@@ -455,8 +511,15 @@ mod tests {
 
         bad_item_id.script_name = "fallback_tm_headbutt".to_string();
         bad_item_id.tmhm_move = Some("HEADBUTT".to_string());
-        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
-            .expect_err("reserved item ids are invalid pack data");
+        let error = teach_tmhm_move(
+            &mut pokemon,
+            &bad_item_id,
+            &moves(),
+            &BTreeSet::new(),
+            None,
+            false,
+        )
+        .expect_err("reserved item ids are invalid pack data");
         assert_eq!(
             error,
             TmHmLearnError::InvalidItemId {
@@ -467,8 +530,15 @@ mod tests {
 
         bad_item_id.script_name = "TM_HEADBUTT".to_string();
         bad_item_id.tmhm_move = Some("legacy_headbutt".to_string());
-        let error = teach_tmhm_move(&mut pokemon, &bad_item_id, &moves(), None, false)
-            .expect_err("reserved move ids are invalid pack data");
+        let error = teach_tmhm_move(
+            &mut pokemon,
+            &bad_item_id,
+            &moves(),
+            &BTreeSet::new(),
+            None,
+            false,
+        )
+        .expect_err("reserved move ids are invalid pack data");
         assert_eq!(
             error,
             TmHmLearnError::InvalidMoveId {

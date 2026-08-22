@@ -1,18 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::models::Dv;
+use crate::random::{CrystalRandom, DividerSource};
 use crate::state::{
     GameState, HALL_OF_FAME_ENTRY_LIMIT, HALL_OF_FAME_MASTER_COUNT, HALL_OF_FAME_TEAM_SIZE,
-    HallOfFameEntry, HallOfFamePokemon, ScriptLocation, ScriptRuntimeAsmDirective,
-    ScriptRuntimeDecorationDescription, ScriptRuntimeDelay, ScriptRuntimeEarthquake,
-    ScriptRuntimeEffect, ScriptRuntimeElevatorFloor, ScriptRuntimeNumericBufferWrite,
-    ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry, ScriptRuntimeVariableWrite,
+    HallOfFameEntry, HallOfFamePokemon, ScriptLocation, ScriptReturnFrame, ScriptRuntimeDelay,
+    ScriptRuntimeEarthquake, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
 };
 use crate::systems::economy::{EconomyError, MoneyAccount};
 use crate::systems::phone::insert_phone_number_in_first_open_slot;
+use crate::timing::{wrapping_byte_counter_frames, wrapping_byte_counter_ticks};
 
 pub const SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE: &str = "SPECIALCALL_NONE";
+const PHONE_CALLER_MEMCALL_OPERAND: [&str; 3] =
+    ["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"];
+const PHONE_SCRIPT_BANK_MEMCALL_OPERAND: &str = "wPhoneScriptBank";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,15 +64,22 @@ impl ScriptRuntimeCpuCondition {
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeInputs {
     pub selected_party_index: Option<usize>,
-    pub random_value: Option<u32>,
-    pub rng_seed_after: Option<u32>,
     pub game_version: Option<String>,
+    pub current_landmark_name: Option<String>,
+    pub resolved_named_buffer_value: Option<String>,
+    pub resolved_stone_table_entries: Option<Vec<ScriptRuntimeStoneTableEntry>>,
+    pub resolved_decoration: Option<ScriptRuntimeDecorationResolution>,
     pub gift_original_trainer_name: Option<String>,
     pub gift_original_trainer_id: Option<u16>,
-    pub gift_dvs: Option<Dv>,
-    pub gift_rng_seed_after: Option<u32>,
     pub gift_nickname_accepted: Option<bool>,
     pub gift_nickname: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptRuntimeDecorationResolution {
+    pub target_script: String,
+    pub string_buffer_3: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -192,6 +201,16 @@ pub fn apply_initialize_events(
     state: &mut GameState,
     config: &InitializeEventsConfig,
 ) -> Result<(), String> {
+    // InitDecorations runs as part of InitializeEvents before its event flag
+    // is set. These are the exact initial wDeco* bytes from decorations.asm.
+    state
+        .script_runtime
+        .memory
+        .insert("wDecoBed".to_string(), "DECO_FEATHERY_BED".to_string());
+    state
+        .script_runtime
+        .memory
+        .insert("wDecoPoster".to_string(), "DECO_TOWN_MAP".to_string());
     for flag in &config.event_flags {
         state
             .flags
@@ -263,6 +282,18 @@ pub enum ScriptRuntimeOutcome {
         source_script: String,
         command_index: usize,
     },
+    PhoneCallasmPresentation {
+        effect: ScriptPhoneCallasmPresentation,
+        source_script: String,
+        command_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptPhoneCallasmPresentation {
+    RingTwice,
+    HangUp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -274,8 +305,6 @@ pub enum ScriptRuntimeCommandError {
     PaddedCommand { command: String },
     #[error("unknown script runtime command '{command}'")]
     UnknownCommand { command: String },
-    #[error("script runtime data declaration '{command}' is not an executable opcode")]
-    NonExecutableDataCommand { command: String },
     #[error("script runtime command '{command}' expects {expected} args but found {actual}")]
     WrongArgCount {
         command: String,
@@ -292,8 +321,6 @@ pub enum ScriptRuntimeCommandError {
     InvalidMoneyAccount { account: String },
     #[error("script runtime getmoney account is unknown '{account}'")]
     UnknownMoneyAccount { account: String },
-    #[error("script runtime CPU return has unknown condition '{condition}'")]
-    InvalidCpuCondition { condition: String },
     #[error("script runtime source script '{source_script}' is not exact pack syntax")]
     InvalidSourceScript { source_script: String },
     #[error("script runtime command '{command}' has invalid numeric token syntax '{token}'")]
@@ -304,24 +331,42 @@ pub enum ScriptRuntimeCommandError {
     MissingAccumulator { command: String },
     #[error("script runtime command '{command}' requires an active menu")]
     MissingActiveMenu { command: String },
-    #[error("script runtime command 'random' requires deterministic random input")]
-    MissingRandomInput,
-    #[error("script runtime command 'random' requires deterministic rng_seed_after input")]
-    MissingRandomSeedAfter,
-    #[error("script runtime command '{command}' must not declare random input fields")]
-    UnexpectedRandomInput { command: String },
-    #[error("script runtime command 'random' requires a positive upper bound")]
-    RandomBoundZero,
-    #[error("script runtime command 'random' received value {value} outside upper bound {bound}")]
-    RandomInputOutOfRange { value: u32, bound: u32 },
+    #[error("script runtime command 'random' requires an injected divider source")]
+    RandomRequiresDivider,
+    #[error("script runtime command 'getcurlandmarkname' requires the current map landmark name")]
+    MissingCurrentLandmarkName,
+    #[error("script runtime command '{command}' requires a resolved named-buffer value")]
+    MissingResolvedNamedBufferValue { command: String },
+    #[error("script runtime command 'writecmdqueue' requires a resolved stone-table queue")]
+    MissingResolvedStoneTableQueue,
+    #[error("script runtime command 'describedecoration' requires a resolved decoration script")]
+    MissingResolvedDecoration,
+    #[error("resolved decoration name is empty")]
+    EmptyResolvedDecorationName,
+    #[error("script random executor received non-random command '{command}'")]
+    NonRandomCommandAtRandomBoundary { command: String },
+    #[error("script runtime command 'random' bound {bound} does not fit GetScriptByte")]
+    RandomBoundOutOfByteRange { bound: u32 },
+    #[error("script runtime command 'random' divider read failed: {message}")]
+    RandomDivider { message: String },
     #[error("script runtime command 'checkver' requires explicit game version input")]
     MissingGameVersion,
-    #[error("script runtime command 'pop' cannot pop an empty runtime stack")]
-    EmptyStack,
+    #[error("script runtime command '{command}' requires source constant {constant}")]
+    MissingSourceConstant { command: String, constant: String },
+    #[error("script runtime command '{command}' source constant {constant}={value} is not a u16")]
+    InvalidSourceConstant {
+        command: String,
+        constant: String,
+        value: i64,
+    },
     #[error("script dispatch has invalid next script '{script}'")]
     InvalidNextScript { script: String },
     #[error("script dispatch has invalid last talked object '{object_identifier}'")]
     InvalidLastTalkedObject { object_identifier: String },
+    #[error("script runtime memcall has unsupported pointer operand '{operand}'")]
+    UnsupportedMemcallOperand { operand: String },
+    #[error("script runtime memcall requires wPhoneCallerScript")]
+    MissingPhoneCallerScript,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,8 +560,6 @@ pub enum ScriptRuntimeCommandIssue {
 }
 
 pub const SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID: &str = "USE_SCRIPT_VAR";
-pub const SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID: &str = "ITEM_FROM_MEM";
-pub const SCRIPT_RUNTIME_CURRENT_BANK_TARGET: &str = "BANK(@)";
 
 fn is_exact_nonempty_runtime_token(value: &str) -> bool {
     !value.is_empty()
@@ -711,9 +754,7 @@ pub fn script_runtime_command_issues(
         }
         "getitemname" => {
             let item_id = &command.args[1];
-            if item_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID
-                && item_id != SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID
-            {
+            if item_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID {
                 if !is_exact_nonempty_runtime_pack_id(item_id) {
                     issues.push(ScriptRuntimeCommandIssue::InvalidItem {
                         item_id: item_id.clone(),
@@ -725,8 +766,12 @@ pub fn script_runtime_command_issues(
                 }
             }
         }
-        "getmonname" => {
-            let species_id = &command.args[1];
+        "getmonname" | "loadwildmon" => {
+            let species_id = if command.command == "getmonname" {
+                &command.args[1]
+            } else {
+                &command.args[0]
+            };
             if species_id != SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID {
                 if !is_exact_nonempty_runtime_pack_id(species_id) {
                     issues.push(ScriptRuntimeCommandIssue::InvalidSpecies {
@@ -803,20 +848,9 @@ pub fn script_runtime_command_issues(
                 });
             }
         }
-        "cmdqueue" | "writecmdqueue" | "elevator" | "callasm" | "dba" | "dw" | "checkpokemail"
-        | "givepokemail" => {
-            let target_label = if command.command == "cmdqueue" {
-                &command.args[1]
-            } else {
-                &command.args[0]
-            };
+        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
+            let target_label = &command.args[0];
             push_unknown_runtime_target_issue(command, target_label, catalog, &mut issues);
-        }
-        "stonetable" => {
-            push_unknown_runtime_target_issue(command, &command.args[2], catalog, &mut issues);
-        }
-        "conditional_event" => {
-            push_unknown_runtime_target_issue(command, &command.args[1], catalog, &mut issues);
         }
         _ => {}
     }
@@ -829,9 +863,6 @@ fn push_unknown_runtime_target_issue(
     catalog: &ScriptRuntimeReferenceCatalog,
     issues: &mut Vec<ScriptRuntimeCommandIssue>,
 ) {
-    if target_label == SCRIPT_RUNTIME_CURRENT_BANK_TARGET {
-        return;
-    }
     if !is_exact_nonempty_runtime_label(target_label) {
         issues.push(ScriptRuntimeCommandIssue::InvalidTarget {
             target_label: target_label.to_string(),
@@ -854,15 +885,18 @@ pub fn resolve_script_runtime_target_label(
     source_script: &str,
     target_label: &str,
 ) -> Option<String> {
-    if script_labels.contains(target_label) {
-        return Some(target_label.to_string());
-    }
     if target_label.starts_with('.') {
         let parent_script = script_label_parent(source_script);
-        let local = format!("{target_label}@{parent_script}");
-        if script_labels.contains(&local) {
-            return Some(local);
-        }
+        let local = if target_label.contains('@') {
+            (script_label_parent(target_label) == parent_script)
+                .then(|| target_label.to_string())?
+        } else {
+            format!("{target_label}@{parent_script}")
+        };
+        return script_labels.contains(&local).then_some(local);
+    }
+    if script_labels.contains(target_label) {
+        return Some(target_label.to_string());
     }
     None
 }
@@ -879,44 +913,17 @@ pub fn apply_script_runtime_command_in_map(
     origin_map_name: &str,
     command: ScriptRuntimeCommand,
     inputs: ScriptRuntimeInputs,
+    constants: &StoryEventScriptConstants,
 ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
     validate_script_runtime_command(&command)?;
-    if command.command == "conditional_event" {
-        return Err(ScriptRuntimeCommandError::NonExecutableDataCommand {
-            command: command.command,
-        });
-    }
-    if command.command != "random"
-        && (inputs.random_value.is_some() || inputs.rng_seed_after.is_some())
-    {
-        return Err(ScriptRuntimeCommandError::UnexpectedRandomInput {
-            command: command.command.clone(),
-        });
-    }
-
     let outcome = match command.command.as_str() {
         "addval" => {
             let left = parse_required_accumulator(state, &command)?;
             let right = parse_i32_token(&command.command, &command.args[0])?;
-            set_script_value(state, &command, (left + right).to_string())
-        }
-        "random" => {
-            let bound = parse_u32_token(&command.command, &command.args[0])?;
-            if bound == 0 {
-                return Err(ScriptRuntimeCommandError::RandomBoundZero);
-            }
-            let value = inputs
-                .random_value
-                .ok_or(ScriptRuntimeCommandError::MissingRandomInput)?;
-            if value >= bound {
-                return Err(ScriptRuntimeCommandError::RandomInputOutOfRange { value, bound });
-            }
-            let rng_seed_after = inputs
-                .rng_seed_after
-                .ok_or(ScriptRuntimeCommandError::MissingRandomSeedAfter)?;
-            state.rng_seed = rng_seed_after;
+            let value = (i64::from(left) + i64::from(right)).rem_euclid(256) as u8;
             set_script_value(state, &command, value.to_string())
         }
+        "random" => return Err(ScriptRuntimeCommandError::RandomRequiresDivider),
         "checkpoke" => {
             let species_id = &command.args[0];
             let has_species = state
@@ -932,7 +939,7 @@ pub fn apply_script_runtime_command_in_map(
             )
         }
         "checkpokemail" => {
-            apply_runtime_effect(state, origin_map_name, &command)?;
+            apply_runtime_effect(state, origin_map_name, &command, constants)?;
             set_script_value(state, &command, "2".to_string())
         }
         "checkver" => {
@@ -941,13 +948,87 @@ pub fn apply_script_runtime_command_in_map(
                 .ok_or(ScriptRuntimeCommandError::MissingGameVersion)?;
             set_script_value(state, &command, value)
         }
+        "getcurlandmarkname" => {
+            let landmark_name = inputs
+                .current_landmark_name
+                .ok_or(ScriptRuntimeCommandError::MissingCurrentLandmarkName)?;
+            state
+                .script_runtime
+                .named_buffers
+                .insert(command.args[0].clone(), landmark_name);
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "gettrainername"
+        | "gettrainerclassname"
+        | "getitemname"
+        | "getmonname"
+        | "getstring"
+        | "getlandmarkname" => {
+            let value = inputs.resolved_named_buffer_value.ok_or_else(|| {
+                ScriptRuntimeCommandError::MissingResolvedNamedBufferValue {
+                    command: command.command.clone(),
+                }
+            })?;
+            state
+                .script_runtime
+                .named_buffers
+                .insert(command.args[0].clone(), value);
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "writecmdqueue" => {
+            let entries = inputs
+                .resolved_stone_table_entries
+                .ok_or(ScriptRuntimeCommandError::MissingResolvedStoneTableQueue)?;
+            state.script_runtime.stone_table_entries.extend(entries);
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "describedecoration" => {
+            let resolved = inputs
+                .resolved_decoration
+                .ok_or(ScriptRuntimeCommandError::MissingResolvedDecoration)?;
+            if !is_exact_nonempty_runtime_token(&resolved.target_script) {
+                return Err(ScriptRuntimeCommandError::InvalidNextScript {
+                    script: resolved.target_script,
+                });
+            }
+            if let Some(name) = resolved.string_buffer_3 {
+                if name.is_empty() {
+                    return Err(ScriptRuntimeCommandError::EmptyResolvedDecorationName);
+                }
+                state
+                    .script_runtime
+                    .named_buffers
+                    .insert("STRING_BUFFER_3".to_string(), name);
+            }
+            state.script_runtime.next_script = Some(ScriptLocation {
+                origin_map_name: origin_map_name.to_string(),
+                script: resolved.target_script,
+            });
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
         "checkphonecall" => set_script_value(
             state,
             &command,
-            u8::from(!state.script_runtime.special_phone_calls.is_empty()).to_string(),
+            u8::from(state.script_runtime.special_phone_call.is_some()).to_string(),
         ),
         _ => {
-            apply_runtime_effect(state, origin_map_name, &command)?;
+            apply_runtime_effect(state, origin_map_name, &command, constants)?;
             ScriptRuntimeOutcome::EffectRecorded {
                 command: command.command.clone(),
                 source_script: command.source_script.clone(),
@@ -956,13 +1037,42 @@ pub fn apply_script_runtime_command_in_map(
         }
     };
 
-    state.script_runtime.effects.push(ScriptRuntimeEffect {
-        command: command.command,
-        args: command.args,
-        source_script: command.source_script,
-        command_index: command.command_index,
-    });
     Ok(outcome)
+}
+
+pub fn apply_script_random_command_in_map<S>(
+    state: &mut GameState,
+    command: ScriptRuntimeCommand,
+    divider: &mut S,
+) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
+    validate_script_runtime_command(&command)?;
+    if command.command != "random" {
+        return Err(
+            ScriptRuntimeCommandError::NonRandomCommandAtRandomBoundary {
+                command: command.command,
+            },
+        );
+    }
+    let bound = parse_u32_token(&command.command, &command.args[0])?;
+    let bound = u8::try_from(bound)
+        .map_err(|_| ScriptRuntimeCommandError::RandomBoundOutOfByteRange { bound })?;
+    let value = if bound == 0 {
+        0
+    } else {
+        let mut rng = CrystalRandom::new(state.random_state, divider);
+        let value = rng.script_random_range(bound).map_err(|error| {
+            ScriptRuntimeCommandError::RandomDivider {
+                message: error.to_string(),
+            }
+        })?;
+        state.random_state = rng.state();
+        value
+    };
+    Ok(set_script_value(state, &command, value.to_string()))
 }
 
 pub fn validate_script_runtime_command(
@@ -987,8 +1097,8 @@ pub fn validate_script_runtime_command(
         .ok_or_else(|| ScriptRuntimeCommandError::UnknownCommand {
             command: command.command.clone(),
         })?;
-    let arity_is_valid = if command.command == "ret" {
-        command.args.len() <= 1
+    let arity_is_valid = if command.command == "memcall" {
+        matches!(command.args.len(), 1 | 3)
     } else {
         command.args.len() == expected
     };
@@ -1014,20 +1124,33 @@ pub fn validate_script_runtime_command(
     }
     if matches!(
         command.command.as_str(),
-        "getlandmarkname" | "getmoney" | "gettrainerclassname"
+        "gettrainername"
+            | "gettrainerclassname"
+            | "getitemname"
+            | "getmonname"
+            | "getstring"
+            | "getcurlandmarkname"
+            | "getlandmarkname"
+            | "getmoney"
+            | "getnum"
     ) {
         require_script_string_buffer(&command.command, &command.args[0])?;
     }
     if command.command == "getmoney" {
         parse_script_money_account(&command.args[1])?;
     }
-    if command.command == "ret"
-        && let Some(condition) = command.args.first()
-        && ScriptRuntimeCpuCondition::from_asm_token(condition).is_none()
-    {
-        return Err(ScriptRuntimeCommandError::InvalidCpuCondition {
-            condition: condition.clone(),
-        });
+    if command.command == "loadwildmon" {
+        parse_u8_token(&command.command, &command.args[1])?;
+    }
+    if command.command == "memcall" {
+        let args = command.args.iter().map(String::as_str).collect::<Vec<_>>();
+        if args.as_slice() != PHONE_CALLER_MEMCALL_OPERAND
+            && args.as_slice() != [PHONE_SCRIPT_BANK_MEMCALL_OPERAND]
+        {
+            return Err(ScriptRuntimeCommandError::UnsupportedMemcallOperand {
+                operand: command.args.join(" "),
+            });
+        }
     }
     if command.command == "special" && !is_exact_nonempty_runtime_pack_id(&command.args[0]) {
         return Err(ScriptRuntimeCommandError::PaddedArg {
@@ -1073,48 +1196,52 @@ fn apply_runtime_effect(
     state: &mut GameState,
     origin_map_name: &str,
     command: &ScriptRuntimeCommand,
+    constants: &StoryEventScriptConstants,
 ) -> Result<(), ScriptRuntimeCommandError> {
     match command.command.as_str() {
         "special" => state.script_runtime.last_special_routine = Some(command.args[0].clone()),
-        "pause" | "wait" => state
-            .script_runtime
-            .pending_delays
-            .push(ScriptRuntimeDelay {
-                command: command.command.clone(),
-                frames: parse_u16_token(&command.command, &command.args[0])?,
-                source_script: command.source_script.clone(),
-                command_index: command.command_index,
-            }),
+        "pause" | "wait" | "deactivatefacing" => {
+            let parameter = parse_u8_token(&command.command, &command.args[0])?;
+            let frames_per_tick = match command.command.as_str() {
+                "pause" => 2,
+                "wait" => 6,
+                "deactivatefacing" => 1,
+                _ => unreachable!("matched delay command"),
+            };
+            state
+                .script_runtime
+                .pending_delays
+                .push(ScriptRuntimeDelay {
+                    command: command.command.clone(),
+                    parameter: u16::from(parameter),
+                    frames: wrapping_byte_counter_frames(parameter, frames_per_tick),
+                    release_all_objects: command.command == "deactivatefacing",
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+        }
         "earthquake" => {
-            let parameter = parse_u16_token(&command.command, &command.args[0])?;
+            let parameter = u16::from(parse_u8_token(&command.command, &command.args[0])?);
             state
                 .script_runtime
                 .pending_earthquakes
                 .push(ScriptRuntimeEarthquake {
                     parameter,
                     shake_frames: parameter,
-                    sleep_frames: parameter & 0x3f,
+                    sleep_frames: wrapping_byte_counter_ticks((parameter & 0x3f) as u8),
                     source_script: command.source_script.clone(),
                     command_index: command.command_index,
                 });
         }
+        // The exact emote id remains in the replayable runtime effect. The
+        // corresponding show/hide operations are movement opcodes.
+        "loademote" => {}
         "setlasttalked" => state.script_runtime.last_talked_object = Some(command.args[0].clone()),
         "variablesprite" => {
             state
                 .script_runtime
                 .variable_sprites
                 .insert(command.args[0].clone(), command.args[1].clone());
-        }
-        "gettrainername"
-        | "gettrainerclassname"
-        | "getitemname"
-        | "getmonname"
-        | "getstring"
-        | "getlandmarkname" => {
-            state
-                .script_runtime
-                .named_buffers
-                .insert(command.args[0].clone(), command.args[1..].join(" "));
         }
         "getmoney" => {
             let account = parse_script_money_account(&command.args[1])?;
@@ -1126,12 +1253,6 @@ fn apply_runtime_effect(
                 .script_runtime
                 .named_buffers
                 .insert(command.args[0].clone(), value.to_string());
-        }
-        "getcurlandmarkname" => {
-            state
-                .script_runtime
-                .named_buffers
-                .insert(command.args[0].clone(), String::new());
         }
         "loadmenu" => {
             state.script_runtime.active_menu = Some(command.args[0].clone());
@@ -1146,14 +1267,6 @@ fn apply_runtime_effect(
             state.script_runtime.window_open = true;
         }
         "closewindow" => state.script_runtime.window_open = false,
-        "menu_coords" => {
-            state.script_runtime.menu_coords = Some([
-                parse_menu_coord_token(&command.command, &command.args[0])?,
-                parse_menu_coord_token(&command.command, &command.args[1])?,
-                parse_menu_coord_token(&command.command, &command.args[2])?,
-                parse_menu_coord_token(&command.command, &command.args[3])?,
-            ]);
-        }
         "dontrestartmapmusic" => state.script_runtime.map_music_restart_disabled = true,
         "playmapmusic" => state.script_runtime.map_music_requested = true,
         "wildoff" => {
@@ -1172,14 +1285,11 @@ fn apply_runtime_effect(
         "release" => state.script_runtime.player_input_locked = false,
         "lockall" => state.script_runtime.all_input_locked = true,
         "releaseall" => state.script_runtime.all_input_locked = false,
-        "stop" => state.script_runtime.script_stop_requested = true,
         "itemnotify" => state.script_runtime.item_notify_queued = true,
-        "verbosegiveitemvar" => {
-            state
-                .script_runtime
-                .named_buffers
-                .insert(command.args[0].clone(), command.args[1].clone());
-        }
+        // The pack-backed item boundary resolves the variable quantity,
+        // performs ReceiveItem, fills STRING_BUFFER_4 with CurItemName, and
+        // queues GiveItemScript. Neither operand is itself a string buffer.
+        "verbosegiveitemvar" => {}
         "addcellnum" => {
             let contact_id = &command.args[0];
             let added = !state.script_runtime.phone_numbers.contains(contact_id)
@@ -1200,15 +1310,9 @@ fn apply_runtime_effect(
             });
         }
         "specialphonecall" => {
-            if command.args[0] == SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE {
-                state.script_runtime.special_phone_calls.clear();
-            } else {
-                state.script_runtime.special_phone_calls.clear();
-                state
-                    .script_runtime
-                    .special_phone_calls
-                    .push(command.args[0].clone());
-            }
+            state.script_runtime.special_phone_call = (command.args[0]
+                != SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE)
+                .then(|| command.args[0].clone());
             state
                 .script_runtime
                 .variables
@@ -1241,28 +1345,93 @@ fn apply_runtime_effect(
                 .memory
                 .insert("wOtherTrainerID".to_string(), command.args[1].clone());
         }
+        "loadwildmon" => {
+            let level = parse_u8_token(&command.command, &command.args[1])?;
+            state
+                .script_runtime
+                .memory
+                .insert("wBattleScriptFlags".to_string(), "128".to_string());
+            state
+                .script_runtime
+                .memory
+                .insert("wTempWildMonSpecies".to_string(), command.args[0].clone());
+            state
+                .script_runtime
+                .memory
+                .insert("wCurPartyLevel".to_string(), level.to_string());
+        }
+        "memcall" => {
+            let target_script = state
+                .script_runtime
+                .memory
+                .get("wPhoneCallerScript")
+                .cloned()
+                .ok_or(ScriptRuntimeCommandError::MissingPhoneCallerScript)?;
+            if !is_exact_nonempty_runtime_label(&target_script) {
+                return Err(ScriptRuntimeCommandError::InvalidNextScript {
+                    script: target_script,
+                });
+            }
+            state.script_runtime.call_stack.push(ScriptReturnFrame {
+                origin_map_name: origin_map_name.to_string(),
+                source_script: command.source_script.clone(),
+                next_command_index: command.command_index + 1,
+            });
+            state.script_runtime.next_script = Some(ScriptLocation {
+                origin_map_name: origin_map_name.to_string(),
+                script: target_script,
+            });
+            state.script_runtime.script_ended = None;
+        }
         "randomwildmon" => {
             state
                 .script_runtime
                 .memory
                 .insert("wBattleScriptFlags".to_string(), "0".to_string());
         }
-        "catchtutorial" => {
-            state
-                .script_runtime
-                .catch_tutorials
-                .push(command.args[0].clone());
-            state.script_runtime.script_value = Some("1".to_string());
-        }
+        // The visible runtime executes CatchTutorial synchronously at this
+        // command boundary, just as Script_catchtutorial calls the routine and
+        // then Script_reloadmap. There is no saved command-history byte.
+        "catchtutorial" => {}
         "warpsound" => state.script_runtime.warp_sound_queued = true,
-        "blackoutmod" => state.script_runtime.blackout_mod = Some(command.args[0].clone()),
-        "battletowertext" => state.script_runtime.battle_tower_text = Some(command.args[0].clone()),
-        "halloffame" => record_hall_of_fame(state),
+        // `Script_blackoutmod` writes only wLastSpawnMapGroup/Number. The
+        // pack boundary resolves that pair to the authoritative spawn id.
+        "blackoutmod" => {}
+        "battletowertext" => {
+            let key = match command.args[0].as_str() {
+                "BATTLETOWERTEXT_INTRO" => "battle_tower_intro_text",
+                "BATTLETOWERTEXT_WIN_TEXT" => "battle_tower_win_text",
+                "BATTLETOWERTEXT_LOSS_TEXT" => "battle_tower_loss_text",
+                token => {
+                    return Err(ScriptRuntimeCommandError::UnknownNumericToken {
+                        command: command.command.clone(),
+                        token: token.to_string(),
+                    });
+                }
+            };
+            let text_label = state
+                .script_runtime
+                .variables
+                .get(key)
+                .cloned()
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingAccumulator {
+                    command: command.command.clone(),
+                })?;
+            state.script_runtime.pending_text_label = Some(text_label);
+        }
+        "halloffame" => record_hall_of_fame(
+            state,
+            required_source_u16_constant(constants, &command, "SPAWN_LANCE")?,
+        ),
         "credits" => {
             // Script_credits calls RedCredits, which stores SPAWN_RED before
             // entering the credits program. Hall of Fame credits use the
             // separate `halloffame` command and store SPAWN_LANCE there.
-            state.hall_of_fame.spawn_after_champion = Some(2);
+            state.hall_of_fame.spawn_after_champion = Some(required_source_u16_constant(
+                constants,
+                &command,
+                "SPAWN_RED",
+            )?);
             state.script_runtime.credits_requested = true;
         }
         "writevar" => {
@@ -1272,19 +1441,16 @@ fn apply_runtime_effect(
                 }
             })?;
             let target = command.args[0].clone();
+            let blue_card_balance = (target == "VAR_BLUECARDBALANCE")
+                .then(|| parse_u8_token(&command.command, &value))
+                .transpose()?;
             state
                 .script_runtime
                 .variables
                 .insert(target.clone(), value.clone());
-            state
-                .script_runtime
-                .variable_writes
-                .push(ScriptRuntimeVariableWrite {
-                    target,
-                    value,
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                });
+            if let Some(balance) = blue_card_balance {
+                state.blue_card_balance = balance;
+            }
         }
         "getnum" => {
             let value = state.script_runtime.script_value.clone().ok_or_else(|| {
@@ -1292,93 +1458,16 @@ fn apply_runtime_effect(
                     command: command.command.clone(),
                 }
             })?;
-            let parsed = parse_u16_token(&command.command, &value)?;
+            let parsed = parse_u8_token(&command.command, &value)?;
             let rendered = parsed.to_string();
             let target_buffer = command.args[0].clone();
             state
                 .script_runtime
                 .named_buffers
                 .insert(target_buffer.clone(), rendered.clone());
-            state
-                .script_runtime
-                .numeric_buffer_writes
-                .push(ScriptRuntimeNumericBufferWrite {
-                    target_buffer,
-                    value: rendered,
-                    width: 3,
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                });
         }
-        "elevfloor" => {
-            state
-                .script_runtime
-                .elevator_floors
-                .push(ScriptRuntimeElevatorFloor {
-                    floor: command.args[0].clone(),
-                    warp: parse_u16_token(&command.command, &command.args[1])?,
-                    target_map: command.args[2].clone(),
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                });
-        }
-        "stonetable" => {
-            state
-                .script_runtime
-                .stone_table_entries
-                .push(ScriptRuntimeStoneTableEntry {
-                    warp: parse_u16_token(&command.command, &command.args[0])?,
-                    object_event: command.args[1].clone(),
-                    script: command.args[2].clone(),
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                });
-        }
-        "dw" | "ldh" | "ld" | "dn" | "dba" | "dbw" => {
-            state
-                .script_runtime
-                .asm_directives
-                .push(ScriptRuntimeAsmDirective {
-                    command: command.command.clone(),
-                    args: command.args.clone(),
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                })
-        }
-        "describedecoration" => {
-            state
-                .script_runtime
-                .decoration_descriptions
-                .push(ScriptRuntimeDecorationDescription {
-                    decoration: command.args[0].clone(),
-                    source_script: command.source_script.clone(),
-                    command_index: command.command_index,
-                })
-        }
-        "cmdqueue" => state
-            .script_runtime
-            .command_queue
-            .push(ScriptRuntimeQueuedCommand {
-                origin_map_name: origin_map_name.to_string(),
-                command: command.command.clone(),
-                bank: Some(command.args[0].clone()),
-                target: command.args[1].clone(),
-                source_script: command.source_script.clone(),
-                command_index: command.command_index,
-            }),
-        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
-            if command.command == "checkpokemail" {
-                state
-                    .script_runtime
-                    .checked_mail_targets
-                    .push(command.args[0].clone());
-            }
-            if command.command == "givepokemail" {
-                state
-                    .script_runtime
-                    .given_mail_targets
-                    .push(command.args[0].clone());
-            }
+        "describedecoration" => unreachable!("describedecoration is resolved before effects"),
+        "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
             state
                 .script_runtime
                 .command_queue
@@ -1391,20 +1480,6 @@ fn apply_runtime_effect(
                     command_index: command.command_index,
                 });
         }
-        "push" => state.script_runtime.stack.push(command.args[0].clone()),
-        "pop" => {
-            let value = state
-                .script_runtime
-                .stack
-                .pop()
-                .ok_or(ScriptRuntimeCommandError::EmptyStack)?;
-            state
-                .script_runtime
-                .named_buffers
-                .insert(command.args[0].clone(), value);
-        }
-        "ret" => {}
-        "teleport_from" => state.script_runtime.teleport_from_queued = true,
         "_2dmenu" => state.script_runtime.menu_2d_requested = true,
         other => {
             return Err(ScriptRuntimeCommandError::UnknownCommand {
@@ -1419,7 +1494,25 @@ fn apply_runtime_effect(
 /// request. Crystal snapshots the current party into SRAM before starting the
 /// Hall of Fame animation, saturates the win counter at 200, and records the
 /// newest team at the front of a bounded history.
-fn record_hall_of_fame(state: &mut GameState) {
+fn required_source_u16_constant(
+    constants: &StoryEventScriptConstants,
+    command: &ScriptRuntimeCommand,
+    constant: &str,
+) -> Result<u16, ScriptRuntimeCommandError> {
+    let value = constants.global.get(constant).ok_or_else(|| {
+        ScriptRuntimeCommandError::MissingSourceConstant {
+            command: command.command.clone(),
+            constant: constant.to_string(),
+        }
+    })?;
+    u16::try_from(*value).map_err(|_| ScriptRuntimeCommandError::InvalidSourceConstant {
+        command: command.command.clone(),
+        constant: constant.to_string(),
+        value: *value,
+    })
+}
+
+fn record_hall_of_fame(state: &mut GameState, spawn_after_champion: u16) {
     // Script_halloffame clears GAME_TIMER_COUNTING_F before entering the
     // HallOfFame farcall. HallOfFame itself raises wGameLogicPaused only for
     // its save/recording work and clears it before the animation/credits.
@@ -1467,7 +1560,7 @@ fn record_hall_of_fame(state: &mut GameState) {
         .entries
         .truncate(HALL_OF_FAME_ENTRY_LIMIT);
     state.hall_of_fame.count = next_count;
-    state.hall_of_fame.spawn_after_champion = Some(1);
+    state.hall_of_fame.spawn_after_champion = Some(spawn_after_champion);
     state
         .flags
         .engine_flags
@@ -1565,9 +1658,9 @@ fn menu_coord_constant(command: &str, token: &str) -> Result<i16, ScriptRuntimeC
     }
 }
 
-fn parse_u16_token(command: &str, token: &str) -> Result<u16, ScriptRuntimeCommandError> {
+fn parse_u8_token(command: &str, token: &str) -> Result<u8, ScriptRuntimeCommandError> {
     let value = parse_i32_token(command, token)?;
-    u16::try_from(value).map_err(|_| ScriptRuntimeCommandError::UnknownNumericToken {
+    u8::try_from(value).map_err(|_| ScriptRuntimeCommandError::UnknownNumericToken {
         command: command.to_string(),
         token: token.to_string(),
     })
@@ -1679,7 +1772,9 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("special", 1),
         ("pause", 1),
+        ("deactivatefacing", 1),
         ("earthquake", 1),
+        ("loademote", 1),
         ("setlasttalked", 1),
         ("variablesprite", 2),
         ("gettrainername", 3),
@@ -1689,7 +1784,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("loadmenu", 1),
         ("verticalmenu", 0),
         ("closewindow", 0),
-        ("menu_coords", 4),
         ("dontrestartmapmusic", 0),
         ("playmapmusic", 0),
         ("wildoff", 0),
@@ -1698,7 +1792,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("release", 0),
         ("lockall", 0),
         ("releaseall", 0),
-        ("stop", 0),
         ("itemnotify", 0),
         ("addval", 1),
         ("verbosegiveitemvar", 2),
@@ -1715,6 +1808,8 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("trade", 1),
         ("winlosstext", 2),
         ("loadtrainer", 2),
+        ("loadwildmon", 2),
+        ("memcall", 1),
         ("randomwildmon", 0),
         ("catchtutorial", 1),
         ("warpsound", 0),
@@ -1724,25 +1819,11 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("battletowertext", 1),
         ("halloffame", 0),
         ("credits", 0),
-        ("dw", 1),
-        ("stonetable", 3),
-        ("elevfloor", 3),
-        ("ldh", 2),
-        ("ld", 2),
         ("describedecoration", 1),
-        ("cmdqueue", 2),
-        ("conditional_event", 2),
-        ("push", 1),
-        ("pop", 1),
-        ("ret", 0),
         ("checkver", 0),
         ("writecmdqueue", 1),
         ("elevator", 1),
-        ("teleport_from", 0),
         ("_2dmenu", 0),
-        ("dn", 2),
-        ("dba", 1),
-        ("dbw", 2),
         ("writevar", 1),
         ("checkpokemail", 1),
         ("getnum", 1),
@@ -1762,7 +1843,11 @@ mod tests {
         command: ScriptRuntimeCommand,
         inputs: ScriptRuntimeInputs,
     ) -> Result<ScriptRuntimeOutcome, ScriptRuntimeCommandError> {
-        apply_script_runtime_command_in_map(state, "TestMap", command, inputs)
+        let constants = StoryEventScriptConstants {
+            global: BTreeMap::from([("SPAWN_LANCE".to_string(), 1), ("SPAWN_RED".to_string(), 2)]),
+            maps: BTreeMap::new(),
+        };
+        apply_script_runtime_command_in_map(state, "TestMap", command, inputs, &constants)
     }
 
     fn command(name: &str, args: &[&str]) -> ScriptRuntimeCommand {
@@ -1868,7 +1953,24 @@ mod tests {
         assert_eq!(counts.get("release"), Some(&0));
         assert_eq!(counts.get("lockall"), Some(&0));
         assert_eq!(counts.get("releaseall"), Some(&0));
-        assert_eq!(counts.get("stop"), Some(&0));
+        assert_eq!(counts.get("deactivatefacing"), Some(&1));
+        assert_eq!(counts.get("loademote"), Some(&1));
+        assert!(!counts.contains_key("stop"));
+        assert!(!counts.contains_key("push"));
+        assert!(!counts.contains_key("pop"));
+        assert!(!counts.contains_key("ret"));
+        assert!(!counts.contains_key("ld"));
+        assert!(!counts.contains_key("ldh"));
+        assert!(!counts.contains_key("teleport_from"));
+        assert!(!counts.contains_key("cmdqueue"));
+        assert!(!counts.contains_key("stonetable"));
+        assert!(!counts.contains_key("menu_coords"));
+        assert!(!counts.contains_key("elevfloor"));
+        assert!(!counts.contains_key("conditional_event"));
+        assert!(!counts.contains_key("dw"));
+        assert!(!counts.contains_key("dn"));
+        assert!(!counts.contains_key("dba"));
+        assert!(!counts.contains_key("dbw"));
         assert!(!counts.contains_key("checkscene"));
         assert!(!counts.contains_key("endifjustbattled"));
         assert!(!counts.contains_key("faceplayer"));
@@ -1887,6 +1989,47 @@ mod tests {
                 expected: 0,
                 actual: 1,
             })
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command("stop", &[])),
+            Err(ScriptRuntimeCommandError::UnknownCommand {
+                command: "stop".to_string(),
+            })
+        );
+        for cpu_instruction in ["push", "pop"] {
+            assert_eq!(
+                validate_script_runtime_command(&command(cpu_instruction, &["af"])),
+                Err(ScriptRuntimeCommandError::UnknownCommand {
+                    command: cpu_instruction.to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn battletowertext_queues_only_the_authored_print_text_boundary() {
+        let mut state = GameState::default();
+        state.script_runtime.variables.insert(
+            "battle_tower_intro_text".to_string(),
+            "BattleTowerTrainerText1".to_string(),
+        );
+
+        apply_script_runtime_command(
+            &mut state,
+            command("battletowertext", &["BATTLETOWERTEXT_INTRO"]),
+            default_inputs(),
+        )
+        .expect("queue Battle Tower intro text");
+
+        assert_eq!(
+            state.script_runtime.pending_text_label.as_deref(),
+            Some("BattleTowerTrainerText1")
+        );
+        let serialized = serde_json::to_value(&state.script_runtime)
+            .expect("serialize script runtime after battletowertext");
+        assert!(
+            serialized.get("battle_tower_text").is_none(),
+            "battletowertext must not create a second host-only runtime flag: {serialized}"
         );
     }
 
@@ -1988,6 +2131,123 @@ mod tests {
     }
 
     #[test]
+    fn loadwildmon_sets_the_exact_scripted_wild_battle_bytes() {
+        let runtime_command = command("loadwildmon", &["SUDOWOODO", "20"]);
+        assert_eq!(validate_script_runtime_command(&runtime_command), Ok(()));
+        assert!(matches!(
+            validate_script_runtime_command(&command("loadwildmon", &["SUDOWOODO", "256"])),
+            Err(ScriptRuntimeCommandError::UnknownNumericToken { command, token })
+                if command == "loadwildmon" && token == "256"
+        ));
+        let catalog = ScriptRuntimeReferenceCatalog {
+            pokemon: BTreeSet::from(["SUDOWOODO".to_string()]),
+            ..ScriptRuntimeReferenceCatalog::default()
+        };
+        assert_eq!(
+            script_runtime_command_issues(&runtime_command, &catalog),
+            []
+        );
+        assert_eq!(
+            script_runtime_command_issues(&command("loadwildmon", &["MISSINGNO", "20"]), &catalog,),
+            [ScriptRuntimeCommandIssue::UnknownSpecies {
+                species_id: "MISSINGNO".to_string(),
+            }]
+        );
+
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "0".to_string());
+        state
+            .script_runtime
+            .memory
+            .insert("wTempWildMonSpecies".to_string(), "GEODUDE".to_string());
+        state
+            .script_runtime
+            .memory
+            .insert("wCurPartyLevel".to_string(), "99".to_string());
+
+        apply_script_runtime_command(&mut state, runtime_command, default_inputs())
+            .expect("loadwildmon applies the exact scripted encounter setup");
+
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wBattleScriptFlags")
+                .map(String::as_str),
+            Some("128")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wTempWildMonSpecies")
+                .map(String::as_str),
+            Some("SUDOWOODO")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCurPartyLevel")
+                .map(String::as_str),
+            Some("20")
+        );
+    }
+
+    #[test]
+    fn memcall_calls_the_dynamic_phone_script_and_retains_the_return_frame() {
+        let runtime_command = command(
+            "memcall",
+            &["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"],
+        );
+        assert_eq!(
+            validate_script_runtime_command(&command("memcall", &["wPhoneScriptBank"])),
+            Ok(())
+        );
+        assert!(matches!(
+            validate_script_runtime_command(&command("memcall", &["wUnknownPointer"])),
+            Err(ScriptRuntimeCommandError::UnsupportedMemcallOperand { operand })
+                if operand == "wUnknownPointer"
+        ));
+        let mut missing = GameState::default();
+        let before_missing = missing.clone();
+        assert_eq!(
+            apply_script_runtime_command(&mut missing, runtime_command.clone(), default_inputs(),),
+            Err(ScriptRuntimeCommandError::MissingPhoneCallerScript)
+        );
+        assert_eq!(missing, before_missing);
+
+        let mut state = GameState::default();
+        state.script_runtime.memory.insert(
+            "wPhoneCallerScript".to_string(),
+            "BillPhoneScript1".to_string(),
+        );
+
+        apply_script_runtime_command(&mut state, runtime_command, default_inputs())
+            .expect("memcall enters the exact dynamically selected caller");
+
+        assert_eq!(
+            state.script_runtime.call_stack,
+            [crate::state::ScriptReturnFrame {
+                origin_map_name: "TestMap".to_string(),
+                source_script: "RuntimeScript".to_string(),
+                next_command_index: 5,
+            }]
+        );
+        assert_eq!(
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: "BillPhoneScript1".to_string(),
+            })
+        );
+        assert_eq!(state.script_runtime.script_ended, None);
+    }
+
+    #[test]
     fn landmark_and_money_buffer_commands_validate_typed_operands_and_write_exact_values() {
         let catalog = ScriptRuntimeReferenceCatalog {
             landmarks: BTreeSet::from(["LANDMARK_ROUTE_32".to_string()]),
@@ -2053,6 +2313,57 @@ mod tests {
     }
 
     #[test]
+    fn current_landmark_name_requires_exact_map_derived_input_and_buffer() {
+        let runtime_command = command("getcurlandmarkname", &["STRING_BUFFER_3"]);
+        let mut state = GameState::default();
+        let mut inputs = default_inputs();
+        inputs.current_landmark_name = Some("VIOLET CITY".to_string());
+
+        apply_script_runtime_command(&mut state, runtime_command.clone(), inputs)
+            .expect("getcurlandmarkname writes the injected current landmark");
+        assert_eq!(
+            state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_3")
+                .map(String::as_str),
+            Some("VIOLET CITY")
+        );
+
+        let state_before_missing = GameState::default();
+        let mut missing = state_before_missing.clone();
+        assert_eq!(
+            apply_script_runtime_command(&mut missing, runtime_command, default_inputs()),
+            Err(ScriptRuntimeCommandError::MissingCurrentLandmarkName)
+        );
+        assert_eq!(missing, state_before_missing);
+        assert_eq!(
+            validate_script_runtime_command(&command("getcurlandmarkname", &["STRING_BUFFER_2"],)),
+            Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+                command: "getcurlandmarkname".to_string(),
+                buffer: "STRING_BUFFER_2".to_string(),
+            })
+        );
+        for invalid in [
+            command(
+                "gettrainername",
+                &["STRING_BUFFER_2", "FALKNER", "FALKNER1"],
+            ),
+            command("getitemname", &["STRING_BUFFER_2", "POTION"]),
+            command("getmonname", &["STRING_BUFFER_2", "PIKACHU"]),
+            command("getstring", &["STRING_BUFFER_2", "SomeString"]),
+        ] {
+            assert_eq!(
+                validate_script_runtime_command(&invalid),
+                Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+                    command: invalid.command,
+                    buffer: "STRING_BUFFER_2".to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
     fn trainer_class_name_command_uses_exact_class_catalog_and_named_buffer() {
         let catalog = ScriptRuntimeReferenceCatalog {
             trainer_class_names: BTreeSet::from(["BEAUTY".to_string(), "COOLTRAINERM".to_string()]),
@@ -2094,16 +2405,28 @@ mod tests {
         );
 
         let mut state = GameState::default();
-        apply_script_runtime_command(&mut state, runtime_command, default_inputs())
-            .expect("gettrainerclassname records the validated pack-owned class id");
+        let mut inputs = default_inputs();
+        inputs.resolved_named_buffer_value = Some("COOLTRAINER".to_string());
+        apply_script_runtime_command(&mut state, runtime_command.clone(), inputs)
+            .expect("gettrainerclassname records the resolved pack-owned class name");
         assert_eq!(
             state
                 .script_runtime
                 .named_buffers
                 .get("STRING_BUFFER_4")
                 .map(String::as_str),
-            Some("COOLTRAINERM")
+            Some("COOLTRAINER")
         );
+
+        let state_before_missing = GameState::default();
+        let mut missing = state_before_missing.clone();
+        assert_eq!(
+            apply_script_runtime_command(&mut missing, runtime_command, default_inputs()),
+            Err(ScriptRuntimeCommandError::MissingResolvedNamedBufferValue {
+                command: "gettrainerclassname".to_string(),
+            })
+        );
+        assert_eq!(missing, state_before_missing);
     }
 
     #[test]
@@ -2162,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_returns_accept_only_exact_rgbds_conditions() {
+    fn cpu_return_conditions_are_typed_but_not_event_runtime_commands() {
         for (token, condition) in [
             ("z", ScriptRuntimeCpuCondition::Z),
             ("nz", ScriptRuntimeCpuCondition::Nz),
@@ -2173,29 +2496,14 @@ mod tests {
                 ScriptRuntimeCpuCondition::from_asm_token(token),
                 Some(condition)
             );
-            assert_eq!(
-                validate_script_runtime_command(&command("ret", &[token])),
-                Ok(())
-            );
         }
         assert_eq!(
             validate_script_runtime_command(&command("ret", &[])),
-            Ok(())
-        );
-        assert_eq!(
-            validate_script_runtime_command(&command("ret", &["NZ"])),
-            Err(ScriptRuntimeCommandError::InvalidCpuCondition {
-                condition: "NZ".to_string(),
+            Err(ScriptRuntimeCommandError::UnknownCommand {
+                command: "ret".to_string(),
             })
         );
-        assert!(matches!(
-            validate_script_runtime_command(&command("ret", &["z", "nc"])),
-            Err(ScriptRuntimeCommandError::WrongArgCount {
-                command,
-                expected: 0,
-                actual: 2,
-            }) if command == "ret"
-        ));
+        assert_eq!(ScriptRuntimeCpuCondition::from_asm_token("NZ"), None);
     }
 
     #[test]
@@ -2214,12 +2522,11 @@ mod tests {
 
         assert_eq!(
             error,
-            ScriptRuntimeCommandError::NonExecutableDataCommand {
+            ScriptRuntimeCommandError::UnknownCommand {
                 command: "conditional_event".to_string(),
             }
         );
         assert!(state.script_runtime.command_queue.is_empty());
-        assert!(state.script_runtime.effects.is_empty());
     }
 
     #[test]
@@ -2242,10 +2549,7 @@ mod tests {
             }
         );
 
-        state
-            .script_runtime
-            .special_phone_calls
-            .push("SPECIALCALL_POKERUS".to_string());
+        state.script_runtime.special_phone_call = Some("SPECIALCALL_POKERUS".to_string());
         let pending = apply_script_runtime_command(
             &mut state,
             command("checkphonecall", &[]),
@@ -2275,7 +2579,7 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command("getitemname", &["BUFFER_1", "legacy_POTION"]),
+                &command("getitemname", &["STRING_BUFFER_3", "legacy_POTION"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::InvalidCommand {
@@ -2374,7 +2678,7 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command("getitemname", &["BUFFER_1", "potion"]),
+                &command("getitemname", &["STRING_BUFFER_3", "potion"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::UnknownItem {
@@ -2383,7 +2687,7 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command("getitemname", &["BUFFER_1", "$POTION"]),
+                &command("getitemname", &["STRING_BUFFER_3", "$POTION"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::InvalidItem {
@@ -2392,17 +2696,16 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command(
-                    "getitemname",
-                    &["BUFFER_1", SCRIPT_RUNTIME_ITEM_FROM_MEMORY_ID]
-                ),
+                &command("getitemname", &["STRING_BUFFER_3", "ITEM_FROM_MEM"]),
                 &catalog
             ),
-            []
+            vec![ScriptRuntimeCommandIssue::UnknownItem {
+                item_id: "ITEM_FROM_MEM".to_string()
+            }]
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command("getmonname", &["BUFFER_1", "pikachu"]),
+                &command("getmonname", &["STRING_BUFFER_3", "pikachu"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::UnknownSpecies {
@@ -2411,7 +2714,7 @@ mod tests {
         );
         assert_eq!(
             script_runtime_command_issues(
-                &command("getmonname", &["BUFFER_1", "$PIKACHU"]),
+                &command("getmonname", &["STRING_BUFFER_3", "$PIKACHU"]),
                 &catalog
             ),
             vec![ScriptRuntimeCommandIssue::InvalidSpecies {
@@ -2483,6 +2786,7 @@ mod tests {
         let catalog = ScriptRuntimeReferenceCatalog {
             script_labels: BTreeSet::from([
                 "AsmScript".to_string(),
+                ".Local".to_string(),
                 ".Local@AsmScript".to_string(),
                 "GlobalTarget".to_string(),
             ]),
@@ -2505,46 +2809,21 @@ mod tests {
             []
         );
         assert_eq!(
-            script_runtime_command_issues(
-                &command(
-                    "cmdqueue",
-                    &[SCRIPT_RUNTIME_CURRENT_BANK_TARGET, ".Missing"]
-                ),
-                &catalog
-            ),
+            script_runtime_command_issues(&command("writecmdqueue", &[".Missing"]), &catalog),
             vec![ScriptRuntimeCommandIssue::UnknownTarget {
                 target_label: ".Missing".to_string()
             }]
         );
         assert_eq!(
-            script_runtime_command_issues(
-                &command(
-                    "cmdqueue",
-                    &[SCRIPT_RUNTIME_CURRENT_BANK_TARGET, "$Missing"]
-                ),
-                &catalog
-            ),
+            script_runtime_command_issues(&command("writecmdqueue", &["$Missing"]), &catalog),
             vec![ScriptRuntimeCommandIssue::InvalidTarget {
                 target_label: "$Missing".to_string()
             }]
         );
-        assert_eq!(
-            script_runtime_command_issues(
-                &command(
-                    "cmdqueue",
-                    &[
-                        SCRIPT_RUNTIME_CURRENT_BANK_TARGET,
-                        SCRIPT_RUNTIME_CURRENT_BANK_TARGET
-                    ],
-                ),
-                &catalog
-            ),
-            []
-        );
     }
 
     #[test]
-    fn records_exact_runtime_effects_without_command_enums() {
+    fn commands_commit_only_their_authoritative_runtime_state() {
         let mut state = GameState::default();
         apply_script_runtime_command(
             &mut state,
@@ -2587,9 +2866,6 @@ mod tests {
         )
         .expect("duplicate addcellnum");
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
-        assert_eq!(state.script_runtime.effects.len(), 4);
-        assert_eq!(state.script_runtime.effects[0].command, "special");
-        assert_eq!(state.script_runtime.effects[3].command, "addcellnum");
     }
 
     #[test]
@@ -2604,8 +2880,12 @@ mod tests {
         pokemon.mail = Some(crate::models::pokemon::MailData {
             message: "DARK CAVE leads".to_string(),
             author: "RANDY".to_string(),
+            nationality: 0,
+            author_id: 0,
             species: "SPEAROW".to_string(),
+            mail_type: "FLOWER_MAIL".to_string(),
         });
+        pokemon.item = Some("FLOWER_MAIL".to_string());
         state.storage.party.pokemon[0] = Some(pokemon);
 
         apply_script_runtime_command(
@@ -2616,15 +2896,12 @@ mod tests {
         .expect("check mail");
 
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("2"));
-        assert_eq!(
-            state.script_runtime.checked_mail_targets,
-            vec!["ReceivedSpearowMailText".to_string()]
-        );
     }
 
     #[test]
-    fn catchtutorial_records_battle_type_and_sets_true_script_value() {
+    fn catchtutorial_leaves_the_script_accumulator_unchanged() {
         let mut state = GameState::default();
+        state.script_runtime.script_value = Some("7".to_string());
 
         apply_script_runtime_command(
             &mut state,
@@ -2633,15 +2910,11 @@ mod tests {
         )
         .expect("catchtutorial");
 
-        assert_eq!(
-            state.script_runtime.catch_tutorials,
-            vec!["BATTLETYPE_TUTORIAL".to_string()]
-        );
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
     }
 
     #[test]
-    fn specialphonecall_none_clears_queued_calls_without_saving_sentinel() {
+    fn specialphonecall_overwrites_and_none_clears_the_single_live_slot() {
         let mut state = GameState::default();
 
         apply_script_runtime_command(
@@ -2650,6 +2923,20 @@ mod tests {
             default_inputs(),
         )
         .expect("queue call");
+        assert_eq!(
+            state.script_runtime.special_phone_call.as_deref(),
+            Some("SPECIALCALL_MASTERBALL")
+        );
+        apply_script_runtime_command(
+            &mut state,
+            command("specialphonecall", &["SPECIALCALL_POKERUS"]),
+            default_inputs(),
+        )
+        .expect("overwrite call");
+        assert_eq!(
+            state.script_runtime.special_phone_call.as_deref(),
+            Some("SPECIALCALL_POKERUS")
+        );
         apply_script_runtime_command(
             &mut state,
             command(
@@ -2660,41 +2947,19 @@ mod tests {
         )
         .expect("clear calls");
 
-        assert!(state.script_runtime.special_phone_calls.is_empty());
-        assert_eq!(
-            state
-                .script_runtime
-                .effects
-                .iter()
-                .map(|effect| (effect.command.clone(), effect.args.clone()))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "specialphonecall".to_string(),
-                    vec!["SPECIALCALL_MASTERBALL".to_string()]
-                ),
-                (
-                    "specialphonecall".to_string(),
-                    vec![SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE.to_string()]
-                ),
-            ]
-        );
+        assert!(state.script_runtime.special_phone_call.is_none());
     }
 
     #[test]
-    fn lock_release_and_stop_commands_mutate_exact_runtime_state() {
+    fn lock_and_release_commands_mutate_exact_runtime_state() {
         let mut state = GameState::default();
 
         apply_script_runtime_command(&mut state, command("lock", &[]), default_inputs())
             .expect("lock");
         apply_script_runtime_command(&mut state, command("lockall", &[]), default_inputs())
             .expect("lockall");
-        apply_script_runtime_command(&mut state, command("stop", &[]), default_inputs())
-            .expect("stop");
-
         assert!(state.script_runtime.player_input_locked);
         assert!(state.script_runtime.all_input_locked);
-        assert!(state.script_runtime.script_stop_requested);
 
         apply_script_runtime_command(&mut state, command("release", &[]), default_inputs())
             .expect("release");
@@ -2703,16 +2968,6 @@ mod tests {
 
         assert!(!state.script_runtime.player_input_locked);
         assert!(!state.script_runtime.all_input_locked);
-        assert!(state.script_runtime.script_stop_requested);
-        assert_eq!(
-            state
-                .script_runtime
-                .effects
-                .iter()
-                .map(|effect| effect.command.as_str())
-                .collect::<Vec<_>>(),
-            vec!["lock", "lockall", "stop", "release", "releaseall"]
-        );
     }
 
     #[test]
@@ -2730,67 +2985,42 @@ mod tests {
             }
         );
 
-        apply_script_runtime_command(
-            &mut state,
-            command("random", &["10"]),
-            ScriptRuntimeInputs {
-                random_value: Some(7),
-                rng_seed_after: Some(1234),
-                ..ScriptRuntimeInputs::default()
-            },
-        )
-        .expect("random");
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
-        assert_eq!(state.rng_seed, 1234);
-
-        assert!(matches!(
-            apply_script_runtime_command(
-                &mut state,
-                command("random", &["10"]),
-                ScriptRuntimeInputs {
-                    random_value: Some(7),
-                    ..ScriptRuntimeInputs::default()
-                },
-            ),
-            Err(ScriptRuntimeCommandError::MissingRandomSeedAfter)
-        ));
-
-        assert!(matches!(
-            apply_script_runtime_command(
-                &mut state,
-                command("random", &["10"]),
-                ScriptRuntimeInputs {
-                    random_value: Some(10),
-                    ..ScriptRuntimeInputs::default()
-                },
-            ),
-            Err(ScriptRuntimeCommandError::RandomInputOutOfRange { .. })
-        ));
         assert_eq!(
             apply_script_runtime_command(
                 &mut state,
-                command("random", &["0"]),
-                ScriptRuntimeInputs {
-                    random_value: Some(0),
-                    ..ScriptRuntimeInputs::default()
-                },
+                command("random", &["10"]),
+                ScriptRuntimeInputs::default(),
             ),
-            Err(ScriptRuntimeCommandError::RandomBoundZero)
+            Err(ScriptRuntimeCommandError::RandomRequiresDivider)
         );
 
-        assert!(matches!(
-            apply_script_runtime_command(
-                &mut state,
-                command("addval", &["1"]),
-                ScriptRuntimeInputs {
-                    random_value: Some(0),
-                    rng_seed_after: Some(1234),
-                    ..ScriptRuntimeInputs::default()
-                },
-            ),
-            Err(ScriptRuntimeCommandError::UnexpectedRandomInput { command })
-                if command == "addval"
-        ));
+        state.random_state = crate::random::CrystalRandomState::default();
+        let mut divider = crate::random::ReplayDivider::new([6, 0]);
+        apply_script_random_command_in_map(&mut state, command("random", &["10"]), &mut divider)
+            .expect("random with exact divider source");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
+        assert_eq!(divider.remaining(), 0);
+
+        let before = state.random_state;
+        let mut no_divider = crate::random::ReplayDivider::new([]);
+        apply_script_random_command_in_map(&mut state, command("random", &["0"]), &mut no_divider)
+            .expect("random zero stores zero without reading DIV");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(state.random_state, before);
+    }
+
+    #[test]
+    fn addval_wraps_the_script_accumulator_as_an_asm_byte() {
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("0".to_string());
+
+        apply_script_runtime_command(&mut state, command("addval", &["-1"]), default_inputs())
+            .expect("subtract one from zero");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("255"));
+
+        apply_script_runtime_command(&mut state, command("addval", &["1"]), default_inputs())
+            .expect("add one to 255");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
     }
 
     #[test]
@@ -2848,7 +3078,101 @@ mod tests {
         assert_eq!(earthquake.sleep_frames, 84 & 0x3f);
         assert_eq!(earthquake.source_script, "RuntimeScript");
         assert_eq!(earthquake.command_index, 4);
-        assert_eq!(state.script_runtime.effects[0].command, "earthquake");
+    }
+
+    #[test]
+    fn loademote_records_the_exact_loaded_graphic() {
+        let mut state = GameState::default();
+
+        let outcome = apply_script_runtime_command(
+            &mut state,
+            command("loademote", &["EMOTE_SHADOW"]),
+            default_inputs(),
+        )
+        .expect("load exact emote graphic");
+
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::EffectRecorded { ref command, .. } if command == "loademote"
+        ));
+    }
+
+    #[test]
+    fn pause_and_wait_expand_their_byte_counters_to_lcd_frames() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(&mut state, command("pause", &["15"]), default_inputs())
+            .expect("pause");
+        apply_script_runtime_command(&mut state, command("wait", &["15"]), default_inputs())
+            .expect("wait");
+        apply_script_runtime_command(&mut state, command("pause", &["0"]), default_inputs())
+            .expect("zero pause");
+
+        assert_eq!(state.script_runtime.pending_delays[0].frames, 30);
+        assert_eq!(state.script_runtime.pending_delays[1].frames, 90);
+        assert_eq!(state.script_runtime.pending_delays[2].frames, 512);
+    }
+
+    #[test]
+    fn pause_and_wait_reject_parameters_outside_the_script_byte() {
+        for opcode in ["pause", "wait"] {
+            let mut state = GameState::default();
+            assert!(
+                apply_script_runtime_command(
+                    &mut state,
+                    command(opcode, &["256"]),
+                    default_inputs(),
+                )
+                .is_err()
+            );
+            assert!(state.script_runtime.pending_delays.is_empty());
+        }
+    }
+
+    #[test]
+    fn deactivatefacing_queues_exact_one_frame_wait_and_object_release() {
+        let mut state = GameState::default();
+        state.script_runtime.all_input_locked = true;
+
+        apply_script_runtime_command(
+            &mut state,
+            command("deactivatefacing", &["3"]),
+            default_inputs(),
+        )
+        .expect("deactivatefacing");
+
+        let delay = &state.script_runtime.pending_delays[0];
+        assert_eq!(delay.command, "deactivatefacing");
+        assert_eq!(delay.frames, 3);
+        assert!(delay.release_all_objects);
+    }
+
+    #[test]
+    fn earthquake_zero_low_six_bit_counter_wraps_to_256_ticks() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(&mut state, command("earthquake", &["0"]), default_inputs())
+            .expect("zero earthquake byte");
+
+        let earthquake = &state.script_runtime.pending_earthquakes[0];
+        assert_eq!(earthquake.parameter, 0);
+        assert_eq!(earthquake.shake_frames, 0);
+        assert_eq!(earthquake.sleep_frames, 256);
+    }
+
+    #[test]
+    fn earthquake_rejects_parameters_that_do_not_fit_script_byte() {
+        let mut state = GameState::default();
+
+        assert!(
+            apply_script_runtime_command(
+                &mut state,
+                command("earthquake", &["256"]),
+                default_inputs(),
+            )
+            .is_err()
+        );
+        assert!(state.script_runtime.pending_earthquakes.is_empty());
     }
 
     #[test]
@@ -2871,12 +3195,7 @@ mod tests {
                 .map(String::as_str),
             Some("12")
         );
-        assert_eq!(state.script_runtime.variable_writes.len(), 1);
-        let write = &state.script_runtime.variable_writes[0];
-        assert_eq!(write.target, "VAR_BLUECARDBALANCE");
-        assert_eq!(write.value, "12");
-        assert_eq!(write.source_script, "RuntimeScript");
-        assert_eq!(write.command_index, 4);
+        assert_eq!(state.blue_card_balance, 12);
         assert!(!state.script_runtime.named_buffers.contains_key("writevar"));
     }
 
@@ -2893,8 +3212,6 @@ mod tests {
             Err(ScriptRuntimeCommandError::MissingAccumulator { .. })
         ));
         assert!(state.script_runtime.variables.is_empty());
-        assert!(state.script_runtime.variable_writes.is_empty());
-        assert!(state.script_runtime.effects.is_empty());
     }
 
     #[test]
@@ -2917,13 +3234,6 @@ mod tests {
                 .map(String::as_str),
             Some("37")
         );
-        assert_eq!(state.script_runtime.numeric_buffer_writes.len(), 1);
-        let write = &state.script_runtime.numeric_buffer_writes[0];
-        assert_eq!(write.target_buffer, "STRING_BUFFER_3");
-        assert_eq!(write.value, "37");
-        assert_eq!(write.width, 3);
-        assert_eq!(write.source_script, "RuntimeScript");
-        assert_eq!(write.command_index, 4);
         assert!(!state.script_runtime.named_buffers.contains_key("getnum"));
     }
 
@@ -2957,188 +3267,128 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
         ));
-        assert!(state.script_runtime.numeric_buffer_writes.is_empty());
-        assert!(state.script_runtime.effects.is_empty());
-    }
-
-    #[test]
-    fn elevfloor_records_exact_floor_warp_and_target_map() {
-        let mut state = GameState::default();
-
-        apply_script_runtime_command(
-            &mut state,
-            command("elevfloor", &["FLOOR_1F", "4", "CELADON_DEPT_STORE_1F"]),
-            default_inputs(),
-        )
-        .expect("elevfloor");
-
-        assert_eq!(state.script_runtime.elevator_floors.len(), 1);
-        let floor = &state.script_runtime.elevator_floors[0];
-        assert_eq!(floor.floor, "FLOOR_1F");
-        assert_eq!(floor.warp, 4);
-        assert_eq!(floor.target_map, "CELADON_DEPT_STORE_1F");
-        assert_eq!(floor.source_script, "RuntimeScript");
-        assert_eq!(floor.command_index, 4);
-        assert!(!state.script_runtime.named_buffers.contains_key("elevfloor"));
-        assert_eq!(state.script_runtime.effects[0].command, "elevfloor");
-    }
-
-    #[test]
-    fn elevfloor_requires_exact_numeric_warp_token() {
-        let mut state = GameState::default();
-
+        state.script_runtime.script_value = Some("256".to_string());
         assert!(matches!(
             apply_script_runtime_command(
                 &mut state,
-                command(
-                    "elevfloor",
-                    &["FLOOR_1F", "WARP_4", "CELADON_DEPT_STORE_1F"]
-                ),
-                default_inputs(),
+                command("getnum", &["STRING_BUFFER_3"]),
+                default_inputs()
             ),
             Err(ScriptRuntimeCommandError::UnknownNumericToken { .. })
         ));
-        assert!(state.script_runtime.elevator_floors.is_empty());
-        assert!(state.script_runtime.effects.is_empty());
+        assert!(state.script_runtime.named_buffers.is_empty());
     }
 
     #[test]
-    fn stonetable_records_exact_warp_object_and_script() {
-        let mut state = GameState::default();
-
-        apply_script_runtime_command(
-            &mut state,
-            command(
-                "stonetable",
-                &["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"],
-            ),
-            default_inputs(),
-        )
-        .expect("stonetable");
-
-        assert_eq!(state.script_runtime.stone_table_entries.len(), 1);
-        let entry = &state.script_runtime.stone_table_entries[0];
-        assert_eq!(entry.warp, 5);
-        assert_eq!(entry.object_event, "BLACKTHORNGYM2F_BOULDER1");
-        assert_eq!(entry.script, ".Boulder1");
-        assert_eq!(entry.source_script, "RuntimeScript");
-        assert_eq!(entry.command_index, 4);
-        assert!(
-            !state
-                .script_runtime
-                .named_buffers
-                .contains_key("stonetable")
+    fn getnum_requires_a_source_string_buffer_destination() {
+        assert_eq!(
+            validate_script_runtime_command(&command("getnum", &["STRING_BUFFER_2"])),
+            Err(ScriptRuntimeCommandError::InvalidStringBuffer {
+                command: "getnum".to_string(),
+                buffer: "STRING_BUFFER_2".to_string(),
+            })
         );
-        assert_eq!(state.script_runtime.effects[0].command, "stonetable");
     }
 
     #[test]
-    fn stonetable_requires_exact_numeric_warp_token() {
+    fn elevator_table_directives_are_not_runtime_opcodes() {
         let mut state = GameState::default();
-
-        assert!(matches!(
+        assert_eq!(
             apply_script_runtime_command(
                 &mut state,
-                command(
-                    "stonetable",
-                    &["WARP_5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
-                ),
+                command("elevfloor", &["FLOOR_1F", "4", "CELADON_DEPT_STORE_1F"]),
                 default_inputs(),
             ),
-            Err(ScriptRuntimeCommandError::UnknownNumericToken { .. })
-        ));
-        assert!(state.script_runtime.stone_table_entries.is_empty());
-        assert!(state.script_runtime.effects.is_empty());
+            Err(ScriptRuntimeCommandError::UnknownCommand {
+                command: "elevfloor".to_string(),
+            })
+        );
     }
 
     #[test]
-    fn describedecoration_records_each_exact_selector() {
+    fn writecmdqueue_requires_and_installs_resolved_stone_table_atomically() {
+        let mut state = GameState::default();
+        assert_eq!(
+            apply_script_runtime_command(
+                &mut state,
+                command("writecmdqueue", &[".CommandQueue"]),
+                default_inputs(),
+            ),
+            Err(ScriptRuntimeCommandError::MissingResolvedStoneTableQueue)
+        );
+        assert!(state.script_runtime.stone_table_entries.is_empty());
+
+        let entries = vec![ScriptRuntimeStoneTableEntry {
+            warp: 5,
+            object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
+            script: ".Boulder1@BlackthornGym2FSetUpStoneTableCallback".to_string(),
+            source_script: ".StoneTable@BlackthornGym2FSetUpStoneTableCallback".to_string(),
+            command_index: 0,
+        }];
+        apply_script_runtime_command(
+            &mut state,
+            command("writecmdqueue", &[".CommandQueue"]),
+            ScriptRuntimeInputs {
+                resolved_stone_table_entries: Some(entries.clone()),
+                ..default_inputs()
+            },
+        )
+        .expect("writecmdqueue");
+
+        assert_eq!(state.script_runtime.stone_table_entries, entries);
+    }
+
+    #[test]
+    fn describedecoration_tail_jumps_to_the_resolved_asm_script() {
         let mut state = GameState::default();
 
         apply_script_runtime_command(
             &mut state,
             command("describedecoration", &["DECODESC_LEFT_DOLL"]),
-            default_inputs(),
+            ScriptRuntimeInputs {
+                resolved_decoration: Some(ScriptRuntimeDecorationResolution {
+                    target_script: ".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole"
+                        .to_string(),
+                    string_buffer_3: Some("PIKACHU DOLL".to_string()),
+                }),
+                ..default_inputs()
+            },
         )
         .expect("left doll describedecoration");
-        apply_script_runtime_command(
-            &mut state,
-            command("describedecoration", &["DECODESC_POSTER"]),
-            default_inputs(),
-        )
-        .expect("poster describedecoration");
 
-        assert_eq!(state.script_runtime.decoration_descriptions.len(), 2);
         assert_eq!(
-            state.script_runtime.decoration_descriptions[0].decoration,
-            "DECODESC_LEFT_DOLL"
+            state.script_runtime.named_buffers.get("STRING_BUFFER_3"),
+            Some(&"PIKACHU DOLL".to_string())
         );
         assert_eq!(
-            state.script_runtime.decoration_descriptions[1].decoration,
-            "DECODESC_POSTER"
-        );
-        assert_eq!(
-            state.script_runtime.decoration_descriptions[0].source_script,
-            "RuntimeScript"
-        );
-        assert_eq!(
-            state.script_runtime.decoration_descriptions[0].command_index,
-            4
-        );
-        assert!(
-            !state
-                .script_runtime
-                .named_buffers
-                .contains_key("describedecoration")
-        );
-        assert_eq!(
-            state.script_runtime.effects[1].command,
-            "describedecoration"
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: ".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole".to_string(),
+            })
         );
     }
 
     #[test]
-    fn asm_directives_preserve_repeated_exact_entries_in_order() {
+    fn asm_data_directives_are_not_runtime_opcodes() {
         let mut state = GameState::default();
-
-        apply_script_runtime_command(&mut state, command("dw", &[".MenuData"]), default_inputs())
-            .expect("first dw");
-        apply_script_runtime_command(
-            &mut state,
-            command("dw", &[".OtherMenuData"]),
-            default_inputs(),
-        )
-        .expect("second dw");
-        apply_script_runtime_command(
-            &mut state,
-            command("ldh", &["a", "[rWBK]"]),
-            default_inputs(),
-        )
-        .expect("ldh");
-
-        assert_eq!(state.script_runtime.asm_directives.len(), 3);
-        assert_eq!(state.script_runtime.asm_directives[0].command, "dw");
-        assert_eq!(
-            state.script_runtime.asm_directives[0].args,
-            vec![".MenuData".to_string()]
-        );
-        assert_eq!(state.script_runtime.asm_directives[1].command, "dw");
-        assert_eq!(
-            state.script_runtime.asm_directives[1].args,
-            vec![".OtherMenuData".to_string()]
-        );
-        assert_eq!(state.script_runtime.asm_directives[2].command, "ldh");
-        assert_eq!(
-            state.script_runtime.asm_directives[2].args,
-            vec!["a".to_string(), "[rWBK]".to_string()]
-        );
-        assert_eq!(
-            state.script_runtime.asm_directives[2].source_script,
-            "RuntimeScript"
-        );
-        assert_eq!(state.script_runtime.asm_directives[2].command_index, 4);
-        assert!(!state.script_runtime.named_buffers.contains_key("dw"));
-        assert!(!state.script_runtime.named_buffers.contains_key("ldh"));
+        for (directive, args) in [
+            ("dw", vec![".MenuData"]),
+            ("dn", vec!["1", "2"]),
+            ("dba", vec!["Target"]),
+            ("dbw", vec!["1", "Target"]),
+        ] {
+            assert_eq!(
+                apply_script_runtime_command(
+                    &mut state,
+                    command(directive, &args),
+                    default_inputs(),
+                ),
+                Err(ScriptRuntimeCommandError::UnknownCommand {
+                    command: directive.to_string(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -3220,15 +3470,6 @@ mod tests {
             ),
             Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
         ));
-        assert!(matches!(
-            apply_script_runtime_command(
-                &mut state,
-                command("pop", &["wScriptVar"]),
-                default_inputs()
-            ),
-            Err(ScriptRuntimeCommandError::EmptyStack)
-        ));
-        assert!(state.script_runtime.effects.is_empty());
     }
 
     #[test]
@@ -3281,7 +3522,6 @@ mod tests {
             }
         );
         assert!(!state.script_runtime.window_open);
-        assert!(state.script_runtime.effects.is_empty());
 
         apply_script_runtime_command(
             &mut state,
@@ -3297,32 +3537,24 @@ mod tests {
             Some("RuntimeMenu")
         );
         assert!(state.script_runtime.window_open);
-        assert_eq!(
-            state
-                .script_runtime
-                .effects
-                .iter()
-                .map(|effect| effect.command.as_str())
-                .collect::<Vec<_>>(),
-            vec!["loadmenu", "verticalmenu"]
-        );
     }
 
     #[test]
-    fn menu_coords_accepts_verified_screen_coordinate_expressions() {
+    fn menu_definition_directives_are_not_runtime_opcodes() {
         let mut state = GameState::default();
-
-        apply_script_runtime_command(
-            &mut state,
-            command(
-                "menu_coords",
-                &["SCREEN_LEFT", "2", "SCREEN_WIDTH - 1", "TEXTBOX_Y - 1"],
+        assert_eq!(
+            apply_script_runtime_command(
+                &mut state,
+                command(
+                    "menu_coords",
+                    &["SCREEN_LEFT", "2", "SCREEN_WIDTH - 1", "TEXTBOX_Y - 1"],
+                ),
+                default_inputs(),
             ),
-            default_inputs(),
-        )
-        .expect("menu coords");
-
-        assert_eq!(state.script_runtime.menu_coords, Some([0, 2, 19, 11]));
+            Err(ScriptRuntimeCommandError::UnknownCommand {
+                command: "menu_coords".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -3339,70 +3571,6 @@ mod tests {
             parse_script_i32_token("raw_script", "0x10"),
             Err(ScriptRuntimeCommandError::InvalidNumericToken { .. })
         ));
-    }
-
-    #[test]
-    fn menu_coords_rejects_unknown_coordinate_symbols_without_fallback() {
-        let mut state = GameState::default();
-
-        let error = apply_script_runtime_command(
-            &mut state,
-            command("menu_coords", &["0", "0", "SCREEN_EDGE + LEFT", "8"]),
-            default_inputs(),
-        )
-        .expect_err("unknown coordinate expression rejected");
-
-        assert_eq!(
-            error,
-            ScriptRuntimeCommandError::UnknownNumericToken {
-                command: "menu_coords".to_string(),
-                token: "LEFT".to_string(),
-            }
-        );
-        assert_eq!(state.script_runtime.menu_coords, None);
-    }
-
-    #[test]
-    fn menu_coords_rejects_padded_coordinate_expressions_without_normalization() {
-        let mut state = GameState::default();
-
-        let error = apply_script_runtime_command(
-            &mut state,
-            command(
-                "menu_coords",
-                &["SCREEN_LEFT", "2", "SCREEN_WIDTH  - 1", "TEXTBOX_Y"],
-            ),
-            default_inputs(),
-        )
-        .expect_err("padded coordinate expression rejected");
-
-        assert_eq!(
-            error,
-            ScriptRuntimeCommandError::InvalidNumericToken {
-                command: "menu_coords".to_string(),
-                token: "SCREEN_WIDTH  - 1".to_string(),
-            }
-        );
-        assert_eq!(state.script_runtime.menu_coords, None);
-
-        let error = apply_script_runtime_command(
-            &mut state,
-            command(
-                "menu_coords",
-                &["SCREEN_LEFT", "2", "SCREEN_WIDTH\t-\t1", "TEXTBOX_Y"],
-            ),
-            default_inputs(),
-        )
-        .expect_err("tabbed coordinate expression rejected");
-
-        assert_eq!(
-            error,
-            ScriptRuntimeCommandError::PaddedArg {
-                command: "menu_coords".to_string(),
-                arg: "SCREEN_WIDTH\t-\t1".to_string(),
-            }
-        );
-        assert_eq!(state.script_runtime.menu_coords, None);
     }
 
     #[test]
@@ -3594,6 +3762,29 @@ mod tests {
         ));
         assert_eq!(state.hall_of_fame.spawn_after_champion, Some(2));
         assert!(state.script_runtime.credits_requested);
+    }
+
+    #[test]
+    fn post_credits_markers_require_exported_source_constants() {
+        for (name, constant) in [("halloffame", "SPAWN_LANCE"), ("credits", "SPAWN_RED")] {
+            let mut state = GameState::default();
+            let error = apply_script_runtime_command_in_map(
+                &mut state,
+                "TestMap",
+                command(name, &[]),
+                default_inputs(),
+                &StoryEventScriptConstants::default(),
+            )
+            .expect_err("post-credits marker must not fall back to a numeric literal");
+            assert_eq!(
+                error,
+                ScriptRuntimeCommandError::MissingSourceConstant {
+                    command: name.to_string(),
+                    constant: constant.to_string(),
+                }
+            );
+            assert_eq!(state.hall_of_fame.spawn_after_champion, None);
+        }
     }
 
     #[test]

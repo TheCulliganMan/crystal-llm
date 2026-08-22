@@ -11,7 +11,9 @@ pub struct RuntimePokedexEntry {
     pub species: String,
     #[serde(deserialize_with = "required_pokedex_text")]
     pub classification: String,
+    #[serde(deserialize_with = "required_pokedex_dimension")]
     pub height_digits: u16,
+    #[serde(deserialize_with = "required_pokedex_dimension")]
     pub weight_digits: u16,
     #[serde(deserialize_with = "required_pokedex_pages")]
     pub pages: Vec<String>,
@@ -64,6 +66,8 @@ pub fn pokedex_entry_catalog_issues(
         }
         if invalid_record_species
             || !is_exact_nonempty_pokedex_text(&entry.classification)
+            || entry.height_digits == 0
+            || entry.weight_digits == 0
             || entry.pages.is_empty()
             || entry
                 .pages
@@ -162,6 +166,20 @@ where
     }
 }
 
+fn required_pokedex_dimension<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u16::deserialize(deserializer)?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "pokedex dimensions must be positive",
+        ))
+    }
+}
+
 fn required_pokedex_pages<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -187,6 +205,9 @@ where
 pub struct PokedexState {
     pub seen_species: BTreeSet<String>,
     pub caught_species: BTreeSet<String>,
+    /// One-based Unown letter indices in the same first-caught order as
+    /// Crystal's `wUnownDex` array.
+    pub unown_letters: Vec<u8>,
 }
 
 impl<'de> Deserialize<'de> for PokedexState {
@@ -199,12 +220,14 @@ impl<'de> Deserialize<'de> for PokedexState {
         struct RawPokedexState {
             seen_species: BTreeSet<String>,
             caught_species: BTreeSet<String>,
+            unown_letters: Vec<u8>,
         }
 
         let raw = RawPokedexState::deserialize(deserializer)?;
         let state = Self {
             seen_species: raw.seen_species,
             caught_species: raw.caught_species,
+            unown_letters: raw.unown_letters,
         };
         state.validate_shape().map_err(D::Error::custom)?;
         Ok(state)
@@ -226,7 +249,14 @@ impl PokedexState {
     }
 
     pub fn record_caught_pokemon(&mut self, pokemon: &Pokemon) -> bool {
-        self.record_caught(&pokemon.species)
+        let newly_caught_species = self.record_caught(&pokemon.species);
+        if pokemon.species.id == "UNOWN" {
+            let letter = pokemon.dvs.unown_letter();
+            if !self.unown_letters.contains(&letter) {
+                self.unown_letters.push(letter);
+            }
+        }
+        newly_caught_species
     }
 
     pub fn has_seen(&self, species_id: &str) -> bool {
@@ -245,6 +275,10 @@ impl PokedexState {
         self.caught_species.len()
     }
 
+    pub fn unown_count(&self) -> usize {
+        self.unown_letters.len()
+    }
+
     fn validate_shape(&self) -> Result<(), String> {
         for species in &self.seen_species {
             if !is_exact_nonempty_pokedex_id(species) {
@@ -259,6 +293,17 @@ impl PokedexState {
                 return Err(format!(
                     "pokedex caught species {species} is not present in seen species"
                 ));
+            }
+        }
+        let mut unique_letters = BTreeSet::new();
+        for &letter in &self.unown_letters {
+            if !(1..=26).contains(&letter) {
+                return Err(format!(
+                    "pokedex Unown letter index {letter} is outside 1..=26"
+                ));
+            }
+            if !unique_letters.insert(letter) {
+                return Err(format!("pokedex Unown letter index {letter} is duplicated"));
             }
         }
         Ok(())
@@ -278,6 +323,12 @@ pub enum PokedexSaveError {
     },
     #[error("saved pokedex.caught_species {species} is not present in saved pokedex.seen_species")]
     CaughtSpeciesNotSeen { species: String },
+    #[error("saved pokedex.unown_letters contains invalid one-based letter index {letter}")]
+    InvalidUnownLetter { letter: u8 },
+    #[error("saved pokedex.unown_letters repeats one-based letter index {letter}")]
+    DuplicateUnownLetter { letter: u8 },
+    #[error("saved pokedex.unown_letters is nonempty but UNOWN is not caught")]
+    UnownLettersWithoutCaughtSpecies,
 }
 
 pub fn validate_saved_pokedex_references<F>(
@@ -305,6 +356,18 @@ where
                 species: species.clone(),
             });
         }
+    }
+    let mut unique_letters = BTreeSet::new();
+    for &letter in &pokedex.unown_letters {
+        if !(1..=26).contains(&letter) {
+            return Err(PokedexSaveError::InvalidUnownLetter { letter });
+        }
+        if !unique_letters.insert(letter) {
+            return Err(PokedexSaveError::DuplicateUnownLetter { letter });
+        }
+    }
+    if !pokedex.unown_letters.is_empty() && !pokedex.caught_species.contains("UNOWN") {
+        return Err(PokedexSaveError::UnownLettersWithoutCaughtSpecies);
     }
     Ok(())
 }
@@ -354,6 +417,28 @@ mod tests {
         assert!(pokedex.has_caught("CHIKORITA"));
         assert_eq!(pokedex.seen_count(), 1);
         assert_eq!(pokedex.caught_count(), 1);
+    }
+
+    #[test]
+    fn saved_unown_letters_are_unique_one_based_forms_of_caught_unown() {
+        let mut pokedex = PokedexState::default();
+        let unown = species("UNOWN");
+        pokedex.record_caught(&unown);
+        pokedex.unown_letters = vec![1, 26];
+
+        validate_saved_pokedex_references(&pokedex, |species| Some(species.to_string()))
+            .expect("valid saved Unown letters");
+
+        pokedex.unown_letters.push(1);
+        assert_eq!(
+            validate_saved_pokedex_references(&pokedex, |species| Some(species.to_string())),
+            Err(PokedexSaveError::DuplicateUnownLetter { letter: 1 })
+        );
+        pokedex.unown_letters = vec![27];
+        assert_eq!(
+            validate_saved_pokedex_references(&pokedex, |species| Some(species.to_string())),
+            Err(PokedexSaveError::InvalidUnownLetter { letter: 27 })
+        );
     }
 
     #[test]
@@ -535,6 +620,30 @@ mod tests {
     }
 
     #[test]
+    fn pokedex_entry_catalog_issues_rejects_zero_dimensions() {
+        let entries = [(
+            "CHIKORITA".to_string(),
+            RuntimePokedexEntry {
+                species: "CHIKORITA".to_string(),
+                classification: "Leaf".to_string(),
+                height_digits: 0,
+                weight_digits: 0,
+                pages: vec!["A sweet aroma wafts from its leaf.".to_string()],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let species_ids = ["CHIKORITA".to_string()].into_iter().collect();
+
+        assert_eq!(
+            pokedex_entry_catalog_issues(&entries, &species_ids),
+            vec![PokedexEntryCatalogIssue::InvalidEntry {
+                species_id: "CHIKORITA".to_string(),
+            }],
+        );
+    }
+
+    #[test]
     fn pokedex_entry_json_rejects_malformed_pack_fields_at_deserialization() {
         let cases = [
             (
@@ -575,6 +684,26 @@ mod tests {
                     "heightDigits": 211,
                     "weightDigits": 141,
                     "pages": ["A sweet aroma gently wafts from its leaf. "]
+                }),
+            ),
+            (
+                "height",
+                serde_json::json!({
+                    "species": "CHIKORITA",
+                    "classification": "Leaf",
+                    "heightDigits": 0,
+                    "weightDigits": 141,
+                    "pages": ["A sweet aroma gently wafts from its leaf."]
+                }),
+            ),
+            (
+                "weight",
+                serde_json::json!({
+                    "species": "CHIKORITA",
+                    "classification": "Leaf",
+                    "heightDigits": 211,
+                    "weightDigits": 0,
+                    "pages": ["A sweet aroma gently wafts from its leaf."]
                 }),
             ),
         ];

@@ -38,14 +38,11 @@ fn setup_shell_view(mut commands: Commands) {
     // range and culls every positive-z LCD sprite.
     let mut camera = Camera2dBundle::default();
     camera.projection.scaling_mode = bevy::render::camera::ScalingMode::WindowSize(1.0);
-    commands.spawn((
-        camera,
-        MainCameraMarker,
-    ));
+    commands.spawn((camera, MainCameraMarker));
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.0),
                 custom_size: Some(Vec2::new(640.0, 576.0)),
                 ..default()
             },
@@ -57,7 +54,7 @@ fn setup_shell_view(mut commands: Commands) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(230.0 / 255.0, 173.0 / 255.0, 1.0, 0.0),
+                color: Color::srgba(230.0 / 255.0, 173.0 / 255.0, 1.0, 0.0),
                 custom_size: Some(Vec2::new(640.0, 576.0)),
                 ..default()
             },
@@ -69,7 +66,7 @@ fn setup_shell_view(mut commands: Commands) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(0.06, 0.08, 0.10, 0.0),
+                color: Color::srgba(0.06, 0.08, 0.10, 0.0),
                 custom_size: Some(Vec2::new(612.0, 116.0)),
                 ..default()
             },
@@ -81,7 +78,7 @@ fn setup_shell_view(mut commands: Commands) {
     commands.spawn((
         SpriteBundle {
             sprite: Sprite {
-                color: Color::rgba(0.07, 0.09, 0.12, 0.0),
+                color: Color::srgba(0.07, 0.09, 0.12, 0.0),
                 custom_size: Some(Vec2::new(302.0, 128.0)),
                 ..default()
             },
@@ -95,7 +92,7 @@ fn setup_shell_view(mut commands: Commands) {
             "Loading runtime...",
             TextStyle {
                 font_size: 18.0,
-                color: Color::rgb(0.88, 0.94, 0.86),
+                color: Color::srgb(0.88, 0.94, 0.86),
                 ..default()
             },
         )
@@ -113,7 +110,7 @@ fn setup_shell_view(mut commands: Commands) {
             "",
             TextStyle {
                 font_size: 20.0,
-                color: Color::rgb(0.97, 0.97, 0.90),
+                color: Color::srgb(0.97, 0.97, 0.90),
                 ..default()
             },
         )
@@ -131,7 +128,7 @@ fn setup_shell_view(mut commands: Commands) {
             "",
             TextStyle {
                 font_size: 18.0,
-                color: Color::rgb(0.94, 0.97, 0.99),
+                color: Color::srgb(0.94, 0.97, 0.99),
                 ..default()
             },
         )
@@ -158,8 +155,21 @@ fn apply_keyboard_input(
     let elapsed_input_ticks = timer.take_ticks();
     timer.stage_presentation_ticks(elapsed_input_ticks);
     if elapsed_vblanks == 0 && elapsed_input_ticks == 0 {
+        let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+        let ctrl_pressed = keys.pressed(KeyCode::ControlLeft)
+            || keys.pressed(KeyCode::ControlRight);
+        if !shift_pressed && !alt_pressed && !ctrl_pressed
+            && let Some(direction) = just_pressed_overworld_direction(&keys)
+        {
+            // Host rendering can run faster than Crystal's 60 Hz input loop.
+            // Retain a press edge seen between authoritative ticks so a quick
+            // tap still reaches the next joypad sample after the key is up.
+            runtime_shell.pending_overworld_direction_press = Some(direction);
+        }
         return;
     }
+    let pending_direction_press = runtime_shell.pending_overworld_direction_press.take();
     // GameTimer is a VBlank hook, not an overworld-input side effect. Run it
     // for every authoritative catch-up VBlank before any presentation/modal
     // early return; dialogue, menus, battles, and interpolation all consume
@@ -177,9 +187,57 @@ fn apply_keyboard_input(
     let rtc_sample = (*rtc_source).sample();
     let mut rtc_changed = runtime_shell.latest_rtc_sample != Some(rtc_sample);
     runtime_shell.latest_rtc_sample = Some(rtc_sample);
-    runtime_shell.lcd_animation_frame = runtime_shell.lcd_animation_frame.wrapping_add(1);
-    let text_acceleration_requested =
-        keys.pressed(KeyCode::KeyZ) || keys.pressed(KeyCode::KeyX);
+    runtime_shell.lcd_animation_frame = runtime_shell
+        .lcd_animation_frame
+        .wrapping_add(u64::from(elapsed_input_ticks));
+    if runtime_shell.bill_pc_move_save.is_some() {
+        if let Err(error) =
+            advance_visible_bill_pc_move_save(&mut runtime_shell, elapsed_input_ticks)
+        {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+        return;
+    }
+    if runtime_shell.pc_release_sequence.is_some() {
+        if let Err(error) =
+            advance_visible_pc_release_sequence(&mut runtime_shell, elapsed_input_ticks)
+        {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+        return;
+    }
+    if runtime_shell.pc_transfer_sequence.is_some() {
+        if let Err(error) =
+            advance_visible_pc_transfer_sequence(&mut runtime_shell, elapsed_input_ticks)
+        {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+        return;
+    }
+    if elapsed_input_ticks > 0 {
+        match advance_visible_incoming_phone_sequence(&mut runtime_shell, elapsed_input_ticks) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
+        }
+        match advance_visible_pokegear_phone_call(&mut runtime_shell, elapsed_input_ticks) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
+        }
+    }
+    let text_acceleration_requested = keys.pressed(KeyCode::KeyZ) || keys.pressed(KeyCode::KeyX);
     let ambient_phase_changed = runtime_shell.ambient_tileset_animation_active
         && runtime_shell
             .ambient_tileset_animation_schedule
@@ -191,8 +249,7 @@ fn apply_keyboard_input(
     if ambient_phase_changed {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if (runtime_shell.battle_lcd_animation_active
-        || runtime_shell.field_text_reveal.is_some())
+    if (runtime_shell.battle_lcd_animation_active || runtime_shell.field_text_reveal.is_some())
         && runtime_shell.lcd_animation_frame % 8 == 0
     {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
@@ -210,68 +267,36 @@ fn apply_keyboard_input(
         runtime_shell.follower_visible_tile_overrides.clear();
         for object_id in follower_ids {
             runtime_shell.object_walk_from.remove(&object_id);
-            runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
-            runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
+            runtime_shell
+                .object_walk_frame_ticks_by_id
+                .remove(&object_id);
+            runtime_shell
+                .object_walk_total_ticks_by_id
+                .remove(&object_id);
         }
     }
-    let player_landed = runtime_shell.player_walk_frame_ticks == 1;
-    runtime_shell.player_walk_frame_ticks = runtime_shell.player_walk_frame_ticks.saturating_sub(1);
-    if runtime_shell.player_walk_frame_ticks == 0 {
-        runtime_shell.player_walk_from = None;
-    }
-    if player_landed {
-        // Retained origins model OBJECT_LAST_MAP_* only while the sprite is
-        // visibly in flight. Forced ice/current/downhill chains pause core
-        // ticks during interpolation, so frame-number expiry alone can leave
-        // an already-landed origin collision-owned across later tiles.
-        let overworld = &mut runtime_shell.shell.session_mut().overworld;
-        overworld.player_last_runtime_tile = None;
-        overworld.player_last_tile_occupied_until_frame = 0;
-    }
-    runtime_shell.object_walk_frame_ticks = runtime_shell.object_walk_frame_ticks.saturating_sub(1);
-    for remaining in runtime_shell.object_walk_frame_ticks_by_id.values_mut() {
-        *remaining = remaining.saturating_sub(1);
-    }
-    let landed_object_ids = runtime_shell
-        .object_walk_frame_ticks_by_id
-        .iter()
-        .filter_map(|(object_id, remaining)| (*remaining == 0).then_some(object_id.clone()))
-        .collect::<Vec<_>>();
-    let object_landed = !landed_object_ids.is_empty();
-    for object_id in landed_object_ids {
-        runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
-        runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
-        runtime_shell.object_walk_from.remove(&object_id);
-        runtime_shell
-            .follower_visible_tile_overrides
-            .remove(&object_id);
-        let overworld = &mut runtime_shell.shell.session_mut().overworld;
-        overworld.object_last_runtime_tiles.remove(&object_id);
-        overworld
-            .object_last_tiles_occupied_until_frame
-            .remove(&object_id);
-    }
-    if player_landed || object_landed {
-        start_next_queued_follower_walk(&mut runtime_shell);
-    }
-    if runtime_shell.object_walk_frame_ticks == 0 {
-        runtime_shell.trainer_walk_from = None;
-        if runtime_shell.pending_trainer_sight.is_none()
-            && runtime_shell.object_walk_frame_ticks_by_id.is_empty()
-        {
-            runtime_shell.object_walk_stride = false;
-        }
-    }
+    // Scripted leader/follower programs must cross each LCD boundary one tick
+    // at a time so catch-up frames can start and advance the following phase.
+    // Bulk-subtracting all elapsed ticks here discarded the remainder at every
+    // step boundary, which made the guide tour visibly pause and then jump.
+    let initial_movement_ticks = if runtime_shell.visible_script_movement.is_some() {
+        1
+    } else {
+        u8::try_from(elapsed_input_ticks).unwrap_or(u8::MAX)
+    };
+    advance_visible_walk_timers(&mut runtime_shell, initial_movement_ticks);
     if runtime_shell.battle_switch_cursor.is_some() {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if let Some(emote) = runtime_shell.visible_overworld_emote.as_mut() {
-        emote.frames_remaining = emote.frames_remaining.saturating_sub(1);
+        emote.frames_remaining =
+            visible_effect_frames_after_ticks(emote.frames_remaining, elapsed_input_ticks);
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if let Some(earthquake) = runtime_shell.visible_earthquake.as_mut() {
-        earthquake.frames_remaining = earthquake.frames_remaining.saturating_sub(1);
-        earthquake.phase = earthquake.phase.wrapping_add(1) % 4;
+        earthquake.frames_remaining =
+            visible_effect_frames_after_ticks(earthquake.frames_remaining, elapsed_input_ticks);
+        earthquake.phase = earthquake.phase.wrapping_add(elapsed_input_ticks as u8) % 4;
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if runtime_shell
@@ -338,7 +363,6 @@ fn apply_keyboard_input(
         runtime_shell.visible_whirlpool_animation = None;
         runtime_shell.visible_headbutt_animation = None;
         runtime_shell.visible_flash_animation = None;
-        runtime_shell.visible_sweet_scent_delay = false;
         runtime_shell.pending_surf_start_from = None;
         if std::mem::take(&mut runtime_shell.pending_field_battle_entry) {
             if let Err(error) = prepare_visible_battle_entry(&mut runtime_shell)
@@ -374,6 +398,17 @@ fn apply_keyboard_input(
             } else {
                 let step_index = animation.frame / 4;
                 let phase = (animation.frame % 4) as u8;
+                if phase == 0
+                    && let Err(error) = execute_visible_pending_waterfall_step(
+                        &mut runtime_shell,
+                        step_index,
+                        animation.steps,
+                    )
+                {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
                 let Ok(step_index_i16) = i16::try_from(step_index) else {
                     let error = anyhow::anyhow!(
                         "WATERFALL visual step {step_index} exceeds runtime tile coordinates"
@@ -382,23 +417,15 @@ fn apply_keyboard_input(
                     runtime_shell.last_error = Some(error.to_string());
                     return;
                 };
-                let Some(step_offset) = step_index_i16.checked_mul(METATILE_WIDTH) else {
-                    let error = anyhow::anyhow!(
-                        "WATERFALL visual step offset overflows at step {step_index}"
-                    );
-                    record_visible_runtime_error(&mut runtime_shell, &error);
-                    runtime_shell.last_error = Some(error.to_string());
-                    return;
-                };
+                let step_offset = step_index_i16;
                 let Some(segment_from_y) = animation.from_tile.y.checked_sub(step_offset) else {
-                    let error = anyhow::anyhow!(
-                        "WATERFALL visual origin underflows at step {step_index}"
-                    );
+                    let error =
+                        anyhow::anyhow!("WATERFALL visual origin underflows at step {step_index}");
                     record_visible_runtime_error(&mut runtime_shell, &error);
                     runtime_shell.last_error = Some(error.to_string());
                     return;
                 };
-                let Some(segment_to_y) = segment_from_y.checked_sub(METATILE_WIDTH) else {
+                let Some(segment_to_y) = segment_from_y.checked_sub(1) else {
                     let error = anyhow::anyhow!(
                         "WATERFALL visual destination underflows at step {step_index}"
                     );
@@ -406,11 +433,15 @@ fn apply_keyboard_input(
                     runtime_shell.last_error = Some(error.to_string());
                     return;
                 };
-                let segment_from = TilePosition { x: animation.from_tile.x, y: segment_from_y };
-                let segment_to = TilePosition { x: segment_from.x, y: segment_to_y };
-                if step_index + 1 == animation.steps
-                    && segment_to != animation.to_tile
-                {
+                let segment_from = TilePosition {
+                    x: animation.from_tile.x,
+                    y: segment_from_y,
+                };
+                let segment_to = TilePosition {
+                    x: segment_from.x,
+                    y: segment_to_y,
+                };
+                if step_index + 1 == animation.steps && segment_to != animation.to_tile {
                     let error = anyhow::anyhow!(
                         "WATERFALL visual path ended at ({}, {}) instead of authoritative ({}, {})",
                         segment_to.x,
@@ -513,9 +544,68 @@ fn apply_keyboard_input(
         advance_visible_fishing_animation(&mut runtime_shell);
         return;
     }
+    if runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
+        matches!(
+            hatch.phase,
+            VisibleEggHatchPhase::EggHold
+                | VisibleEggHatchPhase::Wobble
+                | VisibleEggHatchPhase::Shell
+        ) || (hatch.phase == VisibleEggHatchPhase::Reveal
+            && runtime_shell.visible_frontpic_animation.is_none())
+    }) {
+        if let Err(error) = advance_visible_egg_hatch(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+        return;
+    }
+    if advance_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+        return;
+    }
     if let Some(frame) = runtime_shell.visible_diploma.as_mut() {
         *frame = frame.wrapping_add(1);
         mark_runtime_snapshot_dirty(&mut runtime_shell);
+        return;
+    }
+    if runtime_shell
+        .visible_slot_machine
+        .as_ref()
+        .is_some_and(|machine| {
+            !matches!(
+                machine.animation,
+                VisibleSlotMachineAnimation::None | VisibleSlotMachineAnimation::AwaitResult
+            )
+        })
+    {
+        if let Err(error) = advance_visible_slot_machine_animation(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
+        return;
+    }
+    if runtime_shell
+        .visible_card_flip
+        .as_ref()
+        .is_some_and(|game| {
+            matches!(
+                game.animation,
+                VisibleCardFlipAnimation::WaitStake
+                    | VisibleCardFlipAnimation::Deal { .. }
+                    | VisibleCardFlipAnimation::Cycle { .. }
+                    | VisibleCardFlipAnimation::SelectFlash { .. }
+                    | VisibleCardFlipAnimation::WaitBeforeReveal
+                    | VisibleCardFlipAnimation::WaitReveal
+                    | VisibleCardFlipAnimation::WaitResult { .. }
+                    | VisibleCardFlipAnimation::Payout { .. }
+                    | VisibleCardFlipAnimation::QuitWaitBefore
+                    | VisibleCardFlipAnimation::QuitWaitAfter
+            )
+        })
+    {
+        if let Err(error) = advance_visible_card_flip_animation(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+        }
         return;
     }
     if runtime_shell.visible_heal_machine.is_some() {
@@ -640,14 +730,27 @@ fn apply_keyboard_input(
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if runtime_shell.visible_script_movement.is_some() {
-        match advance_visible_script_movement(&mut runtime_shell) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(error) => {
-                record_visible_runtime_error(&mut runtime_shell, &error);
-                runtime_shell.last_error = Some(error.to_string());
-                return;
+        let mut movement_still_active = false;
+        for catch_up_index in 0..elapsed_input_ticks.max(1) {
+            if catch_up_index > 0 {
+                advance_visible_walk_timers(&mut runtime_shell, 1);
             }
+            match advance_visible_script_movement(&mut runtime_shell) {
+                Ok(active) => {
+                    movement_still_active = active;
+                    if !active {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        if movement_still_active {
+            return;
         }
     }
     if !runtime_shell.battle_messages.is_empty()
@@ -755,10 +858,9 @@ fn apply_keyboard_input(
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if exp_segment_finished {
-        if let Err(error) = queue_visible_shell_sound_effect(
-            &mut runtime_shell,
-            "SFX_HIT_END_OF_EXP_BAR",
-        ) {
+        if let Err(error) =
+            queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_HIT_END_OF_EXP_BAR")
+        {
             record_visible_runtime_error(&mut runtime_shell, &error);
         }
         if runtime_shell
@@ -767,10 +869,9 @@ fn apply_keyboard_input(
             .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
         {
             runtime_shell.battle_fanfare_messages.pop_front();
-            if let Err(error) = queue_visible_shell_sound_effect(
-                &mut runtime_shell,
-                "SFX_DEX_FANFARE_50_79",
-            ) {
+            if let Err(error) =
+                queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+            {
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
         }
@@ -794,10 +895,9 @@ fn apply_keyboard_input(
             .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
         {
             runtime_shell.battle_fanfare_messages.pop_front();
-            if let Err(error) = queue_visible_shell_sound_effect(
-                &mut runtime_shell,
-                "SFX_DEX_FANFARE_50_79",
-            ) {
+            if let Err(error) =
+                queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+            {
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
         }
@@ -811,28 +911,26 @@ fn apply_keyboard_input(
     if let Some(frames) = runtime_shell.visible_script_delay_frames.as_mut() {
         *frames = frames.saturating_sub(1);
     }
-    if runtime_shell.visible_strength_notice_phase
-        == Some(VisibleStrengthNoticePhase::CryPause)
-        && runtime_shell.visible_script_delay_frames == Some(0)
-    {
-        runtime_shell.visible_script_delay_frames = None;
-        let Some(next) = runtime_shell.field_notice_queue.pop_front() else {
-            let error = anyhow::anyhow!(
-                "Strength cry pause finished without the source MoveBoulderText"
-            );
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-            runtime_shell.visible_strength_notice_phase = None;
-            return;
-        };
-        runtime_shell.field_notice = Some(next);
-        runtime_shell.visible_strength_notice_phase =
-            Some(VisibleStrengthNoticePhase::MoveText);
-        mark_runtime_snapshot_dirty(&mut runtime_shell);
-        return;
-    }
     if runtime_shell.visible_script_delay_frames == Some(0) {
         if let Err(error) = drain_visible_delays(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(format!("{error:#}"));
+        }
+        return;
+    }
+    if runtime_shell.visible_special_text_pause_frames.is_some() {
+        if let Err(error) = advance_visible_special_text_pause(&mut runtime_shell) {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(format!("{error:#}"));
+        }
+        return;
+    }
+    if runtime_shell
+        .pending_remember_password
+        .as_ref()
+        .is_some_and(|prompt| prompt.closing_frames.is_some())
+    {
+        if let Err(error) = advance_visible_remember_password_prompt(&mut runtime_shell) {
             record_visible_runtime_error(&mut runtime_shell, &error);
             runtime_shell.last_error = Some(format!("{error:#}"));
         }
@@ -856,8 +954,6 @@ fn apply_keyboard_input(
         runtime_shell.pending_field_travel_delay_frames = None;
         runtime_shell.field_notice = None;
         runtime_shell.field_notice_queue.clear();
-        runtime_shell.pending_sweet_scent_nothing_notice = false;
-        runtime_shell.visible_strength_notice_phase = None;
         runtime_shell.pending_field_travel_arrival = false;
         if runtime_shell.visible_field_travel_animation
             == Some(VisibleFieldTravelAnimation::TeleportFrom)
@@ -879,8 +975,9 @@ fn apply_keyboard_input(
         mark_runtime_snapshot_dirty(&mut runtime_shell);
         return;
     }
-    runtime_shell.poison_flash_frames_remaining =
-        runtime_shell.poison_flash_frames_remaining.saturating_sub(1);
+    runtime_shell.poison_flash_frames_remaining = runtime_shell
+        .poison_flash_frames_remaining
+        .saturating_sub(1);
     if let Some(sign) = runtime_shell.visible_map_name_sign.as_mut() {
         sign.frames_remaining = sign.frames_remaining.saturating_sub(1);
         if sign.frames_remaining == 0 {
@@ -906,7 +1003,11 @@ fn apply_keyboard_input(
     {
         return;
     }
-    if runtime_shell.pending_name_input.is_some() || runtime_shell.pending_name_choice.is_some() {
+    if runtime_shell.pending_name_input.is_some()
+        || runtime_shell.pending_mail_input.is_some()
+        || runtime_shell.pending_mail_read.is_some()
+        || runtime_shell.pending_name_choice.is_some()
+    {
         return;
     }
     if runtime_shell.intro_screen.is_some() {
@@ -949,11 +1050,9 @@ fn apply_keyboard_input(
         || runtime_shell.field_text_reveal.is_some()
         || runtime_shell.field_notice.is_some()
         || runtime_shell.pc_notice.is_some()
+        || runtime_shell.visible_wait_sfx_boundary
     {
-        match tick_visible_field_text_reveal(
-            &mut runtime_shell,
-            text_acceleration_requested,
-        ) {
+        match tick_visible_field_text_reveal(&mut runtime_shell, text_acceleration_requested) {
             Ok(true) => mark_runtime_presentation_dirty(&mut runtime_shell),
             Ok(false) => {}
             Err(error) => {
@@ -962,11 +1061,34 @@ fn apply_keyboard_input(
                 return;
             }
         }
-        // `writetext` prints its complete text and then continues. Only the
-        // source `waitbutton`/`promptbutton` commands require a player press.
-        // Treating every writetext boundary as an acknowledgement trapped
-        // radio broadcasts on Oak's first line and let repeated A presses
-        // race subsequent pause/text commands.
+        // `waitsfx` is an autonomous ASM sequencing fence. Poll it from the
+        // frame loop so the script resumes as soon as the transient channel
+        // finishes; requiring an unrelated A/B press leaves item rewards and
+        // other fanfares parked forever on their preceding textbox.
+        if runtime_shell.visible_wait_sfx_boundary {
+            match runtime_shell.shell.presentation_snapshot() {
+                Ok(snapshot) => {
+                    match advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot) {
+                        Ok(true) => return,
+                        Ok(false) => {}
+                        Err(error) => {
+                            record_visible_runtime_error(&mut runtime_shell, &error);
+                            runtime_shell.last_error = Some(error.to_string());
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        // Crystal's PrintText is synchronous: no command after `writetext`
+        // may begin until the visual printer has finished. The TextLabel
+        // boundary therefore resumes automatically only after every page;
+        // a following waitbutton/promptbutton remains the player boundary.
         let auto_continue_writetext = runtime_shell
             .shell
             .snapshot()
@@ -975,22 +1097,11 @@ fn apply_keyboard_input(
                 snapshot.ui.text_window_open
                     && snapshot.ui.text.is_some()
                     && snapshot.ui.pending_yes_no.is_none()
-                    && visible_field_dialogue_is_fully_revealed(&runtime_shell, snapshot)
+                    && visible_field_dialogue_is_entirely_consumed(&runtime_shell, snapshot)
             })
-            .and_then(|_| runtime_shell.active_script_cursor.as_ref())
-            .and_then(|cursor| {
-                runtime_shell
-                    .shell
-                    .runtime()
-                    .compiled_script_command_name(
-                        &cursor.source_script,
-                        cursor.next_command_index,
-                    )
-                    .ok()
-            })
-            .is_some_and(|command| !matches!(command.as_str(), "waitbutton" | "promptbutton"));
+            .is_some_and(|snapshot| snapshot.script_events.pending_text_label.is_some());
         if auto_continue_writetext {
-            if let Err(error) = continue_visible_script_after_prompt(&mut runtime_shell) {
+            if let Err(error) = advance_visible_text_label(&mut runtime_shell) {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
             }
@@ -999,15 +1110,10 @@ fn apply_keyboard_input(
         // UseFlashTextScript is text_asm rather than the ordinary
         // field-move text script: once the line has printed it immediately
         // plays SFX_FLASH and runs BlindingFlash, with no button wait.
-        if runtime_shell.visible_flash_animation.is_some()
-            && runtime_shell.field_notice.is_some()
-        {
+        if runtime_shell.visible_flash_animation.is_some() && runtime_shell.field_notice.is_some() {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
-                    if visible_field_dialogue_is_fully_revealed(
-                        &runtime_shell,
-                        &snapshot,
-                    ) =>
+                    if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) =>
                 {
                     runtime_shell.field_notice = None;
                     if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
@@ -1015,8 +1121,60 @@ fn apply_keyboard_input(
                         runtime_shell.last_error = Some(error.to_string());
                         return;
                     }
-                    begin_pending_field_notice_effect(&mut runtime_shell);
+                    if let Err(error) = begin_pending_field_notice_effect(&mut runtime_shell) {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(error.to_string());
+                        return;
+                    }
                     mark_runtime_snapshot_dirty(&mut runtime_shell);
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        let item_ball_found_text_ready = runtime_shell
+            .visible_item_ball_notice
+            .as_ref()
+            .is_some_and(|notice| notice.phase == VisibleItemBallPhase::FoundText)
+            && runtime_shell.field_notice.is_some();
+        if item_ball_found_text_ready {
+            match runtime_shell.shell.presentation_snapshot() {
+                Ok(snapshot)
+                    if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) =>
+                {
+                    if let Err(error) = begin_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(error.to_string());
+                    }
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        let egg_hatch_text_sound_ready = runtime_shell
+            .visible_egg_hatch
+            .as_ref()
+            .is_some_and(|hatch| hatch.phase == VisibleEggHatchPhase::HatchText)
+            && runtime_shell.pending_field_notice_sound.as_deref() == Some("SFX_CAUGHT_MON");
+        if egg_hatch_text_sound_ready {
+            match runtime_shell.shell.presentation_snapshot() {
+                Ok(snapshot)
+                    if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) =>
+                {
+                    if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(error.to_string());
+                    }
                     return;
                 }
                 Ok(_) => {}
@@ -1036,10 +1194,7 @@ fn apply_keyboard_input(
         if automatic_field_effect_ready {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
-                    if visible_field_dialogue_is_fully_revealed(
-                        &runtime_shell,
-                        &snapshot,
-                    ) =>
+                    if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) =>
                 {
                     runtime_shell.field_notice = None;
                     if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
@@ -1047,38 +1202,11 @@ fn apply_keyboard_input(
                         runtime_shell.last_error = Some(error.to_string());
                         return;
                     }
-                    begin_pending_field_notice_effect(&mut runtime_shell);
-                    mark_runtime_snapshot_dirty(&mut runtime_shell);
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    record_visible_runtime_error(&mut runtime_shell, &error);
-                    runtime_shell.last_error = Some(error.to_string());
-                    return;
-                }
-            }
-        }
-        if runtime_shell.visible_strength_notice_phase
-            == Some(VisibleStrengthNoticePhase::UseText)
-            && runtime_shell.field_notice.is_some()
-        {
-            match runtime_shell.shell.presentation_snapshot() {
-                Ok(snapshot)
-                    if visible_field_dialogue_is_fully_revealed(
-                        &runtime_shell,
-                        &snapshot,
-                    ) =>
-                {
-                    runtime_shell.field_notice = None;
-                    if let Err(error) = play_pending_field_notice_sound(&mut runtime_shell) {
+                    if let Err(error) = begin_pending_field_notice_effect(&mut runtime_shell) {
                         record_visible_runtime_error(&mut runtime_shell, &error);
                         runtime_shell.last_error = Some(error.to_string());
                         return;
                     }
-                    runtime_shell.visible_script_delay_frames = Some(3);
-                    runtime_shell.visible_strength_notice_phase =
-                        Some(VisibleStrengthNoticePhase::CryPause);
                     mark_runtime_snapshot_dirty(&mut runtime_shell);
                     return;
                 }
@@ -1109,22 +1237,12 @@ fn apply_keyboard_input(
                     return;
                 }
             };
-            let auto_continue = visible_field_dialogue_is_fully_revealed(
-                &runtime_shell,
-                &field_snapshot,
-            ) && field_snapshot.ui.pending_text_wait.is_none()
-                && field_snapshot.ui.pending_yes_no.is_none()
-                && runtime_shell.active_script_cursor.is_some();
+            let auto_continue =
+                visible_field_dialogue_is_entirely_consumed(&runtime_shell, &field_snapshot)
+                    && field_snapshot.ui.pending_text_wait.is_none()
+                    && field_snapshot.ui.pending_yes_no.is_none()
+                    && runtime_shell.active_script_cursor.is_some();
             if auto_continue {
-                match advance_visible_completed_field_text_page(&mut runtime_shell, &field_snapshot) {
-                    Ok(true) => return,
-                    Ok(false) => {}
-                    Err(error) => {
-                        record_visible_runtime_error(&mut runtime_shell, &error);
-                        runtime_shell.last_error = Some(format!("{error:#}"));
-                        return;
-                    }
-                }
                 if let Err(error) = advance_visible_script_until_player_boundary(&mut runtime_shell)
                 {
                     record_visible_runtime_error(&mut runtime_shell, &error);
@@ -1133,7 +1251,9 @@ fn apply_keyboard_input(
             }
             return;
         }
-    } else if runtime_shell.field_text_reveal.take().is_some() {
+    } else if runtime_shell.active_script_cursor.is_none()
+        && runtime_shell.field_text_reveal.take().is_some()
+    {
         // The typewriter is presentation-only state. A script can close its
         // final textbox while resuming several commands in the same A press
         // (Mom's introductory script does exactly this), leaving no pending
@@ -1143,9 +1263,7 @@ fn apply_keyboard_input(
     }
 
     if runtime_shell.pending_overworld_step_boundary.is_some() {
-        if runtime_shell.player_walk_frame_ticks > 0
-            || runtime_shell.visible_ledge_jump.is_some()
-        {
+        if runtime_shell.player_walk_frame_ticks > 0 || runtime_shell.visible_ledge_jump.is_some() {
             // A map connection is still the same uninterrupted overworld
             // walk. Sample the live D-pad while its retained source-map step
             // finishes so a corner pressed during the seam is not lost before
@@ -1174,6 +1292,9 @@ fn apply_keyboard_input(
             .take()
             .expect("checked pending overworld step boundary");
         match boundary {
+            PendingOverworldStepBoundary::TrainerSight => {
+                run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
+            }
             PendingOverworldStepBoundary::Arrival => {
                 runtime_shell.pending_overworld_warp_scene = None;
                 run_bevy_action(&mut runtime_shell, settle_visible_overworld_frame_arrival);
@@ -1181,14 +1302,18 @@ fn apply_keyboard_input(
             PendingOverworldStepBoundary::CoordEvent => {
                 run_bevy_action(&mut runtime_shell, execute_last_coord_event_script);
             }
-            PendingOverworldStepBoundary::TrainerSight => {
-                run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
+            PendingOverworldStepBoundary::PhoneCall => {
+                run_bevy_action(&mut runtime_shell, advance_visible_script_until_player_boundary);
             }
             PendingOverworldStepBoundary::WildBattle => {
                 run_bevy_action(&mut runtime_shell, settle_visible_battle_after_action);
             }
-            PendingOverworldStepBoundary::PoisonBlackout => {
-                run_bevy_action(&mut runtime_shell, resolve_visible_blackout);
+            PendingOverworldStepBoundary::PoisonBlackout(step_event) => {
+                run_bevy_action(&mut runtime_shell, |shell| {
+                    present_visible_step_event(shell, &step_event)?;
+                    shell.pending_poison_blackout = true;
+                    Ok(())
+                });
             }
             PendingOverworldStepBoundary::StepEvent(step_event) => {
                 run_bevy_action(&mut runtime_shell, |shell| {
@@ -1250,34 +1375,29 @@ fn apply_keyboard_input(
         && keys.pressed(KeyCode::ShiftRight)
         && has_visible_shell_select_action(&mut runtime_shell);
     let direction_requested = plain_input
-        && [
-            KeyCode::ArrowUp,
-            KeyCode::ArrowDown,
-            KeyCode::ArrowLeft,
-            KeyCode::ArrowRight,
-        ]
-        .into_iter()
-        .any(|key| keys.pressed(key));
-    let shell_consumes_direction = direction_requested
-        && has_visible_shell_direction_action(&mut runtime_shell);
+        && (pending_direction_press.is_some()
+            || [
+                KeyCode::ArrowUp,
+                KeyCode::ArrowDown,
+                KeyCode::ArrowLeft,
+                KeyCode::ArrowRight,
+            ]
+            .into_iter()
+            .any(|key| keys.pressed(key)));
+    let shell_consumes_direction =
+        direction_requested && has_visible_shell_direction_action(&mut runtime_shell);
     let visible_shell_pressed = (plain_input
         && ((keys.just_pressed(KeyCode::KeyZ) && shell_consumes_a)
             || (keys.just_pressed(KeyCode::KeyX) && shell_consumes_b)
             || (keys.just_pressed(KeyCode::Enter) && shell_consumes_start)
             || (shell_consumes_direction
-                && (keys.just_pressed(KeyCode::ArrowUp)
-                    || keys.just_pressed(KeyCode::ArrowDown)
-                    || keys.just_pressed(KeyCode::ArrowLeft)
-                    || keys.just_pressed(KeyCode::ArrowRight)))))
+                && (just_pressed_overworld_direction(&keys).is_some()
+                    || pending_direction_press.is_some()))))
         || (!alt_pressed
             && !ctrl_pressed
             && keys.just_pressed(KeyCode::ShiftRight)
             && shell_consumes_select);
-    sync_overworld_held_directions(
-        &keys,
-        &mut runtime_shell,
-        shell_consumes_direction,
-    );
+    sync_overworld_held_directions(&keys, &mut runtime_shell, shell_consumes_direction);
     if visible_shell_pressed {
         return;
     }
@@ -1289,22 +1409,12 @@ fn apply_keyboard_input(
         shell_consumes_start,
         shell_consumes_select,
     );
-    let newly_pressed_direction = [
-        (KeyCode::ArrowUp, GameButton::Up),
-        (KeyCode::ArrowDown, GameButton::Down),
-        (KeyCode::ArrowLeft, GameButton::Left),
-        (KeyCode::ArrowRight, GameButton::Right),
-    ]
-    .into_iter()
-    .find_map(|(key, direction)| keys.just_pressed(key).then_some(direction));
+    let newly_pressed_direction = just_pressed_overworld_direction(&keys)
+        .or(pending_direction_press);
     buttons.retain(|button| !is_direction_button(*button));
     if !shell_consumes_direction
-        && let Some(direction) = newly_pressed_direction.or_else(|| {
-            runtime_shell
-                .overworld_held_directions
-                .back()
-                .copied()
-        })
+        && let Some(direction) = newly_pressed_direction
+            .or_else(|| runtime_shell.overworld_held_directions.back().copied())
     {
         buttons.insert(0, direction);
     }
@@ -1409,8 +1519,7 @@ fn apply_keyboard_input(
                     .pending_audio
                     .iter()
                     .any(|command| !matches!(command.kind, ModpackAudioKind::Music))
-                && let Err(error) =
-                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
+                && let Err(error) = queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
             {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
@@ -1431,6 +1540,7 @@ fn apply_keyboard_input(
     let mut execute_overworld_arrival = false;
     let mut execute_coord_event_script = false;
     let mut execute_trainer_sight_script = false;
+    let mut execute_phone_call_script = false;
     let mut execute_interaction_script = false;
     let mut execute_wild_battle_boundary = false;
     let mut execute_poison_blackout = false;
@@ -1440,11 +1550,9 @@ fn apply_keyboard_input(
     let mut movement_scene_before_final_tick = None;
     let mut tick_error = None;
     let mut player_facing_changed = false;
-    for _ in 0..elapsed_ticks {
-        let movement_scene_before_tick = if buttons
-            .iter()
-            .copied()
-            .any(is_direction_button)
+    let mut remaining_catch_up_ticks = 0;
+    for tick_index in 0..elapsed_ticks {
+        let movement_scene_before_tick = if buttons.iter().copied().any(is_direction_button)
             || runtime_shell
                 .shell
                 .session()
@@ -1508,18 +1616,7 @@ fn apply_keyboard_input(
             Ok(frame) => {
                 player_facing_changed |= runtime_shell.shell.session().overworld.player.facing
                     != player_facing_before_tick;
-                let step_event_boundary = frame.step_events.as_ref().is_some_and(|events| {
-                    events.repel_expired.is_some()
-                        || events.egg_hatched
-                        || events.poison_result.is_some()
-                });
-                let reached_boundary = step_event_boundary
-                    || frame.coord_event.is_some()
-                    || frame.trainer_sight.is_some()
-                    || frame.interaction.is_some()
-                    || frame.warp.is_some()
-                    || frame.connection.is_some()
-                    || frame.wild_battle.is_some();
+                let reached_boundary = overworld_frame_reaches_presentation_boundary(&frame);
                 let object_tiles_after_tick = runtime_shell
                     .shell
                     .session()
@@ -1559,12 +1656,14 @@ fn apply_keyboard_input(
                     } else {
                         Direction::Right
                     };
-                    runtime_shell.pending_follower_walks.push_back(VisibleFollowerWalk {
-                        object_id: follower_id.clone(),
-                        from,
-                        to,
-                        direction,
-                    });
+                    runtime_shell
+                        .pending_follower_walks
+                        .push_back(VisibleFollowerWalk {
+                            object_id: follower_id.clone(),
+                            from,
+                            to,
+                            direction,
+                        });
                     runtime_shell
                         .follower_visible_tile_overrides
                         .entry(follower_id)
@@ -1595,7 +1694,9 @@ fn apply_keyboard_input(
                             })
                     });
                 for (object_id, from) in newly_walking {
-                    runtime_shell.object_walk_from.insert(object_id.clone(), from);
+                    runtime_shell
+                        .object_walk_from
+                        .insert(object_id.clone(), from);
                     runtime_shell
                         .object_walk_frame_ticks_by_id
                         .insert(object_id.clone(), WALK_FRAME_HOLD_TICKS);
@@ -1620,34 +1721,23 @@ fn apply_keyboard_input(
                     .clone();
                 for (object_id, direction) in object_facings_after_tick {
                     if newly_walking_ids.contains(&object_id) {
-                        let phase = if runtime_shell.object_walk_directions.get(&object_id)
-                            == Some(&direction)
-                        {
-                            runtime_shell
-                                .object_walk_phases
-                                .get(&object_id)
-                                .copied()
-                                .unwrap_or(0)
-                                .wrapping_add(1)
-                                % 4
-                        } else {
-                            1
-                        };
-                        runtime_shell.object_walk_phases.insert(object_id.clone(), phase);
-                        runtime_shell.object_walk_directions.insert(object_id, direction);
+                        advance_object_walk_phase(&mut runtime_shell, &object_id, direction);
                     } else if object_facings_before_tick.get(&object_id) != Some(&direction) {
-                        runtime_shell.object_walk_phases.insert(object_id.clone(), 0);
-                        runtime_shell.object_walk_directions.insert(object_id, direction);
+                        runtime_shell
+                            .object_walk_phases
+                            .insert(object_id.clone(), 0);
+                        runtime_shell
+                            .object_walk_direction_phases
+                            .insert((object_id, direction), 0);
                     }
                 }
                 movement_scene_before_final_tick = movement_scene_before_tick;
                 final_frame = Some(frame);
+                remaining_catch_up_ticks = elapsed_ticks.saturating_sub(tick_index + 1);
                 if reached_boundary
-                    || final_frame
-                        .as_ref()
-                        .is_some_and(|frame| {
-                            frame.movement.is_some() || frame.autonomous_objects_changed
-                        })
+                    || final_frame.as_ref().is_some_and(|frame| {
+                        frame.movement.is_some() || frame.autonomous_objects_changed
+                    })
                 {
                     // A queued corner belongs only to this continuous walk.
                     // Never carry it through a warp, encounter, trainer, or
@@ -1710,11 +1800,11 @@ fn apply_keyboard_input(
                 frame.snapshot.mode,
                 MovementMode::Normal | MovementMode::Bike | MovementMode::Skate
             ) && !runtime_shell.transient_audio_playing
-                && !runtime_shell.pending_audio.iter().any(|command| {
-                    !matches!(command.kind, ModpackAudioKind::Music)
-                })
-                && let Err(error) =
-                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
+                && !runtime_shell
+                    .pending_audio
+                    .iter()
+                    .any(|command| !matches!(command.kind, ModpackAudioKind::Music))
+                && let Err(error) = queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_BUMP")
             {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
@@ -1730,6 +1820,7 @@ fn apply_keyboard_input(
                 || direction_held
                 || frame.autonomous_objects_changed
                 || frame.step_events.is_some()
+                || frame.phone_call.is_some()
                 || frame.coord_event.is_some()
                 || frame.trainer_sight.is_some()
                 || frame.interaction.is_some()
@@ -1746,9 +1837,11 @@ fn apply_keyboard_input(
             }
             if player_moved {
                 let (mut from, speed_multiplier) = match frame.movement.as_ref() {
-                    Some(StepOutcome::Moved { from, speed_multiplier, .. }) => {
-                        (*from, (*speed_multiplier).max(1))
-                    }
+                    Some(StepOutcome::Moved {
+                        from,
+                        speed_multiplier,
+                        ..
+                    }) => (*from, (*speed_multiplier).max(1)),
                     _ => unreachable!("player_moved requires a moved outcome"),
                 };
                 if let Some(connection) = frame.connection.as_ref() {
@@ -1774,24 +1867,21 @@ fn apply_keyboard_input(
                 }
                 let step_ticks = (WALK_FRAME_HOLD_TICKS / speed_multiplier).max(1);
                 runtime_shell.player_walk_from = Some(from);
-                let previous_stride = runtime_shell.player_walk_stride;
-                runtime_shell.player_walk_stride = next_player_walk_stride(
-                    runtime_shell.player_walk_frame_ticks,
-                    runtime_shell.player_walk_stride,
-                );
-                if previous_stride && !runtime_shell.player_walk_stride {
-                    runtime_shell.player_walk_mirror_stride =
-                        !runtime_shell.player_walk_mirror_stride;
-                }
+                advance_player_walk_phase(&mut runtime_shell, frame.snapshot.facing);
                 runtime_shell.player_walk_total_ticks = step_ticks;
-                runtime_shell.player_walk_frame_ticks = step_ticks;
+                runtime_shell.player_walk_frame_ticks = visible_new_step_frames_remaining(
+                    step_ticks,
+                    remaining_catch_up_ticks,
+                );
                 runtime_shell.overworld_direction_repeat_ticks = step_ticks.saturating_sub(1);
             }
             if let Some(LedgeJumpOutcome::Jumped { from, to, .. }) = frame.ledge_jump {
                 runtime_shell.visible_ledge_jump = Some(VisibleLedgeJump {
                     from,
                     to,
-                    frame: 0,
+                    frame: u8::try_from(remaining_catch_up_ticks)
+                        .unwrap_or(u8::MAX)
+                        .min(15),
                 });
                 let BevyRuntimeShell {
                     shell,
@@ -1820,6 +1910,7 @@ fn apply_keyboard_input(
             execute_overworld_arrival = frame.warp.is_some() || frame.connection.is_some();
             execute_coord_event_script = frame.coord_event.is_some();
             execute_trainer_sight_script = frame.trainer_sight.is_some();
+            execute_phone_call_script = frame.phone_call.is_some();
             let interaction_targets_walking_object = frame
                 .interaction
                 .as_ref()
@@ -1830,9 +1921,7 @@ fn apply_keyboard_input(
                     } => Some(object_id),
                     _ => None,
                 })
-                .is_some_and(|object_id| {
-                    runtime_shell.object_walk_from.contains_key(object_id)
-                });
+                .is_some_and(|object_id| runtime_shell.object_walk_from.contains_key(object_id));
             execute_interaction_script = keys.just_pressed(KeyCode::KeyZ)
                 && runtime_shell.player_walk_frame_ticks == 0
                 && !shell_consumes_a
@@ -1864,18 +1953,17 @@ fn apply_keyboard_input(
                     .iter()
                     .flatten()
                     .any(|pokemon| {
-                        !pokemon.is_egg
-                            && pokemon.species.id != "EGG"
-                            && pokemon.hp > 0
+                        !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0
                     });
-            let movement_is_visibly_in_flight = player_moved
-                || matches!(frame.ledge_jump, Some(LedgeJumpOutcome::Jumped { .. }));
+            let movement_is_visibly_in_flight = overworld_boundary_waits_for_visible_landing(
+                &frame,
+                runtime_shell.player_walk_frame_ticks,
+                runtime_shell.visible_ledge_jump.is_some(),
+            );
             if movement_is_visibly_in_flight {
                 if frame.warp.is_some()
-                    && let (
-                        Some(mut source_scene),
-                        Some(StepOutcome::Moved { from, to, .. }),
-                    ) = (movement_scene_before_final_tick, frame.movement.as_ref())
+                    && let (Some(mut source_scene), Some(StepOutcome::Moved { from, to, .. })) =
+                        (movement_scene_before_final_tick, frame.movement.as_ref())
                 {
                     // Core has already installed the destination session. Keep
                     // the source map and place its presentation target on the
@@ -1890,30 +1978,21 @@ fn apply_keyboard_input(
                     } else {
                         Direction::Up
                     };
-                    runtime_shell.pending_overworld_warp_scene =
-                        Some(Arc::new(source_scene));
+                    runtime_shell.pending_overworld_warp_scene = Some(Arc::new(source_scene));
                 }
-                runtime_shell.pending_overworld_step_boundary = if execute_overworld_arrival {
-                    Some(PendingOverworldStepBoundary::Arrival)
-                } else if execute_coord_event_script {
-                    Some(PendingOverworldStepBoundary::CoordEvent)
-                } else if execute_trainer_sight_script {
-                    Some(PendingOverworldStepBoundary::TrainerSight)
-                } else if execute_wild_battle_boundary {
-                    Some(PendingOverworldStepBoundary::WildBattle)
-                } else if execute_poison_blackout {
-                    Some(PendingOverworldStepBoundary::PoisonBlackout)
-                } else {
-                    visible_step_event
-                        .clone()
-                        .map(PendingOverworldStepBoundary::StepEvent)
-                };
+                runtime_shell.pending_overworld_step_boundary =
+                    pending_overworld_step_boundary_for_frame(
+                        &frame,
+                        execute_poison_blackout,
+                        visible_step_event.clone(),
+                    );
                 if runtime_shell.pending_overworld_step_boundary.is_some() {
                     // A buffered direction belongs only to uninterrupted
                     // overworld walking. Coord scripts, warps, trainer sight,
-                    // battles, and step events take ownership at this tile;
-                    // replaying the edge after their relocation/cutscene can
-                    // move the player out from under the authored boundary.
+                    // calls, battles, and step events take ownership at this
+                    // tile; replaying the edge after their relocation or
+                    // cutscene can move the player out from under the authored
+                    // boundary.
                     runtime_shell.overworld_buffered_direction = None;
                     if matches!(
                         runtime_shell.pending_overworld_step_boundary,
@@ -1934,6 +2013,7 @@ fn apply_keyboard_input(
                     execute_overworld_arrival = false;
                     execute_coord_event_script = false;
                     execute_trainer_sight_script = false;
+                    execute_phone_call_script = false;
                     execute_wild_battle_boundary = false;
                     execute_poison_blackout = false;
                     visible_step_event = None;
@@ -1990,12 +2070,14 @@ fn apply_keyboard_input(
     if !tick_ok {
         return;
     }
-    if execute_overworld_arrival {
+    if execute_trainer_sight_script {
+        run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
+    } else if execute_overworld_arrival {
         run_bevy_action(&mut runtime_shell, settle_visible_overworld_frame_arrival);
     } else if execute_coord_event_script {
         run_bevy_action(&mut runtime_shell, execute_last_coord_event_script);
-    } else if execute_trainer_sight_script {
-        run_bevy_action(&mut runtime_shell, execute_last_trainer_sight_script);
+    } else if execute_phone_call_script {
+        run_bevy_action(&mut runtime_shell, advance_visible_script_until_player_boundary);
     } else if execute_interaction_script {
         runtime_shell.overworld_interaction_consumed_a = true;
         run_bevy_action(&mut runtime_shell, execute_last_interaction_script);
@@ -2007,7 +2089,13 @@ fn apply_keyboard_input(
         }
         run_bevy_action(&mut runtime_shell, settle_visible_battle_after_action);
     } else if execute_poison_blackout {
-        run_bevy_action(&mut runtime_shell, resolve_visible_blackout);
+        if let Some(step_event) = visible_step_event {
+            run_bevy_action(&mut runtime_shell, |shell| {
+                present_visible_step_event(shell, &step_event)?;
+                shell.pending_poison_blackout = true;
+                Ok(())
+            });
+        }
     } else if let Some(step_event) = visible_step_event {
         run_bevy_action(&mut runtime_shell, |shell| {
             present_visible_step_event(shell, &step_event)
@@ -2045,6 +2133,52 @@ fn apply_keyboard_input(
     }
 }
 
+fn overworld_frame_reaches_presentation_boundary(frame: &crate::RuntimeOverworldFrame) -> bool {
+    frame.step_events.as_ref().is_some_and(|events| {
+        events.repel_expired.is_some()
+            || events.egg_hatched
+            || events.poison_result.is_some()
+    }) || frame.trainer_sight.is_some()
+        || frame.coord_event.is_some()
+        || frame.phone_call.is_some()
+        || frame.interaction.is_some()
+        || frame.warp.is_some()
+        || frame.connection.is_some()
+        || frame.wild_battle.is_some()
+}
+
+fn overworld_boundary_waits_for_visible_landing(
+    frame: &crate::RuntimeOverworldFrame,
+    retained_walk_frames: u8,
+    retained_ledge_jump: bool,
+) -> bool {
+    matches!(frame.movement, Some(StepOutcome::Moved { .. }))
+        || matches!(frame.ledge_jump, Some(LedgeJumpOutcome::Jumped { .. }))
+        || (frame.phone_call.is_some() && (retained_walk_frames > 0 || retained_ledge_jump))
+}
+
+fn pending_overworld_step_boundary_for_frame(
+    frame: &crate::RuntimeOverworldFrame,
+    poison_blackout: bool,
+    visible_step_event: Option<crate::core::systems::step_events::StepEventResult>,
+) -> Option<PendingOverworldStepBoundary> {
+    if frame.trainer_sight.is_some() {
+        Some(PendingOverworldStepBoundary::TrainerSight)
+    } else if frame.warp.is_some() || frame.connection.is_some() {
+        Some(PendingOverworldStepBoundary::Arrival)
+    } else if frame.coord_event.is_some() {
+        Some(PendingOverworldStepBoundary::CoordEvent)
+    } else if frame.phone_call.is_some() {
+        Some(PendingOverworldStepBoundary::PhoneCall)
+    } else if frame.wild_battle.is_some() {
+        Some(PendingOverworldStepBoundary::WildBattle)
+    } else if poison_blackout {
+        visible_step_event.map(PendingOverworldStepBoundary::PoisonBlackout)
+    } else {
+        visible_step_event.map(PendingOverworldStepBoundary::StepEvent)
+    }
+}
+
 fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell
         .visible_overworld_emote
@@ -2079,18 +2213,30 @@ fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) 
     let next = match direction {
         Direction::Up => TilePosition {
             x: current.x,
-            y: current.y.checked_sub(stride).context("trainer approach moved above runtime bounds")?,
+            y: current
+                .y
+                .checked_sub(stride)
+                .context("trainer approach moved above runtime bounds")?,
         },
         Direction::Down => TilePosition {
             x: current.x,
-            y: current.y.checked_add(stride).context("trainer approach moved below runtime bounds")?,
+            y: current
+                .y
+                .checked_add(stride)
+                .context("trainer approach moved below runtime bounds")?,
         },
         Direction::Left => TilePosition {
-            x: current.x.checked_sub(stride).context("trainer approach moved left of runtime bounds")?,
+            x: current
+                .x
+                .checked_sub(stride)
+                .context("trainer approach moved left of runtime bounds")?,
             y: current.y,
         },
         Direction::Right => TilePosition {
-            x: current.x.checked_add(stride).context("trainer approach moved right of runtime bounds")?,
+            x: current
+                .x
+                .checked_add(stride)
+                .context("trainer approach moved right of runtime bounds")?,
             y: current.y,
         },
     };
@@ -2116,11 +2262,93 @@ fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) 
 }
 
 fn next_player_walk_stride(_remaining_ticks: u8, current_stride: bool) -> bool {
-    // This bit selects the stepping foot, not standing versus walking. The
-    // renderer keeps the action frame for every in-flight tile and mirrors
-    // vertical art on alternate steps. Showing standing art for one entire
-    // moving tile is visible skating rather than a walk cycle.
+    // TypeScript primes one entry of [standing, step, standing, mirrored step]
+    // for each tile. `true` selects an action frame; the separate mirror bit
+    // distinguishes the two action frames.
     !current_stride
+}
+
+fn visible_new_step_frames_remaining(step_ticks: u8, catch_up_ticks_after_step: u32) -> u8 {
+    let elapsed = u8::try_from(catch_up_ticks_after_step).unwrap_or(u8::MAX);
+    step_ticks.saturating_sub(elapsed)
+}
+
+fn advance_player_walk_phase(runtime_shell: &mut BevyRuntimeShell, direction: Direction) {
+    let phase = next_directional_walk_phase(
+        runtime_shell
+            .player_walk_direction_phases
+            .get(&direction)
+            .copied(),
+    );
+    runtime_shell
+        .player_walk_direction_phases
+        .insert(direction, phase);
+    runtime_shell.player_walk_stride = player_walk_uses_action_frame(phase & 1 == 1);
+    runtime_shell.player_walk_mirror_stride = phase == 3;
+}
+
+fn player_walk_uses_action_frame(stride: bool) -> bool {
+    stride
+}
+
+fn object_walk_uses_action_frame(phase: u8) -> bool {
+    phase & 1 == 1
+}
+
+fn object_walk_uses_mirrored_action_frame(phase: u8) -> bool {
+    phase & 3 == 3
+}
+
+fn advance_visible_walk_timers(runtime_shell: &mut BevyRuntimeShell, elapsed_ticks: u8) {
+    if elapsed_ticks == 0 {
+        return;
+    }
+    let player_landed = runtime_shell.player_walk_frame_ticks > 0
+        && runtime_shell.player_walk_frame_ticks <= elapsed_ticks;
+    runtime_shell.player_walk_frame_ticks = runtime_shell
+        .player_walk_frame_ticks
+        .saturating_sub(elapsed_ticks);
+    if runtime_shell.player_walk_frame_ticks == 0 {
+        runtime_shell.player_walk_from = None;
+    }
+    if player_landed {
+        let overworld = &mut runtime_shell.shell.session_mut().overworld;
+        overworld.player_last_runtime_tile = None;
+        overworld.player_last_tile_occupied_until_frame = 0;
+    }
+    runtime_shell.object_walk_frame_ticks = runtime_shell
+        .object_walk_frame_ticks
+        .saturating_sub(elapsed_ticks);
+    for remaining in runtime_shell.object_walk_frame_ticks_by_id.values_mut() {
+        *remaining = remaining.saturating_sub(elapsed_ticks);
+    }
+    let landed_object_ids = runtime_shell
+        .object_walk_frame_ticks_by_id
+        .iter()
+        .filter_map(|(object_id, remaining)| (*remaining == 0).then_some(object_id.clone()))
+        .collect::<Vec<_>>();
+    let object_landed = !landed_object_ids.is_empty();
+    for object_id in landed_object_ids {
+        runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
+        runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
+        runtime_shell.object_walk_from.remove(&object_id);
+        runtime_shell.follower_visible_tile_overrides.remove(&object_id);
+        let overworld = &mut runtime_shell.shell.session_mut().overworld;
+        overworld.object_last_runtime_tiles.remove(&object_id);
+        overworld.object_last_tiles_occupied_until_frame.remove(&object_id);
+    }
+    if player_landed || object_landed {
+        start_next_queued_follower_walk(runtime_shell);
+        mark_runtime_snapshot_dirty(runtime_shell);
+    }
+    if runtime_shell.object_walk_frame_ticks == 0 {
+        runtime_shell.trainer_walk_from = None;
+        if runtime_shell.pending_trainer_sight.is_none()
+            && runtime_shell.object_walk_frame_ticks_by_id.is_empty()
+        {
+            runtime_shell.object_walk_stride = false;
+        }
+    }
 }
 
 fn start_next_queued_follower_walk(runtime_shell: &mut BevyRuntimeShell) {
@@ -2157,39 +2385,59 @@ fn advance_object_walk_phase(
     object_id: &str,
     direction: Direction,
 ) {
-    let phase = if runtime_shell.object_walk_directions.get(object_id) == Some(&direction) {
+    // TypeScript owns one SpriteAnimation per direction. Preserve that same
+    // independent four-frame gait for followers that turn a corner and later
+    // return to a direction they have already used.
+    let direction_key = (object_id.to_string(), direction);
+    let phase = next_directional_walk_phase(
         runtime_shell
-            .object_walk_phases
-            .get(object_id)
-            .copied()
-            .unwrap_or(0)
-            .wrapping_add(1)
-            % 4
-    } else {
-        1
-    };
-    runtime_shell.object_walk_phases.insert(object_id.to_string(), phase);
+            .object_walk_direction_phases
+            .get(&direction_key)
+            .copied(),
+    );
     runtime_shell
-        .object_walk_directions
-        .insert(object_id.to_string(), direction);
+        .object_walk_direction_phases
+        .insert(direction_key, phase);
+    runtime_shell
+        .object_walk_phases
+        .insert(object_id.to_string(), phase);
 }
 
-fn start_next_visible_script_movement_phase(
-    runtime_shell: &mut BevyRuntimeShell,
-) -> Result<bool> {
+fn next_directional_walk_phase(previous_direction_phase: Option<u8>) -> u8 {
+    previous_direction_phase.unwrap_or(0).wrapping_add(1) % 4
+}
+
+fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
     loop {
-        let next = runtime_shell.visible_script_movement.as_mut().and_then(|movement| {
-            movement
-                .phases
-                .pop_front()
-                .map(|phase| (movement.object_id.clone(), phase))
-        });
+        let next = runtime_shell
+            .visible_script_movement
+            .as_mut()
+            .and_then(|movement| {
+                movement
+                    .phases
+                    .pop_front()
+                    .map(|phase| (movement.object_id.clone(), phase))
+            });
         let Some((object_id, phase)) = next else {
+            // The follower is deliberately one command behind its leader.
+            // Once the leader consumes its final phase, the last queued
+            // follower command still has to animate before this retained
+            // scene can be released to the authoritative final snapshot.
+            if drain_visible_follower_step(runtime_shell)? {
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(true);
+            }
             let pending = runtime_shell
                 .visible_script_movement
                 .as_mut()
                 .and_then(|movement| movement.pending_programs.pop_front());
             if let Some(program) = pending {
+                if let Some(movement) = runtime_shell.visible_script_movement.as_ref() {
+                    if movement.object_id == "PLAYER" {
+                        runtime_shell.visible_player_sprite_y_offset =
+                            movement.stationary_y_offset;
+                    }
+                }
                 let revealed_object = if !program.previous_hidden && program.object_id != "PLAYER" {
                     runtime_shell
                         .shell
@@ -2253,6 +2501,11 @@ fn start_next_visible_script_movement_phase(
                 movement.follower_object_id = program.follower_object_id;
                 movement.follower_queued_step = program.follower_queued_step;
                 continue;
+            }
+            if let Some(movement) = runtime_shell.visible_script_movement.as_ref() {
+                if movement.object_id == "PLAYER" {
+                    runtime_shell.visible_player_sprite_y_offset = movement.stationary_y_offset;
+                }
             }
             runtime_shell.visible_script_movement = None;
             runtime_shell.visible_script_movement_scene = None;
@@ -2332,9 +2585,11 @@ fn start_next_visible_script_movement_phase(
                     scene.visible_objects.retain(|object| {
                         object.object_identifier.as_deref() != Some(object_id.as_str())
                     });
-                } else if !scene.visible_objects.iter().any(|object| {
-                    object.object_identifier.as_deref() == Some(object_id.as_str())
-                }) {
+                } else if !scene
+                    .visible_objects
+                    .iter()
+                    .any(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+                {
                     scene.visible_objects.push(revealed_object.with_context(|| {
                         format!("visible script cannot reveal unknown object {object_id}")
                     })?);
@@ -2357,10 +2612,9 @@ fn start_next_visible_script_movement_phase(
                         }
                     })
                     .context("stationary movement actor has no retained facing")?;
-                let movement = runtime_shell
-                    .visible_script_movement
-                    .as_mut()
-                    .context("visible script movement disappeared while starting stationary effect")?;
+                let movement = runtime_shell.visible_script_movement.as_mut().context(
+                    "visible script movement disappeared while starting stationary effect",
+                )?;
                 movement.hold_frames_remaining = duration;
                 movement.active_jump_duration = None;
                 movement.active_uses_standing_frame = !matches!(
@@ -2379,13 +2633,18 @@ fn start_next_visible_script_movement_phase(
             VisibleScriptMovementPhase::ScreenShake { parameter } => {
                 runtime_shell.visible_earthquake = Some(VisibleEarthquake {
                     intensity: 1_u16 << ((parameter >> 6) & 0x3),
-                    frames_remaining: (parameter & 0x3f).max(1),
+                    frames_remaining: crate::core::timing::wrapping_byte_counter_ticks(
+                        (parameter & 0x3f) as u8,
+                    ),
                     phase: 0,
                 });
                 mark_runtime_snapshot_dirty(runtime_shell);
                 continue;
             }
-            VisibleScriptMovementPhase::Turn { direction, duration } => {
+            VisibleScriptMovementPhase::Turn {
+                direction,
+                duration,
+            } => {
                 let scene = Arc::make_mut(
                     runtime_shell
                         .visible_script_movement_scene
@@ -2447,16 +2706,15 @@ fn start_next_visible_script_movement_phase(
                     runtime_shell.player_walk_from = Some(from);
                     runtime_shell.player_walk_total_ticks = duration;
                     runtime_shell.player_walk_frame_ticks = duration;
-                    let previous_stride = runtime_shell.player_walk_stride;
-                    runtime_shell.player_walk_stride = !runtime_shell.player_walk_stride;
-                    if previous_stride && !runtime_shell.player_walk_stride {
-                        runtime_shell.player_walk_mirror_stride =
-                            !runtime_shell.player_walk_mirror_stride;
-                    }
+                    advance_player_walk_phase(runtime_shell, direction);
                 } else {
-                    scene.visible_object_runtime_tiles.insert(object_id.clone(), to);
+                    scene
+                        .visible_object_runtime_tiles
+                        .insert(object_id.clone(), to);
                     if update_facing {
-                        scene.visible_object_facings.insert(object_id.clone(), direction);
+                        scene
+                            .visible_object_facings
+                            .insert(object_id.clone(), direction);
                     }
                     advance_object_walk_phase(runtime_shell, &object_id, direction);
                     runtime_shell.trainer_walk_from = Some((object_id, from));
@@ -2503,11 +2761,21 @@ fn advance_visible_script_movement(runtime_shell: &mut BevyRuntimeShell) -> Resu
             .visible_script_movement
             .as_ref()
             .context("visible script movement disappeared while advancing step")?;
-        let movement_in_flight = if movement.object_id == "PLAYER" {
-            runtime_shell.player_walk_frame_ticks > 0
-        } else {
-            runtime_shell.object_walk_frame_ticks > 0
-        };
+        let leader_in_flight = visible_actor_walk_in_flight(
+            &movement.object_id,
+            runtime_shell.player_walk_frame_ticks,
+            runtime_shell.object_walk_frame_ticks,
+            &runtime_shell.object_walk_frame_ticks_by_id,
+        );
+        let follower_in_flight = movement.follower_object_id.as_deref().is_some_and(|object_id| {
+            visible_actor_walk_in_flight(
+                object_id,
+                runtime_shell.player_walk_frame_ticks,
+                runtime_shell.object_walk_frame_ticks,
+                &runtime_shell.object_walk_frame_ticks_by_id,
+            )
+        });
+        let movement_in_flight = leader_in_flight || follower_in_flight;
         if movement_in_flight {
             return Ok(true);
         }
@@ -2547,40 +2815,67 @@ fn advance_visible_script_movement(runtime_shell: &mut BevyRuntimeShell) -> Resu
     Ok(true)
 }
 
-fn update_visible_stationary_movement_frame(
-    runtime_shell: &mut BevyRuntimeShell,
-) -> Result<()> {
+fn visible_actor_walk_in_flight(
+    object_id: &str,
+    player_walk_frame_ticks: u8,
+    scripted_object_walk_frame_ticks: u8,
+    object_walk_frame_ticks_by_id: &BTreeMap<String, u8>,
+) -> bool {
+    if object_id == "PLAYER" {
+        player_walk_frame_ticks > 0
+    } else {
+        object_walk_frame_ticks_by_id
+            .get(object_id)
+            .copied()
+            .unwrap_or(scripted_object_walk_frame_ticks)
+            > 0
+    }
+}
+
+fn update_visible_stationary_movement_frame(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
         return Ok(());
     };
     let Some(effect) = movement.active_stationary_effect else {
         return Ok(());
     };
-    let elapsed = movement
-        .active_stationary_duration
-        .saturating_sub(movement.hold_frames_remaining.min(movement.active_stationary_duration));
+    let elapsed = movement.active_stationary_duration.saturating_sub(
+        movement
+            .hold_frames_remaining
+            .min(movement.active_stationary_duration),
+    );
     let stationary_y_offset = match effect {
         VisibleStationaryMovementEffect::TeleportRise => {
+            // StepFunction_TeleportFrom's InitSpinRise falls through into
+            // DoSpinRise. Its first rendered rise sample is therefore
+            // Sine($11, $60) - $60 == -1, not another frame at ground level.
             const OFFSETS: [i16; 17] = [
-                0, -1, -2, -5, -8, -12, -17, -22, -29, -36, -43, -51, -60, -69, -78, -87,
-                -96,
+                -1, -2, -5, -8, -12, -17, -22, -29, -36, -43, -51, -60, -69, -78, -87, -96, -96,
             ];
             OFFSETS[usize::from(elapsed.min(16))]
         }
         VisibleStationaryMovementEffect::TeleportWait => -96,
         VisibleStationaryMovementEffect::TeleportDescent => {
             const OFFSETS: [i16; 17] = [
-                -96, -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1,
-                0,
+                -96, -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1, 0,
             ];
             OFFSETS[usize::from(elapsed.min(16))]
         }
         VisibleStationaryMovementEffect::TeleportSpin => 0,
-        VisibleStationaryMovementEffect::SkyfallWait => 96,
+        // StepFunction_Skyfall's setup phase does not write
+        // OBJECT_SPRITE_Y_OFFSET. Scripted collapses inherit +$60 from a
+        // preceding skyfall_top, while an ordinary PIT tile inherits zero.
+        VisibleStationaryMovementEffect::SkyfallWait => {
+            runtime_shell.visible_player_sprite_y_offset
+        }
         VisibleStationaryMovementEffect::SkyfallFall => {
+            // StepFunction_Skyfall's setup countdown falls through into
+            // .Fall when it reaches zero. That same object tick increments
+            // OBJECT_JUMP_HEIGHT to one and writes Sine(1, $60) - $60;
+            // there is no extra frame at the inherited $60 offset between
+            // the setup and fall phases.
             const OFFSETS: [i16; 17] = [
-                96, -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1,
-                0,
+                -87, -78, -69, -60, -51, -43, -36, -29, -22, -17, -12, -8, -5, -2, -1, 0, 0,
             ];
             OFFSETS[usize::from(elapsed.min(16))]
         }
@@ -2622,6 +2917,7 @@ fn update_visible_stationary_movement_frame(
         VisibleStationaryMovementEffect::TeleportWait
             | VisibleStationaryMovementEffect::SkyfallWait
             | VisibleStationaryMovementEffect::SkyfallFall
+            | VisibleStationaryMovementEffect::SkyfallTop
             | VisibleStationaryMovementEffect::RockSmash
     ) {
         return Ok(());
@@ -2697,6 +2993,17 @@ fn game_button_direction(button: GameButton) -> Option<Direction> {
         GameButton::Right => Some(Direction::Right),
         _ => None,
     }
+}
+
+fn just_pressed_overworld_direction(keys: &ButtonInput<KeyCode>) -> Option<GameButton> {
+    [
+        (KeyCode::ArrowUp, GameButton::Up),
+        (KeyCode::ArrowDown, GameButton::Down),
+        (KeyCode::ArrowLeft, GameButton::Left),
+        (KeyCode::ArrowRight, GameButton::Right),
+    ]
+    .into_iter()
+    .find_map(|(key, direction)| keys.just_pressed(key).then_some(direction))
 }
 
 fn sync_overworld_held_directions(
@@ -2887,14 +3194,38 @@ fn apply_runtime_hotkeys(
         if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
             run_bevy_action(&mut runtime_shell, confirm_visible_name_choice);
         }
-        if keys.just_pressed(KeyCode::KeyX)
-            && runtime_shell.pending_standard_capture.is_some()
-        {
+        if keys.just_pressed(KeyCode::KeyX) && runtime_shell.pending_standard_capture.is_some() {
             run_bevy_action(&mut runtime_shell, |shell| {
                 shell.pending_name_choice = None;
                 finish_visible_capture_nickname(shell, None)
             });
         }
+        if keys.just_pressed(KeyCode::KeyX)
+            && runtime_shell.pending_egg_hatch_nickname.is_some()
+        {
+            run_bevy_action(&mut runtime_shell, |shell| {
+                shell.pending_name_choice = None;
+                finish_visible_egg_hatch_nickname(shell, None)
+            });
+        }
+        if keys.just_pressed(KeyCode::KeyX)
+            && runtime_shell.pending_gift_pokemon_nickname.is_some()
+        {
+            run_bevy_action(&mut runtime_shell, |shell| {
+                shell.pending_name_choice = None;
+                finish_visible_gift_pokemon_nickname(shell, None)
+            });
+        }
+        return;
+    }
+    if runtime_shell.pending_mail_read.is_some() {
+        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyX) {
+            run_bevy_action(&mut runtime_shell, close_visible_mail_read);
+        }
+        return;
+    }
+    if runtime_shell.pending_mail_input.is_some() {
+        apply_visible_mail_input_keys(&keys, &mut runtime_shell);
         return;
     }
     if runtime_shell.pending_name_input.is_some() {
@@ -3010,8 +3341,7 @@ fn apply_runtime_hotkeys(
                 dispatch_visible_options_direction(&mut runtime_shell, direction);
                 runtime_shell.ui_held_direction = Some(direction);
                 runtime_shell.ui_direction_repeat_ticks = if newly_pressed { 15 } else { 4 };
-            } else if runtime_shell.ui_held_direction == Some(direction)
-                && elapsed_input_ticks > 0
+            } else if runtime_shell.ui_held_direction == Some(direction) && elapsed_input_ticks > 0
             {
                 runtime_shell.ui_direction_repeat_ticks =
                     runtime_shell.ui_direction_repeat_ticks.saturating_sub(1);
@@ -3158,10 +3488,7 @@ fn apply_runtime_hotkeys(
     apply_visible_runtime_controls(&keys, &mut runtime_shell, elapsed_input_ticks > 0);
 }
 
-fn dispatch_visible_options_direction(
-    runtime_shell: &mut BevyRuntimeShell,
-    direction: GameButton,
-) {
+fn dispatch_visible_options_direction(runtime_shell: &mut BevyRuntimeShell, direction: GameButton) {
     let result = match direction {
         GameButton::Up => move_visible_options_cursor(runtime_shell, -1),
         GameButton::Down => move_visible_options_cursor(runtime_shell, 1),
@@ -3206,9 +3533,8 @@ fn sync_visible_earthquake_camera(
             }
         })
         .unwrap_or((0.0, 0.0));
-    let battle_offset = visible_move_screen_shake_offset(
-        runtime_shell.visible_move_animations.front(),
-    );
+    let battle_offset =
+        visible_move_screen_shake_offset(runtime_shell.visible_move_animations.front());
     let (x, y) = (
         earthquake_offset.0 + battle_offset.0,
         earthquake_offset.1 + battle_offset.1,
@@ -3217,9 +3543,7 @@ fn sync_visible_earthquake_camera(
     transform.translation.y = y;
 }
 
-fn visible_move_screen_shake_offset(
-    animation: Option<&VisibleMoveAnimation>,
-) -> (f32, f32) {
+fn visible_move_screen_shake_offset(animation: Option<&VisibleMoveAnimation>) -> (f32, f32) {
     let Some(animation) = animation.filter(|animation| animation.started) else {
         return (0.0, 0.0);
     };
@@ -3251,7 +3575,11 @@ fn visible_move_screen_shake_offset(
                 .max()
                 .unwrap_or(effect.frame);
             let active_age = animation.frame.saturating_sub(reset_frame);
-            let frequency = if effect.duration == 0 { 4 } else { effect.duration };
+            let frequency = if effect.duration == 0 {
+                4
+            } else {
+                effect.duration
+            };
             let lifetime = if effect.duration == 0 {
                 frequency.saturating_mul(2)
             } else {
@@ -3261,10 +3589,9 @@ fn visible_move_screen_shake_offset(
                 let phase_age = animation.frame.saturating_sub(effect.frame);
                 let amplitude = if effect.param == 0 { 3 } else { effect.param };
                 let value = (f64::from(amplitude)
-                    * (f64::from(phase_age) * std::f64::consts::PI
-                        / f64::from(frequency.max(1)))
-                    .sin())
-                    .round() as f32
+                    * (f64::from(phase_age) * std::f64::consts::PI / f64::from(frequency.max(1)))
+                        .sin())
+                .round() as f32
                     * (TILE_SIZE / SOURCE_TILE_SIZE as f32);
                 offset.0 += value;
             }
@@ -3359,8 +3686,7 @@ fn apply_visible_runtime_controls(
             runtime_shell.ui_direction_repeat_ticks =
                 visible_ui_initial_repeat_ticks(runtime_shell);
         } else if let Some(direction) = active_held_direction {
-            let repeated = advance_repeat
-                && runtime_shell.ui_direction_repeat_ticks == 0;
+            let repeated = advance_repeat && runtime_shell.ui_direction_repeat_ticks == 0;
             if repeated {
                 dispatch_visible_ui_direction(runtime_shell, direction);
                 runtime_shell.ui_direction_repeat_ticks = 4;
@@ -3385,9 +3711,7 @@ fn apply_visible_runtime_controls(
     }
     let overworld_interaction_consumed_this_press =
         std::mem::take(&mut runtime_shell.overworld_interaction_consumed_a);
-    if keys.just_pressed(KeyCode::KeyZ)
-        && plain_input
-        && !overworld_interaction_consumed_this_press
+    if keys.just_pressed(KeyCode::KeyZ) && plain_input && !overworld_interaction_consumed_this_press
     {
         match has_visible_shell_a_action(runtime_shell) {
             Ok(true) => run_bevy_action(runtime_shell, press_visible_a_button),
@@ -3409,31 +3733,41 @@ fn apply_visible_runtime_controls(
         }
     }
     if keys.just_pressed(KeyCode::Enter) && plain_input {
-        // Return is the desktop confirm key. Give an active menu, textbox, or
-        // field interaction (such as a PC directly in front of the player)
-        // priority over Start; otherwise it continues to open the Start menu
-        // while walking around normally.
-        match has_visible_shell_a_action(runtime_shell) {
-            Ok(true) => {
-                run_bevy_action(runtime_shell, press_visible_a_button);
-                return;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                record_visible_runtime_error(runtime_shell, &error);
-                runtime_shell.last_error = Some(error.to_string());
-                return;
+        // Enter is the Game Boy Start button while a script owns gameplay. It
+        // must not alias A there: doing so let Start acknowledge text, leave
+        // the script, and release NPC movement behind the textbox.
+        let script_or_dialogue_ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
+            visible_script_or_dialogue_owns_start_input(runtime_shell, &snapshot)
+        });
+        let script_or_dialogue_owns_input = fail_closed_visible_input_ownership(
+            runtime_shell,
+            script_or_dialogue_ownership,
+        );
+        if !script_or_dialogue_owns_input {
+            // Retain the desktop Enter-as-confirm convention only for ordinary
+            // menus and field interactions that are not owned by a running
+            // script. This is not reachable from text, yes/no, movement,
+            // emote, delay, or WaitSFX boundaries.
+            match has_visible_shell_a_action(runtime_shell) {
+                Ok(true) => {
+                    run_bevy_action(runtime_shell, press_visible_a_button);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    record_visible_runtime_error(runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
             }
         }
         if has_visible_shell_start_action(runtime_shell) {
-            run_bevy_action(runtime_shell, press_visible_start_button);
+            run_bevy_nonadvancing_action(runtime_shell, press_visible_start_button);
         }
     }
 }
 
-fn visible_noninteractive_battle_animation_owns_input(
-    runtime_shell: &BevyRuntimeShell,
-) -> bool {
+fn visible_noninteractive_battle_animation_owns_input(runtime_shell: &BevyRuntimeShell) -> bool {
     runtime_shell.visible_battle_transition.is_some()
         || runtime_shell.visible_frontpic_animation.is_some()
         || runtime_shell
@@ -3452,20 +3786,20 @@ fn visible_noninteractive_battle_animation_owns_input(
             .is_some_and(visible_battle_hp_tween_active)
 }
 
-fn visible_noninteractive_field_animation_owns_input(
-    runtime_shell: &BevyRuntimeShell,
-) -> bool {
-    runtime_shell.pending_trainer_sight.is_some()
-        || runtime_shell.visible_strength_notice_phase
-            == Some(VisibleStrengthNoticePhase::CryPause)
+fn visible_noninteractive_field_animation_owns_input(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+        || runtime_shell.pending_trainer_sight.is_some()
         || runtime_shell.visible_walk_warp_phase.is_some()
         || runtime_shell.visible_heal_machine.is_some()
         || runtime_shell.visible_magnet_train.is_some()
         || runtime_shell
             .visible_blackout_phase
             .is_some_and(|phase| phase != VisibleBlackoutPhase::AwaitText)
-        || runtime_shell.visible_fishing_animation
-        .is_some_and(|animation| animation.phase != VisibleFishingPhase::AwaitText)
+        || runtime_shell
+            .visible_fishing_animation
+            .is_some_and(|animation| animation.phase != VisibleFishingPhase::AwaitText)
         || runtime_shell.visible_fly_animation.is_some()
         || (runtime_shell.visible_waterfall_animation.is_some()
             && runtime_shell.field_notice.is_none())
@@ -3491,9 +3825,9 @@ fn visible_ui_initial_repeat_ticks(runtime_shell: &BevyRuntimeShell) -> u8 {
 fn dispatch_visible_ui_direction(runtime_shell: &mut BevyRuntimeShell, direction: GameButton) {
     if !runtime_shell.battle_messages.is_empty()
         || runtime_shell
-        .battle_exp_tween
-        .as_ref()
-        .is_some_and(|tween| tween.started)
+            .battle_exp_tween
+            .as_ref()
+            .is_some_and(|tween| tween.started)
         || runtime_shell
             .battle_level_stats
             .front()
@@ -3542,10 +3876,7 @@ fn run_bevy_input_action(
     run_bevy_action(runtime_shell, action);
 }
 
-fn run_bevy_action<F>(
-    runtime_shell: &mut BevyRuntimeShell,
-    action: F,
-)
+fn run_bevy_action<F>(runtime_shell: &mut BevyRuntimeShell, action: F)
 where
     F: FnOnce(&mut BevyRuntimeShell) -> Result<()>,
 {
@@ -3564,6 +3895,8 @@ where
         && runtime_shell.pending_gender_selection.is_none()
         && runtime_shell.pending_name_choice.is_none()
         && runtime_shell.pending_name_input.is_none()
+        && runtime_shell.pending_mail_input.is_none()
+        && runtime_shell.pending_mail_read.is_none()
         && runtime_shell.pending_oak_intro.is_none()
         && runtime_shell.pending_time_set.is_none()
         && runtime_shell.pending_trainer_sight.is_none();
@@ -3575,6 +3908,23 @@ where
         }
     });
     match result {
+        Ok(()) => {
+            runtime_shell.last_error = None;
+            mark_runtime_snapshot_dirty(runtime_shell);
+        }
+        Err(error) => {
+            record_visible_runtime_error(runtime_shell, &error);
+            runtime_shell.last_error = Some(format!("{error:#}"));
+        }
+    }
+    sync_visible_battle_action_cursor(runtime_shell);
+}
+
+fn run_bevy_nonadvancing_action<F>(runtime_shell: &mut BevyRuntimeShell, action: F)
+where
+    F: FnOnce(&mut BevyRuntimeShell) -> Result<()>,
+{
+    match action(runtime_shell) {
         Ok(()) => {
             runtime_shell.last_error = None;
             mark_runtime_snapshot_dirty(runtime_shell);
@@ -3643,7 +3993,9 @@ fn visible_player_boundary(
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
     runtime_shell.field_text_reveal.is_some()
-        || runtime_shell.visible_script_delay_frames.is_some_and(|frames| frames > 0)
+        || runtime_shell
+            .visible_script_delay_frames
+            .is_some_and(|frames| frames > 0)
         || runtime_shell
             .visible_earthquake
             .as_ref()
@@ -3654,24 +4006,29 @@ fn visible_player_boundary(
             .is_some_and(|emote| emote.frames_remaining > 0)
         || runtime_shell.visible_mom_bank.is_some()
         || runtime_shell.visible_script_movement.is_some()
+        || runtime_shell.visible_headbutt_animation.is_some()
         || runtime_shell.visible_card_flip.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_unown_puzzle.is_some()
+        || runtime_shell.visible_unown_printer.is_some()
         || runtime_shell.pending_day_of_week.is_some()
         || runtime_shell.kurt_apricorn_cursor.is_some()
+        || runtime_shell.visible_buena_password.is_some()
+        || runtime_shell.visible_battle_tower_challenge_menu.is_some()
+        || runtime_shell.visible_battle_tower_room_menu.is_some()
         || runtime_shell.buena_prize_cursor.is_some()
         || runtime_shell.pending_trainer_sight.is_some()
         || snapshot.script_events.pending_text_label.is_some()
         || snapshot.ui.pending_yes_no.is_some()
         || runtime_shell.pending_phone_prompt.is_some()
+        || runtime_shell.pending_remember_password.is_some()
         || snapshot.ui.pending_text_wait.is_some()
         || snapshot.pending_move_learn.is_some()
         || snapshot.pending_shop.is_some()
         || (snapshot.ui.text_window_open && runtime_shell.active_script_cursor.is_none())
         || snapshot.ui.window_open
         || snapshot.ui.active_pokemon_picture.is_some()
-        || has_visible_elevator_prompt(snapshot, runtime_shell)
-        || has_visible_gift_pokemon_prompt(snapshot, runtime_shell)
+        || runtime_shell.elevator_cursor.is_some()
         || visible_menu_has_selectable_options(snapshot)
         || snapshot.battle.is_some()
         || runtime_shell.start_menu_cursor.is_some()
@@ -3685,17 +4042,21 @@ fn visible_player_boundary(
         || runtime_shell.pending_gender_selection.is_some()
         || runtime_shell.pending_name_choice.is_some()
         || runtime_shell.pending_name_input.is_some()
+        || runtime_shell.pending_mail_input.is_some()
+        || runtime_shell.pending_mail_read.is_some()
         || runtime_shell.pending_oak_intro.is_some()
         || runtime_shell.pending_time_set.is_some()
         || runtime_shell.credits_screen.is_some()
         || visible_field_pack_is_open(runtime_shell)
         || runtime_shell.bill_pc_action_cursor.is_some()
         || runtime_shell.pc_hub_cursor.is_some()
+        || runtime_shell.decoration_menu.is_some()
         || runtime_shell.player_pc_action_cursor.is_some()
         || runtime_shell.mailbox_cursor.is_some()
         || runtime_shell.mailbox_action_cursor.is_some()
         || runtime_shell.storage_cursor.is_some()
         || runtime_shell.pc_item_cursor.is_some()
+        || runtime_shell.decoration_menu.is_some()
         || runtime_shell.player_pc_action_cursor.is_some()
         || runtime_shell.mailbox_cursor.is_some()
         || runtime_shell.mailbox_action_cursor.is_some()
@@ -3705,7 +4066,8 @@ fn has_visible_auto_script_action(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
-    snapshot.script_events.pending_text_label.is_some()
+    runtime_shell.pending_scene_script.is_some()
+        || snapshot.script_events.pending_text_label.is_some()
         || snapshot.script_events.pending_map_load.is_some()
         || snapshot.script_events.pending_map_refresh.is_some()
         || snapshot.script_events.pending_music_fade.is_some()
@@ -3716,6 +4078,7 @@ fn has_visible_auto_script_action(
         || snapshot.script_events.pending_script_warp.is_some()
         || !snapshot.script_events.command_queue.is_empty()
         || snapshot.script_events.next_script.is_some()
+        || snapshot.script_events.map_reentry_script.is_some()
         || !snapshot.script_events.deferred_scripts.is_empty()
         || snapshot.script_events.script_ended.is_some()
         || !snapshot.script_events.audio_events.is_empty()
@@ -3749,7 +4112,10 @@ fn close_visible_noninteractive_runtime_surface(
     // interactive surface itself. In particular OverworldTownMap owns the
     // Pokegear map screen. Auto-closing that core marker here erased the map
     // in the same continuation pass that opened it.
-    if runtime_shell.pokegear_menu_open {
+    if runtime_shell.pokegear_menu_open
+        || runtime_shell.visible_heal_machine.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+    {
         return Ok(false);
     }
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
@@ -3854,11 +4220,8 @@ fn restore_visible_cancelled_evolution(
                     cancellation.party_index
                 )
             })?;
-        crate::core::systems::evolution::cancel_evolution(
-            pokemon,
-            &mut cancellation.report,
-        )
-        .context("cancel visible battle evolution")?;
+        crate::core::systems::evolution::cancel_evolution(pokemon, &mut cancellation.report)
+            .context("cancel visible battle evolution")?;
 
         if state.pending_move_learn.as_ref().is_some_and(|pending| {
             pending.party_index == cancellation.party_index
@@ -3896,8 +4259,8 @@ fn cancel_visible_battle_evolution(runtime_shell: &mut BevyRuntimeShell) -> Resu
         .expect("checked pending evolution cancellation");
     let source_name = restore_visible_cancelled_evolution(runtime_shell, &mut cancellation)?;
 
-    let staged_scenes_aligned = runtime_shell.battle_message_scenes.len()
-        == runtime_shell.battle_messages.len();
+    let staged_scenes_aligned =
+        runtime_shell.battle_message_scenes.len() == runtime_shell.battle_messages.len();
     let stopped_scene = runtime_shell
         .battle_message_scenes
         .front()
@@ -3993,15 +4356,61 @@ fn cancel_visible_field_evolution(runtime_shell: &mut BevyRuntimeShell) -> Resul
     Ok(true)
 }
 
+fn visible_pc_printer_status(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.pc_notice.as_deref().is_some_and(|notice| {
+        notice.starts_with("Printer Error ") && notice.contains("Game Boy\nPrinter Manual.")
+    })
+}
+
 fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| call.phase == VisiblePokegearPhoneCallPhase::NoServicePrompt)
+    {
+        return dismiss_visible_pokegear_no_service_prompt(runtime_shell);
+    }
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| call.phase == VisiblePokegearPhoneCallPhase::AwaitHangup)
+    {
+        return finish_visible_pokegear_phone_call(runtime_shell);
+    }
+    if runtime_shell
+        .special_boundary
+        .as_ref()
+        .is_some_and(|boundary| boundary.label == "PrinterError2")
+    {
+        record_visible_runtime_action(runtime_shell, "printer:error:a_ignored")?;
+        return Ok(());
+    }
+    if visible_pc_printer_status(runtime_shell) {
+        record_visible_runtime_action(runtime_shell, "printer:error:a_ignored")?;
+        return Ok(());
+    }
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return Ok(());
+    }
+    if runtime_shell.pending_mail_read.is_some() {
+        return close_visible_mail_read(runtime_shell);
+    }
+    if runtime_shell.pending_name_choice.is_some() {
+        return confirm_visible_name_choice(runtime_shell);
+    }
+    if runtime_shell.pending_scene_script.is_some() {
+        return take_visible_pending_scene_script(runtime_shell);
+    }
     if runtime_shell.visible_diploma.is_some() {
         return close_visible_diploma(runtime_shell);
     }
     if runtime_shell.visible_unown_words.is_some() {
         return close_visible_unown_words(runtime_shell);
     }
-    if runtime_shell.visible_heal_machine.is_some()
-        || runtime_shell.visible_magnet_train.is_some()
+    if runtime_shell.visible_heal_machine.is_some() || runtime_shell.visible_magnet_train.is_some()
     {
         return Ok(());
     }
@@ -4031,6 +4440,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.visible_unown_puzzle.is_some() {
         return use_visible_unown_puzzle_cell(runtime_shell);
     }
+    if runtime_shell.visible_unown_printer.is_some() {
+        return print_visible_unown_stamp(runtime_shell);
+    }
     if runtime_shell.visible_mom_bank.is_some() {
         return confirm_visible_mom_bank(runtime_shell);
     }
@@ -4039,6 +4451,32 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if runtime_shell.kurt_apricorn_cursor.is_some() {
         return resolve_visible_kurt_apricorn_selection(runtime_shell, false);
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        return resolve_visible_buena_password_selection(runtime_shell);
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        return resolve_visible_battle_tower_challenge_menu(runtime_shell, false);
+    }
+    if let Some(menu) = runtime_shell.visible_battle_tower_room_menu.as_ref() {
+        return match menu.phase.clone() {
+            VisibleBattleTowerRoomMenuPhase::PickLevel => {
+                resolve_visible_battle_tower_room_level(runtime_shell)
+            }
+            VisibleBattleTowerRoomMenuPhase::ConfirmCancel { yes_no_index } => {
+                resolve_visible_battle_tower_room_cancel(runtime_shell, yes_no_index == 0)
+            }
+            VisibleBattleTowerRoomMenuPhase::Rejection { .. } => {
+                runtime_shell
+                    .visible_battle_tower_room_menu
+                    .as_mut()
+                    .context("Battle Tower room menu disappeared")?
+                    .phase = VisibleBattleTowerRoomMenuPhase::PickLevel;
+                set_shell_action_status(runtime_shell, "BATTLE ROOM LEVEL");
+                mark_runtime_snapshot_dirty(runtime_shell);
+                Ok(())
+            }
+        };
     }
     if runtime_shell.buena_prize_cursor.is_some()
         && runtime_shell.pc_confirmation.is_none()
@@ -4076,8 +4514,8 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             }
             return Ok(());
         }
-        let staged_scenes_aligned = runtime_shell.battle_message_scenes.len()
-            == runtime_shell.battle_messages.len();
+        let staged_scenes_aligned =
+            runtime_shell.battle_message_scenes.len() == runtime_shell.battle_messages.len();
         let dismissed_battle_message = runtime_shell.battle_messages.pop_front();
         runtime_shell.battle_text_reveal = None;
         if let Some(animation) = runtime_shell.visible_capture_animation.as_mut()
@@ -4100,7 +4538,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell
             .battle_evolution_cries
             .front()
-            .is_some_and(|(_, trigger)| dismissed_battle_message.as_deref() == Some(trigger.as_str()))
+            .is_some_and(|(_, trigger)| {
+                dismissed_battle_message.as_deref() == Some(trigger.as_str())
+            })
         {
             let (species_id, _) = runtime_shell.battle_evolution_cries.pop_front().unwrap();
             queue_visible_pokemon_cry(runtime_shell, &species_id, "battle_evolution")?;
@@ -4108,17 +4548,21 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell
             .battle_sounds_after_messages
             .front()
-            .is_some_and(|(_, trigger)| dismissed_battle_message.as_deref() == Some(trigger.as_str()))
+            .is_some_and(|(_, trigger)| {
+                dismissed_battle_message.as_deref() == Some(trigger.as_str())
+            })
         {
-            let (sound_id, _) = runtime_shell.battle_sounds_after_messages.pop_front().unwrap();
+            let (sound_id, _) = runtime_shell
+                .battle_sounds_after_messages
+                .pop_front()
+                .unwrap();
             queue_visible_shell_sound_effect(runtime_shell, &sound_id)?;
         }
         if runtime_shell
             .battle_evolution_cancellations
             .front()
             .is_some_and(|cancellation| {
-                dismissed_battle_message.as_deref()
-                    == Some(cancellation.trigger_message.as_str())
+                dismissed_battle_message.as_deref() == Some(cancellation.trigger_message.as_str())
             })
         {
             runtime_shell.battle_evolution_cancellations.pop_front();
@@ -4128,8 +4572,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             .as_ref()
             .is_some_and(|tween| {
                 !tween.started
-                    && (dismissed_battle_message.as_deref()
-                        == Some(tween.trigger_message.as_str())
+                    && (dismissed_battle_message.as_deref() == Some(tween.trigger_message.as_str())
                         || (tween.pixels == tween.target_pixels
                             && !tween.remaining_targets.is_empty()
                             && dismissed_battle_message
@@ -4170,8 +4613,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 .front()
                 .is_some_and(|stats| {
                     !stats.triggered
-                        && runtime_shell.battle_messages.front()
-                            == Some(&stats.trigger_message)
+                        && runtime_shell.battle_messages.front() == Some(&stats.trigger_message)
                 })
             {
                 queue_visible_shell_sound_effect(runtime_shell, "SFX_HIT_END_OF_EXP_BAR")?;
@@ -4226,7 +4668,11 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             .as_deref()
             .is_some_and(|message| message.contains("was newly added to\nthe POKéDEX."));
         if starts_capture_animation {
-            runtime_shell.visible_capture_animation.as_mut().unwrap().started = true;
+            runtime_shell
+                .visible_capture_animation
+                .as_mut()
+                .unwrap()
+                .started = true;
             queue_visible_shell_sound_effect(runtime_shell, "SFX_THROW_BALL")?;
         }
         if starts_capture_pokedex_entry {
@@ -4243,9 +4689,14 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 .pokemon
                 .iter()
                 .position(|species| species.species_id == species_id)
-                .with_context(|| format!("captured species {species_id} is absent from the Pokedex catalog"))?;
+                .with_context(|| {
+                    format!("captured species {species_id} is absent from the Pokedex catalog")
+                })?;
             anyhow::ensure!(
-                snapshot.presentation.pokedex_entries.contains_key(&species_id),
+                snapshot
+                    .presentation
+                    .pokedex_entries
+                    .contains_key(&species_id),
                 "captured species {species_id} has no compiled Pokedex entry"
             );
             // NewPokedexEntry owns the LCD, but capture mutation is deferred
@@ -4264,20 +4715,25 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
-        let starts_move_animation = runtime_shell
-            .visible_move_animations
-            .front()
-            .is_some_and(|animation| {
-                !animation.started
-                    && dismissed_battle_message.as_deref()
-                        == Some(animation.trigger_message.as_str())
-            });
+        let starts_move_animation =
+            runtime_shell
+                .visible_move_animations
+                .front()
+                .is_some_and(|animation| {
+                    !animation.started
+                        && dismissed_battle_message.as_deref()
+                            == Some(animation.trigger_message.as_str())
+                });
         if starts_move_animation {
-            runtime_shell.visible_move_animations.front_mut().unwrap().started = true;
+            runtime_shell
+                .visible_move_animations
+                .front_mut()
+                .unwrap()
+                .started = true;
         }
         let starts_player_trainer_exit = starts_player_send_out && entry_messages_before == 1;
-        let starts_send_out_animation = starts_enemy_send_out
-            || (starts_player_send_out && !starts_player_trainer_exit);
+        let starts_send_out_animation =
+            starts_enemy_send_out || (starts_player_send_out && !starts_player_trainer_exit);
         if starts_enemy_trainer_exit || starts_player_trainer_exit {
             runtime_shell.visible_trainer_exit_animation = Some(VisibleTrainerExitAnimation {
                 side: if starts_enemy_trainer_exit {
@@ -4337,8 +4793,10 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 runtime_shell.battle_message_scenes.clear();
             }
         }
-        if !starts_move_animation && let Some((trigger_message, scene)) =
-            runtime_shell.pending_battle_scenes_after_message.pop_front()
+        if !starts_move_animation
+            && let Some((trigger_message, scene)) = runtime_shell
+                .pending_battle_scenes_after_message
+                .pop_front()
         {
             if dismissed_battle_message.as_deref() == Some(trigger_message.as_str()) {
                 if runtime_shell.battle_message_scenes.is_empty() {
@@ -4414,7 +4872,12 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             {
                 runtime_shell.visible_capture_animation = None;
             }
-            if runtime_shell.shell.presentation_snapshot()?.pending_move_learn.is_some() {
+            if runtime_shell
+                .shell
+                .presentation_snapshot()?
+                .pending_move_learn
+                .is_some()
+            {
                 // Move learning is a retained battle-result surface. Do not
                 // expose the overworld between its announcement and the
                 // delete/stop decision.
@@ -4438,7 +4901,11 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 return resolve_visible_battle_move(runtime_shell, slot);
             }
             let terminal_scene = runtime_shell.battle_message_scene.is_some()
-                && runtime_shell.shell.presentation_snapshot()?.battle.is_none();
+                && runtime_shell
+                    .shell
+                    .presentation_snapshot()?
+                    .battle
+                    .is_none();
             runtime_shell.battle_message_scene = None;
             let resume_trainer_settlement = runtime_shell.battle_shift_prompt_cursor.is_none()
                 && runtime_shell.battle_switch_cursor.is_none()
@@ -4500,7 +4967,15 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.pending_gender_selection.is_some() {
         return confirm_visible_gender_selection(runtime_shell);
     }
-    let snapshot = runtime_shell.shell.presentation_snapshot()?;
+    // Input must observe the authoritative state after the compiled script
+    // run. The render cache can still contain the preceding text for one
+    // frame, which made Mom's newly published PHONE prompt consume A while
+    // ComeHomeForDSTText had not printed yet.
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let presentation_snapshot = runtime_shell.shell.presentation_snapshot()?;
+    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot)? {
+        return Ok(());
+    }
     if runtime_shell.pack_toss.is_some() {
         return confirm_visible_pack_toss(runtime_shell);
     }
@@ -4508,8 +4983,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return commit_visible_pc_item_quantity(runtime_shell);
     }
     if runtime_shell.pc_confirmation.is_some() {
-        let selected = strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pc:confirmation", 2)
-            .context("PC confirmation requires a valid cursor")?;
+        let selected =
+            strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pc:confirmation", 2)
+                .context("PC confirmation requires a valid cursor")?;
         return resolve_visible_pc_confirmation(runtime_shell, selected == 0);
     }
     if runtime_shell.party_mail_take_stage.is_some() {
@@ -4523,29 +4999,32 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return resolve_visible_party_mail_take_prompt(runtime_shell, selected == 0);
     }
     if runtime_shell.pending_contextual_field_move.is_some() {
-        let selected = strict_readonly_cursor_index(
-            &runtime_shell.yes_no_cursor,
-            "field:move-confirm",
-            2,
-        )
-        .context("contextual field-move prompt requires a valid cursor")?;
+        let selected =
+            strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "field:move-confirm", 2)
+                .context("contextual field-move prompt requires a valid cursor")?;
         return resolve_visible_contextual_field_move_prompt(runtime_shell, selected == 0);
     }
     if runtime_shell.held_item_swap_prompt {
-        let selected = strict_readonly_cursor_index(
-            &runtime_shell.yes_no_cursor,
-            "party:held-item-swap",
-            2,
-        )
-        .context("held-item swap prompt requires a valid cursor")?;
+        let selected =
+            strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "party:held-item-swap", 2)
+                .context("held-item swap prompt requires a valid cursor")?;
         return resolve_visible_held_item_swap_prompt(runtime_shell, selected == 0);
     }
-    // YesNoBox is a modal window layered over the field textbox. It owns A
-    // before the underlying text printer/page. Handling the printer first
-    // consumed the player's confirmation by advancing stale Mom text, then
-    // re-entered the same DST question on the next press.
+    // Core may publish YesNoBox as soon as it reaches `yesorno`, while the
+    // presentation still has authored pages to print. The prompt owns A only
+    // after those pages are fully consumed; otherwise A advances the text.
     if snapshot.ui.pending_yes_no.is_some() {
-        if !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot) {
+        if snapshot.ui.text.as_ref().map(|text| text.label.as_str())
+            != presentation_snapshot
+                .ui
+                .text
+                .as_ref()
+                .map(|text| text.label.as_str())
+            || !visible_field_dialogue_is_fully_revealed(runtime_shell, &presentation_snapshot)
+        {
+            return Ok(());
+        }
+        if advance_visible_completed_field_text_page(runtime_shell, &presentation_snapshot)? {
             return Ok(());
         }
         return confirm_visible_pending_yes_no(runtime_shell);
@@ -4560,13 +5039,18 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         return Ok(());
     }
+    if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
+        return resolve_visible_tmhm_teach_prompt(runtime_shell);
+    }
+    if runtime_shell.tmhm_decision_prompt_cursor.is_some() {
+        return resolve_visible_tmhm_decision_prompt(runtime_shell);
+    }
     if runtime_shell.field_notice.is_some()
         && runtime_shell.pending_field_travel_delay_frames.is_some()
     {
         return Ok(());
     }
-    if runtime_shell.field_notice.is_some()
-        && visible_field_notice_uses_prompt_arrow(runtime_shell)
+    if runtime_shell.field_notice.is_some() && visible_field_notice_uses_prompt_arrow(runtime_shell)
     {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
@@ -4582,10 +5066,58 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         runtime_shell.pending_field_notice_cry = Some(target_species);
     }
     if runtime_shell.field_notice.take().is_some() {
-        if runtime_shell.visible_strength_notice_phase
-            == Some(VisibleStrengthNoticePhase::MoveText)
-        {
-            runtime_shell.visible_strength_notice_phase = None;
+        if runtime_shell.pending_gift_pokemon_pc_notice {
+            return finish_visible_gift_pokemon_pc_notice(runtime_shell);
+        }
+        if runtime_shell.pending_trainer_intro.is_some() {
+            return finish_visible_map_trainer_intro(runtime_shell);
+        }
+        let item_ball_phase = runtime_shell
+            .visible_item_ball_notice
+            .as_ref()
+            .map(|notice| notice.phase.clone());
+        match item_ball_phase {
+            Some(VisibleItemBallPhase::PocketText | VisibleItemBallPhase::BagFullText) => {
+                runtime_shell.visible_item_ball_notice = None;
+            }
+            Some(VisibleItemBallPhase::BagFullFoundText) => {
+                let notice = runtime_shell
+                    .visible_item_ball_notice
+                    .as_mut()
+                    .expect("bag-full item-ball phase retains its notice");
+                runtime_shell.field_notice = Some(notice.pocket_text.clone());
+                notice.phase = VisibleItemBallPhase::BagFullText;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
+            _ => {}
+        }
+        let egg_hatch_phase = runtime_shell
+            .visible_egg_hatch
+            .as_ref()
+            .map(|hatch| hatch.phase);
+        if egg_hatch_phase == Some(VisibleEggHatchPhase::HuhText) {
+            begin_visible_egg_hatch_animation(runtime_shell)?;
+            return Ok(());
+        }
+        if egg_hatch_phase == Some(VisibleEggHatchPhase::HatchText) {
+            let hatch = runtime_shell
+                .visible_egg_hatch
+                .take()
+                .context("egg hatch text lost its presentation state")?;
+            let default_name =
+                crate::core::models::pokemon_species_display_name(&hatch.species_id);
+            runtime_shell.pending_egg_hatch_nickname = Some(PendingEggHatchNickname {
+                party_index: hatch.party_index,
+                default_name,
+            });
+            runtime_shell.pending_name_choice = Some(VisibleNameChoice {
+                options: vec!["YES".to_string(), "NO".to_string()],
+                selected: 0,
+            });
+            set_shell_action_status(runtime_shell, "NICKNAME HATCHED POKEMON");
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
         }
         if runtime_shell
             .visible_fishing_animation
@@ -4599,10 +5131,12 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
-        runtime_shell.pending_sweet_scent_nothing_notice = false;
-        if runtime_shell.pending_tmhm_teach_prompt_after_boot {
+        if begin_visible_poison_blackout_after_faint_text(runtime_shell)? {
+            return Ok(());
+        }
+        if runtime_shell.pending_tmhm_text_stage.is_some() {
             runtime_shell.field_notice_scene = None;
-            open_visible_tmhm_teach_prompt_after_boot(runtime_shell)?;
+            advance_visible_tmhm_text_stage(runtime_shell)?;
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
@@ -4618,7 +5152,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             }
             settle_visible_overworld_travel(runtime_shell)?;
         }
-        if begin_pending_field_notice_effect(runtime_shell) {
+        if begin_pending_field_notice_effect(runtime_shell)? {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
@@ -4633,32 +5167,47 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     if runtime_shell.pc_notice.take().is_some() {
-        mark_runtime_snapshot_dirty(runtime_shell);
+        dismiss_visible_pc_notice(runtime_shell);
         return Ok(());
     }
     // A visible Player PC menu owns A even though the originating script's
     // text/window bookkeeping remains open underneath it.  Handling the
     // generic printer first made A silently close/advance that hidden layer
     // instead of selecting WITHDRAW, exactly matching the live stuck-PC bug.
+    if runtime_shell.decoration_menu.is_some() {
+        return confirm_visible_decoration_menu(runtime_shell);
+    }
     if runtime_shell.player_pc_action_cursor.is_some() {
         return confirm_visible_player_pc_action(runtime_shell);
+    }
+    // `elevator` is a synchronous script-owned modal. Its cursor deliberately
+    // advances past the opcode when the prompt opens, so selecting the visible
+    // floor must take precedence over both the still-open field textbox and
+    // the underlying active script cursor.
+    if runtime_shell.elevator_cursor.is_some() {
+        return select_visible_elevator_floor(runtime_shell);
     }
     // A/B accelerate the active printer to one character per frame;
     // they do not reveal a whole page atomically. Only a completed page may
     // advance the script, matching PrintLetterDelay and TypeScript main.
-    if runtime_shell.field_text_reveal.is_some()
-        && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
-    {
+    if !visible_field_dialogue_is_fully_revealed(runtime_shell, &presentation_snapshot) {
         return Ok(());
     }
-    if advance_visible_completed_field_text_page(runtime_shell, &snapshot)? {
+    if advance_visible_completed_field_text_page(runtime_shell, &presentation_snapshot)? {
         return Ok(());
     }
     if runtime_shell.pending_phone_prompt.is_some() {
         return confirm_visible_phone_prompt(runtime_shell);
     }
+    if runtime_shell.pending_remember_password.is_some() {
+        return confirm_visible_remember_password_prompt(runtime_shell);
+    }
     if let Some(summary) = runtime_shell.bill_pc_box_summary.as_mut() {
-        summary.page = if summary.page >= 3 { 1 } else { summary.page + 1 };
+        summary.page = if summary.page >= 3 {
+            1
+        } else {
+            summary.page + 1
+        };
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -4710,20 +5259,17 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if snapshot.script_events.next_script.is_some() {
         return take_visible_next_script(runtime_shell);
     }
-    if !snapshot.script_events.deferred_scripts.is_empty() {
-        return take_visible_deferred_script(runtime_shell);
-    }
     if snapshot.script_events.script_ended.is_some() {
         return take_visible_script_end_state(runtime_shell);
     }
+    if snapshot.script_events.map_reentry_script.is_some() {
+        return take_visible_map_reentry_script(runtime_shell);
+    }
+    if !snapshot.script_events.deferred_scripts.is_empty() {
+        return take_visible_deferred_script(runtime_shell);
+    }
     if let Some(flag) = visible_auto_runtime_flag(&snapshot) {
         return consume_visible_runtime_flag_kind(runtime_shell, flag);
-    }
-    if has_visible_elevator_prompt(&snapshot, runtime_shell) {
-        return select_visible_elevator_floor(runtime_shell);
-    }
-    if has_visible_gift_pokemon_prompt(&snapshot, runtime_shell) {
-        return grant_selected_gift_pokemon(runtime_shell);
     }
     if snapshot.pending_move_learn.is_some() {
         return confirm_visible_pending_move_learn(runtime_shell);
@@ -4770,7 +5316,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return open_visible_field_pack_action_menu(runtime_shell);
     }
     if runtime_shell.tmhm_cursor.is_some() {
-        if selected_field_pack_cancel_row(&snapshot, runtime_shell, &FieldPackPocket::TmHm) {
+        if selected_field_pack_cancel_row(&snapshot, runtime_shell, &FieldPackPocket::TmHm)? {
             return close_visible_field_pack_from_cancel(runtime_shell);
         }
         return open_visible_field_pack_action_menu(runtime_shell);
@@ -4792,7 +5338,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             trim_event_log(&mut runtime_shell.last_audio_events);
             return Ok(());
         }
-        if selected_field_pack_cancel_row(&snapshot, runtime_shell, &FieldPackPocket::Balls) {
+        if selected_field_pack_cancel_row(&snapshot, runtime_shell, &FieldPackPocket::Balls)? {
             return close_visible_field_pack_from_cancel(runtime_shell);
         }
         return open_visible_field_pack_action_menu(runtime_shell);
@@ -4800,9 +5346,27 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.pokegear_menu_open {
         if runtime_shell.pokegear_page == PokegearPage::Radio {
             let Some(station) = runtime_shell.pokegear_radio_station.as_deref() else {
+                anyhow::ensure!(
+                    runtime_shell.pokegear_radio_segment == 0,
+                    "Pokegear no-signal radio has transcript segment {}",
+                    runtime_shell.pokegear_radio_segment
+                );
                 return Ok(());
             };
             let segment_count = visible_map_radio_transcript(station).len();
+            if segment_count == 0 {
+                anyhow::ensure!(
+                    runtime_shell.pokegear_radio_segment == 0,
+                    "Pokegear music-only station {station} has transcript segment {}",
+                    runtime_shell.pokegear_radio_segment
+                );
+                return Ok(());
+            }
+            anyhow::ensure!(
+                runtime_shell.pokegear_radio_segment < segment_count,
+                "Pokegear radio segment {} is outside {segment_count} transcript segments for {station}",
+                runtime_shell.pokegear_radio_segment
+            );
             if runtime_shell.pokegear_radio_segment + 1 < segment_count {
                 runtime_shell.pokegear_radio_segment += 1;
                 runtime_shell.last_audio_events.push(format!(
@@ -4814,7 +5378,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 return Ok(());
             }
             record_visible_runtime_action(runtime_shell, "pokegear:radio:close")?;
-            close_visible_pokegear_menu(runtime_shell);
+            close_visible_pokegear_menu(runtime_shell)?;
             continue_visible_script_after_prompt(runtime_shell)?;
             return Ok(());
         }
@@ -4882,6 +5446,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.bill_pc_action_cursor.is_some() {
         return confirm_visible_bill_pc_action(runtime_shell);
     }
+    if runtime_shell.decoration_menu.is_some() {
+        return confirm_visible_decoration_menu(runtime_shell);
+    }
     if runtime_shell.player_pc_action_cursor.is_some() {
         return confirm_visible_player_pc_action(runtime_shell);
     }
@@ -4890,6 +5457,9 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if runtime_shell.mailbox_cursor.is_some() {
         return confirm_visible_mailbox_selection(runtime_shell);
+    }
+    if runtime_shell.bill_pc_box_action_cursor.is_some() {
+        return confirm_visible_bill_pc_box_action(runtime_shell);
     }
     if runtime_shell.bill_pc_box_cursor.is_some() {
         return confirm_visible_bill_pc_box(runtime_shell);
@@ -4946,6 +5516,25 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 }
 
 fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| {
+            matches!(
+                call.phase,
+                VisiblePokegearPhoneCallPhase::NoServicePrompt
+                    | VisiblePokegearPhoneCallPhase::AwaitHangup
+            )
+        })
+    {
+        return Ok(true);
+    }
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return Ok(true);
+    }
     if runtime_shell.player_walk_frame_ticks > 0 {
         return Ok(false);
     }
@@ -4974,8 +5563,7 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
     if runtime_shell.visible_unown_words.is_some() {
         return Ok(true);
     }
-    if runtime_shell.visible_heal_machine.is_some()
-        || runtime_shell.visible_magnet_train.is_some()
+    if runtime_shell.visible_heal_machine.is_some() || runtime_shell.visible_magnet_train.is_some()
     {
         return Ok(true);
     }
@@ -4988,6 +5576,9 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
     if runtime_shell.visible_unown_puzzle.is_some() {
         return Ok(true);
     }
+    if runtime_shell.visible_unown_printer.is_some() {
+        return Ok(true);
+    }
     if runtime_shell.visible_mom_bank.is_some() {
         return Ok(true);
     }
@@ -4995,6 +5586,15 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
         return Ok(true);
     }
     if runtime_shell.kurt_apricorn_cursor.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        return Ok(true);
+    }
+    if runtime_shell.visible_battle_tower_room_menu.is_some() {
         return Ok(true);
     }
     if runtime_shell.buena_prize_cursor.is_some() {
@@ -5029,6 +5629,7 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
     if snapshot.ui.pending_yes_no.is_some()
         || runtime_shell.pending_phone_prompt.is_some()
+        || runtime_shell.pending_remember_password.is_some()
         || snapshot.ui.pending_text_wait.is_some()
         || snapshot.pending_move_learn.is_some()
         || snapshot.pending_shop.is_some()
@@ -5046,13 +5647,13 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
         || snapshot.script_events.pending_script_warp.is_some()
         || !snapshot.script_events.command_queue.is_empty()
         || snapshot.script_events.next_script.is_some()
+        || snapshot.script_events.map_reentry_script.is_some()
         || !snapshot.script_events.deferred_scripts.is_empty()
         || snapshot.script_events.script_ended.is_some()
         || !snapshot.script_events.audio_events.is_empty()
         || has_visible_pending_non_audio_script_events(&snapshot)
         || visible_auto_runtime_flag(&snapshot).is_some()
-        || has_visible_elevator_prompt(&snapshot, runtime_shell)
-        || has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
+        || runtime_shell.elevator_cursor.is_some()
         || runtime_shell.active_script_cursor.is_some()
         || runtime_shell.bag_cursor.is_some()
         || runtime_shell.key_item_cursor.is_some()
@@ -5086,12 +5687,25 @@ fn press_visible_pokedex_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resul
     if runtime_shell.pokedex_detail_open {
         let snapshot = runtime_shell.shell.presentation_snapshot()?;
         let species = selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
-        let page_count = snapshot
+        let entry = snapshot
             .presentation
             .pokedex_entries
             .get(&species.species_id)
-            .map(|entry| entry.pages.len().max(1))
-            .unwrap_or(1);
+            .with_context(|| {
+                format!("compiled pack missing Pokedex entry {}", species.species_id)
+            })?;
+        let page_count = entry.pages.len();
+        anyhow::ensure!(
+            page_count > 0,
+            "compiled Pokedex entry {} has no pages",
+            species.species_id
+        );
+        anyhow::ensure!(
+            runtime_shell.pokedex_detail_page < page_count,
+            "Pokedex detail page {} is outside {page_count} pages for {}",
+            runtime_shell.pokedex_detail_page,
+            species.species_id
+        );
         if runtime_shell.pokedex_scripted_entry
             && runtime_shell.pokedex_detail_page + 1 >= page_count
         {
@@ -5109,27 +5723,72 @@ fn press_visible_pokedex_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resul
             continue_visible_script_after_prompt(runtime_shell)?;
             return Ok(());
         }
-        runtime_shell.pokedex_detail_page =
-            (runtime_shell.pokedex_detail_page + 1) % page_count;
+        runtime_shell.pokedex_detail_page = (runtime_shell.pokedex_detail_page + 1) % page_count;
         let page_number = runtime_shell.pokedex_detail_page + 1;
-        record_visible_runtime_action(
-            runtime_shell,
-            format!("pokedex:detail:page:{page_number}"),
-        )?;
+        record_visible_runtime_action(runtime_shell, format!("pokedex:detail:page:{page_number}"))?;
         return Ok(());
     }
     inspect_visible_pokedex_selection(runtime_shell)
 }
 
 fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| call.phase == VisiblePokegearPhoneCallPhase::NoServicePrompt)
+    {
+        return dismiss_visible_pokegear_no_service_prompt(runtime_shell);
+    }
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| call.phase == VisiblePokegearPhoneCallPhase::AwaitHangup)
+    {
+        return finish_visible_pokegear_phone_call(runtime_shell);
+    }
+    if runtime_shell
+        .special_boundary
+        .as_ref()
+        .is_some_and(|boundary| boundary.label == "PrinterError2")
+    {
+        return close_visible_special_boundary(runtime_shell);
+    }
+    if visible_pc_printer_status(runtime_shell) {
+        record_visible_runtime_action(runtime_shell, "printer:error:b_cancel")?;
+        runtime_shell.pc_notice = None;
+        queue_visible_current_music(runtime_shell)?;
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return Ok(());
+    }
+    if runtime_shell.pending_mail_read.is_some() {
+        return close_visible_mail_read(runtime_shell);
+    }
+    if runtime_shell.pending_name_choice.is_some() {
+        runtime_shell.pending_name_choice = None;
+        if runtime_shell.pending_egg_hatch_nickname.is_some() {
+            return finish_visible_egg_hatch_nickname(runtime_shell, None);
+        }
+        if runtime_shell.pending_standard_capture.is_some() {
+            return finish_visible_capture_nickname(runtime_shell, None);
+        }
+        if runtime_shell.pending_gift_pokemon_nickname.is_some() {
+            return finish_visible_gift_pokemon_nickname(runtime_shell, None);
+        }
+        return Ok(());
+    }
     if runtime_shell.visible_diploma.is_some() {
         return close_visible_diploma(runtime_shell);
     }
     if runtime_shell.visible_unown_words.is_some() {
         return close_visible_unown_words(runtime_shell);
     }
-    if runtime_shell.visible_heal_machine.is_some()
-        || runtime_shell.visible_magnet_train.is_some()
+    if runtime_shell.visible_heal_machine.is_some() || runtime_shell.visible_magnet_train.is_some()
     {
         return Ok(());
     }
@@ -5159,6 +5818,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.visible_unown_puzzle.is_some() {
         return close_visible_unown_puzzle(runtime_shell);
     }
+    if runtime_shell.visible_unown_printer.is_some() {
+        return close_visible_unown_printer(runtime_shell);
+    }
     if runtime_shell.visible_mom_bank.is_some() {
         return cancel_visible_mom_bank(runtime_shell);
     }
@@ -5184,6 +5846,31 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             return Ok(());
         }
         return resolve_visible_kurt_apricorn_selection(runtime_shell, true);
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        // STATICMENU_DISABLE_B: Buena's live-show password menu cannot be cancelled.
+        return Ok(());
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        return resolve_visible_battle_tower_challenge_menu(runtime_shell, true);
+    }
+    if let Some(menu) = runtime_shell.visible_battle_tower_room_menu.as_ref() {
+        return match menu.phase {
+            VisibleBattleTowerRoomMenuPhase::PickLevel => {
+                runtime_shell
+                    .visible_battle_tower_room_menu
+                    .as_mut()
+                    .context("Battle Tower room menu disappeared")?
+                    .phase = VisibleBattleTowerRoomMenuPhase::ConfirmCancel { yes_no_index: 0 };
+                set_shell_action_status(runtime_shell, "CANCEL BATTLE ROOM CHALLENGE?");
+                mark_runtime_snapshot_dirty(runtime_shell);
+                Ok(())
+            }
+            VisibleBattleTowerRoomMenuPhase::ConfirmCancel { .. } => {
+                resolve_visible_battle_tower_room_cancel(runtime_shell, false)
+            }
+            VisibleBattleTowerRoomMenuPhase::Rejection { .. } => Ok(()),
+        };
     }
     if runtime_shell.buena_prize_cursor.is_some()
         && runtime_shell.pc_confirmation.is_none()
@@ -5250,6 +5937,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         return resolve_visible_held_item_swap_prompt(runtime_shell, false);
     }
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
+    if runtime_shell.elevator_cursor.is_some() {
+        return cancel_visible_elevator_floor(runtime_shell);
+    }
     if (runtime_shell.field_notice.is_some() || runtime_shell.pc_notice.is_some())
         && !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot)
     {
@@ -5260,6 +5950,20 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         return Ok(());
     }
+    if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
+        runtime_shell.tmhm_teach_prompt_cursor = Some(MenuCursor {
+            surface_id: "pack:tmhm:teach-prompt".to_string(),
+            option_index: 1,
+        });
+        return resolve_visible_tmhm_teach_prompt(runtime_shell);
+    }
+    if runtime_shell.tmhm_decision_prompt_cursor.is_some() {
+        runtime_shell.tmhm_decision_prompt_cursor = Some(MenuCursor {
+            surface_id: "pack:tmhm:decision".to_string(),
+            option_index: 1,
+        });
+        return resolve_visible_tmhm_decision_prompt(runtime_shell);
+    }
     if runtime_shell.field_notice.is_some()
         && runtime_shell.pending_field_travel_delay_frames.is_some()
     {
@@ -5268,16 +5972,16 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if cancel_visible_field_evolution(runtime_shell)? {
         return Ok(());
     }
-    if runtime_shell.field_notice.is_some()
-        && visible_field_notice_uses_prompt_arrow(runtime_shell)
+    if runtime_shell.field_notice.is_some() && visible_field_notice_uses_prompt_arrow(runtime_shell)
     {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     if runtime_shell.field_notice.take().is_some() {
-        if runtime_shell.visible_strength_notice_phase
-            == Some(VisibleStrengthNoticePhase::MoveText)
-        {
-            runtime_shell.visible_strength_notice_phase = None;
+        if runtime_shell.pending_gift_pokemon_pc_notice {
+            return finish_visible_gift_pokemon_pc_notice(runtime_shell);
+        }
+        if runtime_shell.pending_trainer_intro.is_some() {
+            return finish_visible_map_trainer_intro(runtime_shell);
         }
         if runtime_shell
             .visible_fishing_animation
@@ -5291,10 +5995,12 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
-        runtime_shell.pending_sweet_scent_nothing_notice = false;
-        if runtime_shell.pending_tmhm_teach_prompt_after_boot {
+        if begin_visible_poison_blackout_after_faint_text(runtime_shell)? {
+            return Ok(());
+        }
+        if runtime_shell.pending_tmhm_text_stage.is_some() {
             runtime_shell.field_notice_scene = None;
-            open_visible_tmhm_teach_prompt_after_boot(runtime_shell)?;
+            advance_visible_tmhm_text_stage(runtime_shell)?;
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
@@ -5310,7 +6016,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             }
             settle_visible_overworld_travel(runtime_shell)?;
         }
-        if begin_pending_field_notice_effect(runtime_shell) {
+        if begin_pending_field_notice_effect(runtime_shell)? {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
@@ -5325,7 +6031,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     if runtime_shell.pc_notice.take().is_some() {
-        mark_runtime_snapshot_dirty(runtime_shell);
+        dismiss_visible_pc_notice(runtime_shell);
         return Ok(());
     }
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
@@ -5334,6 +6040,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if runtime_shell.pending_phone_prompt.is_some() {
         return decline_visible_phone_prompt(runtime_shell);
+    }
+    if runtime_shell.pending_remember_password.is_some() {
+        return decline_visible_remember_password_prompt(runtime_shell);
     }
     if runtime_shell.bill_pc_box_summary.take().is_some() {
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -5348,7 +6057,26 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
+    // As with A, B must not resolve a prompt using a stale rendered text body.
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let presentation_snapshot = runtime_shell.shell.presentation_snapshot()?;
+    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot)? {
+        return Ok(());
+    }
     if snapshot.ui.pending_yes_no.is_some() {
+        if snapshot.ui.text.as_ref().map(|text| text.label.as_str())
+            != presentation_snapshot
+                .ui
+                .text
+                .as_ref()
+                .map(|text| text.label.as_str())
+            || !visible_field_dialogue_is_fully_revealed(runtime_shell, &presentation_snapshot)
+        {
+            return Ok(());
+        }
+        if advance_visible_completed_field_text_page(runtime_shell, &presentation_snapshot)? {
+            return Ok(());
+        }
         return decline_visible_pending_yes_no(runtime_shell);
     }
     if runtime_shell.pokegear_menu_open {
@@ -5359,9 +6087,34 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if snapshot.ui.menu.is_some() {
             let _ = runtime_shell.shell.close_active_menu()?;
         }
-        close_visible_pokegear_menu(runtime_shell);
+        close_visible_pokegear_menu(runtime_shell)?;
         continue_visible_script_after_prompt(runtime_shell)?;
         return Ok(());
+    }
+    // The Player PC action menu is the visible modal owner. Its originating
+    // script can retain a completed textbox underneath it; B must close the
+    // PC rather than route through that hidden text, just as A selects the
+    // visible PC action above the printer.
+    if let Some(menu) = runtime_shell.decoration_menu.as_ref() {
+        let phase = menu.phase.clone();
+        return match phase {
+            VisibleDecorationMenuPhase::Categories { .. } => {
+                close_visible_decoration_menu(runtime_shell)
+            }
+            VisibleDecorationMenuPhase::Decorations { category, .. } => {
+                return_visible_decoration_to_categories(runtime_shell, category)
+            }
+            VisibleDecorationMenuPhase::Side {
+                category,
+                item_cursor_index,
+                ..
+            } => {
+                return_visible_decoration_to_items(runtime_shell, category, item_cursor_index)
+            }
+        };
+    }
+    if runtime_shell.player_pc_action_cursor.is_some() {
+        return close_visible_player_pc(runtime_shell);
     }
     if runtime_shell.field_text_reveal.is_some() {
         // JoyTextDelay, JoyWaitAorB, and PromptButton all accept PAD_A or
@@ -5384,6 +6137,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         if runtime_shell.shop_quantity.take().is_some() {
             mark_runtime_snapshot_dirty(runtime_shell);
+            // B cancels only the quantity chooser. The ASM/TypeScript flow
+            // returns to the active BUY or SELL list, rather than discarding
+            // that list and asking the clerk's top-level question.
             return Ok(());
         }
         if runtime_shell.shop_top_cursor.is_none() {
@@ -5411,11 +6167,11 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if runtime_shell.mailbox_cursor.is_some() {
         runtime_shell.mailbox_cursor = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 3 });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 3,
+        });
         return Ok(());
-    }
-    if runtime_shell.player_pc_action_cursor.is_some() {
-        return close_visible_player_pc(runtime_shell);
     }
     if runtime_shell.pc_item_cursor.is_some() && runtime_shell.pc_item_action.is_some() {
         let action_index = match runtime_shell.pc_item_action {
@@ -5424,7 +6180,10 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         };
         runtime_shell.pc_item_cursor = None;
         runtime_shell.pc_item_action = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: action_index });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: action_index,
+        });
         return Ok(());
     }
     if runtime_shell.pc_item_action == Some(VisiblePlayerPcAction::DepositItem)
@@ -5432,7 +6191,14 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         close_visible_field_pack_without_log(runtime_shell);
         runtime_shell.pc_item_action = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 1 });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 1,
+        });
+        return Ok(());
+    }
+    if runtime_shell.bill_pc_box_action_cursor.take().is_some() {
+        set_shell_action_status(runtime_shell, "CHOOSE A BOX");
         return Ok(());
     }
     if runtime_shell.bill_pc_box_cursor.is_some() {
@@ -5479,12 +6245,12 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             return Ok(());
         }
         if runtime_shell.tmhm_teach_prompt_cursor.is_some() {
-            runtime_shell.tmhm_teach_prompt_cursor = None;
+            runtime_shell.tmhm_teach_prompt_cursor = Some(MenuCursor {
+                surface_id: "pack:tmhm:teach-prompt".to_string(),
+                option_index: 1,
+            });
             record_visible_runtime_action(runtime_shell, "pack:tmhm:teach:b")?;
-            runtime_shell.field_notice = Some("The TM wasn't used.".to_string());
-            mark_runtime_snapshot_dirty(runtime_shell);
-            set_shell_action_status(runtime_shell, "THE TM WASN'T USED");
-            return Ok(());
+            return resolve_visible_tmhm_teach_prompt(runtime_shell);
         }
         if runtime_shell.tmhm_decision_prompt_cursor.is_some() {
             runtime_shell.tmhm_decision_prompt_cursor = Some(MenuCursor {
@@ -5530,7 +6296,10 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.party_menu_open {
         if runtime_shell.mailbox_attach_index.take().is_some() {
             close_visible_party_menu(runtime_shell);
-            runtime_shell.mailbox_cursor = Some(MenuCursor { surface_id: "pc:mailbox".to_string(), option_index: 0 });
+            runtime_shell.mailbox_cursor = Some(MenuCursor {
+                surface_id: "pc:mailbox".to_string(),
+                option_index: 0,
+            });
             return Ok(());
         }
         if runtime_shell.pending_script_party_selection.is_some() {
@@ -5606,12 +6375,25 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 let snapshot = runtime_shell.shell.presentation_snapshot()?;
                 let species =
                     selected_pokedex_catalog_species(&snapshot, runtime_shell.pokedex_cursor)?;
-                let page_count = snapshot
+                let entry = snapshot
                     .presentation
                     .pokedex_entries
                     .get(&species.species_id)
-                    .map(|entry| entry.pages.len().max(1))
-                    .unwrap_or(1);
+                    .with_context(|| {
+                        format!("compiled pack missing Pokedex entry {}", species.species_id)
+                    })?;
+                let page_count = entry.pages.len();
+                anyhow::ensure!(
+                    page_count > 0,
+                    "compiled Pokedex entry {} has no pages",
+                    species.species_id
+                );
+                anyhow::ensure!(
+                    runtime_shell.pokedex_detail_page < page_count,
+                    "Pokedex detail page {} is outside {page_count} pages for {}",
+                    runtime_shell.pokedex_detail_page,
+                    species.species_id
+                );
                 if runtime_shell.pokedex_detail_page + 1 < page_count {
                     runtime_shell.pokedex_detail_page += 1;
                     let page_number = runtime_shell.pokedex_detail_page + 1;
@@ -5678,8 +6460,29 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     }
     if runtime_shell.mailbox_cursor.is_some() {
         runtime_shell.mailbox_cursor = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 3 });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 3,
+        });
         return Ok(());
+    }
+    if let Some(menu) = runtime_shell.decoration_menu.as_ref() {
+        let phase = menu.phase.clone();
+        return match phase {
+            VisibleDecorationMenuPhase::Categories { .. } => {
+                close_visible_decoration_menu(runtime_shell)
+            }
+            VisibleDecorationMenuPhase::Decorations { category, .. } => {
+                return_visible_decoration_to_categories(runtime_shell, category)
+            }
+            VisibleDecorationMenuPhase::Side {
+                category,
+                item_cursor_index,
+                ..
+            } => {
+                return_visible_decoration_to_items(runtime_shell, category, item_cursor_index)
+            }
+        };
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
         return close_visible_player_pc(runtime_shell);
@@ -5691,7 +6494,10 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         };
         runtime_shell.pc_item_cursor = None;
         runtime_shell.pc_item_action = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: action_index });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: action_index,
+        });
         return Ok(());
     }
     if runtime_shell.pc_item_action == Some(VisiblePlayerPcAction::DepositItem)
@@ -5699,7 +6505,14 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     {
         close_visible_field_pack_without_log(runtime_shell);
         runtime_shell.pc_item_action = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 1 });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 1,
+        });
+        return Ok(());
+    }
+    if runtime_shell.bill_pc_box_action_cursor.take().is_some() {
+        set_shell_action_status(runtime_shell, "CHOOSE A BOX");
         return Ok(());
     }
     if runtime_shell.bill_pc_box_cursor.is_some() {
@@ -5848,7 +6661,10 @@ fn queue_visible_mom_bank_messages(
     close_after: bool,
 ) {
     if let Some(bank) = runtime_shell.visible_mom_bank.as_mut() {
-        bank.messages = messages.iter().map(|message| (*message).to_string()).collect();
+        bank.messages = messages
+            .iter()
+            .map(|message| (*message).to_string())
+            .collect();
         bank.close_after_messages = close_after;
     }
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -5875,11 +6691,18 @@ fn confirm_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     record_visible_runtime_action(runtime_shell, format!("mom_bank:{phase:?}:confirm"))?;
     match phase {
         VisibleMomBankPhase::InitializeQuestion => {
-            runtime_shell.shell.session_mut().state_mut().mom_saving_some_money = accepted;
+            runtime_shell
+                .shell
+                .session_mut()
+                .state_mut()
+                .mom_saving_some_money = accepted;
             queue_visible_mom_bank_messages(
                 runtime_shell,
                 if accepted {
-                    &["OK, I'll take care of your money.", "Be careful.\nNow, go on!"]
+                    &[
+                        "OK, I'll take care of your money.",
+                        "Be careful.\nNow, go on!",
+                    ]
                 } else {
                     &["Be careful.\nNow, go on!"]
                 },
@@ -5925,11 +6748,7 @@ fn confirm_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
                 bank.yes_no_index = 0;
                 mark_runtime_snapshot_dirty(runtime_shell);
             }
-            _ => queue_visible_mom_bank_messages(
-                runtime_shell,
-                &["Just do what you can."],
-                true,
-            ),
+            _ => queue_visible_mom_bank_messages(runtime_shell, &["Just do what you can."], true),
         },
         VisibleMomBankPhase::Withdraw | VisibleMomBankPhase::Deposit => {
             if amount == 0 {
@@ -5974,11 +6793,19 @@ fn confirm_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
             } else {
                 state.money -= amount;
                 state.moms_money += amount;
-                queue_visible_mom_bank_messages(runtime_shell, &["OK, I'll save your money."], true);
+                queue_visible_mom_bank_messages(
+                    runtime_shell,
+                    &["OK, I'll save your money."],
+                    true,
+                );
             }
         }
         VisibleMomBankPhase::ChangeQuestion => {
-            runtime_shell.shell.session_mut().state_mut().mom_saving_some_money = accepted;
+            runtime_shell
+                .shell
+                .session_mut()
+                .state_mut()
+                .mom_saving_some_money = accepted;
             queue_visible_mom_bank_messages(
                 runtime_shell,
                 if accepted {
@@ -6004,7 +6831,11 @@ fn cancel_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         VisibleMomBankPhase::InitializeQuestion
         | VisibleMomBankPhase::AccessQuestion
         | VisibleMomBankPhase::ChangeQuestion => {
-            runtime_shell.visible_mom_bank.as_mut().unwrap().yes_no_index = 1;
+            runtime_shell
+                .visible_mom_bank
+                .as_mut()
+                .unwrap()
+                .yes_no_index = 1;
             confirm_visible_mom_bank(runtime_shell)
         }
         VisibleMomBankPhase::Menu
@@ -6034,8 +6865,7 @@ fn move_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell, delta: isize, hor
         }
         VisibleMomBankPhase::Withdraw | VisibleMomBankPhase::Deposit => {
             if horizontal {
-                bank.digit = (i16::from(bank.digit) + delta.signum() as i16)
-                    .clamp(0, 5) as u8;
+                bank.digit = (i16::from(bank.digit) + delta.signum() as i16).clamp(0, 5) as u8;
             } else {
                 let place = 10_u32.pow(u32::from(5 - bank.digit));
                 if delta < 0 {
@@ -6050,6 +6880,20 @@ fn move_visible_mom_bank(runtime_shell: &mut BevyRuntimeShell, delta: isize, hor
 }
 
 fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .special_boundary
+        .as_ref()
+        .is_some_and(|boundary| boundary.label == "PrinterError2")
+    {
+        record_visible_runtime_action(runtime_shell, "printer:error:select_ignored")?;
+        return Ok(());
+    }
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return Ok(());
+    }
     if !runtime_shell.battle_messages.is_empty()
         || runtime_shell
             .battle_exp_tween
@@ -6142,7 +6986,12 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    if runtime_shell.shell.presentation_snapshot()?.battle.is_some() {
+    if runtime_shell
+        .shell
+        .presentation_snapshot()?
+        .battle
+        .is_some()
+    {
         if runtime_shell.battle_move_cursor.is_some() {
             return select_visible_battle_move_swap(runtime_shell);
         }
@@ -6167,9 +7016,9 @@ fn press_visible_select_button(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let Some(item_id) = snapshot.progression.registered_key_item.clone() else {
         record_visible_runtime_action(runtime_shell, "pack:key_item:select:none_registered")?;
-        runtime_shell
-            .last_audio_events
-            .push("no registered key item".to_string());
+        retain_visible_field_notice_scene(runtime_shell, &snapshot);
+        runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "_MayRegisterItemText")?);
+        mark_runtime_snapshot_dirty(runtime_shell);
         set_shell_action_status(runtime_shell, "NO REGISTERED ITEM");
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
@@ -6262,6 +7111,12 @@ fn switch_visible_pack_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
 }
 
 fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return Ok(());
+    }
     if runtime_shell
         .battle_exp_tween
         .as_ref()
@@ -6283,9 +7138,11 @@ fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()
     if runtime_shell.visible_slot_machine.is_some() || runtime_shell.visible_card_flip.is_some() {
         return Ok(());
     }
-    if runtime_shell.field_text_reveal.is_some() {
-        // An active field textbox consumes non-confirm buttons. Do not let
-        // Start open the field menu beneath a running interaction.
+    let snapshot = runtime_shell.shell.presentation_snapshot()?;
+    if visible_script_or_dialogue_owns_start_input(runtime_shell, &snapshot) {
+        // Text/script execution owns the complete joypad except for the
+        // buttons explicitly read by its current ASM command. Start is never
+        // a text acknowledgement or a way to pause a running interaction.
         return Ok(());
     }
     if !runtime_shell.battle_messages.is_empty() {
@@ -6341,6 +7198,25 @@ fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()
 }
 
 fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell
+        .pokegear_phone_call
+        .as_ref()
+        .is_some_and(|call| {
+            matches!(
+                call.phase,
+                VisiblePokegearPhoneCallPhase::NoServicePrompt
+                    | VisiblePokegearPhoneCallPhase::AwaitHangup
+            )
+        })
+    {
+        return true;
+    }
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return true;
+    }
     if runtime_shell.player_walk_frame_ticks > 0 {
         return false;
     }
@@ -6365,8 +7241,7 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
     if runtime_shell.visible_unown_words.is_some() {
         return true;
     }
-    if runtime_shell.visible_heal_machine.is_some()
-        || runtime_shell.visible_magnet_train.is_some()
+    if runtime_shell.visible_heal_machine.is_some() || runtime_shell.visible_magnet_train.is_some()
     {
         return true;
     }
@@ -6379,6 +7254,9 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
     if runtime_shell.visible_unown_puzzle.is_some() {
         return true;
     }
+    if runtime_shell.visible_unown_printer.is_some() {
+        return true;
+    }
     if runtime_shell.visible_mom_bank.is_some() {
         return true;
     }
@@ -6386,6 +7264,15 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
         return true;
     }
     if runtime_shell.kurt_apricorn_cursor.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_battle_tower_room_menu.is_some() {
         return true;
     }
     if runtime_shell.buena_prize_cursor.is_some() {
@@ -6412,10 +7299,10 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
     if runtime_shell.pending_gender_selection.is_some() {
         return true;
     }
-    cached_runtime_snapshot(runtime_shell)
-        .map(|snapshot| {
+    let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
             snapshot.ui.pending_yes_no.is_some()
                 || runtime_shell.pending_phone_prompt.is_some()
+                || runtime_shell.pending_remember_password.is_some()
                 || snapshot.ui.pending_text_wait.is_some()
                 || snapshot.pending_move_learn.is_some()
                 || snapshot.pending_shop.is_some()
@@ -6443,11 +7330,17 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
                     && (runtime_shell.battle_move_cursor.is_some()
                         || runtime_shell.battle_switch_cursor.is_some()))
                 || snapshot.battle.is_some()
-        })
-        .unwrap_or(false)
+        });
+    fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
 fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return true;
+    }
     if runtime_shell.player_walk_frame_ticks > 0 {
         return false;
     }
@@ -6462,9 +7355,13 @@ fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool
         return true;
     }
     if runtime_shell.visible_unown_puzzle.is_some()
+        || runtime_shell.visible_unown_printer.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_card_flip.is_some()
         || runtime_shell.kurt_apricorn_cursor.is_some()
+        || runtime_shell.visible_buena_password.is_some()
+        || runtime_shell.visible_battle_tower_challenge_menu.is_some()
+        || runtime_shell.visible_battle_tower_room_menu.is_some()
         || runtime_shell.buena_prize_cursor.is_some()
     {
         return false;
@@ -6484,41 +7381,52 @@ fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool
     if runtime_shell.special_boundary.is_some() {
         return true;
     }
-    cached_runtime_snapshot(runtime_shell)
-        .map(|snapshot| {
+    let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
             (snapshot.battle.is_some() && runtime_shell.battle_move_cursor.is_some())
                 || (snapshot.battle.is_none()
-                && snapshot.pending_shop.is_none()
-                && !snapshot.ui.text_window_open
-                && !snapshot.ui.window_open
-                && snapshot.ui.menu.is_none()
-                && snapshot.ui.active_pokemon_picture.is_none()
-                && snapshot.ui.pending_yes_no.is_none()
-                && runtime_shell.pending_phone_prompt.is_none()
-                && snapshot.ui.pending_text_wait.is_none()
-                && snapshot.pending_move_learn.is_none()
-                && !has_visible_elevator_prompt(&snapshot, runtime_shell)
-                && !has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
-                && runtime_shell.special_boundary.is_none()
-                && !has_visible_auto_script_action(runtime_shell, &snapshot)
-                && (runtime_shell.pokegear_menu_open
-                    || runtime_shell.storage_cursor.is_some()
-                    || runtime_shell.bag_cursor.is_some()
-                    || runtime_shell.ball_cursor.is_some()
-                    || matches!(
-                        runtime_shell.field_pack_pocket.as_ref(),
-                        Some(FieldPackPocket::Custom(_))
-                    )
-                    || runtime_shell.key_item_cursor.is_some()
-                    || (!visible_field_pack_is_open(runtime_shell)
-                        && snapshot.progression.registered_key_item.is_some())))
-        })
-        .unwrap_or(false)
+                    && snapshot.pending_shop.is_none()
+                    && !snapshot.ui.text_window_open
+                    && !snapshot.ui.window_open
+                    && snapshot.ui.menu.is_none()
+                    && snapshot.ui.active_pokemon_picture.is_none()
+                    && snapshot.ui.pending_yes_no.is_none()
+                    && runtime_shell.pending_phone_prompt.is_none()
+                    && runtime_shell.pending_remember_password.is_none()
+                    && snapshot.ui.pending_text_wait.is_none()
+                    && snapshot.pending_move_learn.is_none()
+                    && runtime_shell.elevator_cursor.is_none()
+                    && runtime_shell.special_boundary.is_none()
+                    && !has_visible_auto_script_action(runtime_shell, &snapshot)
+                    && (runtime_shell.pokegear_menu_open
+                        || runtime_shell.storage_cursor.is_some()
+                        || runtime_shell.bag_cursor.is_some()
+                        || runtime_shell.ball_cursor.is_some()
+                        || matches!(
+                            runtime_shell.field_pack_pocket.as_ref(),
+                            Some(FieldPackPocket::Custom(_))
+                        )
+                        || runtime_shell.key_item_cursor.is_some()
+                        || !visible_field_pack_is_open(runtime_shell)))
+        });
+    fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
 fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
+    if runtime_shell.bill_pc_move_save.is_some()
+        || runtime_shell.pc_release_sequence.is_some()
+        || runtime_shell.pc_transfer_sequence.is_some()
+    {
+        return true;
+    }
     if runtime_shell.player_walk_frame_ticks > 0 {
         return false;
+    }
+    let script_ownership = cached_runtime_snapshot(runtime_shell)
+        .map(|snapshot| visible_script_or_dialogue_owns_start_input(runtime_shell, &snapshot));
+    if fail_closed_visible_input_ownership(runtime_shell, script_ownership) {
+        // Consume the host key so it cannot fall through to overworld input;
+        // press_visible_start_button deliberately ignores it.
+        return true;
     }
     if retained_text_surface_owns_gameplay_input(runtime_shell) {
         return true;
@@ -6534,9 +7442,13 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
         return true;
     }
     if runtime_shell.visible_unown_puzzle.is_some()
+        || runtime_shell.visible_unown_printer.is_some()
         || runtime_shell.visible_slot_machine.is_some()
         || runtime_shell.visible_card_flip.is_some()
         || runtime_shell.kurt_apricorn_cursor.is_some()
+        || runtime_shell.visible_buena_password.is_some()
+        || runtime_shell.visible_battle_tower_challenge_menu.is_some()
+        || runtime_shell.visible_battle_tower_room_menu.is_some()
         || runtime_shell.buena_prize_cursor.is_some()
     {
         return false;
@@ -6562,8 +7474,7 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
     if runtime_shell.special_boundary.is_some() {
         return false;
     }
-    cached_runtime_snapshot(runtime_shell)
-        .map(|snapshot| {
+    let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
             runtime_shell.start_menu_cursor.is_some()
                 || (snapshot.battle.is_none()
                     && snapshot.pending_shop.is_none()
@@ -6573,10 +7484,10 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
                     && snapshot.ui.active_pokemon_picture.is_none()
                     && snapshot.ui.pending_yes_no.is_none()
                     && runtime_shell.pending_phone_prompt.is_none()
+                    && runtime_shell.pending_remember_password.is_none()
                     && snapshot.ui.pending_text_wait.is_none()
                     && snapshot.pending_move_learn.is_none()
-                    && !has_visible_elevator_prompt(&snapshot, runtime_shell)
-                    && !has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
+                    && runtime_shell.elevator_cursor.is_none()
                     && !runtime_shell.party_menu_open
                     && !runtime_shell.pokedex_menu_open
                     && !runtime_shell.pokegear_menu_open
@@ -6586,8 +7497,30 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
                     && runtime_shell.special_boundary.is_none()
                     && !visible_field_pack_is_open(runtime_shell)
                     && !has_visible_auto_script_action(runtime_shell, &snapshot))
-        })
-        .unwrap_or(false)
+        });
+    fail_closed_visible_input_ownership(runtime_shell, ownership)
+}
+
+fn visible_script_or_dialogue_owns_start_input(
+    runtime_shell: &BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) -> bool {
+    runtime_shell.field_text_reveal.is_some()
+        || runtime_shell.field_notice.is_some()
+        || runtime_shell.pc_notice.is_some()
+        || runtime_shell.pending_day_of_week.is_some()
+        || runtime_shell.pending_phone_prompt.is_some()
+        || runtime_shell.pending_remember_password.is_some()
+        || runtime_shell.visible_wait_sfx_boundary
+        || runtime_shell.visible_mom_bank.is_some()
+        || runtime_shell.visible_script_delay_frames.is_some()
+        || runtime_shell.visible_script_movement.is_some()
+        || runtime_shell.visible_overworld_emote.is_some()
+        || snapshot.ui.text_window_open
+        || snapshot.ui.pending_text_wait.is_some()
+        || snapshot.ui.pending_yes_no.is_some()
+        || snapshot.script_events.pending_text_label.is_some()
+        || has_visible_direction_blocking_script_work(runtime_shell, snapshot)
 }
 
 fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
@@ -6613,6 +7546,9 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
     if runtime_shell.visible_unown_puzzle.is_some() {
         return true;
     }
+    if runtime_shell.visible_unown_printer.is_some() {
+        return true;
+    }
     if runtime_shell.visible_mom_bank.is_some() {
         return true;
     }
@@ -6620,6 +7556,15 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
         return true;
     }
     if runtime_shell.kurt_apricorn_cursor.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_buena_password.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        return true;
+    }
+    if runtime_shell.visible_battle_tower_room_menu.is_some() {
         return true;
     }
     if runtime_shell.buena_prize_cursor.is_some() {
@@ -6640,11 +7585,11 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
     if runtime_shell.pending_gender_selection.is_some() {
         return true;
     }
-    cached_runtime_snapshot(runtime_shell)
-        .map(|snapshot| {
+    let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
             runtime_shell.start_menu_cursor.is_some()
                 || snapshot.ui.pending_yes_no.is_some()
                 || runtime_shell.pending_phone_prompt.is_some()
+                || runtime_shell.pending_remember_password.is_some()
                 || snapshot.ui.pending_text_wait.is_some()
                 || snapshot.pending_move_learn.is_some()
                 || snapshot.ui.text_window_open
@@ -6663,10 +7608,23 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
                 || has_visible_direction_blocking_script_work(runtime_shell, &snapshot)
                 || visible_menu_has_selectable_options(&snapshot)
                 || snapshot.battle.is_some()
-                || has_visible_elevator_prompt(&snapshot, runtime_shell)
-                || has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
-        })
-        .unwrap_or(false)
+                || runtime_shell.elevator_cursor.is_some()
+        });
+    fail_closed_visible_input_ownership(runtime_shell, ownership)
+}
+
+fn fail_closed_visible_input_ownership(
+    runtime_shell: &mut BevyRuntimeShell,
+    ownership: Result<bool>,
+) -> bool {
+    match ownership {
+        Ok(owned) => owned,
+        Err(error) => {
+            record_visible_runtime_error(runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+            true
+        }
+    }
 }
 
 fn retained_text_surface_owns_gameplay_input(runtime_shell: &BevyRuntimeShell) -> bool {
@@ -6698,21 +7656,26 @@ fn has_visible_direction_blocking_script_work(
         || snapshot.script_events.pending_script_warp.is_some()
         || !snapshot.script_events.command_queue.is_empty()
         || snapshot.script_events.next_script.is_some()
+        || snapshot.script_events.map_reentry_script.is_some()
         || !snapshot.script_events.deferred_scripts.is_empty()
         || snapshot.script_events.script_ended.is_some()
         || visible_auto_runtime_flag(snapshot).is_some()
         || runtime_shell.active_script_cursor.is_some()
+        || runtime_shell.pokegear_phone_call.is_some()
+        || runtime_shell.incoming_phone_sequence.is_some()
 }
 
-fn visible_field_shortcut_allowed(runtime_shell: &BevyRuntimeShell) -> bool {
+fn visible_field_shortcut_allowed(runtime_shell: &BevyRuntimeShell) -> Result<bool> {
     if runtime_shell.intro_screen.is_some()
         || runtime_shell.title_menu.is_some()
         || runtime_shell.pending_time_set.is_some()
         || runtime_shell.pending_oak_intro.is_some()
         || runtime_shell.pending_gender_selection.is_some()
         || runtime_shell.special_boundary.is_some()
+        || runtime_shell.pokegear_phone_call.is_some()
+        || runtime_shell.incoming_phone_sequence.is_some()
     {
-        return false;
+        return Ok(false);
     }
     runtime_shell
         .shell
@@ -6726,10 +7689,10 @@ fn visible_field_shortcut_allowed(runtime_shell: &BevyRuntimeShell) -> bool {
                 && snapshot.ui.active_pokemon_picture.is_none()
                 && snapshot.ui.pending_yes_no.is_none()
                 && runtime_shell.pending_phone_prompt.is_none()
+                && runtime_shell.pending_remember_password.is_none()
                 && snapshot.ui.pending_text_wait.is_none()
                 && snapshot.pending_move_learn.is_none()
-                && !has_visible_elevator_prompt(&snapshot, runtime_shell)
-                && !has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
+                && runtime_shell.elevator_cursor.is_none()
                 && runtime_shell.start_menu_cursor.is_none()
                 && !runtime_shell.party_menu_open
                 && !runtime_shell.pokedex_menu_open
@@ -6742,54 +7705,57 @@ fn visible_field_shortcut_allowed(runtime_shell: &BevyRuntimeShell) -> bool {
                 && runtime_shell.pc_item_cursor.is_none()
                 && !has_visible_auto_script_action(runtime_shell, &snapshot)
         })
-        .unwrap_or(false)
-}
-
-fn visible_pending_text_wait_active(runtime_shell: &BevyRuntimeShell) -> bool {
-    runtime_shell
-        .shell
-        .snapshot()
-        .map(|snapshot| snapshot.ui.pending_text_wait.is_some())
-        .unwrap_or(false)
 }
 
 fn advance_visible_pending_text_wait(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     // TextCommand_PROMPT_BUTTON plays this only after a fully printed page is
     // acknowledged. The earlier reveal-completion branch returns before this
     // function, so fast-forwarding text remains silent.
-    if pending_text_wait_uses_prompt_button(runtime_shell) {
+    let prompt_button = pending_text_wait_uses_prompt_button(runtime_shell);
+    if prompt_button {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     record_visible_runtime_action(runtime_shell, "ui:text_wait:advance")?;
-    let next_cursor = visible_active_compiled_script_cursor(runtime_shell);
-    if let Some(cursor) = next_cursor {
-        let advanced = runtime_shell
-            .shell
-            .advance_text_wait_and_run_compiled_script(
-                Some(cursor),
-                256,
-                ScriptRuntimeInputs::default(),
-                ScriptPhoneInputs::default(),
-            )?;
-        runtime_shell.last_audio_events.push(format!(
-            "advanced text wait {:?} resumed_steps={}",
-            advanced.wait.state_checksum,
-            advanced.run.steps.len()
-        ));
-        let reached_boundary =
-            integrate_visible_compiled_script_run(runtime_shell, &advanced.run.steps)?;
-        arm_visible_active_script_cursor_from_run(runtime_shell, advanced.run.next_cursor);
-        if reached_boundary {
-            trim_event_log(&mut runtime_shell.last_audio_events);
-            return Ok(());
-        }
-    } else {
+    if prompt_button {
         let advance = runtime_shell.shell.advance_pending_text_wait()?;
         runtime_shell
             .last_audio_events
             .push(format!("advanced text wait {:?}", advance.state_checksum));
+    } else {
+        let next_cursor = visible_active_compiled_script_cursor(runtime_shell);
+        if let Some(cursor) = next_cursor {
+            let advanced = runtime_shell
+                .shell
+                .advance_text_wait_and_run_compiled_script(
+                    Some(cursor),
+                    256,
+                    ScriptRuntimeInputs::default(),
+                    ScriptPhoneInputs::default(),
+                )?;
+            runtime_shell.last_audio_events.push(format!(
+                "advanced text wait {:?} resumed_steps={}",
+                advanced.wait.state_checksum,
+                advanced.run.steps.len()
+            ));
+            let reached_boundary =
+                integrate_visible_compiled_script_run(runtime_shell, &advanced.run.steps)?;
+            arm_visible_active_script_cursor_from_run(runtime_shell, advanced.run.next_cursor);
+            if reached_boundary {
+                trim_event_log(&mut runtime_shell.last_audio_events);
+                return Ok(());
+            }
+        } else {
+            let advance = runtime_shell.shell.advance_pending_text_wait()?;
+            runtime_shell
+                .last_audio_events
+                .push(format!("advanced text wait {:?}", advance.state_checksum));
+        }
     }
     trim_event_log(&mut runtime_shell.last_audio_events);
+    // `promptbutton` can lead directly into a source special that owns modal
+    // input (notably NameRival in CopScript). Resume that opcode through the
+    // shell's one-command executor so its visible UI opens before mutation.
+    // Ordinary `waitbutton` keeps the established composed-run boundary.
     continue_visible_script_after_prompt(runtime_shell)?;
     Ok(())
 }
@@ -6816,6 +7782,85 @@ fn confirm_visible_phone_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<
 
 fn decline_visible_phone_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     resolve_visible_phone_prompt(runtime_shell, false)
+}
+
+fn confirm_visible_remember_password_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let accepted = strict_readonly_cursor_index(
+        &runtime_shell.yes_no_cursor,
+        "script:remember-password",
+        2,
+    )
+    .context("remember-password prompt is active without a valid cursor")?
+        == 0;
+    begin_closing_visible_remember_password_prompt(runtime_shell, accepted)
+}
+
+fn decline_visible_remember_password_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    begin_closing_visible_remember_password_prompt(runtime_shell, false)
+}
+
+fn begin_closing_visible_remember_password_prompt(
+    runtime_shell: &mut BevyRuntimeShell,
+    accepted: bool,
+) -> Result<()> {
+    let Some(prompt) = runtime_shell.pending_remember_password.as_mut() else {
+        return Ok(());
+    };
+    if prompt.closing_frames.is_some() {
+        return Ok(());
+    }
+    runtime_shell.yes_no_cursor = Some(MenuCursor {
+        surface_id: "script:remember-password".to_string(),
+        option_index: usize::from(!accepted),
+    });
+    // AskRememberPassword retains the selected VerticalMenu for 15 frames
+    // before Buena_ExitMenu removes its window and returns to ScriptEvents.
+    prompt.closing_frames = Some(15);
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("special:remember_password:select:{accepted}"),
+    )?;
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn advance_visible_remember_password_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    let Some(prompt) = runtime_shell.pending_remember_password.as_mut() else {
+        return Ok(false);
+    };
+    let Some(frames) = prompt.closing_frames else {
+        return Ok(false);
+    };
+    if frames > 1 {
+        prompt.closing_frames = Some(frames - 1);
+        mark_runtime_presentation_dirty(runtime_shell);
+        return Ok(true);
+    }
+    let accepted = strict_readonly_cursor_index(
+        &runtime_shell.yes_no_cursor,
+        "script:remember-password",
+        2,
+    )
+    .context("closing remember-password prompt has no valid selection")?
+        == 0;
+    let used = runtime_shell.shell.ask_remember_password_special(accepted)?;
+    anyhow::ensure!(
+        matches!(
+            used.outcome.effect,
+            SpecialRoutineEffect::AskRememberPassword { remember } if remember == accepted
+        ),
+        "AskRememberPassword returned a different special effect"
+    );
+    runtime_shell.pending_remember_password = None;
+    runtime_shell.yes_no_cursor = None;
+    runtime_shell.last_audio_events.push(format!(
+        "remember-password accepted={accepted} checksum={:?}",
+        used.state_checksum
+    ));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    mark_runtime_snapshot_dirty(runtime_shell);
+    continue_visible_script_after_prompt(runtime_shell)?;
+    Ok(true)
 }
 
 fn resolve_visible_phone_prompt(
@@ -6979,32 +8024,199 @@ fn play_pending_field_notice_sound(runtime_shell: &mut BevyRuntimeShell) -> Resu
     )
 }
 
-fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> bool {
+fn commit_visible_pending_block_field_move(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let Some(pending) = runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_block_field_move
+        .as_ref()
+    else {
+        return Ok(());
+    };
+    let (source_script, command_index) = match pending.move_id.as_str() {
+        "CUT" => ("Script_Cut", 3),
+        "WHIRLPOOL" => ("Script_UsedWhirlpool", 3),
+        move_id => anyhow::bail!("unsupported pending visible block field move {move_id}"),
+    };
+    execute_visible_deferred_field_move_callasm(runtime_shell, source_script, command_index)
+}
+
+fn commit_visible_pending_flash_field_move(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_flash_field_move
+        .is_none()
+    {
+        return Ok(());
+    }
+    execute_visible_deferred_field_move_callasm(runtime_shell, "Script_UseFlash", 3)
+}
+
+fn commit_visible_pending_surf_field_move(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_surf_field_move
+        .is_none()
+    {
+        return Ok(());
+    }
+    for (command_index, expected_command) in [
+        (3, "callasm"),
+        (4, "readmem"),
+        (5, "writevar"),
+        (6, "special"),
+        (7, "special"),
+        (8, "special"),
+        (9, "applymovement"),
+    ] {
+        execute_visible_deferred_field_move_source_command(
+            runtime_shell,
+            "UsedSurfScript",
+            command_index,
+            expected_command,
+        )?;
+    }
+    Ok(())
+}
+
+fn execute_visible_pending_waterfall_step(
+    runtime_shell: &mut BevyRuntimeShell,
+    step_index: u16,
+    total_steps: u16,
+) -> Result<()> {
+    anyhow::ensure!(
+        step_index < total_steps,
+        "visible WATERFALL step {step_index} is outside total {total_steps}"
+    );
+    let origin_map_name = runtime_shell.shell.session.overworld.map.name.clone();
+    for (command_index, expected_command) in [(0, "applymovement"), (1, "callasm")] {
+        let source_script = ".loop@Script_UsedWaterfall";
+        record_visible_runtime_action(
+            runtime_shell,
+            format!("script:step:{source_script}:{command_index}"),
+        )?;
+        let stepped = runtime_shell.shell.step_compiled_script_command(
+            &origin_map_name,
+            source_script,
+            command_index,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )?;
+        anyhow::ensure!(
+            stepped.command == expected_command,
+            "WATERFALL source loop expected {expected_command}, found {}",
+            stepped.command
+        );
+        runtime_shell.last_audio_events.push(format!(
+            "script step={source_script} command={command_index} result={} checksum={:?}",
+            stepped.mutation.result.result_tag(),
+            stepped.mutation.state_checksum
+        ));
+    }
+    let expected_value = if step_index + 1 == total_steps {
+        "1"
+    } else {
+        "0"
+    };
+    anyhow::ensure!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .script_value
+            .as_deref()
+            == Some(expected_value),
+        "WATERFALL continuation returned a source value inconsistent with step {}/{}",
+        step_index + 1,
+        total_steps
+    );
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    Ok(())
+}
+
+fn execute_visible_deferred_field_move_callasm(
+    runtime_shell: &mut BevyRuntimeShell,
+    source_script: &str,
+    command_index: usize,
+) -> Result<()> {
+    execute_visible_deferred_field_move_source_command(
+        runtime_shell,
+        source_script,
+        command_index,
+        "callasm",
+    )
+}
+
+fn execute_visible_deferred_field_move_source_command(
+    runtime_shell: &mut BevyRuntimeShell,
+    source_script: &str,
+    command_index: usize,
+    expected_command: &str,
+) -> Result<()> {
+    let origin_map_name = runtime_shell.shell.session.overworld.map.name.clone();
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("script:step:{source_script}:{command_index}"),
+    )?;
+    let stepped = runtime_shell.shell.step_compiled_script_command(
+        &origin_map_name,
+        source_script,
+        command_index,
+        ScriptRuntimeInputs::default(),
+        ScriptPhoneInputs::default(),
+    )?;
+    anyhow::ensure!(
+        stepped.command == expected_command,
+        "field-move source boundary expected {expected_command}, found {}",
+        stepped.command
+    );
+    integrate_visible_script_mutation_outcome(runtime_shell, &stepped.mutation)?;
+    runtime_shell.last_audio_events.push(format!(
+        "script step={source_script} command={command_index} result={} checksum={:?}",
+        stepped.mutation.result.result_tag(),
+        stepped.mutation.state_checksum
+    ));
+    trim_event_log(&mut runtime_shell.last_audio_events);
+    Ok(())
+}
+
+fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
     if runtime_shell.visible_waterfall_animation.is_some() {
-        return true;
+        return Ok(true);
     }
     if runtime_shell.pending_field_notice_effect_frames.is_none() {
-        return false;
-    }
-    if runtime_shell.visible_sweet_scent_delay {
-        return true;
+        return Ok(false);
     }
     if let Some(from_tile) = runtime_shell.pending_surf_start_from {
         // UsedSurfScript switches to the surf sprite and then applies one
-        // sixteen-frame `slow_step`. The core has committed the destination;
-        // interpolate there from the retained land tile after the text closes.
+        // sixteen-frame `slow_step`. Execute those exact source commands only
+        // after the use text closes, then interpolate from the retained land
+        // tile to the newly committed destination.
+        commit_visible_pending_surf_field_move(runtime_shell)?;
         runtime_shell.field_notice_scene = None;
         runtime_shell.player_walk_from = Some(from_tile);
         runtime_shell.player_walk_total_ticks = WALK_FRAME_HOLD_TICKS.saturating_mul(2);
         runtime_shell.player_walk_frame_ticks = runtime_shell.player_walk_total_ticks;
         runtime_shell.player_walk_stride = true;
         runtime_shell.player_walk_mirror_stride = false;
+    } else if runtime_shell.visible_flash_animation.is_some() {
+        commit_visible_pending_flash_field_move(runtime_shell)?;
     } else if runtime_shell.visible_cut_animation.is_some()
         || runtime_shell.visible_whirlpool_animation.is_some()
     {
-        // CutDownTree/DisappearWhirlpool have already installed the
-        // replacement block. Once the use text closes, their OAM draws over
-        // that cleared tilemap rather than the retained obstacle block.
+        // The source callasm owns the block write. Commit it only after the
+        // use text closes, immediately before its OAM draws over the cleared
+        // tilemap.
+        commit_visible_pending_block_field_move(runtime_shell)?;
         runtime_shell.field_notice_scene = None;
     } else if runtime_shell.visible_whirlpool_animation.is_none()
         && runtime_shell.visible_headbutt_animation.is_none()
@@ -7016,7 +8228,7 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> bo
             phase: 0,
         });
     }
-    true
+    Ok(true)
 }
 
 fn visible_field_notice_uses_prompt_arrow(runtime_shell: &BevyRuntimeShell) -> bool {
@@ -7030,7 +8242,10 @@ fn visible_field_notice_uses_prompt_arrow(runtime_shell: &BevyRuntimeShell) -> b
         && runtime_shell.visible_headbutt_animation.is_none()
         && !runtime_shell.pending_field_battle_entry
         && runtime_shell.field_notice_queue.is_empty()
-        && !runtime_shell.pending_sweet_scent_nothing_notice
+        && !runtime_shell
+            .visible_item_ball_notice
+            .as_ref()
+            .is_some_and(|notice| notice.phase == VisibleItemBallPhase::FoundText)
 }
 
 fn settle_pending_field_battle_entry_after_notice(
@@ -7053,7 +8268,12 @@ fn advance_visible_heal_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<
         .context("HealMachineAnim disappeared during its retained frame")?;
     let ball_frames = u16::from(party_count) * 30;
     if frame < ball_frames && frame % 30 == 0 {
-        let BevyRuntimeShell { shell, pending_audio, last_audio_events, .. } = runtime_shell;
+        let BevyRuntimeShell {
+            shell,
+            pending_audio,
+            last_audio_events,
+            ..
+        } = runtime_shell;
         queue_visible_sound_effect(
             shell.runtime().audio(),
             pending_audio,
@@ -7063,7 +8283,12 @@ fn advance_visible_heal_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<
     }
     if frame == ball_frames {
         if kind == 2 {
-            let BevyRuntimeShell { shell, pending_audio, last_audio_events, .. } = runtime_shell;
+            let BevyRuntimeShell {
+                shell,
+                pending_audio,
+                last_audio_events,
+                ..
+            } = runtime_shell;
             queue_visible_sound_effect(
                 shell.runtime().audio(),
                 pending_audio,
@@ -7077,7 +8302,12 @@ fn advance_visible_heal_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<
     let total_frames = ball_frames + 80;
     if frame >= total_frames {
         if kind == 2 {
-            let BevyRuntimeShell { shell, pending_audio, last_audio_events, .. } = runtime_shell;
+            let BevyRuntimeShell {
+                shell,
+                pending_audio,
+                last_audio_events,
+                ..
+            } = runtime_shell;
             queue_visible_sound_effect(
                 shell.runtime().audio(),
                 pending_audio,
@@ -7198,7 +8428,12 @@ fn advance_visible_magnet_train(runtime_shell: &mut BevyRuntimeShell) -> Result<
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
-    let BevyRuntimeShell { shell, pending_audio, last_audio_events, .. } = runtime_shell;
+    let BevyRuntimeShell {
+        shell,
+        pending_audio,
+        last_audio_events,
+        ..
+    } = runtime_shell;
     queue_visible_sound_effect(
         shell.runtime().audio(),
         pending_audio,
@@ -7225,7 +8460,10 @@ fn close_visible_unown_words(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 }
 
 fn close_visible_diploma(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    anyhow::ensure!(runtime_shell.visible_diploma.take().is_some(), "Diploma disappeared before acknowledgement");
+    anyhow::ensure!(
+        runtime_shell.visible_diploma.take().is_some(),
+        "Diploma disappeared before acknowledgement"
+    );
     mark_runtime_snapshot_dirty(runtime_shell);
     continue_visible_script_after_prompt(runtime_shell)
 }
@@ -7237,7 +8475,22 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
             continue;
         }
         let snapshot = runtime_shell.shell.presentation_snapshot()?;
-        if advance_visible_next_pending_script_request(runtime_shell, &snapshot)? {
+        if snapshot.script_events.pending_music_fade.is_some() {
+            // `musicfadeout` starts the audio fade and immediately returns in
+            // ScriptEvents; it is not a script delay. Consuming the request
+            // without advancing stranded radio broadcasts before their next
+            // writetext forever.
+            take_visible_pending_music_fade(runtime_shell)?;
+            continue;
+        }
+        // TextLabel is not a generic auto request: PrintText owns the LCD
+        // until every page has rendered. It is consumed by the typewriter's
+        // full-stream completion path. Timers, fades, and map requests remain
+        // automatic here.
+        if snapshot.script_events.pending_text_label.is_none()
+            && snapshot.script_events.pending_music_fade.is_none()
+            && advance_visible_next_pending_script_request(runtime_shell, &snapshot)?
+        {
             return Ok(());
         }
         if !snapshot.script_events.audio_events.is_empty() {
@@ -7269,12 +8522,13 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
         // that wait resumes directly into `closetext`. Treating the open
         // window itself as a boundary before those commands run strands the
         // script between its text and wait opcodes (notably MeetMomScript).
-        let text_window_blocks = snapshot.ui.text_window_open
-            && runtime_shell.active_script_cursor.is_none();
+        let text_window_blocks =
+            snapshot.ui.text_window_open && runtime_shell.active_script_cursor.is_none();
         if runtime_shell.visible_mom_bank.is_some()
             || snapshot.ui.pending_yes_no.is_some()
             || runtime_shell.pending_day_of_week.is_some()
             || runtime_shell.pending_phone_prompt.is_some()
+            || runtime_shell.pending_remember_password.is_some()
             || snapshot.ui.pending_text_wait.is_some()
             || snapshot.script_events.pending_text_label.is_some()
             || snapshot.script_events.pending_script_warp.is_some()
@@ -7282,12 +8536,14 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
             || snapshot.script_events.pending_map_refresh.is_some()
             || snapshot.script_events.pending_music_fade.is_some()
             || snapshot.script_events.pending_screen_fade.is_some()
+            || !snapshot.script_events.pending_delays.is_empty()
+            || !snapshot.script_events.pending_earthquakes.is_empty()
+            || !snapshot.script_events.pending_emotes.is_empty()
             || snapshot.pending_shop.is_some()
             || text_window_blocks
             || snapshot.ui.window_open
             || snapshot.ui.active_pokemon_picture.is_some()
-            || has_visible_elevator_prompt(&snapshot, runtime_shell)
-            || has_visible_gift_pokemon_prompt(&snapshot, runtime_shell)
+            || runtime_shell.elevator_cursor.is_some()
             || visible_menu_has_selectable_options(&snapshot)
             || snapshot.battle.is_some()
             || runtime_shell.start_menu_cursor.is_some()
@@ -7297,13 +8553,21 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
             || runtime_shell.options_menu_open
             || runtime_shell.save_menu_open
             || runtime_shell.special_boundary.is_some()
+            || runtime_shell.visible_wait_sfx_boundary
+            || runtime_shell.visible_heal_machine.is_some()
+            || runtime_shell.visible_magnet_train.is_some()
             || runtime_shell.kurt_apricorn_cursor.is_some()
+            || runtime_shell.visible_buena_password.is_some()
+            || runtime_shell.visible_battle_tower_challenge_menu.is_some()
+            || runtime_shell.visible_battle_tower_room_menu.is_some()
             || runtime_shell.buena_prize_cursor.is_some()
             || runtime_shell.intro_screen.is_some()
             || runtime_shell.credits_screen.is_some()
             || visible_field_pack_is_open(runtime_shell)
             || runtime_shell.storage_cursor.is_some()
             || runtime_shell.pc_item_cursor.is_some()
+            || runtime_shell.pc_confirmation.is_some()
+            || runtime_shell.decoration_menu.is_some()
             || runtime_shell.player_pc_action_cursor.is_some()
             || runtime_shell.mailbox_cursor.is_some()
             || runtime_shell.mailbox_action_cursor.is_some()
@@ -7315,12 +8579,102 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
     anyhow::bail!("visible script continuation exceeded {MAX_CONTINUE_STEPS} steps")
 }
 
+fn advance_visible_wait_sfx_boundary(
+    runtime_shell: &mut BevyRuntimeShell,
+    presentation_snapshot: &RuntimeShellSnapshot,
+) -> Result<bool> {
+    if !runtime_shell.visible_wait_sfx_boundary {
+        return Ok(false);
+    }
+    if presentation_snapshot.ui.text_window_open {
+        if !visible_field_dialogue_is_fully_revealed(runtime_shell, presentation_snapshot) {
+            return Ok(true);
+        }
+        if advance_visible_completed_field_text_page(runtime_shell, presentation_snapshot)? {
+            return Ok(true);
+        }
+    }
+    drain_visible_audio_events(runtime_shell)?;
+    if !visible_wait_sfx_finished(runtime_shell) {
+        return Ok(true);
+    }
+    if let Some(audio_id) = runtime_shell.pending_wait_play_sfx.pop_front() {
+        queue_visible_shell_sound_effect(runtime_shell, &audio_id)?;
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(true);
+    }
+    if let Some(completion) = runtime_shell.wait_play_sfx_completion.take() {
+        runtime_shell.visible_wait_sfx_boundary = false;
+        match completion {
+            VisibleWaitPlaySfxCompletion::FieldNotice(notice) => {
+                continue_visible_script_after_prompt(runtime_shell)?;
+                // `WaitPlaySFX` returns before the following `writetext`. Set the
+                // typed Itemfinder page after continuation has drained any stale
+                // noninteractive Pack surface so that cleanup cannot erase it.
+                runtime_shell.field_notice = Some(notice);
+            }
+            VisibleWaitPlaySfxCompletion::SpecialBoundary(boundary) => {
+                set_shell_action_status(runtime_shell, boundary.label.clone());
+                runtime_shell.special_boundary = Some(boundary);
+            }
+        }
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(true);
+    }
+    if runtime_shell
+        .shell
+        .snapshot()?
+        .script_events
+        .pending_text_label
+        .is_some()
+    {
+        runtime_shell
+            .shell
+            .take_pending_script_request(RuntimePendingScriptRequestKind::TextLabel)?;
+    }
+    if runtime_shell
+        .shell
+        .snapshot()?
+        .script_events
+        .waiting_for_sound_effect
+    {
+        runtime_shell
+            .shell
+            .consume_script_runtime_flag(RuntimeScriptRuntimeFlag::WaitingForSoundEffect)?;
+    }
+    runtime_shell.visible_wait_sfx_boundary = false;
+    continue_visible_script_after_prompt(runtime_shell)?;
+    Ok(true)
+}
+
+fn advance_visible_special_text_pause(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    let Some(frames) = runtime_shell.visible_special_text_pause_frames.as_mut() else {
+        return Ok(false);
+    };
+    *frames = frames.saturating_sub(1);
+    if *frames == 0 {
+        close_visible_special_boundary(runtime_shell)?;
+    } else {
+        mark_runtime_snapshot_dirty(runtime_shell);
+    }
+    Ok(true)
+}
+
 fn advance_visible_next_pending_script_request(
     runtime_shell: &mut BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) -> Result<bool> {
     if snapshot.script_events.pending_text_label.is_some() {
         advance_visible_text_label(runtime_shell)?;
+        return Ok(true);
+    }
+    if snapshot
+        .script_events
+        .pending_map_load
+        .as_ref()
+        .is_some_and(|load| load.command == "newloadmap")
+    {
+        take_visible_pending_map_load(runtime_shell)?;
         return Ok(true);
     }
     if snapshot.script_events.pending_script_warp.is_some() {
@@ -7422,6 +8776,8 @@ fn toggle_visible_start_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     runtime_shell.save_flow = None;
     runtime_shell.special_boundary = None;
     runtime_shell.special_boundary_queue.clear();
+    runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.pending_photo_studio_commit = None;
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;
     runtime_shell.field_pack_pocket = None;
@@ -7498,6 +8854,15 @@ fn visible_start_menu_blockers(
     if runtime_shell.buena_prize_cursor.is_some() {
         blockers.push("buena_prize");
     }
+    if runtime_shell.visible_buena_password.is_some() {
+        blockers.push("buena_password");
+    }
+    if runtime_shell.visible_battle_tower_challenge_menu.is_some() {
+        blockers.push("battle_tower_challenge_menu");
+    }
+    if runtime_shell.visible_battle_tower_room_menu.is_some() {
+        blockers.push("battle_tower_room_menu");
+    }
     if runtime_shell.pc_hub_cursor.is_some() {
         blockers.push("pc_hub");
     }
@@ -7533,10 +8898,19 @@ fn visible_quick_save_blockers(
     snapshot: &RuntimeShellSnapshot,
     allow_active_script_cursor: bool,
     allow_save_menu: bool,
+    allow_bill_pc: bool,
 ) -> Vec<&'static str> {
     let mut blockers = visible_start_menu_blockers(runtime_shell, snapshot)
         .into_iter()
-        .filter(|blocker| (*blocker != "save" || !allow_save_menu) && *blocker != "auto_script")
+        .filter(|blocker| {
+            (*blocker != "save" || !allow_save_menu)
+                && *blocker != "auto_script"
+                && (!allow_bill_pc
+                    || !matches!(
+                        *blocker,
+                        "window" | "menu" | "bill_pc" | "storage" | "party" | "pc_hub"
+                    ))
+        })
         .collect::<Vec<_>>();
     if has_visible_save_blocking_script_work(snapshot) {
         blockers.push("auto_script");
@@ -7559,6 +8933,9 @@ fn visible_quick_save_blockers(
     if runtime_shell.pending_phone_prompt.is_some() {
         blockers.push("phone_prompt");
     }
+    if runtime_shell.pending_remember_password.is_some() {
+        blockers.push("remember_password");
+    }
     if runtime_shell.pending_day_of_week.is_some() {
         blockers.push("day_of_week");
     }
@@ -7570,6 +8947,12 @@ fn visible_quick_save_blockers(
     }
     if runtime_shell.pending_name_input.is_some() {
         blockers.push("name_input");
+    }
+    if runtime_shell.pending_mail_input.is_some() {
+        blockers.push("mail_input");
+    }
+    if runtime_shell.pending_mail_read.is_some() {
+        blockers.push("mail_read");
     }
     if runtime_shell.pending_name_choice.is_some() {
         blockers.push("name_choice");
@@ -7584,7 +8967,7 @@ fn visible_quick_load_blockers(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
 ) -> Vec<&'static str> {
-    visible_quick_save_blockers(runtime_shell, snapshot, false, false)
+    visible_quick_save_blockers(runtime_shell, snapshot, false, false, false)
 }
 
 fn has_visible_save_blocking_script_work(snapshot: &RuntimeShellSnapshot) -> bool {
@@ -7599,6 +8982,7 @@ fn has_visible_save_blocking_script_work(snapshot: &RuntimeShellSnapshot) -> boo
         || snapshot.script_events.pending_script_warp.is_some()
         || !snapshot.script_events.command_queue.is_empty()
         || snapshot.script_events.next_script.is_some()
+        || snapshot.script_events.map_reentry_script.is_some()
         || !snapshot.script_events.deferred_scripts.is_empty()
         || snapshot.script_events.script_ended.is_some()
         || !snapshot.script_events.audio_events.is_empty()

@@ -3,6 +3,7 @@ use crate::battle::stats::BattleStatMultiplier;
 use crate::models::{
     BaseStats, Dv, Item, LearnedMove, PokemonSpecies, PokemonType, item_pocket, pokemon_type,
 };
+use crate::random::{CrystalRandomState, ExactBattleRandom, Random, ReplayDivider};
 
 #[test]
 fn battle_turn_serialized_variants_reject_unknown_fallback_fields() {
@@ -1028,7 +1029,7 @@ fn commit_battle_turn_outcome_deactivates_when_either_side_fled() {
 }
 
 #[test]
-fn commit_wild_battle_escape_attempt_updates_attempts_rng_and_deactivates_on_success() {
+fn commit_wild_battle_escape_attempt_updates_attempts_and_deactivates_on_success() {
     let mut state = GameState::default();
     let enemy = pokemon("RATTATA", 72, pokemon_type("NORMAL"), "TACKLE");
     state.battle = crate::state::BattleMemory::Wild {
@@ -1051,10 +1052,8 @@ fn commit_wild_battle_escape_attempt_updates_attempts_rng_and_deactivates_on_suc
             roll: Some(90),
             attempts_before: 2,
             attempts_after: 3,
-            rng_seed_after: 0x1111_2222,
         },
     );
-    assert_eq!(state.rng_seed, 0x1111_2222);
     assert_eq!(state.battle_escape_attempts, 3);
     assert!(matches!(
         state.battle,
@@ -1069,10 +1068,8 @@ fn commit_wild_battle_escape_attempt_updates_attempts_rng_and_deactivates_on_suc
             roll: Some(12),
             attempts_before: 3,
             attempts_after: 3,
-            rng_seed_after: 0x3333_4444,
         },
     );
-    assert_eq!(state.rng_seed, 0x3333_4444);
     assert_eq!(state.battle_escape_attempts, 0);
     assert_eq!(state.battle, crate::state::BattleMemory::Inactive);
     assert_eq!(state.battle_active_party_index, None);
@@ -1181,6 +1178,7 @@ fn move_data_with_effect_chance(
     effect_chance: u8,
 ) -> Move {
     Move {
+        source_index: 1,
         name: name.to_string(),
         move_type,
         power,
@@ -1235,6 +1233,7 @@ fn move_data_with_stat(
     amount: i8,
 ) -> Move {
     Move {
+        source_index: 1,
         name: name.to_string(),
         move_type,
         power,
@@ -14291,7 +14290,7 @@ fn metronome_selects_pack_move_deterministically_without_extra_pp_spend() {
     });
     let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
     let enemy_hp = enemy.hp;
-    let moves = BTreeMap::from([
+    let mut moves = BTreeMap::from([
         (
             "METRONOME".to_string(),
             move_data_with_effect("METRONOME", pokemon_type("NORMAL"), 0, 100, "METRONOME"),
@@ -14309,6 +14308,10 @@ fn metronome_selects_pack_move_deterministically_without_extra_pp_spend() {
             move_data("EMBER", pokemon_type("FIRE"), 40, 100),
         ),
     ]);
+    for (source_index, move_data) in moves.values_mut().enumerate() {
+        move_data.source_index = (source_index + 1) as u8;
+    }
+    moves.get_mut("EMBER").unwrap().source_index = 64;
     let mut rng = Random::new(1);
 
     let outcome = resolve_battle_turn(
@@ -14334,7 +14337,7 @@ fn metronome_selects_pack_move_deterministically_without_extra_pp_spend() {
         side: BattleSide::Player,
         move_name: "METRONOME".to_string(),
         selected_move: "EMBER".to_string(),
-        roll: 0,
+        roll: 64,
     }));
     assert!(outcome.events.iter().any(|event| matches!(
         event,
@@ -14347,17 +14350,63 @@ fn metronome_selects_pack_move_deterministically_without_extra_pp_spend() {
 }
 
 #[test]
-fn metronome_fails_when_pack_has_no_other_move_candidate() {
+fn metronome_rejection_loop_consumes_exact_raw_battle_random_bytes() {
+    let mut player = pokemon("CLEFAIRY", 90, pokemon_type("NORMAL"), "METRONOME");
+    player.moves.push(LearnedMove {
+        name: "TACKLE".to_string(),
+        current_pp: 5,
+        pp_ups: 0,
+    });
+    let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "SPLASH");
+    let mut moves = BTreeMap::from([
+        (
+            "METRONOME".to_string(),
+            move_data_with_effect("METRONOME", pokemon_type("NORMAL"), 0, 100, "METRONOME"),
+        ),
+        (
+            "STRUGGLE".to_string(),
+            move_data("STRUGGLE", pokemon_type("NORMAL"), 50, 100),
+        ),
+        (
+            "TACKLE".to_string(),
+            move_data("TACKLE", pokemon_type("NORMAL"), 35, 100),
+        ),
+        (
+            "EMBER".to_string(),
+            move_data("EMBER", pokemon_type("FIRE"), 40, 100),
+        ),
+    ]);
+    moves.get_mut("METRONOME").unwrap().source_index = 118;
+    moves.get_mut("STRUGGLE").unwrap().source_index = 165;
+    moves.get_mut("TACKLE").unwrap().source_index = 33;
+    moves.get_mut("EMBER").unwrap().source_index = 64;
+    let state = battle_state(player, enemy, 0);
+    // Starting from hRandomSub = 0, these pairs yield raw bytes
+    // 0, 252, METRONOME, STRUGGLE, TACKLE, then EMBER.
+    let mut divider = ReplayDivider::new([0, 0, 0, 4, 0, 134, 0, 209, 0, 132, 0, 225]);
+    let mut rng = ExactBattleRandom::new(CrystalRandomState::default(), 0, &mut divider);
+
+    assert_eq!(
+        select_metronome_move(&state, BattleSide::Player, &moves, &mut rng),
+        Ok((64, "EMBER"))
+    );
+    assert_eq!(rng.divider_error(), None);
+    drop(rng);
+    assert_eq!(divider.consumed(), 12);
+    assert_eq!(divider.remaining(), 0);
+}
+
+#[test]
+fn metronome_rejects_an_incomplete_indexed_move_catalog() {
     let player = pokemon("CLEFAIRY", 90, pokemon_type("NORMAL"), "METRONOME");
     let enemy = pokemon("RATTATA", 10, pokemon_type("NORMAL"), "METRONOME");
-    let enemy_hp = enemy.hp;
     let moves = BTreeMap::from([(
         "METRONOME".to_string(),
         move_data_with_effect("METRONOME", pokemon_type("NORMAL"), 0, 100, "METRONOME"),
     )]);
     let mut rng = Random::new(21);
 
-    let outcome = resolve_battle_turn(
+    let error = resolve_battle_turn(
         battle_state(player, enemy, rng.seed()),
         BattleTurnInput {
             player: BattleAction::Move { slot: 0 },
@@ -14371,20 +14420,12 @@ fn metronome_fails_when_pack_has_no_other_move_candidate() {
         &weather_modifiers(),
         &mut rng,
     )
-    .expect("metronome failure resolves");
+    .expect_err("Metronome requires the indexed source move catalog");
 
-    assert_eq!(outcome.state.enemy.hp, enemy_hp);
-    assert!(outcome.events.contains(&BattleEvent::MetronomeFailed {
-        side: BattleSide::Player,
-        move_name: "METRONOME".to_string(),
-    }));
-    assert!(!outcome.events.iter().any(|event| matches!(
-        event,
-        BattleEvent::Damage {
-            side: BattleSide::Player,
-            ..
-        }
-    )));
+    assert!(matches!(
+        error,
+        BattleTurnError::MissingMoveSourceIndex { .. }
+    ));
 }
 
 #[test]
@@ -19317,7 +19358,6 @@ fn core_wild_battle_run_uses_exported_escape_rules() {
     assert_eq!(escape.roll, None);
     assert_eq!(escape.attempts_before, 3);
     assert_eq!(escape.attempts_after, 4);
-    assert_eq!(escape.rng_seed_after, 99);
 }
 
 #[test]

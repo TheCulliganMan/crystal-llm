@@ -195,7 +195,7 @@ pub fn resolve_script_control_command(
             let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
             branch(state, &command, left < right)
         }
-        "sjump" | "jump" | "farsjump" | "scall" | "farscall" | "sdefer" | "jumpstd" => {
+        "sjump" | "farsjump" | "scall" | "farscall" | "sdefer" | "jumpstd" => {
             Ok(jump_action(command)?)
         }
         "end" | "endcallback" => Ok(ScriptControlAction::End {
@@ -265,6 +265,10 @@ pub fn apply_script_control_action_to_state(
             command_index,
         } => {
             let kind = if *deferred {
+                // Crystal owns one wDeferredScriptBank/Addr pair. A later
+                // sdefer writes that pointer; it does not enqueue another
+                // script behind the previous target.
+                state.script_runtime.deferred_scripts.clear();
                 state.script_runtime.deferred_scripts.push(ScriptLocation {
                     origin_map_name: origin_map_name.to_string(),
                     script: target_script.clone(),
@@ -357,7 +361,7 @@ pub fn validate_script_control_command(
             require_target(command)?;
             require_resolved_target(command)?;
         }
-        "iftrue" | "iffalse" | "sjump" | "jump" | "farsjump" | "scall" | "farscall" | "sdefer" => {
+        "iftrue" | "iffalse" | "sjump" | "farsjump" | "scall" | "farscall" | "sdefer" => {
             reject_compare_value(command)?;
             require_target(command)?;
             require_resolved_target(command)?;
@@ -815,6 +819,19 @@ mod tests {
                 .contains("unknown field `legacy_target_label`"),
             "{issue_error}"
         );
+    }
+
+    #[test]
+    fn rejects_legacy_jump_alias_in_favor_of_source_sjump() {
+        let state = GameState::default();
+        assert!(matches!(
+            resolve_script_control_command(
+                &state,
+                script_control_command("jump", None, Some(".Done")),
+                &BTreeMap::new(),
+            ),
+            Err(ScriptControlCommandError::UnknownCommand { command }) if command == "jump"
+        ));
     }
 
     #[test]
@@ -1331,6 +1348,33 @@ mod tests {
                 .last()
                 .map(|event| event.kind),
             Some(ScriptControlRuntimeKind::StandardJump)
+        );
+    }
+
+    #[test]
+    fn sdefer_replaces_the_single_deferred_script_pointer() {
+        let mut state = GameState::default();
+        apply_script_control_command(
+            &mut state,
+            "TestMap",
+            script_control_command("sdefer", None, Some(".First")),
+            &BTreeMap::new(),
+        )
+        .expect("defer first script");
+        apply_script_control_command(
+            &mut state,
+            "TestMap",
+            script_control_command("sdefer", None, Some(".Second")),
+            &BTreeMap::new(),
+        )
+        .expect("defer replacement script");
+
+        assert_eq!(
+            state.script_runtime.deferred_scripts,
+            vec![ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: ".Second@Script".to_string(),
+            }]
         );
     }
 

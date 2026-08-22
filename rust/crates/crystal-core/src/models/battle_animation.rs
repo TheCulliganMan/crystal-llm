@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn battle_animation_catalog_rejects_legacy_inline_global_subroutine_sections() {
+    fn battle_animation_catalog_accepts_asm_global_subroutine_labels() {
         let animations = [(
             "BattleAnim_BeatUp".to_string(),
             vec!["BattleAnimSub_Drain:".to_string(), "anim_ret".to_string()],
@@ -546,14 +546,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        assert_eq!(
-            battle_animation_catalog_issues(&animations, &[], 0),
-            vec![BattleAnimationCatalogIssue::InvalidCommand {
-                label: "BattleAnim_BeatUp".to_string(),
-                index: 0,
-                command: "BattleAnimSub_Drain:".to_string(),
-            }]
-        );
+        assert!(battle_animation_catalog_issues(&animations, &[], 0).is_empty());
     }
 
     #[test]

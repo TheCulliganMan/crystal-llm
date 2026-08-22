@@ -49,6 +49,8 @@ fn publish_visual_world_frame(
         // entity to exist leaves one frame in which an optional world renderer
         // can draw the overworld over the naming LCD.
         || naming_screen_blocks_world_presentation(runtime_shell.pending_name_input.as_ref())
+        || runtime_shell.pending_mail_input.is_some()
+        || runtime_shell.pending_mail_read.is_some()
         || runtime_shell.battle_lcd_animation_active
         || battle_entities.iter().next().is_some()
         || fullscreen_entities.iter().next().is_some()
@@ -91,7 +93,7 @@ fn publish_visual_world_frame(
     #[cfg(not(feature = "voxel-view"))]
     let (published_map_texture, published_grid_size) = (
         map_texture.clone(),
-        UVec2::new(VIEWPORT_TILES_X as u32, VIEWPORT_TILES_Y as u32),
+        UVec2::new(VISUAL_WORLD_TILES_X as u32, VISUAL_WORLD_TILES_Y as u32),
     );
 
     let mut actors = Vec::with_capacity(
@@ -197,7 +199,8 @@ fn naming_screen_blocks_world_presentation(input: Option<&PendingNameInput>) -> 
 /// change the user's manually selected presentation mode.
 fn voxel_spatial_effects_supported(runtime_shell: &BevyRuntimeShell) -> bool {
     let scripted_actor_displacement =
-        runtime_shell
+        runtime_shell.visible_player_sprite_y_offset != 0
+            || runtime_shell
             .visible_script_movement
             .as_ref()
             .is_some_and(|movement| {

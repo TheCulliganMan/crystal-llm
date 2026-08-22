@@ -28,6 +28,7 @@ import type { ExportedFieldEncounterData } from "./export-field-encounters";
 import type { ExportedFishingCatalog } from "./export-fishing";
 import type { ExportedFieldMoveCatalog } from "./export-field-moves";
 import type { ExportedFieldBoxItemRule } from "./export-field-box-items";
+import type { ExportedDecorationCatalog } from "./export-decorations";
 import type { ExportedFlyDestinationTable } from "./export-fly-destinations";
 import type { ExportedBattleRewardRules } from "./export-battle-reward-rules";
 import type { ExportedBattleEscapeRules } from "./export-battle-escape-rules";
@@ -88,6 +89,7 @@ const CONTENT_PACK_CATEGORIES = [
   "fishing",
   "field_moves",
   "field_box_items",
+  "decorations",
   "runtime_title_screen",
   "fruit_trees",
   "npcs",
@@ -149,7 +151,6 @@ type CompiledContentPack = {
 };
 
 type ExportedRuntimeTitleScreen = {
-  new_game_spawn_identifier: number | null;
   title_music: string | null;
 };
 
@@ -171,6 +172,7 @@ export type CoreExportPayload = {
   fishing?: ExportedFishingCatalog;
   fieldMoves?: ExportedFieldMoveCatalog;
   fieldBoxItems?: Record<string, ExportedFieldBoxItemRule>;
+  decorations?: ExportedDecorationCatalog;
   runtimeTitleScreen?: ExportedRuntimeTitleScreen;
   flyDestinations?: ExportedFlyDestinationTable;
   fruitTrees?: ExportedFruitTreeCatalog;
@@ -391,19 +393,12 @@ export const alignRuntimeSpawnPoints = (
 
 const buildCoreRuntimeTitleScreen = (
   audioAssets?: Record<string, ExportedAudioAsset>,
-  runtimeSpawnPoints?: unknown,
 ): ExportedRuntimeTitleScreen => {
   const title = audioAssets?.MUSIC_TITLE;
   if (!title || title.id !== "MUSIC_TITLE" || title.kind !== "music") {
     throw new Error("Core title screen requires exact MUSIC_TITLE music asset");
   }
-  const spawn = runtimeSpawnPoints as
-    | Record<string, { identifier?: unknown }>
-    | undefined;
-  if (!spawn?.["0"] || spawn["0"].identifier !== 0) {
-    throw new Error("Core title screen requires exact runtime spawn identifier 0");
-  }
-  return { new_game_spawn_identifier: 0, title_music: title.id };
+  return { title_music: title.id };
 };
 
 const assertExactFileStem = (value: string): void => {
@@ -1399,6 +1394,14 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       payload.fieldBoxItems,
     );
   }
+  if (payload.decorations) {
+    writeCorePackEntry(
+      files.decorations,
+      "decorations",
+      "decorations",
+      payload.decorations,
+    );
+  }
   if (payload.fruitTrees && Object.keys(payload.fruitTrees).length > 0) {
     writeCorePackEntry(
       files.fruit_trees,
@@ -1698,7 +1701,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     "runtime_title_screen",
     "title",
     payload.runtimeTitleScreen ??
-      buildCoreRuntimeTitleScreen(payload.audioAssets, payload.runtimeSpawnPoints),
+      buildCoreRuntimeTitleScreen(payload.audioAssets),
   );
   files.story_events.push(...collectJsonFiles("story_events"));
   files.phone_scripts.push(...collectJsonFiles("phone_scripts"));
@@ -1779,6 +1782,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     { category: "fishing", prefix: "fishing" },
     { category: "field_moves", prefix: "field-moves" },
     { category: "field_box_items", prefix: "field-box-items" },
+    { category: "decorations", prefix: "decorations" },
     { category: "runtime_title_screen", prefix: "runtime-title-screen" },
     { category: "fruit_trees", prefix: "fruit-trees" },
     { category: "pokemon", prefix: "pokemon" },

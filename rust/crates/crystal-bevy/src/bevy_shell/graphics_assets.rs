@@ -65,7 +65,7 @@ fn spawn_object_label(
                 label,
                 TextStyle {
                     font_size: 10.5,
-                    color: Color::rgb(0.98, 0.98, 0.86),
+                    color: Color::srgb(0.98, 0.98, 0.86),
                     ..default()
                 },
             ),
@@ -139,7 +139,7 @@ fn spawn_bg_event_label(
                 label,
                 TextStyle {
                     font_size: 9.5,
-                    color: Color::rgb(0.92, 0.92, 0.78),
+                    color: Color::srgb(0.92, 0.92, 0.78),
                     ..default()
                 },
             ),
@@ -180,7 +180,7 @@ fn spawn_warp_event_label(
                 label,
                 TextStyle {
                     font_size: 9.5,
-                    color: Color::rgb(0.72, 0.84, 1.0),
+                    color: Color::srgb(0.72, 0.84, 1.0),
                     ..default()
                 },
             ),
@@ -218,15 +218,11 @@ fn spawn_coord_event_label(
                 label,
                 TextStyle {
                     font_size: 9.5,
-                    color: Color::rgb(0.90, 0.74, 1.0),
+                    color: Color::srgb(0.90, 0.74, 1.0),
                     ..default()
                 },
             ),
-            transform: Transform::from_xyz(
-                tile_x - TILE_SIZE * 0.58,
-                tile_y,
-                2.4,
-            ),
+            transform: Transform::from_xyz(tile_x - TILE_SIZE * 0.58, tile_y, 2.4),
             ..default()
         },
         EventMarker,
@@ -495,14 +491,42 @@ fn bevy_audio_action(kind: &RuntimeResolvedAudioPlaybackKind) -> Option<BevyAudi
 fn play_pending_audio(
     mut commands: Commands,
     mut runtime_shell: ResMut<BevyRuntimeShell>,
-    mut audio_sources: ResMut<Assets<AudioSource>>,
     music_audio: Query<Entity, With<MusicAudioMarker>>,
     transient_audio: Query<Entity, With<TransientAudioMarker>>,
-    #[cfg(not(test))] mut native_audio: NonSendMut<NativeAudioBackend>,
+    #[cfg(all(not(test), not(target_arch = "wasm32")))] mut native_audio: NonSendMut<
+        NativeAudioBackend,
+    >,
+    #[cfg(all(not(test), target_arch = "wasm32"))] mut browser_audio_unlocked: Local<bool>,
+    #[cfg(all(not(test), target_arch = "wasm32"))] mut browser_audio: NonSendMut<
+        BrowserAudioBackend,
+    >,
+    #[cfg(all(not(test), target_arch = "wasm32"))] keyboard: Res<ButtonInput<KeyCode>>,
+    #[cfg(all(not(test), target_arch = "wasm32"))] mouse: Res<ButtonInput<MouseButton>>,
+    #[cfg(all(not(test), target_arch = "wasm32"))] touches: Res<Touches>,
 ) {
-    #[cfg(not(test))]
+    #[cfg(all(not(test), target_arch = "wasm32"))]
+    if !*browser_audio_unlocked {
+        let unlock_requested = browser_audio_unlock_requested(
+            keyboard.get_just_pressed().next().is_some(),
+            mouse.get_just_pressed().next().is_some(),
+            touches.any_just_pressed(),
+        );
+        if !unlock_requested {
+            // Keep the initial music/SFX queued until this system is running
+            // in the browser's user-input event turn. Creating the WebAudio
+            // stream before a gesture leaves its AudioContext suspended and
+            // produces permanent silence even after the player clicks.
+            return;
+        }
+        *browser_audio_unlocked = true;
+    }
+    #[cfg(all(not(test), not(target_arch = "wasm32")))]
     {
         runtime_shell.transient_audio_playing = !native_audio.transient_finished();
+    }
+    #[cfg(all(not(test), target_arch = "wasm32"))]
+    {
+        runtime_shell.transient_audio_playing = !browser_audio.transient_finished();
     }
     // Bevy queries are snapshots for the duration of a system invocation, so
     // a newly spawned music entity is not visible to `music_audio.iter()`
@@ -521,10 +545,15 @@ fn play_pending_audio(
         for entity in active_transient_entities.drain(..) {
             commands.entity(entity).despawn();
         }
-        #[cfg(not(test))]
+        #[cfg(all(not(test), not(target_arch = "wasm32")))]
         {
             native_audio.stop_music();
             native_audio.stop_transient();
+        }
+        #[cfg(all(not(test), target_arch = "wasm32"))]
+        {
+            browser_audio.stop_music();
+            browser_audio.stop_transient();
         }
         runtime_shell.transient_audio_playing = false;
         runtime_shell.pending_music_stop = false;
@@ -539,39 +568,25 @@ fn play_pending_audio(
             // despawned Bevy marker entities after starting; queued map/title
             // transitions could therefore leave multiple logical tracks
             // alive and audible on backends that process commands lazily.
-            #[cfg(not(test))]
+            #[cfg(all(not(test), not(target_arch = "wasm32")))]
             native_audio.stop_music();
+            #[cfg(all(not(test), target_arch = "wasm32"))]
+            browser_audio.stop_music();
         }
         if !matches!(command.kind, ModpackAudioKind::Music) {
             for entity in active_transient_entities.drain(..) {
                 commands.entity(entity).despawn();
             }
-            #[cfg(not(test))]
+            #[cfg(all(not(test), not(target_arch = "wasm32")))]
             native_audio.stop_transient();
+            #[cfg(all(not(test), target_arch = "wasm32"))]
+            browser_audio.stop_transient();
             runtime_shell.transient_audio_playing = false;
         }
         let cache_key = BevyAudioCacheKey::from_command(&command);
-        #[cfg(not(test))]
-        let native_pcm_loop = match pcm_loop_range_for_bevy_audio_command(
-            runtime_shell.shell.runtime().audio(),
-            &command,
-        ) {
-            Ok(loop_range) => loop_range,
-            Err(error) => {
-                clear_failed_music_playback_state(&mut runtime_shell, &command);
-                record_visible_runtime_system_error(
-                    &mut runtime_shell,
-                    anyhow::anyhow!(
-                        "queued {:?} audio program {} has invalid loop metadata: {error:#}",
-                        command.kind,
-                        command.audio_id
-                    ),
-                );
-                continue;
-            }
-        };
-        let handle = if let Some(handle) = runtime_shell.audio_source_cache.get(&cache_key) {
-            handle.clone()
+        #[cfg_attr(test, allow(unused_variables))]
+        let audio = if let Some(audio) = runtime_shell.audio_source_cache.get(&cache_key) {
+            audio.clone()
         } else {
             let source = match match command.kind {
                 ModpackAudioKind::Music => runtime_shell
@@ -606,71 +621,94 @@ fn play_pending_audio(
                     continue;
                 }
             };
-            let bevy_audio_bytes = match source {
-                AudioProgramSource::Pcm { bytes, format, .. } => {
-                    if command.mode != ModpackAudioPlaybackMode::RawPcm {
-                        clear_failed_music_playback_state(&mut runtime_shell, &command);
-                        record_visible_runtime_system_error(
-                            &mut runtime_shell,
-                            anyhow::anyhow!(
-                                "audio program {} declared PCM but queued as {:?}",
-                                command.audio_id,
-                                command.mode
-                            ),
-                        );
+            #[cfg(all(not(test), not(target_arch = "wasm32")))]
+            let decoded_pcm =
+                match native_audio.poll_preparation(cache_key.clone(), command.clone(), source) {
+                    Ok(Some(audio)) => Ok(audio),
+                    Ok(None) => {
+                        if !matches!(command.kind, ModpackAudioKind::Music) {
+                            runtime_shell.transient_audio_playing = true;
+                        }
+                        runtime_shell.pending_audio.push(command);
                         continue;
                     }
-                    encode_pcm_for_bevy_audio(
-                        &bytes,
-                        format.sample_rate_hz,
-                        format.channels,
-                        format.bits_per_sample,
-                    )
-                }
+                    Err(error) => Err(error),
+                };
+            #[cfg(any(test, target_arch = "wasm32"))]
+            let decoded_pcm = match source {
+                AudioProgramSource::Pcm {
+                    bytes,
+                    format,
+                    loop_start_sample,
+                    loop_end_sample,
+                } => decoded_pcm_audio(&command, bytes, format, loop_start_sample, loop_end_sample),
                 AudioProgramSource::PcmGzip {
                     bytes,
                     format,
                     byte_len,
                     payload_hash,
-                    ..
+                    loop_start_sample,
+                    loop_end_sample,
+                } => decoded_gzip_pcm_audio(
+                    &command,
+                    &bytes,
+                    format,
+                    byte_len,
+                    &payload_hash,
+                    loop_start_sample,
+                    loop_end_sample,
+                ),
+                AudioProgramSource::PcmGzipSidecar {
+                    path,
+                    format,
+                    byte_len,
+                    payload_hash,
+                    loop_start_sample,
+                    loop_end_sample,
                 } => {
-                    if command.mode != ModpackAudioPlaybackMode::RawPcm {
-                        Err(anyhow::anyhow!(
-                            "audio program {} declared compressed PCM but queued as {:?}",
-                            command.audio_id,
-                            command.mode
-                        ))
-                    } else {
-                        use flate2::read::GzDecoder;
-                        let mut decoder = GzDecoder::new(bytes.as_slice());
-                        let mut decoded = Vec::new();
-                        std::io::Read::read_to_end(&mut decoder, &mut decoded)
-                            .with_context(|| format!("decompress PCM audio {}", command.audio_id))
-                            .and_then(|_| {
-                                if decoded.len() != byte_len
-                                    || format!("{:08x}", bevy_audio_fnv1a32(&decoded))
-                                        != payload_hash
-                                {
-                                    anyhow::bail!(
-                                        "compressed PCM audio {} failed metadata validation",
-                                        command.audio_id
-                                    );
+                    #[cfg(all(not(test), target_arch = "wasm32"))]
+                    {
+                        match browser_audio.poll_pcm_sidecar(&path) {
+                            Ok(Some(bytes)) => decoded_gzip_pcm_audio(
+                                &command,
+                                &bytes,
+                                format,
+                                byte_len,
+                                &payload_hash,
+                                loop_start_sample,
+                                loop_end_sample,
+                            ),
+                            Ok(None) => {
+                                if !matches!(command.kind, ModpackAudioKind::Music) {
+                                    runtime_shell.transient_audio_playing = true;
                                 }
-                                Ok(encode_pcm_for_bevy_audio(
-                                    &decoded,
-                                    format.sample_rate_hz,
-                                    format.channels,
-                                    format.bits_per_sample,
-                                )?)
-                            })
+                                runtime_shell.pending_audio.push(command);
+                                continue;
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    #[cfg(any(test, not(target_arch = "wasm32")))]
+                    {
+                        let _ = (
+                            format,
+                            byte_len,
+                            payload_hash,
+                            loop_start_sample,
+                            loop_end_sample,
+                        );
+                        Err(anyhow::anyhow!(
+                            "PCM sidecar {path} requires browser on-demand loading"
+                        ))
                     }
                 }
                 AudioProgramSource::Midi(_) => Err(anyhow::anyhow!(
-                    "MIDI audio is not supported; regenerate this content pack with PCM assets"
+                    "audio program {} is not canonical PCM",
+                    command.audio_id
                 )),
             };
-            let bevy_audio_bytes = match bevy_audio_bytes {
-                Ok(bytes) => bytes,
+            let decoded_pcm = match decoded_pcm {
+                Ok(audio) => audio,
                 Err(error) => {
                     clear_failed_music_playback_state(&mut runtime_shell, &command);
                     record_visible_runtime_system_error(
@@ -680,19 +718,14 @@ fn play_pending_audio(
                     continue;
                 }
             };
-            let handle = audio_sources.add(AudioSource {
-                bytes: bevy_audio_bytes.into(),
-            });
             runtime_shell
                 .audio_source_cache
-                .insert(cache_key, handle.clone());
-            handle
+                .insert(cache_key, decoded_pcm.clone());
+            decoded_pcm
         };
-        #[cfg(not(test))]
-        if let Some(source) = audio_sources.get(&handle) {
-            if let Err(error) =
-                native_audio.play(&command, Arc::clone(&source.bytes), native_pcm_loop)
-            {
+        #[cfg(all(not(test), not(target_arch = "wasm32")))]
+        {
+            if let Err(error) = native_audio.play(&command, &audio) {
                 clear_failed_music_playback_state(&mut runtime_shell, &command);
                 eprintln!(
                     "crystal-bevy audio failed {:?} {}: {error:#}",
@@ -710,54 +743,41 @@ fn play_pending_audio(
                 runtime_shell.transient_audio_playing = true;
             }
         }
+        #[cfg(all(not(test), target_arch = "wasm32"))]
+        {
+            if let Err(error) = browser_audio.play(&command, &audio) {
+                clear_failed_music_playback_state(&mut runtime_shell, &command);
+                record_visible_runtime_system_error(
+                    &mut runtime_shell,
+                    anyhow::anyhow!(
+                        "browser PCM playback failed for {:?} {}: {error:#}",
+                        command.kind,
+                        command.audio_id
+                    ),
+                );
+                continue;
+            } else if !matches!(command.kind, ModpackAudioKind::Music) {
+                runtime_shell.transient_audio_playing = true;
+            }
+        }
         let previous_music_entities = if matches!(command.kind, ModpackAudioKind::Music) {
             std::mem::take(&mut active_music_entities)
         } else {
             Vec::new()
         };
-        #[cfg(not(test))]
         let mut entity_commands = if matches!(command.kind, ModpackAudioKind::Music) {
             for entity in active_transient_entities.drain(..) {
                 commands.entity(entity).despawn();
             }
+            #[cfg(all(not(test), not(target_arch = "wasm32")))]
             native_audio.stop_transient();
+            #[cfg(all(not(test), target_arch = "wasm32"))]
+            browser_audio.stop_transient();
             runtime_shell.transient_audio_playing = false;
             commands.spawn(MusicAudioMarker)
         } else {
-            commands.spawn_empty()
+            commands.spawn(TransientAudioMarker)
         };
-        #[cfg(test)]
-        let mut entity_commands = {
-            let settings = if command.looped {
-                PlaybackSettings::LOOP
-            } else {
-                PlaybackSettings::DESPAWN
-            };
-            if matches!(command.kind, ModpackAudioKind::Music) {
-                for entity in active_transient_entities.drain(..) {
-                    commands.entity(entity).despawn();
-                }
-                commands.spawn((
-                    AudioBundle {
-                        source: handle,
-                        settings,
-                    },
-                    MusicAudioMarker,
-                ))
-            } else {
-                commands.spawn((
-                    AudioBundle {
-                        source: handle,
-                        settings,
-                    },
-                    TransientAudioMarker,
-                ))
-            }
-        };
-        #[cfg(not(test))]
-        if !matches!(command.kind, ModpackAudioKind::Music) {
-            entity_commands.insert(TransientAudioMarker);
-        }
         let new_audio_entity = entity_commands.id();
         entity_commands.insert(Name::new(format!(
             "audio::{:?}::{}",
@@ -783,6 +803,14 @@ fn play_pending_audio(
     }
 }
 
+fn browser_audio_unlock_requested(
+    keyboard_just_pressed: bool,
+    mouse_just_pressed: bool,
+    touch_just_pressed: bool,
+) -> bool {
+    keyboard_just_pressed || mouse_just_pressed || touch_just_pressed
+}
+
 fn clear_failed_music_playback_state(
     runtime_shell: &mut BevyRuntimeShell,
     command: &BevyAudioCommand,
@@ -795,53 +823,128 @@ fn clear_failed_music_playback_state(
     }
 }
 
-fn encode_pcm_for_bevy_audio(
-    bytes: &[u8],
-    sample_rate_hz: u32,
-    channels: u8,
-    bits_per_sample: u8,
-) -> Result<Vec<u8>> {
-    if sample_rate_hz == 0 {
+fn decoded_pcm_audio(
+    command: &BevyAudioCommand,
+    bytes: Vec<u8>,
+    format: AudioPcmFormat,
+    loop_start_sample: Option<usize>,
+    loop_end_sample: Option<usize>,
+) -> Result<CachedPcmAudio> {
+    if command.mode != ModpackAudioPlaybackMode::RawPcm {
+        anyhow::bail!(
+            "audio program {} declared PCM but queued as {:?}",
+            command.audio_id,
+            command.mode
+        );
+    }
+    if format.sample_rate_hz == 0 {
         anyhow::bail!("PCM sample_rate_hz must be positive");
     }
-    if channels == 0 {
+    if format.channels == 0 {
         anyhow::bail!("PCM channels must be positive");
     }
-    if bits_per_sample != 8 && bits_per_sample != 16 {
-        anyhow::bail!("PCM bits_per_sample must be 8 or 16");
+    if format.bits_per_sample != 16 {
+        anyhow::bail!("canonical PCM bits_per_sample must be 16");
     }
-    let channels_u16 = channels as u16;
-    let bytes_per_sample = u16::from(bits_per_sample) / 8;
-    let block_align = channels_u16
-        .checked_mul(bytes_per_sample)
-        .context("PCM block_align overflow")?;
-    let byte_rate = sample_rate_hz
-        .checked_mul(u32::from(block_align))
-        .context("PCM byte_rate overflow")?;
-    let data_len =
-        u32::try_from(bytes.len()).context("PCM data exceeds Bevy audio length field")?;
-    if bytes.len() % usize::from(block_align) != 0 {
+    let block_align = usize::from(format.channels) * 2;
+    if bytes.is_empty() || bytes.len() % block_align != 0 {
         anyhow::bail!("PCM byte length is not aligned to frame size");
     }
-    let riff_len = 36u32
-        .checked_add(data_len)
-        .context("PCM RIFF length overflow")?;
-    let mut encoded = Vec::with_capacity(44 + bytes.len());
-    encoded.extend_from_slice(b"RIFF");
-    encoded.extend_from_slice(&riff_len.to_le_bytes());
-    encoded.extend_from_slice(b"WAVE");
-    encoded.extend_from_slice(b"fmt ");
-    encoded.extend_from_slice(&16u32.to_le_bytes());
-    encoded.extend_from_slice(&1u16.to_le_bytes());
-    encoded.extend_from_slice(&channels_u16.to_le_bytes());
-    encoded.extend_from_slice(&sample_rate_hz.to_le_bytes());
-    encoded.extend_from_slice(&byte_rate.to_le_bytes());
-    encoded.extend_from_slice(&block_align.to_le_bytes());
-    encoded.extend_from_slice(&u16::from(bits_per_sample).to_le_bytes());
-    encoded.extend_from_slice(b"data");
-    encoded.extend_from_slice(&data_len.to_le_bytes());
-    encoded.extend_from_slice(bytes);
-    Ok(encoded)
+    let frame_count = bytes.len() / block_align;
+    let loop_range = match (loop_start_sample, loop_end_sample) {
+        (Some(start), Some(end)) if start < end && end <= frame_count => Some((start, end)),
+        (None, None) => None,
+        (Some(start), Some(end)) => {
+            anyhow::bail!("PCM loop range [{start}, {end}) is outside {frame_count} frames")
+        }
+        _ => anyhow::bail!("PCM source has unpaired loop metadata"),
+    };
+    Ok(CachedPcmAudio {
+        samples: bytes
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+            .collect::<Vec<_>>()
+            .into(),
+        bytes: bytes.into(),
+        format,
+        loop_range,
+    })
+}
+
+fn decoded_gzip_pcm_audio(
+    command: &BevyAudioCommand,
+    compressed: &[u8],
+    format: AudioPcmFormat,
+    byte_len: usize,
+    payload_hash: &str,
+    loop_start_sample: Option<usize>,
+    loop_end_sample: Option<usize>,
+) -> Result<CachedPcmAudio> {
+    if command.mode != ModpackAudioPlaybackMode::RawPcm {
+        anyhow::bail!(
+            "audio program {} declared compressed PCM but queued as {:?}",
+            command.audio_id,
+            command.mode
+        );
+    }
+    use flate2::read::GzDecoder;
+    let mut decoder = GzDecoder::new(compressed);
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decoded)
+        .with_context(|| format!("decompress PCM audio {}", command.audio_id))?;
+    if decoded.len() != byte_len || format!("{:08x}", bevy_audio_fnv1a32(&decoded)) != payload_hash
+    {
+        anyhow::bail!(
+            "compressed PCM audio {} failed metadata validation",
+            command.audio_id
+        );
+    }
+    decoded_pcm_audio(command, decoded, format, loop_start_sample, loop_end_sample)
+}
+
+fn pcm_i16_samples(audio: &CachedPcmAudio) -> Result<Arc<[i16]>> {
+    if audio.format.bits_per_sample != 16 || audio.bytes.len() % 2 != 0 {
+        anyhow::bail!("canonical PCM payload is not aligned signed 16-bit data");
+    }
+    Ok(Arc::clone(&audio.samples))
+}
+
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
+fn decoded_audio_program_source(
+    command: &BevyAudioCommand,
+    source: AudioProgramSource,
+) -> Result<CachedPcmAudio> {
+    match source {
+        AudioProgramSource::Pcm {
+            bytes,
+            format,
+            loop_start_sample,
+            loop_end_sample,
+        } => decoded_pcm_audio(command, bytes, format, loop_start_sample, loop_end_sample),
+        AudioProgramSource::PcmGzip {
+            bytes,
+            format,
+            byte_len,
+            payload_hash,
+            loop_start_sample,
+            loop_end_sample,
+        } => decoded_gzip_pcm_audio(
+            command,
+            &bytes,
+            format,
+            byte_len,
+            &payload_hash,
+            loop_start_sample,
+            loop_end_sample,
+        ),
+        AudioProgramSource::PcmGzipSidecar { path, .. } => Err(anyhow::anyhow!(
+            "PCM sidecar {path} requires browser on-demand loading"
+        )),
+        AudioProgramSource::Midi(_) => Err(anyhow::anyhow!(
+            "audio program {} is not canonical PCM",
+            command.audio_id
+        )),
+    }
 }
 
 fn bitmap_font_glyph_pixel(r: u8, g: u8, b: u8, alpha: u8) -> bool {
@@ -1069,16 +1172,16 @@ fn refresh_shell_panels(
     };
     for mut sprite in &mut dialog_panels {
         sprite.color = if dialog_visible {
-            Color::rgba(0.06, 0.08, 0.10, 0.90)
+            Color::srgba(0.06, 0.08, 0.10, 0.90)
         } else {
-            Color::rgba(0.06, 0.08, 0.10, 0.0)
+            Color::srgba(0.06, 0.08, 0.10, 0.0)
         };
     }
     for mut sprite in &mut battle_panels {
         sprite.color = if battle_visible {
-            Color::rgba(0.07, 0.09, 0.12, 0.82)
+            Color::srgba(0.07, 0.09, 0.12, 0.82)
         } else {
-            Color::rgba(0.07, 0.09, 0.12, 0.0)
+            Color::srgba(0.07, 0.09, 0.12, 0.0)
         };
     }
 }
@@ -1522,6 +1625,7 @@ fn render_script_text_body(
                     lines.push(std::mem::take(&mut current));
                 }
             }
+            "text_asm" => {}
             opcode if opcode.starts_with("sound_") => {}
             _ => {
                 if !current.is_empty() {
@@ -1550,14 +1654,8 @@ fn render_visible_script_text_body(
     rival_name: &str,
     day_of_week: u8,
 ) -> String {
-    render_visible_script_text_pages(
-        body,
-        named_buffers,
-        player_name,
-        rival_name,
-        day_of_week,
-    )
-    .join("\n\n")
+    render_visible_script_text_pages(body, named_buffers, player_name, rival_name, day_of_week)
+        .join("\n\n")
 }
 
 /// Interpret the source text macros as page/line boundaries before applying
@@ -1599,21 +1697,30 @@ pub(super) fn render_visible_script_text_pages(
             _ => render_script_text_args(&command.args),
         };
         match command.command.as_str() {
-            "text"
-            | "text_start"
-            | "text_today"
-            | "text_block"
-            | "text_far"
-            | "text_ram"
-            | "text_decimal" => {
-                flush_line(&mut lines, &mut current);
+            "text" | "text_start" | "text_block" | "text_ram" | "text_decimal" => {
+                // These commands all write at the current ASM text cursor.
+                // Inserting a host newline between a text_ram buffer and the
+                // following punctuation produced impossible extra rows.
                 current.push_str(&rendered);
             }
+            "text_today" => current.push_str("<TODAY>"),
+            "text_pause" | "text_asm" => {}
+            "text_low" => {
+                // TX_LOW relocates BC to the standard bottom baseline.  It
+                // prints nothing, but subsequent chunks must not concatenate
+                // onto the top baseline's text.
+                flush_line(&mut lines, &mut current);
+            }
+            // The field renderer resolves TX_FAR through the runtime text
+            // catalog before calling this interpreter. Its pointer label is
+            // never player-visible text.
+            "text_far" => {}
             "line" | "next" => {
                 flush_line(&mut lines, &mut current);
                 // `<LINE>` and `<NEXT>` both add two tile rows in
-                // `home/text.asm` (`LineChar` and `NextLineChar`).
-                lines.push(String::new());
+                // `home/text.asm` (`LineChar` and `NextLineChar`). The visual
+                // renderer owns that two-tile baseline spacing; inserting a
+                // blank logical line here created four apparent text rows.
                 current.push_str(&rendered);
             }
             "para" => {
@@ -1623,8 +1730,8 @@ pub(super) fn render_visible_script_text_pages(
             "cont" => {
                 // `<CONT>` prompts, scrolls the box up two rows, then starts
                 // the continuation at the third interior row. Keep the last
-                // displayed row as the new top row and preserve the gap that
-                // the text engine creates before printing the continuation.
+                // displayed row as the new top row. The visual renderer owns
+                // the two-tile baseline spacing.
                 flush_line(&mut lines, &mut current);
                 let carry = lines.iter().rev().find(|line| !line.is_empty()).cloned();
                 if !lines.is_empty() {
@@ -1638,7 +1745,6 @@ pub(super) fn render_visible_script_text_pages(
                 lines.clear();
                 if let Some(carry) = carry {
                     lines.push(carry);
-                    lines.push(String::new());
                 }
                 current.push_str(&rendered);
             }
@@ -1665,7 +1771,10 @@ pub(super) fn render_visible_script_text_pages(
 
 fn render_script_text_args(args: &[String]) -> String {
     args.iter()
-        .map(|arg| arg.trim().trim_matches('"'))
+        // `@` is the charmap string terminator, not a visible glyph. Text
+        // bodies use it for empty cursor moves (`line "@"`) and to end a
+        // chunk after punctuation (`text "!@"`).
+        .map(|arg| arg.trim().trim_matches('"').trim_end_matches('@'))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1686,6 +1795,53 @@ pub(super) fn normalize_visible_script_text_with_context(
         .replace("<PLAY_G>", player_name)
         .replace("<RIVAL>", rival_name)
         .replace("<TODAY>", DAY_NAMES[usize::from(day_of_week % 7)])
+}
+
+fn render_visible_asm_text_pages(
+    text: &str,
+    named_buffers: &BTreeMap<String, String>,
+    player_name: &str,
+    rival_name: &str,
+    day_of_week: u8,
+) -> Vec<String> {
+    let mut resolved = String::with_capacity(text.len());
+    let mut remainder = text;
+    while let Some(start) = remainder.find('<') {
+        resolved.push_str(&remainder[..start]);
+        let token = &remainder[start..];
+        let Some(end) = token.find('>') else {
+            resolved.push_str(token);
+            remainder = "";
+            break;
+        };
+        let token_body = &token[1..end];
+        let buffer_id = token_body
+            .strip_prefix("RAM:")
+            .or_else(|| {
+                token_body
+                    .strip_prefix("DECIMAL:")
+                    .and_then(|arguments| arguments.split(',').next())
+                    .map(str::trim)
+            })
+            .unwrap_or(token_body);
+        if token_body.starts_with("STRING_BUFFER_")
+            || token_body.starts_with("RAM:")
+            || token_body.starts_with("DECIMAL:")
+        {
+            if let Some(value) = named_buffers.get(buffer_id) {
+                resolved.push_str(value);
+            }
+        } else {
+            resolved.push_str(&token[..=end]);
+        }
+        remainder = &token[end + 1..];
+    }
+    resolved.push_str(remainder);
+
+    normalize_visible_script_text_with_context(&resolved, player_name, rival_name, day_of_week)
+        .split("\n\n")
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(super) fn visible_rival_name(snapshot: &RuntimeShellSnapshot) -> &str {
@@ -1796,7 +1952,9 @@ fn append_fly_destination_overlay(
     runtime_shell: &BevyRuntimeShell,
     lines: &mut Vec<String>,
 ) {
-    let destinations = active_fly_destinations(snapshot, &runtime_shell.shell);
+    let Ok(destinations) = active_fly_destinations(snapshot, &runtime_shell.shell) else {
+        return;
+    };
     if destinations.is_empty() {
         return;
     }
@@ -1864,39 +2022,10 @@ fn append_runtime_request_overlay(
     if scripts.reset_requested {
         lines.push("request=reset".to_string());
     }
-    if let Some(blackout_mod) = &scripts.blackout_mod {
-        lines.push(format!("blackout_mod={blackout_mod}"));
-    }
-    if let Some(text) = &scripts.battle_tower_text {
-        lines.push(format!("battle_tower_text={text}"));
-    }
     if let Some(picture) = &snapshot.ui.active_pokemon_picture {
         lines.push(format!("pokemon_picture={picture}"));
     }
-    let gift_options = visible_gift_pokemon_prompt_options(snapshot, runtime_shell);
-    if !gift_options.is_empty() {
-        if let Some(cursor) = runtime_shell.gift_pokemon_cursor.as_ref() {
-            if let Some(selected) = strict_readonly_cursor_index(
-                &runtime_shell.gift_pokemon_cursor,
-                &cursor.surface_id,
-                gift_options.len(),
-            ) {
-                let gift = gift_options[selected];
-                lines.push(format!(
-                    "gift_pokemon_selected={}/{} {} Lv{}",
-                    selected + 1,
-                    gift_options.len(),
-                    gift.species_id,
-                    gift.level
-                ));
-            } else {
-                lines.push(format!("invalid_cursor=gift surface={}", cursor.surface_id));
-            }
-        } else {
-            lines.push("invalid_cursor=gift missing_cursor".to_string());
-        }
-    }
-    if has_visible_elevator_prompt(snapshot, runtime_shell) {
+    if runtime_shell.elevator_cursor.is_some() {
         let elevator_options = visible_elevator_prompt_options(snapshot, runtime_shell);
         let option_count = visible_elevator_option_count(snapshot, runtime_shell);
         if option_count > 0 {
@@ -1933,13 +2062,15 @@ fn append_runtime_request_overlay(
                 }
                 offset = next_offset;
             }
+        } else if let Some(cursor) = runtime_shell.elevator_cursor.as_ref() {
+            lines.push(format!(
+                "invalid_cursor=elevator surface={}",
+                cursor.surface_id
+            ));
         }
     }
     if !scripts.completed_trades.is_empty() {
         lines.push(format!("completed_trades={:?}", scripts.completed_trades));
-    }
-    if !scripts.catch_tutorials.is_empty() {
-        lines.push(format!("catch_tutorials={:?}", scripts.catch_tutorials));
     }
 }
 
@@ -2809,8 +2940,8 @@ fn append_party_menu_context(
     }
     if runtime_shell.party_summary_open {
         lines.push("SUMMARY".to_string());
-        for entry in visible_party_summary_entries(snapshot, runtime_shell) {
-            lines.push(entry);
+        if let Ok(entries) = visible_party_summary_entries(snapshot, runtime_shell) {
+            lines.extend(entries);
         }
         return;
     }

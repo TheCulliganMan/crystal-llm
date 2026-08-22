@@ -3,6 +3,7 @@ import { MoveEffect, MoveName, PokemonType, Stat } from "@pokecrystal/core/core/
 
 export const moves: Partial<Record<MoveName, Move>> = {
   [MoveName.POUND]: {
+    source_index: 1,
     name: MoveName.POUND,
     type: PokemonType.NORMAL,
     power: 40,
@@ -14,6 +15,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.KARATE_CHOP]: {
+    source_index: 2,
     name: MoveName.KARATE_CHOP,
     type: PokemonType.FIGHTING,
     power: 50,
@@ -25,6 +27,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.DOUBLESLAP]: {
+    source_index: 3,
     name: MoveName.DOUBLESLAP,
     type: PokemonType.NORMAL,
     power: 15,
@@ -36,6 +39,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.COMET_PUNCH]: {
+    source_index: 4,
     name: MoveName.COMET_PUNCH,
     type: PokemonType.NORMAL,
     power: 18,
@@ -47,6 +51,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.MEGA_PUNCH]: {
+    source_index: 5,
     name: MoveName.MEGA_PUNCH,
     type: PokemonType.NORMAL,
     power: 80,
@@ -58,6 +63,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.PAY_DAY]: {
+    source_index: 6,
     name: MoveName.PAY_DAY,
     type: PokemonType.NORMAL,
     power: 40,
@@ -69,6 +75,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.FIRE_PUNCH]: {
+    source_index: 7,
     name: MoveName.FIRE_PUNCH,
     type: PokemonType.FIRE,
     power: 75,
@@ -80,6 +87,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.ICE_PUNCH]: {
+    source_index: 8,
     name: MoveName.ICE_PUNCH,
     type: PokemonType.ICE,
     power: 75,
@@ -91,6 +99,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.THUNDERPUNCH]: {
+    source_index: 9,
     name: MoveName.THUNDERPUNCH,
     type: PokemonType.ELECTRIC,
     power: 75,
@@ -102,6 +111,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SCRATCH]: {
+    source_index: 10,
     name: MoveName.SCRATCH,
     type: PokemonType.NORMAL,
     power: 40,
@@ -113,6 +123,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.VICEGRIP]: {
+    source_index: 11,
     name: MoveName.VICEGRIP,
     type: PokemonType.NORMAL,
     power: 55,
@@ -124,6 +135,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.GUILLOTINE]: {
+    source_index: 12,
     name: MoveName.GUILLOTINE,
     type: PokemonType.NORMAL,
     power: 0,
@@ -135,6 +147,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.RAZOR_WIND]: {
+    source_index: 13,
     name: MoveName.RAZOR_WIND,
     type: PokemonType.NORMAL,
     power: 80,
@@ -146,6 +159,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SWORDS_DANCE]: {
+    source_index: 14,
     name: MoveName.SWORDS_DANCE,
     type: PokemonType.NORMAL,
     power: 0,
@@ -157,6 +171,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: 2,
   },
   [MoveName.CUT]: {
+    source_index: 15,
     name: MoveName.CUT,
     type: PokemonType.NORMAL,
     power: 50,
@@ -168,6 +183,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.GUST]: {
+    source_index: 16,
     name: MoveName.GUST,
     type: PokemonType.FLYING,
     power: 40,
@@ -179,6 +195,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.WING_ATTACK]: {
+    source_index: 17,
     name: MoveName.WING_ATTACK,
     type: PokemonType.FLYING,
     power: 60,
@@ -190,6 +207,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.WHIRLWIND]: {
+    source_index: 18,
     name: MoveName.WHIRLWIND,
     type: PokemonType.NORMAL,
     power: 0,
@@ -201,6 +219,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.FLY]: {
+    source_index: 19,
     name: MoveName.FLY,
     type: PokemonType.FLYING,
     power: 70,
@@ -212,6 +231,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.BIND]: {
+    source_index: 20,
     name: MoveName.BIND,
     type: PokemonType.NORMAL,
     power: 15,
@@ -223,6 +243,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SLAM]: {
+    source_index: 21,
     name: MoveName.SLAM,
     type: PokemonType.NORMAL,
     power: 80,
@@ -234,6 +255,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.VINE_WHIP]: {
+    source_index: 22,
     name: MoveName.VINE_WHIP,
     type: PokemonType.GRASS,
     power: 35,
@@ -245,6 +267,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.STOMP]: {
+    source_index: 23,
     name: MoveName.STOMP,
     type: PokemonType.NORMAL,
     power: 65,
@@ -256,6 +279,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.DOUBLE_KICK]: {
+    source_index: 24,
     name: MoveName.DOUBLE_KICK,
     type: PokemonType.FIGHTING,
     power: 30,
@@ -267,6 +291,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.MEGA_KICK]: {
+    source_index: 25,
     name: MoveName.MEGA_KICK,
     type: PokemonType.NORMAL,
     power: 120,
@@ -278,6 +303,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.JUMP_KICK]: {
+    source_index: 26,
     name: MoveName.JUMP_KICK,
     type: PokemonType.FIGHTING,
     power: 70,
@@ -289,6 +315,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.ROLLING_KICK]: {
+    source_index: 27,
     name: MoveName.ROLLING_KICK,
     type: PokemonType.FIGHTING,
     power: 60,
@@ -300,6 +327,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SAND_ATTACK]: {
+    source_index: 28,
     name: MoveName.SAND_ATTACK,
     type: PokemonType.GROUND,
     power: 0,
@@ -311,6 +339,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.HEADBUTT]: {
+    source_index: 29,
     name: MoveName.HEADBUTT,
     type: PokemonType.NORMAL,
     power: 70,
@@ -322,6 +351,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.HORN_ATTACK]: {
+    source_index: 30,
     name: MoveName.HORN_ATTACK,
     type: PokemonType.NORMAL,
     power: 65,
@@ -333,6 +363,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.FURY_ATTACK]: {
+    source_index: 31,
     name: MoveName.FURY_ATTACK,
     type: PokemonType.NORMAL,
     power: 15,
@@ -344,6 +375,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.HORN_DRILL]: {
+    source_index: 32,
     name: MoveName.HORN_DRILL,
     type: PokemonType.NORMAL,
     power: 1,
@@ -355,6 +387,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.TACKLE]: {
+    source_index: 33,
     name: MoveName.TACKLE,
     type: PokemonType.NORMAL,
     power: 35,
@@ -366,6 +399,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.BODY_SLAM]: {
+    source_index: 34,
     name: MoveName.BODY_SLAM,
     type: PokemonType.NORMAL,
     power: 85,
@@ -377,6 +411,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.WRAP]: {
+    source_index: 35,
     name: MoveName.WRAP,
     type: PokemonType.NORMAL,
     power: 15,
@@ -388,6 +423,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.TAKE_DOWN]: {
+    source_index: 36,
     name: MoveName.TAKE_DOWN,
     type: PokemonType.NORMAL,
     power: 90,
@@ -399,6 +435,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.THRASH]: {
+    source_index: 37,
     name: MoveName.THRASH,
     type: PokemonType.NORMAL,
     power: 90,
@@ -410,6 +447,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.DOUBLE_EDGE]: {
+    source_index: 38,
     name: MoveName.DOUBLE_EDGE,
     type: PokemonType.NORMAL,
     power: 120,
@@ -421,6 +459,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.TAIL_WHIP]: {
+    source_index: 39,
     name: MoveName.TAIL_WHIP,
     type: PokemonType.NORMAL,
     power: 0,
@@ -432,6 +471,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.POISON_STING]: {
+    source_index: 40,
     name: MoveName.POISON_STING,
     type: PokemonType.POISON,
     power: 15,
@@ -443,6 +483,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.TWINEEDLE]: {
+    source_index: 41,
     name: MoveName.TWINEEDLE,
     type: PokemonType.BUG,
     power: 25,
@@ -454,6 +495,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.PIN_MISSILE]: {
+    source_index: 42,
     name: MoveName.PIN_MISSILE,
     type: PokemonType.BUG,
     power: 14,
@@ -465,6 +507,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.LEER]: {
+    source_index: 43,
     name: MoveName.LEER,
     type: PokemonType.NORMAL,
     power: 0,
@@ -476,6 +519,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.BITE]: {
+    source_index: 44,
     name: MoveName.BITE,
     type: PokemonType.DARK,
     power: 60,
@@ -487,6 +531,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.GROWL]: {
+    source_index: 45,
     name: MoveName.GROWL,
     type: PokemonType.NORMAL,
     power: 0,
@@ -498,6 +543,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.ROAR]: {
+    source_index: 46,
     name: MoveName.ROAR,
     type: PokemonType.NORMAL,
     power: 0,
@@ -509,6 +555,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SING]: {
+    source_index: 47,
     name: MoveName.SING,
     type: PokemonType.NORMAL,
     power: 0,
@@ -520,6 +567,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SUPERSONIC]: {
+    source_index: 48,
     name: MoveName.SUPERSONIC,
     type: PokemonType.NORMAL,
     power: 0,
@@ -531,6 +579,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SONICBOOM]: {
+    source_index: 49,
     name: MoveName.SONICBOOM,
     type: PokemonType.NORMAL,
     power: 20,
@@ -542,6 +591,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.DISABLE]: {
+    source_index: 50,
     name: MoveName.DISABLE,
     type: PokemonType.NORMAL,
     power: 0,
@@ -553,6 +603,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.ACID]: {
+    source_index: 51,
     name: MoveName.ACID,
     type: PokemonType.POISON,
     power: 40,
@@ -564,6 +615,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.EMBER]: {
+    source_index: 52,
     name: MoveName.EMBER,
     type: PokemonType.FIRE,
     power: 40,
@@ -575,6 +627,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.FLAMETHROWER]: {
+    source_index: 53,
     name: MoveName.FLAMETHROWER,
     type: PokemonType.FIRE,
     power: 95,
@@ -586,6 +639,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.MIST]: {
+    source_index: 54,
     name: MoveName.MIST,
     type: PokemonType.ICE,
     power: 0,
@@ -597,6 +651,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.WATER_GUN]: {
+    source_index: 55,
     name: MoveName.WATER_GUN,
     type: PokemonType.WATER,
     power: 40,
@@ -608,6 +663,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.HYDRO_PUMP]: {
+    source_index: 56,
     name: MoveName.HYDRO_PUMP,
     type: PokemonType.WATER,
     power: 120,
@@ -619,6 +675,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SURF]: {
+    source_index: 57,
     name: MoveName.SURF,
     type: PokemonType.WATER,
     power: 95,
@@ -630,6 +687,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.ICE_BEAM]: {
+    source_index: 58,
     name: MoveName.ICE_BEAM,
     type: PokemonType.ICE,
     power: 95,
@@ -641,6 +699,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.BLIZZARD]: {
+    source_index: 59,
     name: MoveName.BLIZZARD,
     type: PokemonType.ICE,
     power: 120,
@@ -652,6 +711,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.PSYBEAM]: {
+    source_index: 60,
     name: MoveName.PSYBEAM,
     type: PokemonType.PSYCHIC_TYPE,
     power: 65,
@@ -663,6 +723,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.BUBBLEBEAM]: {
+    source_index: 61,
     name: MoveName.BUBBLEBEAM,
     type: PokemonType.WATER,
     power: 65,
@@ -674,6 +735,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.AURORA_BEAM]: {
+    source_index: 62,
     name: MoveName.AURORA_BEAM,
     type: PokemonType.ICE,
     power: 65,
@@ -685,6 +747,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: -1,
   },
   [MoveName.HYPER_BEAM]: {
+    source_index: 63,
     name: MoveName.HYPER_BEAM,
     type: PokemonType.NORMAL,
     power: 150,
@@ -696,6 +759,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.PECK]: {
+    source_index: 64,
     name: MoveName.PECK,
     type: PokemonType.FLYING,
     power: 35,
@@ -707,6 +771,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.DRILL_PECK]: {
+    source_index: 65,
     name: MoveName.DRILL_PECK,
     type: PokemonType.FLYING,
     power: 80,
@@ -718,6 +783,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SUBMISSION]: {
+    source_index: 66,
     name: MoveName.SUBMISSION,
     type: PokemonType.FIGHTING,
     power: 80,
@@ -729,6 +795,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.LOW_KICK]: {
+    source_index: 67,
     name: MoveName.LOW_KICK,
     type: PokemonType.FIGHTING,
     power: 50,
@@ -740,6 +807,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.COUNTER]: {
+    source_index: 68,
     name: MoveName.COUNTER,
     type: PokemonType.FIGHTING,
     power: 1,
@@ -751,6 +819,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SEISMIC_TOSS]: {
+    source_index: 69,
     name: MoveName.SEISMIC_TOSS,
     type: PokemonType.FIGHTING,
     power: 1,
@@ -762,6 +831,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.STRENGTH]: {
+    source_index: 70,
     name: MoveName.STRENGTH,
     type: PokemonType.NORMAL,
     power: 80,
@@ -773,6 +843,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.ABSORB]: {
+    source_index: 71,
     name: MoveName.ABSORB,
     type: PokemonType.GRASS,
     power: 20,
@@ -784,6 +855,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.MEGA_DRAIN]: {
+    source_index: 72,
     name: MoveName.MEGA_DRAIN,
     type: PokemonType.GRASS,
     power: 40,
@@ -795,6 +867,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.LEECH_SEED]: {
+    source_index: 73,
     name: MoveName.LEECH_SEED,
     type: PokemonType.GRASS,
     power: 0,
@@ -806,6 +879,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.GROWTH]: {
+    source_index: 74,
     name: MoveName.GROWTH,
     type: PokemonType.NORMAL,
     power: 0,
@@ -817,6 +891,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: 1,
   },
   [MoveName.RAZOR_LEAF]: {
+    source_index: 75,
     name: MoveName.RAZOR_LEAF,
     type: PokemonType.GRASS,
     power: 55,
@@ -828,6 +903,7 @@ export const moves: Partial<Record<MoveName, Move>> = {
     amount: undefined,
   },
   [MoveName.SOLARBEAM]: {
+    source_index: 76,
     name: MoveName.SOLARBEAM,
     type: PokemonType.GRASS,
     power: 120,

@@ -1,4 +1,53 @@
     #[test]
+    fn scripted_gift_dvs_use_two_random_calls_and_preserve_inter_call_carry() {
+        let mut state = GameState::default();
+        state.random_state = CrystalRandomState {
+            add: 0xff,
+            sub: 0x10,
+        };
+        let mut divider = ReplayDivider::new([0, 0x20, 0, 1]);
+
+        let dvs = generate_scripted_gift_dvs(&mut state, &mut divider)
+            .expect("complete scripted gift divider trace");
+
+        // First Random overflows hRandomAdd, so its carry is consumed by the
+        // second Random. GivePoke stores the two returned hRandomSub bytes as
+        // Attack/Defense and Speed/Special nibbles respectively.
+        assert_eq!(dvs, Dv::from_non_hp(15, 0, 14, 14));
+        assert_eq!(
+            state.random_state,
+            CrystalRandomState {
+                add: 0,
+                sub: 0xee,
+            }
+        );
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn boxed_custom_gift_ot_id_uses_two_source_random_calls() {
+        let mut state = GameState::default();
+        state.random_state = CrystalRandomState {
+            add: 0xff,
+            sub: 0x10,
+        };
+        let mut divider = ReplayDivider::new([0, 0x20, 0, 1]);
+
+        let ot_id = generate_scripted_box_gift_ot_id(&mut state, &mut divider)
+            .expect("complete boxed custom gift OT divider trace");
+
+        assert_eq!(ot_id, 0xf0ee);
+        assert_eq!(
+            state.random_state,
+            CrystalRandomState {
+                add: 0,
+                sub: 0xee,
+            }
+        );
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
     fn runtime_bills_grandfather_commands_use_exact_input_mode() {
         let selected_party = RuntimeBillsGrandfatherCommand {
             party_index: Some(1),
@@ -79,88 +128,21 @@
     }
 
     #[test]
-    fn runtime_battle_tower_action_commands_use_exact_payloads() {
-        let save_level_group = RuntimeBattleTowerActionCommand {
+    fn runtime_battle_tower_action_commands_carry_only_the_source_action() {
+        let command = RuntimeBattleTowerActionCommand {
             action: "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
-            level_group: Some(5),
-            selected_reward: None,
         };
         assert_eq!(
-            runtime_battle_tower_action_inputs(&save_level_group).expect("save level group"),
-            (Some(5), None)
+            serde_json::to_value(&command).expect("serialize Battle Tower action"),
+            serde_json::json!({"action": "BATTLETOWERACTION_SAVELEVELGROUP"})
         );
-
-        let missing_level_group = RuntimeBattleTowerActionCommand {
-            action: "BATTLETOWERACTION_SAVELEVELGROUP".to_string(),
-            level_group: None,
-            selected_reward: None,
-        };
-        let missing_level_error = runtime_battle_tower_action_inputs(&missing_level_group)
-            .expect_err("SAVELEVELGROUP must carry level_group");
         assert!(
-            format!("{missing_level_error:#}")
-                .contains("Battle Tower SAVELEVELGROUP command requires level_group"),
-            "{missing_level_error:#}"
-        );
-
-        let save_options = RuntimeBattleTowerActionCommand {
-            action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
-            level_group: None,
-            selected_reward: Some("HP_UP".to_string()),
-        };
-        assert_eq!(
-            runtime_battle_tower_action_inputs(&save_options).expect("save options"),
-            (None, Some("HP_UP".to_string()))
-        );
-
-        let missing_reward = RuntimeBattleTowerActionCommand {
-            action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
-            level_group: None,
-            selected_reward: None,
-        };
-        let missing_reward_error = runtime_battle_tower_action_inputs(&missing_reward)
-            .expect_err("SAVEOPTIONS must carry selected_reward");
-        assert!(
-            format!("{missing_reward_error:#}")
-                .contains("Battle Tower SAVEOPTIONS command requires selected_reward"),
-            "{missing_reward_error:#}"
-        );
-
-        for command in [
-            RuntimeBattleTowerActionCommand {
-                action: "BATTLETOWERACTION_SAVEOPTIONS".to_string(),
-                level_group: Some(5),
-                selected_reward: Some("HP_UP".to_string()),
-            },
-            RuntimeBattleTowerActionCommand {
-                action: "BATTLETOWERACTION_SET_EXPLANATION_READ".to_string(),
-                level_group: Some(5),
-                selected_reward: None,
-            },
-        ] {
-            let error = runtime_battle_tower_action_inputs(&command)
-                .expect_err("level_group must only appear on SAVELEVELGROUP");
-            assert!(
-                format!("{error:#}").contains(&format!(
-                    "Battle Tower {} command must not declare level_group",
-                    command.action
-                )),
-                "{error:#}"
-            );
-        }
-
-        let unused_reward = RuntimeBattleTowerActionCommand {
-            action: "BATTLETOWERACTION_SET_EXPLANATION_READ".to_string(),
-            level_group: None,
-            selected_reward: Some("HP_UP".to_string()),
-        };
-        let unused_reward_error = runtime_battle_tower_action_inputs(&unused_reward)
-            .expect_err("selected_reward must only appear on SAVEOPTIONS");
-        assert!(
-            format!("{unused_reward_error:#}").contains(
-                "Battle Tower BATTLETOWERACTION_SET_EXPLANATION_READ command must not declare selected_reward"
-            ),
-            "{unused_reward_error:#}"
+            serde_json::from_value::<RuntimeBattleTowerActionCommand>(serde_json::json!({
+                "action": "BATTLETOWERACTION_SAVEOPTIONS",
+                "selected_reward": "HP_UP"
+            }))
+            .is_err(),
+            "synthetic reward-selection payloads must not survive the source migration"
         );
     }
 
@@ -406,7 +388,7 @@
         assert_eq!(
             connection_destination_tile(TilePosition::new(6, -2), "north", 0, &attributes)
                 .expect("north connection"),
-            TilePosition::new(6, 16)
+            TilePosition::new(6, 17)
         );
         assert_eq!(
             connection_destination_tile(TilePosition::new(6, 18), "south", 0, &attributes)
@@ -416,7 +398,7 @@
         assert_eq!(
             connection_destination_tile(TilePosition::new(-2, 4), "west", 0, &attributes)
                 .expect("west connection"),
-            TilePosition::new(18, 4)
+            TilePosition::new(19, 4)
         );
         assert_eq!(
             connection_destination_tile(TilePosition::new(20, 4), "east", 0, &attributes)
@@ -671,6 +653,7 @@
             special_phone_calls: BTreeMap::from([(
                 "SPECIALCALL_MASTERBALL".to_string(),
                 SpecialPhoneCallRule {
+                    value: 8,
                     condition: "SpecialCallOnlyWhenOutside".to_string(),
                     contact_id: "PHONE_ELM".to_string(),
                     caller_script: "ElmPhoneCallerScript".to_string(),
@@ -679,8 +662,7 @@
             ..GameDataSet::default()
         };
         let mut state = GameState::default();
-        state.script_runtime.special_phone_calls =
-            vec!["SPECIALCALL_MASTERBALL".to_string()];
+        state.script_runtime.special_phone_call = Some("SPECIALCALL_MASTERBALL".to_string());
         state.repel_steps_remaining = 1;
         state.active_repel_item = Some("REPEL".to_string());
         state.step_events.step_count = 17;
@@ -720,13 +702,20 @@
                 .next_script
                 .as_ref()
                 .map(|location| location.script.as_str()),
+            Some("Script_ReceivePhoneCall")
+        );
+        assert!(state.script_runtime.call_stack.is_empty());
+        assert_eq!(state.script_runtime.pending_delays[0].parameter, 30);
+        assert_eq!(state.script_runtime.pending_delays[0].frames, 60);
+        assert!(state.script_runtime.command_queue.is_empty());
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wPhoneCallerScript")
+                .map(String::as_str),
             Some("ElmPhoneCallerScript")
         );
-        assert_eq!(state.script_runtime.call_stack.len(), 1);
-        assert_eq!(state.script_runtime.call_stack[0].source_script, "Script_ReceivePhoneCall");
-        assert_eq!(state.script_runtime.call_stack[0].next_command_index, 3);
-        assert_eq!(state.script_runtime.pending_delays[0].frames, 30);
-        assert_eq!(state.script_runtime.command_queue[0].target, "RingTwice_StartCall");
     }
 
     #[test]
@@ -825,6 +814,113 @@
             Some("BCallerScript")
         );
 
+    }
+
+    #[test]
+    fn outgoing_pokegear_calls_use_the_asm_callback_wrappers_without_spurious_ringing() {
+        let mut module = test_map_module("Route29", "ROUTE_29", None);
+        module.attributes.width = 2;
+        module.blocks = vec![1, 1];
+        let mut data = GameDataSet {
+            maps: map_payload(vec![module]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            runtime_map_metadata: BTreeMap::from([(
+                "ROUTE_29".to_string(),
+                phone_scheduler_metadata(0, "ROUTE"),
+            )]),
+            phone_contacts: PhoneContactCatalog(BTreeMap::from([(
+                "PHONE_BILL".to_string(),
+                PhoneContactRecord {
+                    contact_id: "PHONE_BILL".to_string(),
+                    trainer_class: None,
+                    trainer_label: None,
+                    lines: vec!["PHONE_BILL:".to_string()],
+                    primary_label: "PHONE_BILL".to_string(),
+                    callee_time_mask: 0x2,
+                    map_constant: Some("GOLDENROD_POKECOM_CENTER_1F".to_string()),
+                    callee_script: Some("BillPhoneCalleeScript".to_string()),
+                    caller_time_mask: 0,
+                    caller_script: None,
+                },
+            )])),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state.time.time_of_day = TimeOfDay::Day;
+        let mut session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("overworld session");
+
+        let mutation = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::StartPokegearPhoneCall(
+                    RuntimePokegearPhoneCallCommand {
+                        contact_id: "PHONE_BILL".to_string(),
+                    },
+                ),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            )
+            .expect("valid outgoing phone call");
+        let RuntimeMutationResult::PokegearPhoneCallStarted(outcome) = mutation.result else {
+            panic!("unexpected outgoing phone result")
+        };
+        assert_eq!(outcome.callback_script, "LoadPhoneScriptBank");
+        assert_eq!(outcome.callee_script.as_deref(), Some("BillPhoneCalleeScript"));
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wPhoneCallerScript")
+                .map(String::as_str),
+            Some("BillPhoneCalleeScript")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCurCaller")
+                .map(String::as_str),
+            Some("PHONE_BILL")
+        );
+        assert!(state.script_runtime.audio_events.is_empty());
+
+        data.runtime_map_metadata
+            .get_mut("ROUTE_29")
+            .expect("route metadata")
+            .phone_service = 0x10;
+        let mut no_service_state = GameState::default();
+        no_service_state.time.time_of_day = TimeOfDay::Day;
+        let mut no_service_session = data
+            .overworld_session("Route29", TilePosition::new(0, 0), 0)
+            .expect("no-service overworld session");
+        let mutation = data
+            .apply_runtime_mutation_command(
+                &mut no_service_state,
+                &mut no_service_session,
+                RuntimeMutationCommand::StartPokegearPhoneCall(
+                    RuntimePokegearPhoneCallCommand {
+                        contact_id: "PHONE_BILL".to_string(),
+                    },
+                ),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            )
+            .expect("no-service outgoing phone call");
+        let RuntimeMutationResult::PokegearPhoneCallStarted(outcome) = mutation.result else {
+            panic!("unexpected no-service phone result")
+        };
+        assert_eq!(outcome.callback_script, "LoadOutOfAreaScript");
+        assert_eq!(outcome.callee_script, None);
+        assert!(!no_service_state
+            .script_runtime
+            .memory
+            .contains_key("wPhoneCallerScript"));
+        assert!(no_service_state.script_runtime.audio_events.is_empty());
     }
 
     #[test]
@@ -1041,15 +1137,16 @@
             ".Script@LockedDoorData".to_string(),
             serde_json::json!([]),
         );
-        module.script_runtime_commands = vec![ScriptRuntimeCommand {
-            command: "conditional_event".to_string(),
-            args: vec![
-                "EVENT_OPENED_LOCKED_DOOR".to_string(),
-                ".Script".to_string(),
-            ],
-            source_script: "LockedDoorData".to_string(),
-            command_index: 0,
-        }];
+        module
+            .scripts
+            .insert(".Script".to_string(), serde_json::json!([]));
+        module.scripts.insert(
+            "LockedDoorData".to_string(),
+            serde_json::json!([{
+                "command": "conditional_event",
+                "args": ["EVENT_OPENED_LOCKED_DOOR", ".Script"]
+            }]),
+        );
         let data = GameDataSet {
             maps: map_payload(vec![module]),
             tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
@@ -2144,6 +2241,7 @@
         data.type_categories = test_type_categories();
         data.type_effectiveness = test_type_effectiveness();
         data.weather_modifiers = test_weather_modifiers();
+        data.roaming_pokemon = roaming_catalog_for_tests("RAIKOU", "ENTEI");
         let value = serde_json::to_value(data).expect("serialize explicit empty game data");
         serde_json::from_value::<GameDataSet>(value.clone())
             .expect("exact game data round-trips with trainer class names");
@@ -2862,6 +2960,61 @@
     }
 
     #[test]
+    fn browser_pack_writes_pcm_as_hash_verified_gzip_sidecars() {
+        let path = temp_test_path("browser/runtime.browser.crystalpack");
+        let mut data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let pcm = vec![0_u8, 0];
+        let mut asset = ModpackAudioAsset::pcm(
+            "CRY_TEST",
+            "content-packs/test/cries/CRY_TEST.pcm",
+            ModpackAudioKind::Cry,
+            ModpackPcmAudioFormat {
+                sample_rate_hz: 22_050,
+                channels: 1,
+                bits_per_sample: 16,
+            },
+        )
+        .expect("PCM asset");
+        asset.pcm_frame_count = Some(1);
+        asset.payload_hash = Some(format!("{:08x}", fnv1a32_bytes(&pcm)));
+        data.audio = vec![asset];
+        let report = canonical_test_compile_report(&data, "base-game");
+        let pack = CompiledGamePack::new_unchecked_with_audio_for_tests(
+            data,
+            BTreeMap::from([("CRY_TEST".to_string(), pcm.clone())]),
+            report,
+        );
+
+        write_compiled_game_pack_with_pcm_sidecars(&path, &pack)
+            .expect("write browser sidecar pack");
+        let loaded =
+            read_loaded_compiled_game_pack(&path).expect("read browser sidecar pack artifact");
+        validate_compiled_game_pack_identity(loaded.pack()).expect("sidecar pack identity");
+        validate_compiled_audio_payloads(loaded.pack()).expect("sidecar audio manifest");
+        let (_, _, loaded_pack) = loaded.into_parts();
+        let (_, _, embedded, manifest, compression, _, _, _) = loaded_pack.into_parts();
+        assert!(embedded.is_empty(), "browser pack must not embed PCM");
+        assert_eq!(
+            compression.as_deref(),
+            Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR)
+        );
+        let entry = manifest.cries.get("CRY_TEST").expect("cry manifest");
+        let sidecar = path.parent().expect("pack parent").join(pcm_gzip_sidecar_path(
+            "CRY_TEST",
+            &entry.payload_hash,
+        ));
+        let mut decoder = flate2::read::GzDecoder::new(
+            std::fs::File::open(&sidecar).expect("open sidecar"),
+        );
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).expect("decode sidecar");
+        assert_eq!(decoded, pcm);
+        let _ = std::fs::remove_dir_all(path.parent().expect("pack parent"));
+    }
+
+    #[test]
     fn compiled_game_pack_rejects_empty_corrupt_and_legacy_unframed_payloads() {
         let path = temp_test_path("framed-runtime.crystalpack");
         let data = AssetRoot::new(repository_root_for_tests())
@@ -2921,7 +3074,7 @@
             .expect_err("framed v5 compiled packs are rejected before payload decode")
             .to_string();
         assert!(
-            v5_error.contains("unsupported format version 5"),
+            v5_error.contains("unsupported frame format version 5"),
             "{v5_error}"
         );
 
@@ -2967,8 +3120,8 @@
         prior_under_v6.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
         prior_under_v6.extend_from_slice(&prior_payload);
         let prior_shape_error = decode_compiled_game_pack(&prior_under_v6, &path)
-            .expect_err("v5 payload shape must not decode under the v6 frame")
-            .to_string();
+            .expect_err("v5 payload shape must not decode under the v6 frame");
+        let prior_shape_error = format!("{prior_shape_error:#}");
         assert!(
             prior_shape_error.contains("missing field `encounters`")
                 || prior_shape_error.contains("missing field encounters"),
@@ -3189,7 +3342,7 @@
         first.attributes.map_constant = Some("DUPLICATE_MAP".to_string());
         let mut second = test_map_module("SecondMap", "DUPLICATE_MAP", None);
         second.attributes.map_constant = Some("DUPLICATE_MAP".to_string());
-        let mut data = GameDataSet {
+        let data = GameDataSet {
             maps: [
                 ("FirstMap".to_string(), first),
                 ("SecondMap".to_string(), second),
@@ -3706,7 +3859,7 @@
 
     #[test]
     fn runtime_pack_geometry_uses_declared_map_module_geometry() {
-        let mut data = GameDataSet {
+        let data = GameDataSet {
             maps: [(
                 "Route29".to_string(),
                 test_map_module("Route29", "ROUTE_29", None),
@@ -5025,6 +5178,7 @@
                     tmhm_move: None,
                 }]),
                 moves: move_payload(vec![Move {
+                    source_index: 1,
                     name: "SPARK".to_string(),
                     move_type: pokemon_type("ELECTRIC"),
                     power: 40,
@@ -5045,6 +5199,7 @@
                 type_categories: test_type_categories(),
                 type_effectiveness: test_type_effectiveness(),
                 weather_modifiers: test_weather_modifiers(),
+                roaming_pokemon: roaming_catalog_for_tests("RAIKOU", "ENTEI"),
                 ..ModpackPayload::default()
             },
             ..ModpackManifest::default()
@@ -5510,23 +5665,123 @@
         }));
     }
     #[test]
-    fn runtime_mutation_protocol_rejects_framed_v4_payload_without_compatibility_decode() {
+    fn runtime_mutation_protocol_round_trips_decoration_actions() {
+        for command in [
+            RuntimeMutationCommand::SetUpDecoration(RuntimeDecorationSetupCommand {
+                decoration_id: "DECO_PINK_BED".to_string(),
+                side: None,
+            }),
+            RuntimeMutationCommand::PutAwayDecoration(RuntimeDecorationPutAwayCommand {
+                category: DecorationCategory::Ornament,
+                side: Some(DecorationSide::Left),
+            }),
+        ] {
+            let payload = encode_runtime_mutation_command_payload(&command)
+                .expect("encode decoration mutation command");
+            assert_eq!(
+                decode_runtime_mutation_command_payload(&payload)
+                    .expect("decode decoration mutation command"),
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_round_trips_composed_mail_attachment() {
+        let command = RuntimeMutationCommand::ComposeBagMailToParty(
+            RuntimeComposeMailCommand {
+                item_id: "FLOWER_MAIL".to_string(),
+                party_index: 0,
+                message: "HELLO FROM JOHTO".to_string(),
+            },
+        );
+        let payload = encode_runtime_mutation_command_payload(&command)
+            .expect("encode composed Mail mutation command");
+        assert_eq!(
+            decode_runtime_mutation_command_payload(&payload)
+                .expect("decode composed Mail mutation command"),
+            command
+        );
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_round_trips_pokegear_radio_tuning() {
+        let command = RuntimeMutationCommand::SetPokegearRadioTuning(
+            RuntimePokegearRadioTuningCommand { tuning_knob: 52 },
+        );
+        let payload = encode_runtime_mutation_command_payload(&command)
+            .expect("encode Pokegear radio tuning mutation command");
+        assert_eq!(
+            decode_runtime_mutation_command_payload(&payload)
+                .expect("decode Pokegear radio tuning mutation command"),
+            command
+        );
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_round_trips_outgoing_pokegear_phone_calls() {
+        let command = RuntimeMutationCommand::StartPokegearPhoneCall(
+            RuntimePokegearPhoneCallCommand {
+                contact_id: "PHONE_BILL".to_string(),
+            },
+        );
+        let payload = encode_runtime_mutation_command_payload(&command)
+            .expect("encode outgoing Pokegear phone mutation command");
+        assert_eq!(
+            decode_runtime_mutation_command_payload(&payload)
+                .expect("decode outgoing Pokegear phone mutation command"),
+            command
+        );
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_round_trips_map_setup_callbacks() {
+        let command = RuntimeMutationCommand::ApplyMapSetupCallbacks {
+            map_setup: "MAPSETUP_RELOADMAP".to_string(),
+        };
+        let payload = encode_runtime_mutation_command_payload(&command)
+            .expect("encode map setup callback mutation command");
+        assert_eq!(
+            decode_runtime_mutation_command_payload(&payload)
+                .expect("decode map setup callback mutation command"),
+            command
+        );
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_round_trips_map_reentry_queue_drain() {
+        let command = RuntimeMutationCommand::DrainScriptRuntimeQueue(
+            RuntimeScriptRuntimeQueueDrainCommand {
+                queue: RuntimeScriptRuntimeQueue::MapReentryScript,
+            },
+        );
+        let payload = encode_runtime_mutation_command_payload(&command)
+            .expect("encode map reentry queue drain command");
+        assert_eq!(
+            decode_runtime_mutation_command_payload(&payload)
+                .expect("decode map reentry queue drain command"),
+            command
+        );
+    }
+
+    #[test]
+    fn runtime_mutation_protocol_rejects_framed_v46_payload_without_compatibility_decode() {
         let current = encode_runtime_mutation_command_payload(
             &RuntimeMutationCommand::ResolveBlackoutToLastSpawn,
         )
         .expect("encode current command payload");
-        let v4 = RuntimeCommandPayload::new(
-            "crystal_runtime_mutation_command_v4",
+        let v46 = RuntimeCommandPayload::new(
+            "crystal_runtime_mutation_command_v46",
             current.bytes().to_vec(),
         )
         .expect("construct well-formed legacy schema payload");
 
-        let error = decode_runtime_mutation_command_payload(&v4)
-            .expect_err("v4 command frames have no compatibility shim");
+        let error = decode_runtime_mutation_command_payload(&v46)
+            .expect_err("v46 command frames have no compatibility shim");
 
         assert!(
             error.to_string().contains(
-                "schema 'crystal_runtime_mutation_command_v4' does not match expected 'crystal_runtime_mutation_command_v5'"
+                "schema 'crystal_runtime_mutation_command_v46' does not match expected 'crystal_runtime_mutation_command_v47'"
             ),
             "{error:#}"
         );

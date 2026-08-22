@@ -232,7 +232,10 @@ pub fn attempt_ledge_jump_with_occupied_tiles(
             };
         }
     };
-    if !can_jump_ledge(map, tileset, ledge, direction, stride) {
+    // ASM TryJump reads the permission at the player's current collision
+    // position. The tile in front is the course jumped over, not the tile
+    // whose HOP_* direction bits authorize the jump.
+    if !can_jump_ledge(map, tileset, state.tile, direction, stride) {
         return LedgeJumpOutcome::NotLedge {
             at: ledge,
             facing: direction,
@@ -407,12 +410,7 @@ mod tests {
                     collision: [permissions::FLOOR; 4],
                 },
                 MetatileCollision {
-                    collision: [
-                        permissions::FLOOR,
-                        permissions::HOP_DOWN,
-                        permissions::HOP_DOWN,
-                        permissions::HOP_DOWN,
-                    ],
+                    collision: [permissions::HOP_DOWN; 4],
                 },
                 MetatileCollision {
                     collision: [landing_permission; 4],
@@ -786,6 +784,50 @@ mod tests {
     }
 
     #[test]
+    fn ledge_jump_reads_directional_permission_under_player() {
+        let map = OverworldMapData::from_attributes("one_way_ledge", &attributes(1, 2), vec![0, 1]);
+        let tileset = TilesetCollision {
+            metatiles: vec![
+                MetatileCollision {
+                    collision: [
+                        permissions::FLOOR,
+                        permissions::FLOOR,
+                        permissions::HOP_DOWN,
+                        permissions::HOP_DOWN,
+                    ],
+                },
+                MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                },
+            ],
+        };
+        let mut state = PlayerMovementState {
+            tile: TilePosition::new(0, 1),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
+
+        let outcome = attempt_ledge_jump(
+            &mut state,
+            Direction::Down,
+            &map,
+            &tileset,
+            StepOptions::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            LedgeJumpOutcome::Jumped {
+                from: TilePosition::new(0, 1),
+                over: TilePosition::new(0, 2),
+                to: TilePosition::new(0, 3),
+                speed_multiplier: 1,
+            }
+        );
+        assert_eq!(state.tile, TilePosition::new(0, 3));
+    }
+
+    #[test]
     fn bike_ledge_jump_keeps_fixed_ledge_speed() {
         let mut state = PlayerMovementState {
             tile: TilePosition::new(2, 2),
@@ -814,7 +856,7 @@ mod tests {
     #[test]
     fn ledge_jump_rejects_wrong_direction_without_normalization() {
         let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 5),
+            tile: TilePosition::new(2, 3),
             facing: Direction::Up,
             mode: MovementMode::Normal,
         };
@@ -829,11 +871,11 @@ mod tests {
         assert_eq!(
             outcome,
             LedgeJumpOutcome::NotLedge {
-                at: TilePosition::new(2, 4),
+                at: TilePosition::new(2, 2),
                 facing: Direction::Up,
             }
         );
-        assert_eq!(state.tile, TilePosition::new(2, 5));
+        assert_eq!(state.tile, TilePosition::new(2, 3));
     }
 
     #[test]

@@ -20,6 +20,103 @@ fn bevy_shell_source() -> &'static str {
     )
 }
 
+#[test]
+fn map_refresh_commands_do_not_run_map_entry_callbacks_or_restart_music() {
+    let source = include_str!("../credits.rs");
+    let body = source
+        .split_once("fn take_visible_pending_map_refresh")
+        .expect("pending map refresh handler")
+        .1
+        .split_once("\nfn arm_visible_current_scene_script")
+        .expect("end of pending map refresh handler")
+        .0;
+
+    assert!(
+        !body.contains("arm_visible_current_map_callbacks"),
+        "refreshmap/reanchormap must not execute map-entry callbacks"
+    );
+    assert!(
+        !body.contains("queue_visible_current_music"),
+        "refreshmap/reanchormap must not restart current-map music"
+    );
+}
+
+#[test]
+fn map_setup_callbacks_are_not_replayed_as_visible_scripts() {
+    let source = bevy_shell_source();
+
+    assert!(
+        !source.contains("pending_map_callbacks"),
+        "map setup callbacks execute authoritatively during setup and must not be queued again"
+    );
+    assert!(
+        !source.contains("take_next_visible_map_callback"),
+        "the visible shell must not execute callback bodies a second time"
+    );
+}
+
+#[test]
+fn visible_newloadmap_commits_the_staged_destination_before_map_setup() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let initial = runtime_shell.shell.snapshot().expect("initial snapshot");
+    let target = initial
+        .spawn_points
+        .iter()
+        .find(|spawn| spawn.map_name != initial.overworld.map_name)
+        .cloned()
+        .expect("a spawn on another map");
+    let target_tile = TilePosition::new(target.tile_x, target.tile_y);
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        state.script_runtime.pending_script_warp = Some(
+            crystal_core::state::ScriptWarpRequest {
+                target_map: target.map_name.clone(),
+                tile: target_tile,
+                facing: None,
+                source_script: "WarpToSpawnPoint".to_string(),
+                command_index: 0,
+            },
+        );
+        state.script_runtime.pending_map_load = Some(
+            crystal_core::state::ScriptMapLoadRequest {
+                command: "newloadmap".to_string(),
+                map_setup: Some("MAPSETUP_FLY".to_string()),
+                source_script: ".FlyScript@FlyFunction".to_string(),
+                command_index: 8,
+            },
+        );
+    }
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
+    let staged = runtime_shell.shell.snapshot().expect("staged snapshot");
+
+    assert!(
+        advance_visible_next_pending_script_request(&mut runtime_shell, &staged)
+            .expect("advance newloadmap")
+    );
+
+    let arrived = runtime_shell.shell.snapshot().expect("arrival snapshot");
+    assert_eq!(arrived.overworld.map_name, target.map_name);
+    assert_eq!(arrived.overworld.tile, target_tile);
+    assert!(arrived.script_events.pending_script_warp.is_none());
+    assert!(arrived.script_events.pending_map_load.is_none());
+}
+
+fn deterministic_battle_divider_trace(mut divider_state: u16) -> Vec<u8> {
+    let mut samples = Vec::with_capacity(16_384);
+    for _ in 0..16_384 {
+        if divider_state == 0 {
+            divider_state = 0xace1;
+        }
+        let feedback = divider_state & 1;
+        divider_state >>= 1;
+        if feedback != 0 {
+            divider_state ^= 0xb400;
+        }
+        samples.push(divider_state as u8);
+    }
+    samples
+}
+
 /// Match the desktop executable: the game data comes from the explicit
 /// compiled pack, while artwork resolves from the workspace asset root.
 /// `load_from_compiled_pack` intentionally addresses web runtime data and
@@ -63,6 +160,245 @@ fn release_hotkey_mapper_has_no_space_or_escape_aliases() {
     assert!(
         !mapper.contains("KeyCode::Escape") && !mapper.contains("KeyCode::Space"),
         "only configured Game Boy controls may drive the runtime hotkey mapper"
+    );
+}
+
+#[test]
+fn visible_cut_commits_the_block_at_the_source_callasm_boundary() {
+    let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
+    let map_name = runtime_shell.shell.session.overworld.map.name.clone();
+    runtime_shell.shell.session.overworld.map.metatile_ids[0] = 0x5b;
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_block_field_move = Some(
+        crystal_core::systems::field_moves::FieldMoveBlockOutcome {
+        move_id: "CUT".to_string(),
+        actor_party_index: 0,
+        actor_species: "CYNDAQUIL".to_string(),
+        map_name: map_name.clone(),
+        tileset_name: "johto".to_string(),
+        metatile_x: 0,
+        metatile_y: 0,
+        previous_block_id: 0x5b,
+        replacement_block_id: 0x3c,
+        variant: "tree".to_string(),
+        },
+    );
+    runtime_shell.visible_cut_animation = Some(VisibleCutAnimation {
+        target_tile: TilePosition::new(0, 0),
+        facing: Direction::Down,
+        variant: "tree".to_string(),
+        frame: 0,
+    });
+    runtime_shell.pending_field_notice_effect_frames = Some(32);
+
+    assert_eq!(
+        runtime_shell.shell.session.overworld.map.metatile_at(0, 0),
+        Some(0x5b)
+    );
+    assert!(
+        begin_pending_field_notice_effect(&mut runtime_shell)
+            .expect("begin source Cut effect")
+    );
+    assert_eq!(
+        runtime_shell.shell.session.overworld.map.metatile_at(0, 0),
+        Some(0x3c)
+    );
+    assert!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_block_field_move
+            .is_none()
+    );
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .map_block_overrides
+            .get(&map_name)
+            .and_then(|overrides| overrides.get(&(0, 0)))
+            .copied(),
+        Some(0x3c)
+    );
+}
+
+#[test]
+fn visible_flash_sets_the_status_bit_at_the_source_callasm_boundary() {
+    let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_flash_field_move = Some(
+        crystal_core::systems::field_moves::FieldMoveFlagOutcome {
+            move_id: "FLASH".to_string(),
+            actor_party_index: 0,
+            actor_species: "CYNDAQUIL".to_string(),
+            engine_flag: "STATUSFLAGS_FLASH".to_string(),
+            was_set: false,
+            is_set: true,
+        },
+    );
+    runtime_shell.visible_flash_animation = Some(VisibleFlashAnimation { frame: 0 });
+    runtime_shell.pending_field_notice_effect_frames = Some(16);
+
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .flags
+            .is_engine_flag_set("STATUSFLAGS_FLASH"),
+        Ok(false)
+    );
+    assert!(
+        begin_pending_field_notice_effect(&mut runtime_shell)
+            .expect("begin source Flash effect")
+    );
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .flags
+            .is_engine_flag_set("STATUSFLAGS_FLASH"),
+        Ok(true)
+    );
+    assert!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_flash_field_move
+            .is_none()
+    );
+}
+
+#[test]
+fn visible_surf_moves_only_at_the_source_slow_step_boundary() {
+    let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
+    let from_tile = runtime_shell.shell.session.overworld.player.tile;
+    let facing = runtime_shell.shell.session.overworld.player.facing;
+    let to_tile = match facing {
+        Direction::Up => TilePosition::new(from_tile.x, from_tile.y - 1),
+        Direction::Down => TilePosition::new(from_tile.x, from_tile.y + 1),
+        Direction::Left => TilePosition::new(from_tile.x - 1, from_tile.y),
+        Direction::Right => TilePosition::new(from_tile.x + 1, from_tile.y),
+    };
+    let map_name = runtime_shell.shell.session.overworld.map.name.clone();
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .memory
+        .insert("wSurfingPlayerState".to_string(), "4".to_string());
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_surf_field_move = Some(
+        crystal_core::systems::field_moves::FieldMoveTravelOutcome {
+            move_id: "SURF".to_string(),
+            actor_party_index: 0,
+            actor_species: "CYNDAQUIL".to_string(),
+            map_name,
+            from_tile,
+            to_tile,
+            steps: 1,
+            mode: MovementMode::Surf,
+        },
+    );
+    runtime_shell.pending_surf_start_from = Some(from_tile);
+    runtime_shell.pending_field_notice_effect_frames = Some(16);
+
+    assert_eq!(runtime_shell.shell.session.overworld.player.tile, from_tile);
+    assert_eq!(
+        runtime_shell.shell.session.overworld.player.mode,
+        MovementMode::Normal
+    );
+    assert!(
+        begin_pending_field_notice_effect(&mut runtime_shell)
+            .expect("begin source Surf slow_step")
+    );
+    assert_eq!(runtime_shell.shell.session.overworld.player.tile, to_tile);
+    assert_eq!(
+        runtime_shell.shell.session.overworld.player.mode,
+        MovementMode::Surf
+    );
+    assert!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_surf_field_move
+            .is_none()
+    );
+}
+
+#[test]
+fn visible_waterfall_commits_each_source_loop_step_individually() {
+    let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
+    runtime_shell.shell.session.overworld.player.mode = MovementMode::Surf;
+    runtime_shell.shell.session.overworld.player.facing = Direction::Up;
+    let from_tile = runtime_shell.shell.session.overworld.player.tile;
+    let to_tile = TilePosition::new(from_tile.x, from_tile.y - 1);
+    let map_name = runtime_shell.shell.session.overworld.map.name.clone();
+    runtime_shell.shell.session.state.overworld = crystal_core::state::OverworldMemory::from_snapshot(
+        &runtime_shell.shell.session.overworld.snapshot(),
+    );
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .pending_waterfall_field_move = Some(
+        crystal_core::systems::field_moves::FieldMoveTravelOutcome {
+            move_id: "WATERFALL".to_string(),
+            actor_party_index: 0,
+            actor_species: "CYNDAQUIL".to_string(),
+            map_name,
+            from_tile,
+            to_tile,
+            steps: 1,
+            mode: MovementMode::Surf,
+        },
+    );
+
+    assert_eq!(runtime_shell.shell.session.overworld.player.tile, from_tile);
+    execute_visible_pending_waterfall_step(&mut runtime_shell, 0, 1)
+        .expect("execute one source Waterfall loop step");
+
+    assert_eq!(runtime_shell.shell.session.overworld.player.tile, to_tile);
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .script_value
+            .as_deref(),
+        Some("1")
+    );
+    assert!(
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .pending_waterfall_field_move
+            .is_none()
     );
 }
 
@@ -136,6 +472,7 @@ fn every_compiled_dialogue_resume_path_reaches_a_runtime_boundary_without_loopin
                 | "promptbutton"
                 | "waitbutton"
                 | "yesorno"
+                | "verbosegiveitem"
         )
     }
 
@@ -173,6 +510,7 @@ fn every_compiled_dialogue_resume_path_reaches_a_runtime_boundary_without_loopin
                 | "promptbutton"
                 | "waitbutton"
                 | "yesorno"
+                | "verbosegiveitem"
         ) || matches!(
             name,
             "applymovement"
@@ -187,7 +525,6 @@ fn every_compiled_dialogue_resume_path_reaches_a_runtime_boundary_without_loopin
                 | "warpfacing"
                 | "newloadmap"
                 | "reloadmap"
-                | "reloadmappart"
                 | "reloadmapafterbattle"
                 | "refreshmap"
                 | "reanchormap"
@@ -374,7 +711,7 @@ use super::*;
 use crate::core::systems::script_text::{ScriptTextBody, ScriptTextBodyCommand};
 
 #[test]
-fn every_asm_writetext_continues_to_the_authored_input_boundary() {
+fn every_asm_writetext_is_a_synchronous_print_boundary() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -410,13 +747,13 @@ fn every_asm_writetext_continues_to_the_authored_input_boundary() {
                 }
                 total += 1;
                 assert!(
-                    !crate::compiled_script_boundary_stops_run(
+                    crate::compiled_script_boundary_stops_run(
                         name,
                         &Some(crate::RuntimeCompiledScriptBoundary::TextLabel(
                             "ASMText".to_string()
                         ))
                     ),
-                    "{name} is a presentation command in ScriptEvents and must never suspend the interpreter"
+                    "{name} must suspend the interpreter until PrintText finishes"
                 );
                 match body
                     .get(index + 1)
@@ -588,6 +925,7 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
                 Dv::from_non_hp(10, 10, 10, 10),
             )
             .expect("add selected Elm starter");
+        shell.session_mut().state.badges.johto.fill(true);
         if shell.script_events_snapshot().script_ended.is_some() {
             shell
                 .take_script_end_state()
@@ -640,20 +978,18 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
         shell
             .snapshot()
             .unwrap_or_else(|error| panic!("{starter} rival battle snapshot failed: {error:#}"));
+        shell.session_mut().state.random_state =
+            crystal_core::random::CrystalRandomState::default();
+        shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay(deterministic_battle_divider_trace(0));
         let mut turns = 0usize;
         let trainer_defeated = loop {
             turns += 1;
             assert!(turns <= 64, "{starter} rival battle exceeded 64 turns");
-            let player_action = BattleAction::Move { slot: 0 };
+            let player_action = BattleAction::Move { slot: 3 };
             let enemy_action = BattleAction::Move { slot: 0 };
-            let rng_seed_after = shell
-                .preview_active_battle_turn_rng_seed_after(
-                    player_action.clone(),
-                    enemy_action.clone(),
-                )
-                .expect("preview rival turn RNG boundary");
             let turn = shell
-                .resolve_active_battle_turn(player_action, enemy_action, rng_seed_after)
+                .resolve_active_battle_turn(player_action, enemy_action)
                 .expect("resolve complete rival battle turn");
             assert!(
                 turn.outcome.state.player.hp > 0,
@@ -712,7 +1048,10 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
             )
             .expect("resume rival post-battle branch after map reload");
         assert!(
-            matches!(post_battle.boundary, Some(crate::RuntimeCompiledScriptBoundary::TextWait(_))),
+            matches!(
+                post_battle.boundary,
+                Some(crate::RuntimeCompiledScriptBoundary::TextLabel(_))
+            ),
             "{starter} rival post-battle script did not reach its authored win text: {post_battle:?}"
         );
         // ASM defines WIN=0, copies wBattleResult into wScriptVar at
@@ -818,7 +1157,7 @@ fn cherrygrove_can_lose_battle_resumes_the_opposite_asm_branch_without_whiteout(
         .expect("resume loss branch");
     assert!(matches!(
         post_battle.boundary,
-        Some(crate::RuntimeCompiledScriptBoundary::TextWait(_))
+        Some(crate::RuntimeCompiledScriptBoundary::TextLabel(_))
     ));
     // WIN=0 and LOSE=1. Therefore `iftrue .AfterVictorious` is the Rival's
     // victory, i.e. the player's authored loss branch.
@@ -859,6 +1198,7 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
             Dv::from_non_hp(15, 15, 15, 15),
         )
         .expect("add battle lead");
+    shell.session_mut().state.badges.johto.fill(true);
     if shell.script_events_snapshot().script_ended.is_some() {
         shell
             .take_script_end_state()
@@ -900,6 +1240,10 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
         "ASM counter-starter branch must materialize the entire three-Pokemon party"
     );
 
+    shell.session_mut().state.random_state = crystal_core::random::CrystalRandomState::default();
+    shell.session_mut().divider =
+        crystal_core::random::RuntimeDividerSource::replay(deterministic_battle_divider_trace(0x1234));
+
     let mut defeated_species = Vec::new();
     let mut turns = 0usize;
     loop {
@@ -914,18 +1258,18 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
             .species
             .id
             .clone();
-        let player_action = BattleAction::Move { slot: 0 };
+        // Typhlosion's first retained level-100 move is Normal-type and cannot
+        // damage the lead Gastly; use its retained Flame Wheel slot.
+        let player_action = BattleAction::Move { slot: 1 };
         let enemy_action = BattleAction::Move { slot: 0 };
-        let rng_seed_after = shell
-            .preview_active_battle_turn_rng_seed_after(
-                player_action.clone(),
-                enemy_action.clone(),
-            )
-            .expect("preview Azalea turn RNG");
         let turn = shell
-            .resolve_active_battle_turn(player_action, enemy_action, rng_seed_after)
+            .resolve_active_battle_turn(player_action, enemy_action)
             .expect("resolve Azalea battle turn");
-        assert!(turn.outcome.state.player.hp > 0);
+        assert!(
+            turn.outcome.state.player.hp > 0,
+            "Typhlosion fainted on turn {turns} against {enemy_species}: {:?}",
+            turn.outcome.events
+        );
         if turn.outcome.state.enemy.hp > 0 {
             continue;
         }
@@ -978,7 +1322,7 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
         .expect("resume Azalea script after full trainer party");
     assert!(matches!(
         post_battle.boundary,
-        Some(crate::RuntimeCompiledScriptBoundary::TextWait(_))
+        Some(crate::RuntimeCompiledScriptBoundary::TextLabel(_))
     ));
     assert_eq!(
         shell.script_events_snapshot().pending_text_label.as_deref(),
@@ -1069,6 +1413,16 @@ fn boot_textbox_wraps_and_normalizes_like_typescript_bitmap_font() {
         vec!["one two".to_string(), "three".to_string()],
         "boot textboxes must clamp to the inner textbox line count instead of overflowing"
     );
+    assert_eq!(
+        wrap_boot_text_for_box("What will CHIKORITA do?", 7, 4),
+        vec![
+            "What".to_string(),
+            "will CH".to_string(),
+            "IKORITA".to_string(),
+            "do?".to_string(),
+        ],
+        "long Pokemon names must split within the battle command prompt column"
+    );
 }
 
 #[test]
@@ -1101,8 +1455,58 @@ fn runtime_tick_timer_preserves_all_vblanks_while_bounding_input_catch_up() {
     let mut timer = RuntimeTickTimer::new(1.0 / 60.0);
     timer.tick(1.0 / 30.0);
     assert_eq!(timer.take_vblanks(), 2);
-    assert_eq!(timer.take_ticks(), MAX_RUNTIME_CATCH_UP_TICKS);
+    assert_eq!(
+        timer.take_ticks(),
+        2,
+        "a 30 Hz Rust host must process the same two elapsed game frames as TypeScript"
+    );
     assert!(!timer.has_tick());
+}
+
+#[test]
+fn runtime_tick_timer_matches_typescripts_five_frame_catch_up_bound() {
+    let mut timer = RuntimeTickTimer::new(1.0 / 60.0);
+    timer.tick(1.0);
+
+    assert_eq!(timer.take_vblanks(), 60);
+    assert_eq!(
+        timer.take_ticks(),
+        5,
+        "desktop gameplay must use TypeScript's bounded five-frame recovery window"
+    );
+}
+
+#[test]
+fn incoming_phone_calls_stop_catch_up_and_wait_for_visible_landing() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let mut frame = runtime_shell
+        .shell
+        .tick(std::iter::empty::<GameButton>())
+        .expect("produce an ordinary overworld frame")
+        .clone();
+    frame.phone_call = Some(crystal_assets::IncomingPhoneCall {
+        kind: crystal_assets::IncomingPhoneCallKind::Special {
+            call_id: "SPECIALCALL_POKERUS".to_string(),
+        },
+        contact_id: "PHONE_ELM".to_string(),
+        caller_script: "ElmPhonePokerusScript".to_string(),
+        receive_script: "Script_ReceivePhoneCall".to_string(),
+        delay_frames: 30,
+    });
+
+    assert!(
+        overworld_frame_reaches_presentation_boundary(&frame),
+        "the ring/script must own the first frame that reports the incoming call"
+    );
+    assert_eq!(
+        pending_overworld_step_boundary_for_frame(&frame, false, None),
+        Some(PendingOverworldStepBoundary::PhoneCall),
+        "a call triggered by CountStep must wait behind the visible tile landing"
+    );
+    assert!(
+        overworld_boundary_waits_for_visible_landing(&frame, 1, false),
+        "an ordinary call sampled during retained walk interpolation must also wait for landing"
+    );
 }
 
 #[test]
@@ -1126,6 +1530,32 @@ fn visible_sequence_clock_recovers_normal_low_refresh_cadence_without_unbounded_
         MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES,
         "a stalled host frame must not skip an entire visible sequence"
     );
+}
+
+#[test]
+fn interruption_unfocused_game_window_keeps_presentation_sequences_running() {
+    let settings = continuous_game_winit_settings();
+    assert_eq!(settings.focused_mode, UpdateMode::Continuous);
+    assert_eq!(settings.unfocused_mode, UpdateMode::Continuous);
+}
+
+#[test]
+fn interruption_one_shot_audio_completes_at_its_decoded_duration() {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(250);
+    assert!(!one_shot_playback_finished(
+        false,
+        Some(deadline),
+        started + Duration::from_millis(249),
+    ));
+    assert!(one_shot_playback_finished(false, Some(deadline), deadline));
+    assert!(one_shot_playback_finished(true, Some(deadline), started));
+}
+
+#[test]
+fn interruption_emotes_consume_every_bounded_catch_up_tick() {
+    assert_eq!(visible_effect_frames_after_ticks(15, 4), 11);
+    assert_eq!(visible_effect_frames_after_ticks(3, 4), 0);
 }
 
 #[test]
@@ -1215,7 +1645,8 @@ fn phone_number_prompt_uses_the_standard_yes_no_window_cursor() {
         .expect("phone prompt snapshot");
     assert!(scene_dialog_yes_no_active(&snapshot, &runtime_shell));
     assert_eq!(
-        scene_dialog_yes_no_cursor_index(&snapshot, &runtime_shell),
+        scene_dialog_yes_no_cursor_index(&snapshot, &runtime_shell)
+            .expect("valid phone YES/NO cursor"),
         1
     );
 }
@@ -1236,7 +1667,7 @@ fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
         command_index: 1,
     });
     assert!(
-        visible_quick_save_blockers(&runtime_shell, &map_load, false, false)
+        visible_quick_save_blockers(&runtime_shell, &map_load, false, false, false)
             .contains(&"auto_script"),
         "a map reload must finish before the save can be committed"
     );
@@ -1250,7 +1681,7 @@ fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
             command_index: 2,
         });
     assert!(
-        visible_quick_save_blockers(&runtime_shell, &map_refresh, false, false)
+        visible_quick_save_blockers(&runtime_shell, &map_refresh, false, false, false)
             .contains(&"auto_script"),
         "a map refresh must finish before the save can be committed"
     );
@@ -1261,7 +1692,8 @@ fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
         next_command_index: 3,
     });
     assert!(
-        visible_quick_save_blockers(&runtime_shell, &baseline, false, false).contains(&"script"),
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false, false)
+            .contains(&"script"),
         "dialogue, calls, movement, and post-battle continuations all retain an active script cursor"
     );
     runtime_shell.active_script_cursor = None;
@@ -1272,7 +1704,7 @@ fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
         contact_id: "PHONE_ELM".to_string(),
     });
     assert!(
-        visible_quick_save_blockers(&runtime_shell, &baseline, false, false)
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false, false)
             .contains(&"phone_prompt")
     );
     runtime_shell.pending_phone_prompt = None;
@@ -1286,7 +1718,7 @@ fn visible_save_policy_rejects_non_atomic_script_resume_boundaries() {
         yes_no_index: 0,
     });
     assert!(
-        visible_quick_save_blockers(&runtime_shell, &baseline, false, false)
+        visible_quick_save_blockers(&runtime_shell, &baseline, false, false, false)
             .contains(&"day_of_week")
     );
 }
@@ -1329,7 +1761,7 @@ fn runtime_snapshot_performance_benchmark() {
         .find(|key| !key.starts_with('.') && !key.contains('@'))
         .expect("benchmark pack contains at least one valid text body");
 
-    let mut timed = |label: &str, step: &mut dyn FnMut() -> Result<()>| {
+    let timed = |label: &str, step: &mut dyn FnMut() -> Result<()>| {
         let start = Instant::now();
         for _ in 0..SAMPLES {
             step().expect("benchmark step");

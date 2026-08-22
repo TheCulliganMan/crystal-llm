@@ -14,6 +14,8 @@ describe("parseMoves", () => {
 
     const moves = parseMoves("/mock/moves.asm");
 
+    expect(moves.TACKLE.source_index).toBe(1);
+    expect(moves.MODDED_STRIKE.source_index).toBe(2);
     expect(moves.TACKLE.effect).toBe("NORMAL_HIT");
     expect(moves.MODDED_STRIKE.effect).toBe("MODDED_WEATHER");
   });

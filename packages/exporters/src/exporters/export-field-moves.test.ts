@@ -106,6 +106,8 @@ describe("exportFieldMoves", () => {
         "\tdw ItemfinderEffect    ; ITEMFINDER",
         "\tdw BlueCardEffect      ; BLUE_CARD",
         "\tdw SquirtbottleEffect  ; SQUIRTBOTTLE",
+        "\tdw CardKeyEffect       ; CARD_KEY",
+        "\tdw BasementKeyEffect   ; BASEMENT_KEY",
         "\tdw EscapeRopeEffect    ; ESCAPE_ROPE",
         "TownMapEffect:",
         "\tfarcall PokegearMap",
@@ -140,9 +142,44 @@ describe("exportFieldMoves", () => {
         "SquirtbottleEffect:",
         "\tfarcall _Squirtbottle",
         "\tret",
+        "CardKeyEffect:",
+        "\tfarcall _CardKey",
+        "\tret",
+        "BasementKeyEffect:",
+        "\tfarcall _BasementKey",
+        "\tret",
         "EscapeRopeEffect:",
         "\tfarcall EscapeRopeFunction",
         "\tret",
+      ].join("\n")
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "card_key.asm"),
+      [
+        "_CardKey:",
+        "\tcp GROUP_RADIO_TOWER_3F",
+        "\tcp MAP_RADIO_TOWER_3F",
+        "\tcp OW_UP",
+        "\tcp 18",
+        "\tcp 6",
+        "\tld hl, .CardKeyScript",
+        ".CardKeyScript:",
+        "\tclosetext",
+        "\tfarsjump CardKeySlotScript",
+      ].join("\n")
+    );
+    writeFile(
+      path.join(mockDisassemblyRoot, "engine", "events", "basement_key.asm"),
+      [
+        "_BasementKey:",
+        "\tcp GROUP_GOLDENROD_UNDERGROUND",
+        "\tcp MAP_GOLDENROD_UNDERGROUND",
+        "\tcp 22",
+        "\tcp 10",
+        "\tld hl, .BasementKeyScript",
+        ".BasementKeyScript:",
+        "\tclosetext",
+        "\tfarsjump BasementDoorScript",
       ].join("\n")
     );
     writeFile(
@@ -176,6 +213,20 @@ describe("exportFieldMoves", () => {
     expect(catalog.bicycle).toEqual({ item_id: "BICYCLE" });
     expect(catalog.itemfinder).toEqual({ item_id: "ITEMFINDER" });
     expect(catalog.squirtbottle).toEqual({ item_id: "SQUIRTBOTTLE" });
+    expect(catalog.card_key).toEqual({
+      item_id: "CARD_KEY",
+      map_name: "RadioTower3F",
+      required_facing: "up",
+      target_tile: { x: 14, y: 2 },
+      target_script: "CardKeySlotScript",
+    });
+    expect(catalog.basement_key).toEqual({
+      item_id: "BASEMENT_KEY",
+      map_name: "GoldenrodUnderground",
+      required_facing: null,
+      target_tile: { x: 18, y: 6 },
+      target_script: "BasementDoorScript",
+    });
     expect(catalog.coin_case).toEqual({ item_id: "COIN_CASE" });
     expect(catalog.blue_card).toEqual({ item_id: "BLUE_CARD" });
     expect(catalog.town_map).toEqual({ item_id: "TOWN_MAP" });

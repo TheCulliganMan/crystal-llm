@@ -28,6 +28,17 @@ export type GlobalScriptRootSource = {
   readonly standardTargets: readonly string[];
 };
 
+export type SharedGlobalScriptRootSource = {
+  readonly filePath: string;
+  readonly roots: readonly string[];
+};
+
+export type GlobalScriptDefinitionSource = {
+  readonly filePath: string;
+  readonly roots: readonly string[];
+  readonly reachableLabels: readonly string[];
+};
+
 export type StandardScriptsStoryEventPayload = {
   StandardScripts: Record<string, StoryCommand[] | string[]> & {
     StdScripts: StoryCommand[];
@@ -174,8 +185,13 @@ const TEXT_COMMANDS = new Set([
   "text_promptbutton",
   "text_ram",
   "text_decimal",
+  "text_low",
+  "text_pause",
+  "text_today",
   "text_far",
   "sound_item",
+  "sound_caught_mon",
+  "sound_slot_machine_start",
   "sound_dex_fanfare_50_79",
   "sound_dex_fanfare_80_109",
   "sound_dex_fanfare_140_169",
@@ -212,7 +228,6 @@ const MAP_DATA_COMMANDS = new Set([
 const MOVEMENT_COMMANDS = new Set([
   "step",
   "slow_step",
-  "fast_step",
   "big_step",
   "turn_step",
   "jump_step",
@@ -227,22 +242,6 @@ const MOVEMENT_COMMANDS = new Set([
   "turn_in",
   "turn_waterfall",
   "step_sleep",
-  "step_sleep_1",
-  "step_sleep_2",
-  "step_sleep_3",
-  "step_sleep_4",
-  "step_sleep_5",
-  "step_sleep_6",
-  "step_sleep_7",
-  "step_sleep_8",
-  "step_sleep_9",
-  "step_sleep_10",
-  "step_sleep_11",
-  "step_sleep_12",
-  "step_sleep_13",
-  "step_sleep_14",
-  "step_sleep_15",
-  "step_sleep_16",
   "step_wait_end",
   "step_end",
   "step_loop",
@@ -736,6 +735,7 @@ const collectGlobalScriptRootClosure = (
   source: GlobalScriptRootSource,
   standardOrder: readonly string[],
   standardAndSharedScripts: StoryScripts,
+  requireFarRootDeclarations = true,
 ): { scripts: StoryScripts; standardTargets: string[] } => {
   if (!fs.existsSync(source.filePath)) {
     throw new Error(`Required global script source is missing: ${source.filePath}`);
@@ -769,7 +769,7 @@ const collectGlobalScriptRootClosure = (
   const declarations = declaredFarScriptLabels(source.filePath);
   const sourceScripts = parseAsmFile(source.filePath);
   for (const root of source.roots) {
-    if (declarations.get(root) !== 1) {
+    if (requireFarRootDeclarations && declarations.get(root) !== 1) {
       throw new Error(
         `Required global script root ${root} must be declared with :: in ${source.filePath}`,
       );
@@ -889,6 +889,8 @@ export function parseStandardScriptsFile(
   filePath: string,
   sharedScriptFilePaths: readonly string[] = [],
   globalScriptSources: readonly GlobalScriptRootSource[] = [],
+  sharedGlobalScriptSources: readonly SharedGlobalScriptRootSource[] = [],
+  globalScriptDefinitionSources: readonly GlobalScriptDefinitionSource[] = [],
 ): StandardScriptsPayload {
   const source = fs.readFileSync(filePath, "utf8");
   const order = source
@@ -937,6 +939,60 @@ export function parseStandardScriptsFile(
 
   const globalScriptRoots: string[] = [];
   const declaredGlobalRoots = new Set<string>();
+  const declaredSharedGlobalSources = new Set<string>();
+  for (const source of sharedGlobalScriptSources) {
+    if (!sharedScriptFilePaths.includes(source.filePath)) {
+      throw new Error(
+        `Shared global script source ${source.filePath} is not a canonical shared script source`,
+      );
+    }
+    if (declaredSharedGlobalSources.has(source.filePath)) {
+      throw new Error(`Shared global script source ${source.filePath} is declared more than once`);
+    }
+    declaredSharedGlobalSources.add(source.filePath);
+    if (source.roots.length === 0) {
+      throw new Error(`Shared global script source ${source.filePath} has no required roots`);
+    }
+    for (const root of source.roots) {
+      if (declaredGlobalRoots.has(root)) {
+        throw new Error(`Global script root ${root} is declared more than once`);
+      }
+      declaredGlobalRoots.add(root);
+      const definitionSource = definitionSources.get(root);
+      if (definitionSource !== source.filePath) {
+        throw new Error(
+          `Required shared global script root ${root} is not defined by ${source.filePath}`,
+        );
+      }
+      if (!scripts[root]?.length) {
+        throw new Error(
+          `Required shared global script root ${root} has no command body in ${source.filePath}`,
+        );
+      }
+      globalScriptRoots.push(root);
+    }
+  }
+  for (const source of globalScriptDefinitionSources) {
+    const closure = collectGlobalScriptRootClosure(
+      { ...source, standardTargets: [] },
+      order,
+      scripts,
+      false,
+    );
+    for (const [label, commands] of Object.entries(closure.scripts)) {
+      const previousSource = definitionSources.get(label);
+      if (previousSource) {
+        throw new Error(
+          `Global script definition ${label} from ${source.filePath} duplicates ${previousSource}`,
+        );
+      }
+      if (label === "StdScripts" || label === "GlobalScriptRoots") {
+        throw new Error(`Global script definition source ${source.filePath} uses reserved label ${label}`);
+      }
+      scripts[label] = commands;
+      definitionSources.set(label, source.filePath);
+    }
+  }
   for (const source of globalScriptSources) {
     for (const root of source.roots) {
       if (declaredGlobalRoots.has(root)) {
@@ -1025,6 +1081,12 @@ export function exportStoryEvents(): void {
     "events",
     "treemons.asm",
   );
+  const sharedSweetScentScriptsPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "events",
+    "sweet_scent.asm",
+  );
   const sharedMiscScriptsPath = path.join(
     getDisassemblyRoot(),
     "engine",
@@ -1050,11 +1112,35 @@ export function exportStoryEvents(): void {
     "bug_contest",
     "contest.asm",
   );
+  const clearSpritesPath = path.join(
+    getDisassemblyRoot(),
+    "home",
+    "clear_sprites.asm",
+  );
+  const fieldMovesPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "events",
+    "field_moves.asm",
+  );
+  const fishingGfxPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "events",
+    "fishing_gfx.asm",
+  );
+  const mapSetupPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "overworld",
+    "map_setup.asm",
+  );
   const standardScripts = parseStandardScriptsFile(
     standardScriptsPath,
     [
       sharedOverworldScriptsPath,
       sharedTreeMonScriptsPath,
+      sharedSweetScentScriptsPath,
       sharedMiscScriptsPath,
       sharedTreeMonMapsPath,
       sharedTreeMonsPath,
@@ -1062,19 +1148,153 @@ export function exportStoryEvents(): void {
     [
       {
         filePath: bugContestScriptsPath,
-        roots: ["BugCatchingContestOverScript"],
-        reachableLabels: [
+        roots: [
+          "BugCatchingContestBattleScript",
           "BugCatchingContestOverScript",
+        ],
+        reachableLabels: [
+          "BugCatchingContestBattleScript",
+          "BugCatchingContestOverScript",
+          "BugCatchingContestOutOfBallsScript",
           "BugCatchingContestReturnToGateScript",
           "BugCatchingContestTimeUpText",
+          "BugCatchingContestIsOverText",
         ],
         standardTargets: ["BugContestResultsWarpScript"],
+      },
+    ],
+    [
+      {
+        filePath: sharedOverworldScriptsPath,
+        roots: [
+          "Script_CutFromMenu",
+          "Script_UseFlash",
+          "SurfFromMenuScript",
+          ".FlyScript@FlyFunction",
+          "Script_WaterfallFromMenu",
+          ".UsedDigScript@EscapeRopeOrDig",
+          ".UsedEscapeRopeScript@EscapeRopeOrDig",
+          ".TeleportScript@TeleportFunction",
+          "Script_StrengthFromMenu",
+          "Script_WhirlpoolFromMenu",
+          "HeadbuttFromMenuScript",
+          "RockSmashFromMenuScript",
+          "Script_GotABite",
+          "Script_NotEvenANibble",
+          "Script_NotEvenANibble2",
+          "Script_GetOnBike",
+          "Script_GetOnBike_Register",
+          "Script_GetOffBike",
+          "Script_GetOffBike_Register",
+          "Script_CantGetOffBike",
+        ],
+      },
+      {
+        filePath: sharedSweetScentScriptsPath,
+        roots: [".SweetScent@SweetScentFromMenu"],
+      },
+    ],
+    [
+      {
+        filePath: clearSpritesPath,
+        roots: ["HideSprites"],
+        reachableLabels: ["HideSprites", ".loop@HideSprites"],
+      },
+      {
+        filePath: fieldMovesPath,
+        roots: ["BlindingFlash", "ShakeHeadbuttTree", "FlyFromAnim", "FlyToAnim"],
+        reachableLabels: [
+          "BlindingFlash",
+          "ShakeHeadbuttTree",
+          ".loop@ShakeHeadbuttTree",
+          ".done@ShakeHeadbuttTree",
+          "HideHeadbuttTree",
+          "TreeRelativeLocationTable",
+          "OWCutAnimation",
+          ".loop@OWCutAnimation",
+          ".finish@OWCutAnimation",
+          ".LoadCutGFX@OWCutAnimation",
+          "OWCutJumptable",
+          ".dw@OWCutJumptable",
+          "Cut_SpawnAnimateTree",
+          "Cut_SpawnAnimateLeaves",
+          "Cut_StartWaiting",
+          "Cut_WaitAnimSFX",
+          ".finished@Cut_WaitAnimSFX",
+          "Cut_SpawnLeaf",
+          "Cut_GetLeafSpawnCoords",
+          ".left_side@Cut_GetLeafSpawnCoords",
+          ".top_side@Cut_GetLeafSpawnCoords",
+          ".Coords@Cut_GetLeafSpawnCoords",
+          "Cut_Headbutt_GetPixelFacing",
+          ".Coords@Cut_Headbutt_GetPixelFacing",
+          "FlyFromAnim",
+          ".loop@FlyFromAnim",
+          ".exit@FlyFromAnim",
+          "FlyToAnim",
+          ".loop@FlyToAnim",
+          ".exit@FlyToAnim",
+          ".RestorePlayerSprite_DespawnLeaves@FlyToAnim",
+          ".OAMloop@FlyToAnim",
+          "FlyFunction_InitGFX",
+          "FlyFunction_FrameTimer",
+          ".exit@FlyFunction_FrameTimer",
+          ".SpawnLeaf@FlyFunction_FrameTimer",
+        ],
+      },
+      {
+        filePath: fishingGfxPath,
+        roots: ["LoadFishingGFX"],
+        reachableLabels: [
+          "LoadFishingGFX",
+          ".got_gender@LoadFishingGFX",
+          ".LoadGFX@LoadFishingGFX",
+        ],
+      },
+      {
+        filePath: mapSetupPath,
+        roots: ["SkipUpdateMapSprites"],
+        reachableLabels: ["SkipUpdateMapSprites"],
       },
     ],
   );
   writeJsonToTargets(
     path.join("story_events", "StandardScripts.json"),
     standardScriptsStoryEventPayload(standardScripts),
+    { indent: 2 },
+  );
+
+  const overworldEventsPath = path.join(
+    getDisassemblyRoot(),
+    "engine",
+    "overworld",
+    "events.asm",
+  );
+  if (!fs.existsSync(overworldEventsPath)) {
+    throw new Error(`Required overworld event source is missing: ${overworldEventsPath}`);
+  }
+  const overworldEvents = parseAsmFile(overworldEventsPath);
+  for (const sharedPath of [
+    path.join(getDisassemblyRoot(), "engine", "events", "trainer_scripts.asm"),
+    path.join(getDisassemblyRoot(), "engine", "events", "whiteout.asm"),
+    path.join(getDisassemblyRoot(), "engine", "pokemon", "breeding.asm"),
+    path.join(getDisassemblyRoot(), "engine", "overworld", "player_object.asm"),
+  ]) {
+    if (!fs.existsSync(sharedPath)) {
+      throw new Error(`Required player-event source is missing: ${sharedPath}`);
+    }
+    for (const [label, commands] of Object.entries(parseAsmFile(sharedPath))) {
+      if (overworldEvents[label]) {
+        throw new Error(
+          `Player-event label ${label} from ${sharedPath} duplicates ${overworldEventsPath}`,
+        );
+      }
+      overworldEvents[label] = commands;
+    }
+  }
+  writeJsonToTargets(
+    path.join("story_events", "OverworldEvents.json"),
+    { OverworldEvents: overworldEvents },
     { indent: 2 },
   );
 }

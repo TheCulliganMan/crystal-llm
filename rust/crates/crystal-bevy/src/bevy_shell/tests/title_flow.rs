@@ -477,6 +477,29 @@ fn visible_intro_completes_to_title_within_typescript_frame_budget() {
 }
 
 #[test]
+fn visible_intro_scene_13_restores_the_asm_scroll_origin() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    {
+        let intro = runtime_shell
+            .intro_screen
+            .as_mut()
+            .expect("intro presentation state");
+        intro.jumptable_index = 12;
+        intro.scroll_x = 0x35;
+        intro.scroll_y = 0x4a;
+    }
+
+    tick_visible_intro_screen(&mut runtime_shell).expect("set up Suicune forest scene");
+
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("intro remains active during scene handoff");
+    assert_eq!(intro.scroll_x, 0);
+    assert_eq!(intro.scroll_y, 0);
+}
+
+#[test]
 fn visible_intro_never_loses_its_lcd_surface_during_a_full_sequence() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     let mut rendered_art = RenderedTilesetArt::default();
@@ -849,12 +872,12 @@ fn retained_map_surface_pair(world: &mut World) -> RetainedMapSurfacePair {
 
     assert_eq!(
         base_size,
-        Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-        "base map surface must fill the LCD"
+        Some(Vec2::new(CLASSIC_SCROLL_WIDTH, CLASSIC_SCROLL_HEIGHT)),
+        "base map surface must cover the LCD plus its movement halo"
     );
     assert_eq!(
         priority_size,
-        Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
+        Some(Vec2::new(CLASSIC_SCROLL_WIDTH, CLASSIC_SCROLL_HEIGHT)),
         "priority map surface must fill the LCD"
     );
     assert_eq!(
@@ -961,12 +984,19 @@ fn assert_base_map_surface_is_fully_opaque(world: &World, surfaces: &RetainedMap
     let size = image.texture_descriptor.size;
     assert_eq!(
         (size.width, size.height),
-        (VIEWPORT_TILES_X as u32 * SOURCE_TILE_SIZE as u32, VIEWPORT_TILES_Y as u32 * SOURCE_TILE_SIZE as u32),
-        "base map image must contain the complete native 160x144 LCD"
+        (
+            CLASSIC_SCROLL_TILES_X as u32 * SOURCE_TILE_SIZE as u32,
+            CLASSIC_SCROLL_TILES_Y as u32 * SOURCE_TILE_SIZE as u32
+        ),
+        "base map image must contain the LCD plus one runtime tile around every edge"
     );
     assert_eq!(
         image.data.len(),
-        VIEWPORT_TILES_X as usize * VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE * SOURCE_TILE_SIZE * 4,
+        CLASSIC_SCROLL_TILES_X as usize
+            * CLASSIC_SCROLL_TILES_Y as usize
+            * SOURCE_TILE_SIZE
+            * SOURCE_TILE_SIZE
+            * 4,
         "base map image must contain one RGBA texel for every native LCD pixel"
     );
     assert!(
@@ -1003,7 +1033,7 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             std::time::Duration::from_secs_f64(f64::from(GAME_TICK_SECONDS)),
         ))
-        .insert_resource(ClearColor(Color::rgb(0.05, 0.07, 0.06)))
+        .insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.06)))
         .insert_resource(runtime_shell)
         .insert_resource(native_rtc_source_for_test())
         // Each MinimalPlugins update is an explicit deterministic Game
@@ -1014,7 +1044,6 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .insert_resource(VisibleSequenceTickClock::deterministic_test())
         .insert_resource(ButtonInput::<KeyCode>::default())
         .insert_resource(HeldArrowRightTestFrames(0))
-        .init_resource::<Assets<AudioSource>>()
         .init_resource::<Assets<Image>>()
         .insert_resource(RenderedViewport::default())
         .insert_resource(RenderedTilesetArt::default())

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const PACK_RELATIVE_PATH: &str = "content-packs/core-modular.crystalpack";
+const BROWSER_PACK_RELATIVE_PATH: &str = "content-packs/core-modular.browser.crystalpack";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -60,8 +61,13 @@ fn export_core_pack(repository_root: &Path) -> Result<()> {
             tracked_pack.display()
         )
     })?;
+    let browser_pack = repository_root.join(BROWSER_PACK_RELATIVE_PATH);
+    compiled
+        .write_browser_game_pack(&browser_pack)
+        .context("write browser pack with on-demand PCM sidecars")?;
     write_provenance(repository_root, &tracked_pack)?;
     println!("exported {}", tracked_pack.display());
+    println!("exported {}", browser_pack.display());
     Ok(())
 }
 

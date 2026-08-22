@@ -217,7 +217,11 @@ impl PcBox {
 }
 
 fn validate_pc_box_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+    if name.is_empty()
+        || name.chars().count() > 8
+        || name.trim() != name
+        || name.chars().any(char::is_control)
+    {
         return Err(format!("box name has invalid text '{name}'"));
     }
     Ok(())
@@ -328,7 +332,7 @@ fn validate_capture_box_index(box_index: usize) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum CaptureStorageLocation {
     Party { slot: usize },
@@ -395,6 +399,15 @@ mod tests {
         assert_eq!(
             storage.validate_metadata(),
             Err("pc_boxes[0] box name has invalid text ' BOX 01'".to_string())
+        );
+
+        let mut storage = PokemonStorage::default();
+        let mut pc_box = PcBox::new(0);
+        pc_box.name = "NINECHARS".to_string();
+        storage.pc_boxes.push(pc_box);
+        assert_eq!(
+            storage.validate_metadata(),
+            Err("pc_boxes[0] box name has invalid text 'NINECHARS'".to_string())
         );
 
         let mut storage = PokemonStorage::default();

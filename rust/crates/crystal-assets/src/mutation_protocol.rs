@@ -89,7 +89,10 @@ pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<
 
 fn validate_compiled_game_pack_identity(pack: &CompiledGamePack) -> Result<()> {
     validate_compiled_runtime_files(&pack.runtime_files)?;
-    let derived = if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_GZIP) {
+    let derived = if matches!(
+        pack.audio_compression.as_deref(),
+        Some(PACK_AUDIO_COMPRESSION_GZIP | PACK_AUDIO_COMPRESSION_GZIP_SIDECAR)
+    ) {
         derive_compiled_game_pack_identity_from_manifest(
             pack.format_version,
             &pack.data,
@@ -212,6 +215,40 @@ fn validate_compiled_report_data_counts(
 }
 
 fn validate_compiled_audio_payloads(pack: &CompiledGamePack) -> Result<()> {
+    if let Some(compression) = pack.audio_compression.as_deref()
+        && compression != PACK_AUDIO_COMPRESSION_GZIP
+        && compression != PACK_AUDIO_COMPRESSION_GZIP_SIDECAR
+    {
+        anyhow::bail!("unsupported compiled audio storage mode '{compression}'");
+    }
+    if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR) {
+        if !pack.compiled_audio.is_empty() {
+            anyhow::bail!("PCM sidecar pack must not embed audio payloads");
+        }
+        let expected_manifest =
+            ModpackAudioManifest::from_assets(&pack.data.audio, &BTreeMap::new())?;
+        if pack.audio_manifest != expected_manifest {
+            anyhow::bail!("PCM sidecar manifest does not match definitive audio metadata");
+        }
+        for asset in &pack.data.audio {
+            if !matches!(asset.source, ModpackAudioSource::Pcm) {
+                anyhow::bail!(
+                    "PCM sidecar pack contains non-PCM audio asset '{}'",
+                    asset.id
+                );
+            }
+            let entry = match asset.kind {
+                ModpackAudioKind::Music => pack.audio_manifest.music.get(&asset.id),
+                ModpackAudioKind::SoundEffect => {
+                    pack.audio_manifest.sound_effects.get(&asset.id)
+                }
+                ModpackAudioKind::Cry => pack.audio_manifest.cries.get(&asset.id),
+            }
+            .with_context(|| format!("PCM sidecar pack is missing manifest '{}'", asset.id))?;
+            entry.validate()?;
+        }
+        return Ok(());
+    }
     if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_GZIP) {
         for asset in &pack.data.audio {
             if !pack.compiled_audio.contains_key(&asset.id) {
@@ -514,7 +551,7 @@ fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePa
         );
     }
     let mut cursor = std::io::Cursor::new(payload);
-    let mut pack: CompiledGamePack = ciborium::from_reader(&mut cursor)
+    let pack: CompiledGamePack = ciborium::from_reader(&mut cursor)
         .with_context(|| format!("decode compiled game pack {}", path.display()))?;
     if cursor.position() as usize != payload.len() {
         anyhow::bail!(
@@ -533,7 +570,12 @@ fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePa
     Ok(pack)
 }
 
-const PACK_AUDIO_COMPRESSION_GZIP: &str = "gzip";
+pub const PACK_AUDIO_COMPRESSION_GZIP: &str = "gzip";
+pub const PACK_AUDIO_COMPRESSION_GZIP_SIDECAR: &str = "gzip_sidecar";
+
+pub fn pcm_gzip_sidecar_path(audio_id: &str, payload_hash: &str) -> String {
+    format!("audio/{audio_id}.{payload_hash}.pcm.gz")
+}
 
 fn compress_pack_audio(pack: &mut CompiledGamePack) -> Result<()> {
     let mut compressed = BTreeMap::new();
@@ -557,6 +599,66 @@ fn compress_pack_audio(pack: &mut CompiledGamePack) -> Result<()> {
     }
     pack.compiled_audio = compressed;
     pack.audio_compression = Some(PACK_AUDIO_COMPRESSION_GZIP.to_string());
+    Ok(())
+}
+
+pub(crate) fn write_compiled_game_pack_with_pcm_sidecars(
+    path: impl AsRef<Path>,
+    pack: &CompiledGamePack,
+) -> Result<()> {
+    let path = path.as_ref();
+    validate_compiled_game_pack_path(path)?;
+    validate_compiled_game_pack_identity(pack)
+        .with_context(|| format!("validate browser game pack identity {}", path.display()))?;
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let mut serialized_pack = pack.clone();
+    let mut sidecars = Vec::new();
+    for (id, bytes) in &pack.compiled_audio {
+        let asset = pack
+            .data
+            .audio
+            .iter()
+            .find(|asset| asset.id == *id)
+            .with_context(|| format!("compiled audio payload {id} has no declared asset"))?;
+        if !matches!(asset.source, ModpackAudioSource::Pcm) {
+            anyhow::bail!("browser sidecar pack requires canonical PCM audio, found {id}");
+        }
+        let entry = pack
+            .audio_manifest
+            .music
+            .get(id)
+            .or_else(|| pack.audio_manifest.sound_effects.get(id))
+            .or_else(|| pack.audio_manifest.cries.get(id))
+            .with_context(|| format!("audio manifest missing {id}"))?;
+        let relative = pcm_gzip_sidecar_path(id, &entry.payload_hash);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut encoder, bytes)
+            .with_context(|| format!("compress PCM sidecar {id}"))?;
+        let compressed = encoder
+            .finish()
+            .with_context(|| format!("finish PCM sidecar {id}"))?;
+        sidecars.push((relative, compressed));
+    }
+    serialized_pack.compiled_audio.clear();
+    serialized_pack.audio_compression = Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR.to_string());
+    serialized_pack.identity = derive_compiled_game_pack_identity_from_manifest(
+        serialized_pack.format_version,
+        &serialized_pack.data,
+        &serialized_pack.audio_manifest,
+        &serialized_pack.runtime_files,
+        &serialized_pack.report,
+    )?;
+    let parent = parent.context("browser game pack path has no parent directory")?;
+    for (relative, bytes) in sidecars {
+        let sidecar = parent.join(relative);
+        std::fs::create_dir_all(sidecar.parent().context("PCM sidecar has no parent")?)
+            .with_context(|| format!("create PCM sidecar directory for {}", sidecar.display()))?;
+        std::fs::write(&sidecar, bytes)
+            .with_context(|| format!("write PCM sidecar {}", sidecar.display()))?;
+    }
+    // Publish the manifest-bearing pack only after every referenced sidecar
+    // exists, so a failed export cannot leave a newly written dangling pack.
+    write_serialized_compiled_game_pack(path, &serialized_pack)?;
     Ok(())
 }
 
@@ -1834,13 +1936,6 @@ fn validate_optional_exact_value(value: &str, description: &str) -> Result<()> {
     validate_exact_modpack_value(value, description)
 }
 
-fn validate_exact_string_list(values: &[String], description: &str) -> Result<()> {
-    for value in values {
-        validate_modpack_payload_token(value, description)?;
-    }
-    Ok(())
-}
-
 fn validate_script_text_command_shapes(map_id: &str, map: &MapModule) -> Result<()> {
     let text_labels: BTreeSet<String> = map.script_text_bodies.keys().cloned().collect();
     for command in &map.script_text_commands {
@@ -2115,7 +2210,7 @@ fn validate_script_movement_shape(map_id: &str, movement: &ScriptMovement) -> Re
     }
     if !script_movement_has_terminator(movement) {
         anyhow::bail!(
-            "map '{map_id}' script movement '{}' must end with step_end",
+            "map '{map_id}' script movement '{}' must end with a terminating opcode",
             movement.label
         );
     }
@@ -2142,9 +2237,12 @@ fn validate_script_movement_shape(map_id: &str, movement: &ScriptMovement) -> Re
 fn script_movement_step_issue_name(issue: &ScriptMovementStepIssue) -> &'static str {
     match issue {
         ScriptMovementStepIssue::UnexpectedDirection => "unexpected_direction",
+        ScriptMovementStepIssue::UnexpectedDuration => "unexpected_duration",
         ScriptMovementStepIssue::MissingDirection => "missing_direction",
         ScriptMovementStepIssue::UnknownDirection { .. } => "unknown_direction",
         ScriptMovementStepIssue::MissingDuration => "missing_duration",
+        ScriptMovementStepIssue::DurationOutOfByteRange { .. } => "duration_out_of_byte_range",
+        ScriptMovementStepIssue::ZeroSleepDuration => "zero_sleep_duration",
         ScriptMovementStepIssue::UnsupportedCommand => "unsupported_command",
     }
 }
@@ -2245,6 +2343,9 @@ fn script_object_command_issue_name(issue: &ScriptObjectCommandIssue) -> &'stati
         ScriptObjectCommandIssue::UnknownMovement { .. } => "unknown_movement",
         ScriptObjectCommandIssue::InvalidMovement { .. } => "invalid_movement",
         ScriptObjectCommandIssue::MissingEmote { .. } => "missing_emote",
+        ScriptObjectCommandIssue::EmoteDurationOutOfByteRange { .. } => {
+            "emote_duration_out_of_byte_range"
+        }
         ScriptObjectCommandIssue::UnknownCommand { .. } => "unknown_command",
     }
 }

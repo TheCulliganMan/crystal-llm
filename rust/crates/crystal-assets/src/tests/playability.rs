@@ -568,6 +568,18 @@
                 source_script: "RouteScript".to_string(),
                 command_index: 6,
             },
+            ScriptFlagCommand {
+                command: "setevent".to_string(),
+                flag_id: "ENGINE_ZEPHYRBADGE".to_string(),
+                source_script: "RouteScript".to_string(),
+                command_index: 8,
+            },
+            ScriptFlagCommand {
+                command: "setflag".to_string(),
+                flag_id: "EVENT_ROUTE_29_POTION".to_string(),
+                source_script: "RouteScript".to_string(),
+                command_index: 9,
+            },
         ];
         let data = GameDataSet {
             maps: [("Start".to_string(), module)].into_iter().collect(),
@@ -598,6 +610,12 @@
                 && diagnostic.subject == "Start:RouteScript:6"
                 && diagnostic.message.contains(" EVENT_ROUTE_29_POTION")
         }));
+        for command_index in [8, 9] {
+            assert!(report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "script_flag_kind_mismatch"
+                    && diagnostic.subject == format!("Start:RouteScript:{command_index}")
+            }));
+        }
     }
 
     #[test]
@@ -792,7 +810,7 @@
                 && diagnostic.message.contains("up")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "malformed_script_no_warp_sentinel"
+            diagnostic.code == "malformed_script_bad_warp_sentinel"
                 && diagnostic.subject == "Start:WarpScript:4"
         }));
     }
@@ -1452,12 +1470,77 @@
             ("GlobalScripts:Script_SpecialElmCall:0", ".LoadElmScript"),
         ] {
             assert!(
-                callasm_issues.iter().any(|(actual, message)| {
-                    *actual == subject && message.contains(target)
-                }),
-                "phone CPU target {target} must fail closed without a typed consumer: {callasm_issues:?}"
+                !callasm_issues.iter().any(|(actual, _)| *actual == subject),
+                "phone CPU target {target} has an exact typed consumer: {callasm_issues:?}"
             );
         }
+
+        data.global_scripts
+            .as_mut()
+            .expect("materialized global module")
+            .definitions
+            .get_mut("RingTwice_StartCall")
+            .and_then(Value::as_array_mut)
+            .expect("RingTwice_StartCall body")[0] =
+            serde_json::json!({"command":"call","args":["ForgedPhoneRoutine"]});
+        let mut forged_phone_diagnostics = Vec::new();
+        verify_script_runtime_commands(&data, &mut forged_phone_diagnostics);
+        assert!(forged_phone_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "non_executable_callasm_target"
+                && diagnostic.subject == "GlobalScripts:Script_ReceivePhoneCall:1"
+        }), "a forged phone callasm body must fail closed: {forged_phone_diagnostics:?}");
+    }
+
+    #[test]
+    fn verifier_rejects_unclassified_commands_later_in_an_executable_script_body() {
+        let scripts = BTreeMap::from([(
+            "MainScript".to_string(),
+            serde_json::json!([
+                {"command": "special", "args": ["FadeOutMusic"]},
+                {"command": "unimplementedopcode", "args": []},
+                {"command": "end", "args": []}
+            ]),
+        )]);
+        let mut module = test_map_module("Start", "START_MAP", None);
+        module.script_runtime_commands =
+            parse_script_runtime_commands("Start", &scripts).expect("parse runtime commands");
+        module.script_control_commands =
+            parse_script_control_commands("Start", &scripts).expect("parse control commands");
+        module.scripts = scripts;
+        let data = GameDataSet {
+            maps: [("Start".to_string(), module)].into_iter().collect(),
+            ..GameDataSet::default()
+        };
+
+        let mut diagnostics = Vec::new();
+        verify_script_control_commands(&data, &mut diagnostics);
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "non_executable_script_command"
+                && diagnostic.subject == "Start:MainScript:1"
+                && diagnostic.message.contains("unimplementedopcode")
+        }), "an executable body must not fall through an unclassified command: {diagnostics:?}");
+
+        let global = GlobalScriptModule {
+            scripts: BTreeMap::from([
+                (
+                    "BugCatchingContestBattleScript".to_string(),
+                    serde_json::json!([
+                        {"command": "loadvar", "args": ["VAR_BATTLETYPE", "BATTLETYPE_CONTEST"]},
+                        {"command": "randomwildmon", "args": []},
+                        {"command": "startbattle", "args": []}
+                    ]),
+                ),
+                (
+                    "InjectedBattleScript".to_string(),
+                    serde_json::json!([{"command": "startbattle", "args": []}]),
+                ),
+            ]),
+            ..GlobalScriptModule::default()
+        };
+        let positions = global_runtime_executable_script_command_positions(&global);
+        assert!(positions.contains(&("BugCatchingContestBattleScript".to_string(), 2)));
+        assert!(!positions.contains(&("InjectedBattleScript".to_string(), 0)));
     }
 
     #[test]
@@ -3106,6 +3189,11 @@
                 ]),
                 required_party_count: 0,
                 challenge_streak_length: 0,
+                reward_candidates: vec!["HP_UP".to_string(), "LUCKY_PUNCH".to_string()],
+                excluded_reward_items: vec!["LUCKY_PUNCH".to_string()],
+                reward_quantity: 5,
+                reward_failure_sentinel: "POTION".to_string(),
+                reward_item_values: [("POTION".to_string(), 0x12), ("HP_UP".to_string(), 0x1a), ("LUCKY_PUNCH".to_string(), 0x1e)].into_iter().collect(),
                 minimum_level_group: 2,
                 maximum_level_group: 1,
                 level_group_size: 0,
@@ -3645,13 +3733,13 @@
             },
             ScriptRuntimeCommand {
                 command: "getitemname".to_string(),
-                args: vec!["BUFFER_1".to_string(), "$POTION".to_string()],
+                args: vec!["STRING_BUFFER_3".to_string(), "$POTION".to_string()],
                 source_script: "ItemScript".to_string(),
                 command_index: 6,
             },
             ScriptRuntimeCommand {
                 command: "getmonname".to_string(),
-                args: vec!["BUFFER_1".to_string(), "$PIKACHU".to_string()],
+                args: vec!["STRING_BUFFER_3".to_string(), "$PIKACHU".to_string()],
                 source_script: "MonNameScript".to_string(),
                 command_index: 7,
             },
@@ -3896,6 +3984,132 @@
                 || diagnostic.code == "phone_contact_primary_label_mismatch")
                 && diagnostic.subject == "phone_contacts:PHONE_ELM"
         }));
+    }
+
+    #[test]
+    fn verifier_rejects_missing_or_non_executable_dynamic_phone_script_roots() {
+        fn contact(
+            contact_id: &str,
+            callee_script: Option<&str>,
+            caller_script: Option<&str>,
+        ) -> PhoneContactRecord {
+            PhoneContactRecord {
+                contact_id: contact_id.to_string(),
+                trainer_class: Some("TRAINER_NONE".to_string()),
+                trainer_label: Some(format!("PHONECONTACT_{contact_id}")),
+                lines: vec![format!("{contact_id}:")],
+                primary_label: contact_id.to_string(),
+                map_constant: None,
+                callee_time_mask: 7,
+                callee_script: callee_script.map(str::to_string),
+                caller_time_mask: 7,
+                caller_script: caller_script.map(str::to_string),
+            }
+        }
+
+        let scripts = BTreeMap::from([
+            (
+                "ExecutablePhoneScript".to_string(),
+                serde_json::json!([{"command": "end", "args": []}]),
+            ),
+            (
+                "PhoneDataOnly".to_string(),
+                serde_json::json!([{
+                    "command": "conditional_event",
+                    "args": ["EVENT_TEST", "PhoneText"]
+                }]),
+            ),
+        ]);
+        let global_scripts = GlobalScriptModule {
+            script_runtime_commands: parse_script_runtime_commands("GlobalScripts", &scripts)
+                .expect("parse dynamic phone roots"),
+            scripts,
+            ..GlobalScriptModule::default()
+        };
+        let data = GameDataSet {
+            phone_contacts: PhoneContactCatalog(BTreeMap::from([
+                (
+                    "PHONE_MISSING".to_string(),
+                    contact(
+                        "PHONE_MISSING",
+                        Some("MissingCalleeScript"),
+                        Some("MissingCallerScript"),
+                    ),
+                ),
+                (
+                    "PHONE_DATA".to_string(),
+                    contact(
+                        "PHONE_DATA",
+                        Some("PhoneDataOnly"),
+                        Some("ExecutablePhoneScript"),
+                    ),
+                ),
+            ])),
+            special_phone_calls: BTreeMap::from([
+                (
+                    "SPECIALCALL_MISSING_CONTACT".to_string(),
+                    SpecialPhoneCallRule {
+                        value: 1,
+                        condition: "SpecialCallOnlyWhenOutside".to_string(),
+                        contact_id: "PHONE_UNKNOWN".to_string(),
+                        caller_script: "ExecutablePhoneScript".to_string(),
+                    },
+                ),
+                (
+                    "SPECIALCALL_MISSING_SCRIPT".to_string(),
+                    SpecialPhoneCallRule {
+                        value: 2,
+                        condition: "SpecialCallWhereverYouAre".to_string(),
+                        contact_id: "PHONE_DATA".to_string(),
+                        caller_script: "MissingSpecialCaller".to_string(),
+                    },
+                ),
+                (
+                    "SPECIALCALL_BAD_CONDITION".to_string(),
+                    SpecialPhoneCallRule {
+                        value: 3,
+                        condition: "special_call_anywhere".to_string(),
+                        contact_id: "PHONE_DATA".to_string(),
+                        caller_script: "ExecutablePhoneScript".to_string(),
+                    },
+                ),
+            ]),
+            global_scripts: Some(global_scripts),
+            ..GameDataSet::default()
+        };
+
+        let mut diagnostics = Vec::new();
+        verify_phone_contacts(&data, &mut diagnostics);
+        for (code, subject) in [
+            (
+                "unknown_phone_contact_callee_script",
+                "phone_contacts:PHONE_MISSING:calleeScript",
+            ),
+            (
+                "unknown_phone_contact_caller_script",
+                "phone_contacts:PHONE_MISSING:callerScript",
+            ),
+            (
+                "non_executable_phone_contact_callee_script",
+                "phone_contacts:PHONE_DATA:calleeScript",
+            ),
+            (
+                "unknown_special_phone_call_contact",
+                "special_phone_calls:SPECIALCALL_MISSING_CONTACT",
+            ),
+            (
+                "unknown_special_phone_call_caller_script",
+                "special_phone_calls:SPECIALCALL_MISSING_SCRIPT",
+            ),
+            (
+                "invalid_special_phone_call_condition",
+                "special_phone_calls:SPECIALCALL_BAD_CONDITION",
+            ),
+        ] {
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.subject == subject
+            }), "missing {code} for {subject}: {diagnostics:?}");
+        }
     }
 
     #[test]
@@ -4241,6 +4455,30 @@
                     duration: None,
                     index: 3,
                 },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: Some(1),
+                    index: 4,
+                },
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: Some(1),
+                    index: 5,
+                },
+                ScriptMovementStep {
+                    command: "step_shake".to_string(),
+                    direction: None,
+                    duration: Some(256),
+                    index: 6,
+                },
+                ScriptMovementStep {
+                    command: "step_sleep".to_string(),
+                    direction: None,
+                    duration: Some(0),
+                    index: 7,
+                },
             ],
         }];
         let data = GameDataSet {
@@ -4259,6 +4497,10 @@
             ("unknown_script_direction", 1),
             ("script_movement_unexpected_direction", 2),
             ("unsupported_script_movement_command", 3),
+            ("script_movement_unexpected_duration", 4),
+            ("script_movement_unexpected_duration", 5),
+            ("script_movement_duration_out_of_byte_range", 6),
+            ("script_movement_zero_sleep_duration", 7),
         ] {
             let subject = format!("Start:BadMovement:{index}");
             assert!(

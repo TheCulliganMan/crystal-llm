@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::pokemon::{PokemonType, Stat};
@@ -5,6 +7,7 @@ use super::pokemon::{PokemonType, Stat};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Move {
+    pub source_index: u8,
     #[serde(deserialize_with = "required_move_token")]
     pub name: String,
     #[serde(rename = "type")]
@@ -28,6 +31,7 @@ impl<'de> Deserialize<'de> for Move {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawMove {
+            source_index: u8,
             #[serde(deserialize_with = "required_move_token")]
             name: String,
             #[serde(rename = "type")]
@@ -45,6 +49,7 @@ impl<'de> Deserialize<'de> for Move {
 
         let raw = RawMove::deserialize(deserializer)?;
         let move_data = Self {
+            source_index: raw.source_index,
             name: raw.name,
             move_type: raw.move_type,
             power: raw.power,
@@ -62,6 +67,12 @@ impl<'de> Deserialize<'de> for Move {
 
 impl Move {
     fn validate_shape(&self) -> Result<(), String> {
+        if !(1..=251).contains(&self.source_index) {
+            return Err(format!(
+                "move {} source index {} must be in 1..=251",
+                self.name, self.source_index
+            ));
+        }
         if self.pp == 0 {
             return Err(format!("move {} must have positive PP", self.name));
         }
@@ -116,6 +127,34 @@ pub fn move_payload_issues(move_data: &Move) -> Vec<MovePayloadIssue> {
         issues.push(MovePayloadIssue::InvalidEffect {
             effect: move_data.effect.clone(),
         });
+    }
+
+    issues
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveSourceIndexCatalogIssue {
+    DuplicateSourceIndex {
+        source_index: u8,
+        first_move: String,
+        second_move: String,
+    },
+}
+
+pub fn move_source_index_catalog_issues(
+    moves: &BTreeMap<String, Move>,
+) -> Vec<MoveSourceIndexCatalogIssue> {
+    let mut source_moves = BTreeMap::<u8, String>::new();
+    let mut issues = Vec::new();
+
+    for (move_id, move_data) in moves {
+        if let Some(first_move) = source_moves.insert(move_data.source_index, move_id.clone()) {
+            issues.push(MoveSourceIndexCatalogIssue::DuplicateSourceIndex {
+                source_index: move_data.source_index,
+                first_move,
+                second_move: move_id.clone(),
+            });
+        }
     }
 
     issues
@@ -214,6 +253,7 @@ mod tests {
     fn parses_existing_json_move_shape() {
         let value: Move = serde_json::from_str(
             r#"{
+              "source_index":1,
               "name":"POUND",
               "type":"NORMAL",
               "power":40,
@@ -236,6 +276,7 @@ mod tests {
     fn move_type_ids_are_modpack_owned_strings_not_core_enums() {
         let value: Move = serde_json::from_str(
             r#"{
+              "source_index":1,
               "name":"AETHER_PULSE",
               "type":"AETHER",
               "power":60,
@@ -256,6 +297,7 @@ mod tests {
     fn move_json_rejects_unknown_modpack_fields() {
         let error = serde_json::from_str::<Move>(
             r#"{
+              "source_index":1,
               "name":"POUND",
               "type":"NORMAL",
               "power":40,
@@ -316,8 +358,23 @@ mod tests {
     }
 
     #[test]
+    fn move_source_index_rejects_no_move_and_out_of_range_ids() {
+        for source_index in [0, 252] {
+            let mut move_json = valid_move_json();
+            move_json["source_index"] = serde_json::json!(source_index);
+
+            let error = serde_json::from_value::<Move>(move_json)
+                .expect_err("move source ids must stay in the Crystal move table")
+                .to_string();
+
+            assert!(error.contains("source index"), "{error}");
+        }
+    }
+
+    #[test]
     fn move_payload_issues_require_exact_pack_owned_ids_without_effect_enums() {
         let move_data = Move {
+            source_index: 1,
             name: "AETHER PULSE".to_string(),
             move_type: pokemon_type("AETHER TYPE"),
             power: 60,
@@ -348,6 +405,7 @@ mod tests {
     #[test]
     fn move_payload_issues_accept_custom_exact_effect_ids() {
         let move_data = Move {
+            source_index: 1,
             name: "AETHER_PULSE".to_string(),
             move_type: pokemon_type("AETHER"),
             power: 60,
@@ -392,6 +450,7 @@ mod tests {
 
     fn valid_move_json() -> serde_json::Value {
         serde_json::json!({
+            "source_index": 1,
             "name": "AETHER_PULSE",
             "type": "AETHER",
             "power": 60,

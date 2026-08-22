@@ -192,6 +192,8 @@ describe("exportFishing", () => {
     const catalog = exportFishing();
 
     expect(catalog.groups.FISHGROUP_SHORE.bite_threshold).toBe(128);
+    expect(catalog.groups.FISHGROUP_SHORE.source_index).toBe(1);
+    expect(catalog.groups.FISHGROUP_POND.source_index).toBe(2);
     expect(catalog.groups.FISHGROUP_SHORE.rod_tables.OLD_ROD.slots[0]).toEqual({
       threshold: 179,
       species: "MAGIKARP",

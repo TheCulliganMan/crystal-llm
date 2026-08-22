@@ -1,5 +1,6 @@
 {
   "POUND": {
+    "source_index": 1,
     "name": "POUND",
     "type": "NORMAL",
     "power": 40,
@@ -11,6 +12,7 @@
     "amount": null
   },
   "KARATE_CHOP": {
+    "source_index": 2,
     "name": "KARATE_CHOP",
     "type": "FIGHTING",
     "power": 50,
@@ -22,6 +24,7 @@
     "amount": null
   },
   "DOUBLESLAP": {
+    "source_index": 3,
     "name": "DOUBLESLAP",
     "type": "NORMAL",
     "power": 15,
@@ -33,6 +36,7 @@
     "amount": null
   },
   "COMET_PUNCH": {
+    "source_index": 4,
     "name": "COMET_PUNCH",
     "type": "NORMAL",
     "power": 18,
@@ -44,6 +48,7 @@
     "amount": null
   },
   "MEGA_PUNCH": {
+    "source_index": 5,
     "name": "MEGA_PUNCH",
     "type": "NORMAL",
     "power": 80,
@@ -55,6 +60,7 @@
     "amount": null
   },
   "PAY_DAY": {
+    "source_index": 6,
     "name": "PAY_DAY",
     "type": "NORMAL",
     "power": 40,
@@ -66,6 +72,7 @@
     "amount": null
   },
   "FIRE_PUNCH": {
+    "source_index": 7,
     "name": "FIRE_PUNCH",
     "type": "FIRE",
     "power": 75,
@@ -77,6 +84,7 @@
     "amount": null
   },
   "ICE_PUNCH": {
+    "source_index": 8,
     "name": "ICE_PUNCH",
     "type": "ICE",
     "power": 75,
@@ -88,6 +96,7 @@
     "amount": null
   },
   "THUNDERPUNCH": {
+    "source_index": 9,
     "name": "THUNDERPUNCH",
     "type": "ELECTRIC",
     "power": 75,
@@ -99,6 +108,7 @@
     "amount": null
   },
   "SCRATCH": {
+    "source_index": 10,
     "name": "SCRATCH",
     "type": "NORMAL",
     "power": 40,
@@ -110,6 +120,7 @@
     "amount": null
   },
   "VICEGRIP": {
+    "source_index": 11,
     "name": "VICEGRIP",
     "type": "NORMAL",
     "power": 55,
@@ -121,6 +132,7 @@
     "amount": null
   },
   "GUILLOTINE": {
+    "source_index": 12,
     "name": "GUILLOTINE",
     "type": "NORMAL",
     "power": 0,
@@ -132,6 +144,7 @@
     "amount": null
   },
   "RAZOR_WIND": {
+    "source_index": 13,
     "name": "RAZOR_WIND",
     "type": "NORMAL",
     "power": 80,
@@ -143,6 +156,7 @@
     "amount": null
   },
   "SWORDS_DANCE": {
+    "source_index": 14,
     "name": "SWORDS_DANCE",
     "type": "NORMAL",
     "power": 0,
@@ -154,6 +168,7 @@
     "amount": 2
   },
   "CUT": {
+    "source_index": 15,
     "name": "CUT",
     "type": "NORMAL",
     "power": 50,
@@ -165,6 +180,7 @@
     "amount": null
   },
   "GUST": {
+    "source_index": 16,
     "name": "GUST",
     "type": "FLYING",
     "power": 40,
@@ -176,6 +192,7 @@
     "amount": null
   },
   "WING_ATTACK": {
+    "source_index": 17,
     "name": "WING_ATTACK",
     "type": "FLYING",
     "power": 60,
@@ -187,6 +204,7 @@
     "amount": null
   },
   "WHIRLWIND": {
+    "source_index": 18,
     "name": "WHIRLWIND",
     "type": "NORMAL",
     "power": 0,
@@ -198,6 +216,7 @@
     "amount": null
   },
   "FLY": {
+    "source_index": 19,
     "name": "FLY",
     "type": "FLYING",
     "power": 70,
@@ -209,6 +228,7 @@
     "amount": null
   },
   "BIND": {
+    "source_index": 20,
     "name": "BIND",
     "type": "NORMAL",
     "power": 15,
@@ -220,6 +240,7 @@
     "amount": null
   },
   "SLAM": {
+    "source_index": 21,
     "name": "SLAM",
     "type": "NORMAL",
     "power": 80,
@@ -231,6 +252,7 @@
     "amount": null
   },
   "VINE_WHIP": {
+    "source_index": 22,
     "name": "VINE_WHIP",
     "type": "GRASS",
     "power": 35,
@@ -242,6 +264,7 @@
     "amount": null
   },
   "STOMP": {
+    "source_index": 23,
     "name": "STOMP",
     "type": "NORMAL",
     "power": 65,
@@ -253,6 +276,7 @@
     "amount": null
   },
   "DOUBLE_KICK": {
+    "source_index": 24,
     "name": "DOUBLE_KICK",
     "type": "FIGHTING",
     "power": 30,
@@ -264,6 +288,7 @@
     "amount": null
   },
   "MEGA_KICK": {
+    "source_index": 25,
     "name": "MEGA_KICK",
     "type": "NORMAL",
     "power": 120,
@@ -275,6 +300,7 @@
     "amount": null
   },
   "JUMP_KICK": {
+    "source_index": 26,
     "name": "JUMP_KICK",
     "type": "FIGHTING",
     "power": 70,
@@ -286,6 +312,7 @@
     "amount": null
   },
   "ROLLING_KICK": {
+    "source_index": 27,
     "name": "ROLLING_KICK",
     "type": "FIGHTING",
     "power": 60,
@@ -297,6 +324,7 @@
     "amount": null
   },
   "SAND_ATTACK": {
+    "source_index": 28,
     "name": "SAND_ATTACK",
     "type": "GROUND",
     "power": 0,
@@ -308,6 +336,7 @@
     "amount": -1
   },
   "HEADBUTT": {
+    "source_index": 29,
     "name": "HEADBUTT",
     "type": "NORMAL",
     "power": 70,
@@ -319,6 +348,7 @@
     "amount": null
   },
   "HORN_ATTACK": {
+    "source_index": 30,
     "name": "HORN_ATTACK",
     "type": "NORMAL",
     "power": 65,
@@ -330,6 +360,7 @@
     "amount": null
   },
   "FURY_ATTACK": {
+    "source_index": 31,
     "name": "FURY_ATTACK",
     "type": "NORMAL",
     "power": 15,
@@ -341,6 +372,7 @@
     "amount": null
   },
   "HORN_DRILL": {
+    "source_index": 32,
     "name": "HORN_DRILL",
     "type": "NORMAL",
     "power": 1,
@@ -352,6 +384,7 @@
     "amount": null
   },
   "TACKLE": {
+    "source_index": 33,
     "name": "TACKLE",
     "type": "NORMAL",
     "power": 35,
@@ -363,6 +396,7 @@
     "amount": null
   },
   "BODY_SLAM": {
+    "source_index": 34,
     "name": "BODY_SLAM",
     "type": "NORMAL",
     "power": 85,
@@ -374,6 +408,7 @@
     "amount": null
   },
   "WRAP": {
+    "source_index": 35,
     "name": "WRAP",
     "type": "NORMAL",
     "power": 15,
@@ -385,6 +420,7 @@
     "amount": null
   },
   "TAKE_DOWN": {
+    "source_index": 36,
     "name": "TAKE_DOWN",
     "type": "NORMAL",
     "power": 90,
@@ -396,6 +432,7 @@
     "amount": null
   },
   "THRASH": {
+    "source_index": 37,
     "name": "THRASH",
     "type": "NORMAL",
     "power": 90,
@@ -407,6 +444,7 @@
     "amount": null
   },
   "DOUBLE_EDGE": {
+    "source_index": 38,
     "name": "DOUBLE_EDGE",
     "type": "NORMAL",
     "power": 120,
@@ -418,6 +456,7 @@
     "amount": null
   },
   "TAIL_WHIP": {
+    "source_index": 39,
     "name": "TAIL_WHIP",
     "type": "NORMAL",
     "power": 0,
@@ -429,6 +468,7 @@
     "amount": -1
   },
   "POISON_STING": {
+    "source_index": 40,
     "name": "POISON_STING",
     "type": "POISON",
     "power": 15,
@@ -440,6 +480,7 @@
     "amount": null
   },
   "TWINEEDLE": {
+    "source_index": 41,
     "name": "TWINEEDLE",
     "type": "BUG",
     "power": 25,
@@ -451,6 +492,7 @@
     "amount": null
   },
   "PIN_MISSILE": {
+    "source_index": 42,
     "name": "PIN_MISSILE",
     "type": "BUG",
     "power": 14,
@@ -462,6 +504,7 @@
     "amount": null
   },
   "LEER": {
+    "source_index": 43,
     "name": "LEER",
     "type": "NORMAL",
     "power": 0,
@@ -473,6 +516,7 @@
     "amount": -1
   },
   "BITE": {
+    "source_index": 44,
     "name": "BITE",
     "type": "DARK",
     "power": 60,
@@ -484,6 +528,7 @@
     "amount": null
   },
   "GROWL": {
+    "source_index": 45,
     "name": "GROWL",
     "type": "NORMAL",
     "power": 0,
@@ -495,6 +540,7 @@
     "amount": -1
   },
   "ROAR": {
+    "source_index": 46,
     "name": "ROAR",
     "type": "NORMAL",
     "power": 0,
@@ -506,6 +552,7 @@
     "amount": null
   },
   "SING": {
+    "source_index": 47,
     "name": "SING",
     "type": "NORMAL",
     "power": 0,
@@ -517,6 +564,7 @@
     "amount": null
   },
   "SUPERSONIC": {
+    "source_index": 48,
     "name": "SUPERSONIC",
     "type": "NORMAL",
     "power": 0,
@@ -528,6 +576,7 @@
     "amount": null
   },
   "SONICBOOM": {
+    "source_index": 49,
     "name": "SONICBOOM",
     "type": "NORMAL",
     "power": 20,
@@ -539,6 +588,7 @@
     "amount": null
   },
   "DISABLE": {
+    "source_index": 50,
     "name": "DISABLE",
     "type": "NORMAL",
     "power": 0,
@@ -550,6 +600,7 @@
     "amount": null
   },
   "ACID": {
+    "source_index": 51,
     "name": "ACID",
     "type": "POISON",
     "power": 40,
@@ -561,6 +612,7 @@
     "amount": -1
   },
   "EMBER": {
+    "source_index": 52,
     "name": "EMBER",
     "type": "FIRE",
     "power": 40,
@@ -572,6 +624,7 @@
     "amount": null
   },
   "FLAMETHROWER": {
+    "source_index": 53,
     "name": "FLAMETHROWER",
     "type": "FIRE",
     "power": 95,
@@ -583,6 +636,7 @@
     "amount": null
   },
   "MIST": {
+    "source_index": 54,
     "name": "MIST",
     "type": "ICE",
     "power": 0,
@@ -594,6 +648,7 @@
     "amount": null
   },
   "WATER_GUN": {
+    "source_index": 55,
     "name": "WATER_GUN",
     "type": "WATER",
     "power": 40,
@@ -605,6 +660,7 @@
     "amount": null
   },
   "HYDRO_PUMP": {
+    "source_index": 56,
     "name": "HYDRO_PUMP",
     "type": "WATER",
     "power": 120,
@@ -616,6 +672,7 @@
     "amount": null
   },
   "SURF": {
+    "source_index": 57,
     "name": "SURF",
     "type": "WATER",
     "power": 95,
@@ -627,6 +684,7 @@
     "amount": null
   },
   "ICE_BEAM": {
+    "source_index": 58,
     "name": "ICE_BEAM",
     "type": "ICE",
     "power": 95,
@@ -638,6 +696,7 @@
     "amount": null
   },
   "BLIZZARD": {
+    "source_index": 59,
     "name": "BLIZZARD",
     "type": "ICE",
     "power": 120,
@@ -649,6 +708,7 @@
     "amount": null
   },
   "PSYBEAM": {
+    "source_index": 60,
     "name": "PSYBEAM",
     "type": "PSYCHIC_TYPE",
     "power": 65,
@@ -660,6 +720,7 @@
     "amount": null
   },
   "BUBBLEBEAM": {
+    "source_index": 61,
     "name": "BUBBLEBEAM",
     "type": "WATER",
     "power": 65,
@@ -671,6 +732,7 @@
     "amount": -1
   },
   "AURORA_BEAM": {
+    "source_index": 62,
     "name": "AURORA_BEAM",
     "type": "ICE",
     "power": 65,
@@ -682,6 +744,7 @@
     "amount": -1
   },
   "HYPER_BEAM": {
+    "source_index": 63,
     "name": "HYPER_BEAM",
     "type": "NORMAL",
     "power": 150,
@@ -693,6 +756,7 @@
     "amount": null
   },
   "PECK": {
+    "source_index": 64,
     "name": "PECK",
     "type": "FLYING",
     "power": 35,
@@ -704,6 +768,7 @@
     "amount": null
   },
   "DRILL_PECK": {
+    "source_index": 65,
     "name": "DRILL_PECK",
     "type": "FLYING",
     "power": 80,
@@ -715,6 +780,7 @@
     "amount": null
   },
   "SUBMISSION": {
+    "source_index": 66,
     "name": "SUBMISSION",
     "type": "FIGHTING",
     "power": 80,
@@ -726,6 +792,7 @@
     "amount": null
   },
   "LOW_KICK": {
+    "source_index": 67,
     "name": "LOW_KICK",
     "type": "FIGHTING",
     "power": 50,
@@ -737,6 +804,7 @@
     "amount": null
   },
   "COUNTER": {
+    "source_index": 68,
     "name": "COUNTER",
     "type": "FIGHTING",
     "power": 1,
@@ -748,6 +816,7 @@
     "amount": null
   },
   "SEISMIC_TOSS": {
+    "source_index": 69,
     "name": "SEISMIC_TOSS",
     "type": "FIGHTING",
     "power": 1,
@@ -759,6 +828,7 @@
     "amount": null
   },
   "STRENGTH": {
+    "source_index": 70,
     "name": "STRENGTH",
     "type": "NORMAL",
     "power": 80,
@@ -770,6 +840,7 @@
     "amount": null
   },
   "ABSORB": {
+    "source_index": 71,
     "name": "ABSORB",
     "type": "GRASS",
     "power": 20,
@@ -781,6 +852,7 @@
     "amount": null
   },
   "MEGA_DRAIN": {
+    "source_index": 72,
     "name": "MEGA_DRAIN",
     "type": "GRASS",
     "power": 40,
@@ -792,6 +864,7 @@
     "amount": null
   },
   "LEECH_SEED": {
+    "source_index": 73,
     "name": "LEECH_SEED",
     "type": "GRASS",
     "power": 0,
@@ -803,6 +876,7 @@
     "amount": null
   },
   "GROWTH": {
+    "source_index": 74,
     "name": "GROWTH",
     "type": "NORMAL",
     "power": 0,
@@ -814,6 +888,7 @@
     "amount": 1
   },
   "RAZOR_LEAF": {
+    "source_index": 75,
     "name": "RAZOR_LEAF",
     "type": "GRASS",
     "power": 55,
@@ -825,6 +900,7 @@
     "amount": null
   },
   "SOLARBEAM": {
+    "source_index": 76,
     "name": "SOLARBEAM",
     "type": "GRASS",
     "power": 120,
@@ -836,6 +912,7 @@
     "amount": null
   },
   "POISONPOWDER": {
+    "source_index": 77,
     "name": "POISONPOWDER",
     "type": "POISON",
     "power": 0,
@@ -847,6 +924,7 @@
     "amount": null
   },
   "STUN_SPORE": {
+    "source_index": 78,
     "name": "STUN_SPORE",
     "type": "GRASS",
     "power": 0,
@@ -858,6 +936,7 @@
     "amount": null
   },
   "SLEEP_POWDER": {
+    "source_index": 79,
     "name": "SLEEP_POWDER",
     "type": "GRASS",
     "power": 0,
@@ -869,6 +948,7 @@
     "amount": null
   },
   "PETAL_DANCE": {
+    "source_index": 80,
     "name": "PETAL_DANCE",
     "type": "GRASS",
     "power": 70,
@@ -880,6 +960,7 @@
     "amount": null
   },
   "STRING_SHOT": {
+    "source_index": 81,
     "name": "STRING_SHOT",
     "type": "BUG",
     "power": 0,
@@ -891,6 +972,7 @@
     "amount": -1
   },
   "DRAGON_RAGE": {
+    "source_index": 82,
     "name": "DRAGON_RAGE",
     "type": "DRAGON",
     "power": 40,
@@ -902,6 +984,7 @@
     "amount": null
   },
   "FIRE_SPIN": {
+    "source_index": 83,
     "name": "FIRE_SPIN",
     "type": "FIRE",
     "power": 15,
@@ -913,6 +996,7 @@
     "amount": null
   },
   "THUNDERSHOCK": {
+    "source_index": 84,
     "name": "THUNDERSHOCK",
     "type": "ELECTRIC",
     "power": 40,
@@ -924,6 +1008,7 @@
     "amount": null
   },
   "THUNDERBOLT": {
+    "source_index": 85,
     "name": "THUNDERBOLT",
     "type": "ELECTRIC",
     "power": 95,
@@ -935,6 +1020,7 @@
     "amount": null
   },
   "THUNDER_WAVE": {
+    "source_index": 86,
     "name": "THUNDER_WAVE",
     "type": "ELECTRIC",
     "power": 0,
@@ -946,6 +1032,7 @@
     "amount": null
   },
   "THUNDER": {
+    "source_index": 87,
     "name": "THUNDER",
     "type": "ELECTRIC",
     "power": 120,
@@ -957,6 +1044,7 @@
     "amount": null
   },
   "ROCK_THROW": {
+    "source_index": 88,
     "name": "ROCK_THROW",
     "type": "ROCK",
     "power": 50,
@@ -968,6 +1056,7 @@
     "amount": null
   },
   "EARTHQUAKE": {
+    "source_index": 89,
     "name": "EARTHQUAKE",
     "type": "GROUND",
     "power": 100,
@@ -979,6 +1068,7 @@
     "amount": null
   },
   "FISSURE": {
+    "source_index": 90,
     "name": "FISSURE",
     "type": "GROUND",
     "power": 1,
@@ -990,6 +1080,7 @@
     "amount": null
   },
   "DIG": {
+    "source_index": 91,
     "name": "DIG",
     "type": "GROUND",
     "power": 60,
@@ -1001,6 +1092,7 @@
     "amount": null
   },
   "TOXIC": {
+    "source_index": 92,
     "name": "TOXIC",
     "type": "POISON",
     "power": 0,
@@ -1012,6 +1104,7 @@
     "amount": null
   },
   "CONFUSION": {
+    "source_index": 93,
     "name": "CONFUSION",
     "type": "PSYCHIC_TYPE",
     "power": 50,
@@ -1023,6 +1116,7 @@
     "amount": null
   },
   "PSYCHIC_M": {
+    "source_index": 94,
     "name": "PSYCHIC_M",
     "type": "PSYCHIC_TYPE",
     "power": 90,
@@ -1034,6 +1128,7 @@
     "amount": -1
   },
   "HYPNOSIS": {
+    "source_index": 95,
     "name": "HYPNOSIS",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1045,6 +1140,7 @@
     "amount": null
   },
   "MEDITATE": {
+    "source_index": 96,
     "name": "MEDITATE",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1056,6 +1152,7 @@
     "amount": 1
   },
   "AGILITY": {
+    "source_index": 97,
     "name": "AGILITY",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1067,6 +1164,7 @@
     "amount": 2
   },
   "QUICK_ATTACK": {
+    "source_index": 98,
     "name": "QUICK_ATTACK",
     "type": "NORMAL",
     "power": 40,
@@ -1078,6 +1176,7 @@
     "amount": null
   },
   "RAGE": {
+    "source_index": 99,
     "name": "RAGE",
     "type": "NORMAL",
     "power": 20,
@@ -1089,6 +1188,7 @@
     "amount": null
   },
   "TELEPORT": {
+    "source_index": 100,
     "name": "TELEPORT",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1100,6 +1200,7 @@
     "amount": null
   },
   "NIGHT_SHADE": {
+    "source_index": 101,
     "name": "NIGHT_SHADE",
     "type": "GHOST",
     "power": 1,
@@ -1111,6 +1212,7 @@
     "amount": null
   },
   "MIMIC": {
+    "source_index": 102,
     "name": "MIMIC",
     "type": "NORMAL",
     "power": 0,
@@ -1122,6 +1224,7 @@
     "amount": null
   },
   "SCREECH": {
+    "source_index": 103,
     "name": "SCREECH",
     "type": "NORMAL",
     "power": 0,
@@ -1133,6 +1236,7 @@
     "amount": -2
   },
   "DOUBLE_TEAM": {
+    "source_index": 104,
     "name": "DOUBLE_TEAM",
     "type": "NORMAL",
     "power": 0,
@@ -1144,6 +1248,7 @@
     "amount": 1
   },
   "RECOVER": {
+    "source_index": 105,
     "name": "RECOVER",
     "type": "NORMAL",
     "power": 0,
@@ -1155,6 +1260,7 @@
     "amount": null
   },
   "HARDEN": {
+    "source_index": 106,
     "name": "HARDEN",
     "type": "NORMAL",
     "power": 0,
@@ -1166,6 +1272,7 @@
     "amount": 1
   },
   "MINIMIZE": {
+    "source_index": 107,
     "name": "MINIMIZE",
     "type": "NORMAL",
     "power": 0,
@@ -1177,6 +1284,7 @@
     "amount": 1
   },
   "SMOKESCREEN": {
+    "source_index": 108,
     "name": "SMOKESCREEN",
     "type": "NORMAL",
     "power": 0,
@@ -1188,6 +1296,7 @@
     "amount": -1
   },
   "CONFUSE_RAY": {
+    "source_index": 109,
     "name": "CONFUSE_RAY",
     "type": "GHOST",
     "power": 0,
@@ -1199,6 +1308,7 @@
     "amount": null
   },
   "WITHDRAW": {
+    "source_index": 110,
     "name": "WITHDRAW",
     "type": "WATER",
     "power": 0,
@@ -1210,6 +1320,7 @@
     "amount": 1
   },
   "DEFENSE_CURL": {
+    "source_index": 111,
     "name": "DEFENSE_CURL",
     "type": "NORMAL",
     "power": 0,
@@ -1221,6 +1332,7 @@
     "amount": null
   },
   "BARRIER": {
+    "source_index": 112,
     "name": "BARRIER",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1232,6 +1344,7 @@
     "amount": 2
   },
   "LIGHT_SCREEN": {
+    "source_index": 113,
     "name": "LIGHT_SCREEN",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1243,6 +1356,7 @@
     "amount": null
   },
   "HAZE": {
+    "source_index": 114,
     "name": "HAZE",
     "type": "ICE",
     "power": 0,
@@ -1254,6 +1368,7 @@
     "amount": null
   },
   "REFLECT": {
+    "source_index": 115,
     "name": "REFLECT",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1265,6 +1380,7 @@
     "amount": null
   },
   "FOCUS_ENERGY": {
+    "source_index": 116,
     "name": "FOCUS_ENERGY",
     "type": "NORMAL",
     "power": 0,
@@ -1276,6 +1392,7 @@
     "amount": null
   },
   "BIDE": {
+    "source_index": 117,
     "name": "BIDE",
     "type": "NORMAL",
     "power": 0,
@@ -1287,6 +1404,7 @@
     "amount": null
   },
   "METRONOME": {
+    "source_index": 118,
     "name": "METRONOME",
     "type": "NORMAL",
     "power": 0,
@@ -1298,6 +1416,7 @@
     "amount": null
   },
   "MIRROR_MOVE": {
+    "source_index": 119,
     "name": "MIRROR_MOVE",
     "type": "FLYING",
     "power": 0,
@@ -1309,6 +1428,7 @@
     "amount": null
   },
   "SELFDESTRUCT": {
+    "source_index": 120,
     "name": "SELFDESTRUCT",
     "type": "NORMAL",
     "power": 200,
@@ -1320,6 +1440,7 @@
     "amount": null
   },
   "EGG_BOMB": {
+    "source_index": 121,
     "name": "EGG_BOMB",
     "type": "NORMAL",
     "power": 100,
@@ -1331,6 +1452,7 @@
     "amount": null
   },
   "LICK": {
+    "source_index": 122,
     "name": "LICK",
     "type": "GHOST",
     "power": 20,
@@ -1342,6 +1464,7 @@
     "amount": null
   },
   "SMOG": {
+    "source_index": 123,
     "name": "SMOG",
     "type": "POISON",
     "power": 20,
@@ -1353,6 +1476,7 @@
     "amount": null
   },
   "SLUDGE": {
+    "source_index": 124,
     "name": "SLUDGE",
     "type": "POISON",
     "power": 65,
@@ -1364,6 +1488,7 @@
     "amount": null
   },
   "BONE_CLUB": {
+    "source_index": 125,
     "name": "BONE_CLUB",
     "type": "GROUND",
     "power": 65,
@@ -1375,6 +1500,7 @@
     "amount": null
   },
   "FIRE_BLAST": {
+    "source_index": 126,
     "name": "FIRE_BLAST",
     "type": "FIRE",
     "power": 120,
@@ -1386,6 +1512,7 @@
     "amount": null
   },
   "WATERFALL": {
+    "source_index": 127,
     "name": "WATERFALL",
     "type": "WATER",
     "power": 80,
@@ -1397,6 +1524,7 @@
     "amount": null
   },
   "CLAMP": {
+    "source_index": 128,
     "name": "CLAMP",
     "type": "WATER",
     "power": 35,
@@ -1408,6 +1536,7 @@
     "amount": null
   },
   "SWIFT": {
+    "source_index": 129,
     "name": "SWIFT",
     "type": "NORMAL",
     "power": 60,
@@ -1419,6 +1548,7 @@
     "amount": null
   },
   "SKULL_BASH": {
+    "source_index": 130,
     "name": "SKULL_BASH",
     "type": "NORMAL",
     "power": 100,
@@ -1430,6 +1560,7 @@
     "amount": null
   },
   "SPIKE_CANNON": {
+    "source_index": 131,
     "name": "SPIKE_CANNON",
     "type": "NORMAL",
     "power": 20,
@@ -1441,6 +1572,7 @@
     "amount": null
   },
   "CONSTRICT": {
+    "source_index": 132,
     "name": "CONSTRICT",
     "type": "NORMAL",
     "power": 10,
@@ -1452,6 +1584,7 @@
     "amount": -1
   },
   "AMNESIA": {
+    "source_index": 133,
     "name": "AMNESIA",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1463,6 +1596,7 @@
     "amount": 2
   },
   "KINESIS": {
+    "source_index": 134,
     "name": "KINESIS",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1474,6 +1608,7 @@
     "amount": -1
   },
   "SOFTBOILED": {
+    "source_index": 135,
     "name": "SOFTBOILED",
     "type": "NORMAL",
     "power": 0,
@@ -1485,6 +1620,7 @@
     "amount": null
   },
   "HI_JUMP_KICK": {
+    "source_index": 136,
     "name": "HI_JUMP_KICK",
     "type": "FIGHTING",
     "power": 85,
@@ -1496,6 +1632,7 @@
     "amount": null
   },
   "GLARE": {
+    "source_index": 137,
     "name": "GLARE",
     "type": "NORMAL",
     "power": 0,
@@ -1507,6 +1644,7 @@
     "amount": null
   },
   "DREAM_EATER": {
+    "source_index": 138,
     "name": "DREAM_EATER",
     "type": "PSYCHIC_TYPE",
     "power": 100,
@@ -1518,6 +1656,7 @@
     "amount": null
   },
   "POISON_GAS": {
+    "source_index": 139,
     "name": "POISON_GAS",
     "type": "POISON",
     "power": 0,
@@ -1529,6 +1668,7 @@
     "amount": null
   },
   "BARRAGE": {
+    "source_index": 140,
     "name": "BARRAGE",
     "type": "NORMAL",
     "power": 15,
@@ -1540,6 +1680,7 @@
     "amount": null
   },
   "LEECH_LIFE": {
+    "source_index": 141,
     "name": "LEECH_LIFE",
     "type": "BUG",
     "power": 20,
@@ -1551,6 +1692,7 @@
     "amount": null
   },
   "LOVELY_KISS": {
+    "source_index": 142,
     "name": "LOVELY_KISS",
     "type": "NORMAL",
     "power": 0,
@@ -1562,6 +1704,7 @@
     "amount": null
   },
   "SKY_ATTACK": {
+    "source_index": 143,
     "name": "SKY_ATTACK",
     "type": "FLYING",
     "power": 140,
@@ -1573,6 +1716,7 @@
     "amount": null
   },
   "TRANSFORM": {
+    "source_index": 144,
     "name": "TRANSFORM",
     "type": "NORMAL",
     "power": 0,
@@ -1584,6 +1728,7 @@
     "amount": null
   },
   "BUBBLE": {
+    "source_index": 145,
     "name": "BUBBLE",
     "type": "WATER",
     "power": 20,
@@ -1595,6 +1740,7 @@
     "amount": -1
   },
   "DIZZY_PUNCH": {
+    "source_index": 146,
     "name": "DIZZY_PUNCH",
     "type": "NORMAL",
     "power": 70,
@@ -1606,6 +1752,7 @@
     "amount": null
   },
   "SPORE": {
+    "source_index": 147,
     "name": "SPORE",
     "type": "GRASS",
     "power": 0,
@@ -1617,6 +1764,7 @@
     "amount": null
   },
   "FLASH": {
+    "source_index": 148,
     "name": "FLASH",
     "type": "NORMAL",
     "power": 0,
@@ -1628,6 +1776,7 @@
     "amount": -1
   },
   "PSYWAVE": {
+    "source_index": 149,
     "name": "PSYWAVE",
     "type": "PSYCHIC_TYPE",
     "power": 1,
@@ -1639,6 +1788,7 @@
     "amount": null
   },
   "SPLASH": {
+    "source_index": 150,
     "name": "SPLASH",
     "type": "NORMAL",
     "power": 0,
@@ -1650,6 +1800,7 @@
     "amount": null
   },
   "ACID_ARMOR": {
+    "source_index": 151,
     "name": "ACID_ARMOR",
     "type": "POISON",
     "power": 0,
@@ -1661,6 +1812,7 @@
     "amount": 2
   },
   "CRABHAMMER": {
+    "source_index": 152,
     "name": "CRABHAMMER",
     "type": "WATER",
     "power": 90,
@@ -1672,6 +1824,7 @@
     "amount": null
   },
   "EXPLOSION": {
+    "source_index": 153,
     "name": "EXPLOSION",
     "type": "NORMAL",
     "power": 250,
@@ -1683,6 +1836,7 @@
     "amount": null
   },
   "FURY_SWIPES": {
+    "source_index": 154,
     "name": "FURY_SWIPES",
     "type": "NORMAL",
     "power": 18,
@@ -1694,6 +1848,7 @@
     "amount": null
   },
   "BONEMERANG": {
+    "source_index": 155,
     "name": "BONEMERANG",
     "type": "GROUND",
     "power": 50,
@@ -1705,6 +1860,7 @@
     "amount": null
   },
   "REST": {
+    "source_index": 156,
     "name": "REST",
     "type": "PSYCHIC_TYPE",
     "power": 0,
@@ -1716,6 +1872,7 @@
     "amount": null
   },
   "ROCK_SLIDE": {
+    "source_index": 157,
     "name": "ROCK_SLIDE",
     "type": "ROCK",
     "power": 75,
@@ -1727,6 +1884,7 @@
     "amount": null
   },
   "HYPER_FANG": {
+    "source_index": 158,
     "name": "HYPER_FANG",
     "type": "NORMAL",
     "power": 80,
@@ -1738,6 +1896,7 @@
     "amount": null
   },
   "SHARPEN": {
+    "source_index": 159,
     "name": "SHARPEN",
     "type": "NORMAL",
     "power": 0,
@@ -1749,6 +1908,7 @@
     "amount": 1
   },
   "CONVERSION": {
+    "source_index": 160,
     "name": "CONVERSION",
     "type": "NORMAL",
     "power": 0,
@@ -1760,6 +1920,7 @@
     "amount": null
   },
   "TRI_ATTACK": {
+    "source_index": 161,
     "name": "TRI_ATTACK",
     "type": "NORMAL",
     "power": 80,
@@ -1771,6 +1932,7 @@
     "amount": null
   },
   "SUPER_FANG": {
+    "source_index": 162,
     "name": "SUPER_FANG",
     "type": "NORMAL",
     "power": 1,
@@ -1782,6 +1944,7 @@
     "amount": null
   },
   "SLASH": {
+    "source_index": 163,
     "name": "SLASH",
     "type": "NORMAL",
     "power": 70,
@@ -1793,6 +1956,7 @@
     "amount": null
   },
   "SUBSTITUTE": {
+    "source_index": 164,
     "name": "SUBSTITUTE",
     "type": "NORMAL",
     "power": 0,
@@ -1804,6 +1968,7 @@
     "amount": null
   },
   "STRUGGLE": {
+    "source_index": 165,
     "name": "STRUGGLE",
     "type": "NORMAL",
     "power": 50,
@@ -1815,6 +1980,7 @@
     "amount": null
   },
   "SKETCH": {
+    "source_index": 166,
     "name": "SKETCH",
     "type": "NORMAL",
     "power": 0,
@@ -1826,6 +1992,7 @@
     "amount": null
   },
   "TRIPLE_KICK": {
+    "source_index": 167,
     "name": "TRIPLE_KICK",
     "type": "FIGHTING",
     "power": 10,
@@ -1837,6 +2004,7 @@
     "amount": null
   },
   "THIEF": {
+    "source_index": 168,
     "name": "THIEF",
     "type": "DARK",
     "power": 40,
@@ -1848,6 +2016,7 @@
     "amount": null
   },
   "SPIDER_WEB": {
+    "source_index": 169,
     "name": "SPIDER_WEB",
     "type": "BUG",
     "power": 0,
@@ -1859,6 +2028,7 @@
     "amount": null
   },
   "MIND_READER": {
+    "source_index": 170,
     "name": "MIND_READER",
     "type": "NORMAL",
     "power": 0,
@@ -1870,6 +2040,7 @@
     "amount": null
   },
   "NIGHTMARE": {
+    "source_index": 171,
     "name": "NIGHTMARE",
     "type": "GHOST",
     "power": 0,
@@ -1881,6 +2052,7 @@
     "amount": null
   },
   "FLAME_WHEEL": {
+    "source_index": 172,
     "name": "FLAME_WHEEL",
     "type": "FIRE",
     "power": 60,
@@ -1892,6 +2064,7 @@
     "amount": null
   },
   "SNORE": {
+    "source_index": 173,
     "name": "SNORE",
     "type": "NORMAL",
     "power": 40,
@@ -1903,6 +2076,7 @@
     "amount": null
   },
   "CURSE": {
+    "source_index": 174,
     "name": "CURSE",
     "type": "CURSE_TYPE",
     "power": 0,
@@ -1914,6 +2088,7 @@
     "amount": null
   },
   "FLAIL": {
+    "source_index": 175,
     "name": "FLAIL",
     "type": "NORMAL",
     "power": 1,
@@ -1925,6 +2100,7 @@
     "amount": null
   },
   "CONVERSION2": {
+    "source_index": 176,
     "name": "CONVERSION2",
     "type": "NORMAL",
     "power": 0,
@@ -1936,6 +2112,7 @@
     "amount": null
   },
   "AEROBLAST": {
+    "source_index": 177,
     "name": "AEROBLAST",
     "type": "FLYING",
     "power": 100,
@@ -1947,6 +2124,7 @@
     "amount": null
   },
   "COTTON_SPORE": {
+    "source_index": 178,
     "name": "COTTON_SPORE",
     "type": "GRASS",
     "power": 0,
@@ -1958,6 +2136,7 @@
     "amount": -2
   },
   "REVERSAL": {
+    "source_index": 179,
     "name": "REVERSAL",
     "type": "FIGHTING",
     "power": 1,
@@ -1969,6 +2148,7 @@
     "amount": null
   },
   "SPITE": {
+    "source_index": 180,
     "name": "SPITE",
     "type": "GHOST",
     "power": 0,
@@ -1980,6 +2160,7 @@
     "amount": null
   },
   "POWDER_SNOW": {
+    "source_index": 181,
     "name": "POWDER_SNOW",
     "type": "ICE",
     "power": 40,
@@ -1991,6 +2172,7 @@
     "amount": null
   },
   "PROTECT": {
+    "source_index": 182,
     "name": "PROTECT",
     "type": "NORMAL",
     "power": 0,
@@ -2002,6 +2184,7 @@
     "amount": null
   },
   "MACH_PUNCH": {
+    "source_index": 183,
     "name": "MACH_PUNCH",
     "type": "FIGHTING",
     "power": 40,
@@ -2013,6 +2196,7 @@
     "amount": null
   },
   "SCARY_FACE": {
+    "source_index": 184,
     "name": "SCARY_FACE",
     "type": "NORMAL",
     "power": 0,
@@ -2024,6 +2208,7 @@
     "amount": -2
   },
   "FAINT_ATTACK": {
+    "source_index": 185,
     "name": "FAINT_ATTACK",
     "type": "DARK",
     "power": 60,
@@ -2035,6 +2220,7 @@
     "amount": null
   },
   "SWEET_KISS": {
+    "source_index": 186,
     "name": "SWEET_KISS",
     "type": "NORMAL",
     "power": 0,
@@ -2046,6 +2232,7 @@
     "amount": null
   },
   "BELLY_DRUM": {
+    "source_index": 187,
     "name": "BELLY_DRUM",
     "type": "NORMAL",
     "power": 0,
@@ -2057,6 +2244,7 @@
     "amount": null
   },
   "SLUDGE_BOMB": {
+    "source_index": 188,
     "name": "SLUDGE_BOMB",
     "type": "POISON",
     "power": 90,
@@ -2068,6 +2256,7 @@
     "amount": null
   },
   "MUD_SLAP": {
+    "source_index": 189,
     "name": "MUD_SLAP",
     "type": "GROUND",
     "power": 20,
@@ -2079,6 +2268,7 @@
     "amount": -1
   },
   "OCTAZOOKA": {
+    "source_index": 190,
     "name": "OCTAZOOKA",
     "type": "WATER",
     "power": 65,
@@ -2090,6 +2280,7 @@
     "amount": -1
   },
   "SPIKES": {
+    "source_index": 191,
     "name": "SPIKES",
     "type": "GROUND",
     "power": 0,
@@ -2101,6 +2292,7 @@
     "amount": null
   },
   "ZAP_CANNON": {
+    "source_index": 192,
     "name": "ZAP_CANNON",
     "type": "ELECTRIC",
     "power": 100,
@@ -2112,6 +2304,7 @@
     "amount": null
   },
   "FORESIGHT": {
+    "source_index": 193,
     "name": "FORESIGHT",
     "type": "NORMAL",
     "power": 0,
@@ -2123,6 +2316,7 @@
     "amount": null
   },
   "DESTINY_BOND": {
+    "source_index": 194,
     "name": "DESTINY_BOND",
     "type": "GHOST",
     "power": 0,
@@ -2134,6 +2328,7 @@
     "amount": null
   },
   "PERISH_SONG": {
+    "source_index": 195,
     "name": "PERISH_SONG",
     "type": "NORMAL",
     "power": 0,
@@ -2145,6 +2340,7 @@
     "amount": null
   },
   "ICY_WIND": {
+    "source_index": 196,
     "name": "ICY_WIND",
     "type": "ICE",
     "power": 55,
@@ -2156,6 +2352,7 @@
     "amount": -1
   },
   "DETECT": {
+    "source_index": 197,
     "name": "DETECT",
     "type": "FIGHTING",
     "power": 0,
@@ -2167,6 +2364,7 @@
     "amount": null
   },
   "BONE_RUSH": {
+    "source_index": 198,
     "name": "BONE_RUSH",
     "type": "GROUND",
     "power": 25,
@@ -2178,6 +2376,7 @@
     "amount": null
   },
   "LOCK_ON": {
+    "source_index": 199,
     "name": "LOCK_ON",
     "type": "NORMAL",
     "power": 0,
@@ -2189,6 +2388,7 @@
     "amount": null
   },
   "OUTRAGE": {
+    "source_index": 200,
     "name": "OUTRAGE",
     "type": "DRAGON",
     "power": 90,
@@ -2200,6 +2400,7 @@
     "amount": null
   },
   "SANDSTORM": {
+    "source_index": 201,
     "name": "SANDSTORM",
     "type": "ROCK",
     "power": 0,
@@ -2211,6 +2412,7 @@
     "amount": null
   },
   "GIGA_DRAIN": {
+    "source_index": 202,
     "name": "GIGA_DRAIN",
     "type": "GRASS",
     "power": 60,
@@ -2222,6 +2424,7 @@
     "amount": null
   },
   "ENDURE": {
+    "source_index": 203,
     "name": "ENDURE",
     "type": "NORMAL",
     "power": 0,
@@ -2233,6 +2436,7 @@
     "amount": null
   },
   "CHARM": {
+    "source_index": 204,
     "name": "CHARM",
     "type": "NORMAL",
     "power": 0,
@@ -2244,6 +2448,7 @@
     "amount": -2
   },
   "ROLLOUT": {
+    "source_index": 205,
     "name": "ROLLOUT",
     "type": "ROCK",
     "power": 30,
@@ -2255,6 +2460,7 @@
     "amount": null
   },
   "FALSE_SWIPE": {
+    "source_index": 206,
     "name": "FALSE_SWIPE",
     "type": "NORMAL",
     "power": 40,
@@ -2266,6 +2472,7 @@
     "amount": null
   },
   "SWAGGER": {
+    "source_index": 207,
     "name": "SWAGGER",
     "type": "NORMAL",
     "power": 0,
@@ -2277,6 +2484,7 @@
     "amount": null
   },
   "MILK_DRINK": {
+    "source_index": 208,
     "name": "MILK_DRINK",
     "type": "NORMAL",
     "power": 0,
@@ -2288,6 +2496,7 @@
     "amount": null
   },
   "SPARK": {
+    "source_index": 209,
     "name": "SPARK",
     "type": "ELECTRIC",
     "power": 65,
@@ -2299,6 +2508,7 @@
     "amount": null
   },
   "FURY_CUTTER": {
+    "source_index": 210,
     "name": "FURY_CUTTER",
     "type": "BUG",
     "power": 10,
@@ -2310,6 +2520,7 @@
     "amount": null
   },
   "STEEL_WING": {
+    "source_index": 211,
     "name": "STEEL_WING",
     "type": "STEEL",
     "power": 70,
@@ -2321,6 +2532,7 @@
     "amount": 1
   },
   "MEAN_LOOK": {
+    "source_index": 212,
     "name": "MEAN_LOOK",
     "type": "NORMAL",
     "power": 0,
@@ -2332,6 +2544,7 @@
     "amount": null
   },
   "ATTRACT": {
+    "source_index": 213,
     "name": "ATTRACT",
     "type": "NORMAL",
     "power": 0,
@@ -2343,6 +2556,7 @@
     "amount": null
   },
   "SLEEP_TALK": {
+    "source_index": 214,
     "name": "SLEEP_TALK",
     "type": "NORMAL",
     "power": 0,
@@ -2354,6 +2568,7 @@
     "amount": null
   },
   "HEAL_BELL": {
+    "source_index": 215,
     "name": "HEAL_BELL",
     "type": "NORMAL",
     "power": 0,
@@ -2365,6 +2580,7 @@
     "amount": null
   },
   "RETURN": {
+    "source_index": 216,
     "name": "RETURN",
     "type": "NORMAL",
     "power": 1,
@@ -2376,6 +2592,7 @@
     "amount": null
   },
   "PRESENT": {
+    "source_index": 217,
     "name": "PRESENT",
     "type": "NORMAL",
     "power": 1,
@@ -2387,6 +2604,7 @@
     "amount": null
   },
   "FRUSTRATION": {
+    "source_index": 218,
     "name": "FRUSTRATION",
     "type": "NORMAL",
     "power": 1,
@@ -2398,6 +2616,7 @@
     "amount": null
   },
   "SAFEGUARD": {
+    "source_index": 219,
     "name": "SAFEGUARD",
     "type": "NORMAL",
     "power": 0,
@@ -2409,6 +2628,7 @@
     "amount": null
   },
   "PAIN_SPLIT": {
+    "source_index": 220,
     "name": "PAIN_SPLIT",
     "type": "NORMAL",
     "power": 0,
@@ -2420,6 +2640,7 @@
     "amount": null
   },
   "SACRED_FIRE": {
+    "source_index": 221,
     "name": "SACRED_FIRE",
     "type": "FIRE",
     "power": 100,
@@ -2431,6 +2652,7 @@
     "amount": null
   },
   "MAGNITUDE": {
+    "source_index": 222,
     "name": "MAGNITUDE",
     "type": "GROUND",
     "power": 1,
@@ -2442,6 +2664,7 @@
     "amount": null
   },
   "DYNAMICPUNCH": {
+    "source_index": 223,
     "name": "DYNAMICPUNCH",
     "type": "FIGHTING",
     "power": 100,
@@ -2453,6 +2676,7 @@
     "amount": null
   },
   "MEGAHORN": {
+    "source_index": 224,
     "name": "MEGAHORN",
     "type": "BUG",
     "power": 120,
@@ -2464,6 +2688,7 @@
     "amount": null
   },
   "DRAGONBREATH": {
+    "source_index": 225,
     "name": "DRAGONBREATH",
     "type": "DRAGON",
     "power": 60,
@@ -2475,6 +2700,7 @@
     "amount": null
   },
   "BATON_PASS": {
+    "source_index": 226,
     "name": "BATON_PASS",
     "type": "NORMAL",
     "power": 0,
@@ -2486,6 +2712,7 @@
     "amount": null
   },
   "ENCORE": {
+    "source_index": 227,
     "name": "ENCORE",
     "type": "NORMAL",
     "power": 0,
@@ -2497,6 +2724,7 @@
     "amount": null
   },
   "PURSUIT": {
+    "source_index": 228,
     "name": "PURSUIT",
     "type": "DARK",
     "power": 40,
@@ -2508,6 +2736,7 @@
     "amount": null
   },
   "RAPID_SPIN": {
+    "source_index": 229,
     "name": "RAPID_SPIN",
     "type": "NORMAL",
     "power": 20,
@@ -2519,6 +2748,7 @@
     "amount": null
   },
   "SWEET_SCENT": {
+    "source_index": 230,
     "name": "SWEET_SCENT",
     "type": "NORMAL",
     "power": 0,
@@ -2530,6 +2760,7 @@
     "amount": -1
   },
   "IRON_TAIL": {
+    "source_index": 231,
     "name": "IRON_TAIL",
     "type": "STEEL",
     "power": 100,
@@ -2541,6 +2772,7 @@
     "amount": -1
   },
   "METAL_CLAW": {
+    "source_index": 232,
     "name": "METAL_CLAW",
     "type": "STEEL",
     "power": 50,
@@ -2552,6 +2784,7 @@
     "amount": 1
   },
   "VITAL_THROW": {
+    "source_index": 233,
     "name": "VITAL_THROW",
     "type": "FIGHTING",
     "power": 70,
@@ -2563,6 +2796,7 @@
     "amount": null
   },
   "MORNING_SUN": {
+    "source_index": 234,
     "name": "MORNING_SUN",
     "type": "NORMAL",
     "power": 0,
@@ -2574,6 +2808,7 @@
     "amount": null
   },
   "SYNTHESIS": {
+    "source_index": 235,
     "name": "SYNTHESIS",
     "type": "GRASS",
     "power": 0,
@@ -2585,6 +2820,7 @@
     "amount": null
   },
   "MOONLIGHT": {
+    "source_index": 236,
     "name": "MOONLIGHT",
     "type": "NORMAL",
     "power": 0,
@@ -2596,6 +2832,7 @@
     "amount": null
   },
   "HIDDEN_POWER": {
+    "source_index": 237,
     "name": "HIDDEN_POWER",
     "type": "NORMAL",
     "power": 1,
@@ -2607,6 +2844,7 @@
     "amount": null
   },
   "CROSS_CHOP": {
+    "source_index": 238,
     "name": "CROSS_CHOP",
     "type": "FIGHTING",
     "power": 100,
@@ -2618,6 +2856,7 @@
     "amount": null
   },
   "TWISTER": {
+    "source_index": 239,
     "name": "TWISTER",
     "type": "DRAGON",
     "power": 40,
@@ -2629,6 +2868,7 @@
     "amount": null
   },
   "RAIN_DANCE": {
+    "source_index": 240,
     "name": "RAIN_DANCE",
     "type": "WATER",
     "power": 0,
@@ -2640,6 +2880,7 @@
     "amount": null
   },
   "SUNNY_DAY": {
+    "source_index": 241,
     "name": "SUNNY_DAY",
     "type": "FIRE",
     "power": 0,
@@ -2651,6 +2892,7 @@
     "amount": null
   },
   "CRUNCH": {
+    "source_index": 242,
     "name": "CRUNCH",
     "type": "DARK",
     "power": 80,
@@ -2662,6 +2904,7 @@
     "amount": -1
   },
   "MIRROR_COAT": {
+    "source_index": 243,
     "name": "MIRROR_COAT",
     "type": "PSYCHIC_TYPE",
     "power": 1,
@@ -2673,6 +2916,7 @@
     "amount": null
   },
   "PSYCH_UP": {
+    "source_index": 244,
     "name": "PSYCH_UP",
     "type": "NORMAL",
     "power": 0,
@@ -2684,6 +2928,7 @@
     "amount": null
   },
   "EXTREMESPEED": {
+    "source_index": 245,
     "name": "EXTREMESPEED",
     "type": "NORMAL",
     "power": 80,
@@ -2695,6 +2940,7 @@
     "amount": null
   },
   "ANCIENTPOWER": {
+    "source_index": 246,
     "name": "ANCIENTPOWER",
     "type": "ROCK",
     "power": 60,
@@ -2706,6 +2952,7 @@
     "amount": null
   },
   "SHADOW_BALL": {
+    "source_index": 247,
     "name": "SHADOW_BALL",
     "type": "GHOST",
     "power": 80,
@@ -2717,6 +2964,7 @@
     "amount": -1
   },
   "FUTURE_SIGHT": {
+    "source_index": 248,
     "name": "FUTURE_SIGHT",
     "type": "PSYCHIC_TYPE",
     "power": 80,
@@ -2728,6 +2976,7 @@
     "amount": null
   },
   "ROCK_SMASH": {
+    "source_index": 249,
     "name": "ROCK_SMASH",
     "type": "FIGHTING",
     "power": 20,
@@ -2739,6 +2988,7 @@
     "amount": -1
   },
   "WHIRLPOOL": {
+    "source_index": 250,
     "name": "WHIRLPOOL",
     "type": "WATER",
     "power": 15,
@@ -2750,6 +3000,7 @@
     "amount": null
   },
   "BEAT_UP": {
+    "source_index": 251,
     "name": "BEAT_UP",
     "type": "DARK",
     "power": 10,

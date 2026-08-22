@@ -15,6 +15,7 @@ export type ExportedRodTable = {
 };
 
 export type ExportedFishingGroup = {
+  source_index: number;
   bite_threshold: number;
   rod_tables: Record<string, ExportedRodTable>;
 };
@@ -396,6 +397,7 @@ export function exportFishing(): ExportedFishingCatalog {
   for (let index = 0; index < constants.length; index += 1) {
     const row = groupRows[index];
     const group: ExportedFishingGroup = {
+      source_index: index + 1,
       bite_threshold: row.biteThreshold,
       rod_tables: {},
     };

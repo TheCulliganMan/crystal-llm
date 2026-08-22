@@ -43,23 +43,6 @@ function extractString(argument: string): string {
   return argument.trim().replace(/@+$/g, "");
 }
 
-function parseDigitCount(argument: string): number {
-  const tokens = argument.split(",").map(t => t.trim().replace(/,$/, ""));
-  for (const token of tokens.reverse()) {
-    if (!token) continue;
-    try {
-      // Use Number() which handles hex (0x) prefixes
-      const digits = Number(token);
-      if (!isNaN(digits)) {
-        return Math.max(1, digits);
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-  return 1;
-}
-
 function parseTextFile(filePath: string): Record<string, string> {
   const results: Record<string, string> = {};
   let label: string | null = null;
@@ -127,7 +110,6 @@ function parseTextFile(filePath: string): Record<string, string> {
       continue;
     }
     if (token === "text_start") {
-      buffer.push("\n\n");
       continue;
     }
     if (token === "text_ram") {
@@ -135,12 +117,12 @@ function parseTextFile(filePath: string): Record<string, string> {
       if (match) {
         buffer.push(`<STRING_BUFFER_${match[1]}>`);
       } else {
-        buffer.push("@");
+        buffer.push(`<RAM:${argument.trim()}>`);
       }
       continue;
     }
     if (token === "text_decimal") {
-      buffer.push("@".repeat(parseDigitCount(argument)));
+      buffer.push(`<DECIMAL:${argument.trim()}>`);
       continue;
     }
     if (token === "text_today") {

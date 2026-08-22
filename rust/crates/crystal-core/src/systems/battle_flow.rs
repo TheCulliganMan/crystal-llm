@@ -191,7 +191,6 @@ fn resolve_active_battle_capture_or_escape_item(
                 wobble_count: 0,
                 animation_shakes: 0,
                 final_catch_rate: 0,
-                rng_seed_after: rng.seed(),
                 ball_id: Some(item.script_name.clone()),
             }
         } else {
@@ -209,7 +208,7 @@ fn resolve_active_battle_capture_or_escape_item(
                 item_id: item_id.to_string(),
             })?
         };
-        state.rng_seed = capture.rng_seed_after;
+        state.rng_seed = rng.seed();
         let completion = if capture.caught && !capture.blocked {
             complete_active_wild_capture_result(state, &capture)
                 .map_err(ActiveBattleFlowError::CaptureComplete)?

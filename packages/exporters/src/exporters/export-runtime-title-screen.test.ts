@@ -847,14 +847,14 @@ describe("runtime title presentation source CFG", () => {
     ]);
     expect(checkpoint.frontier).toEqual({
       reason: "missing_subprogram_contract",
-      block: ".loop@CrystalIntro",
-      target: "JoyTextDelay",
+      block: "IntroScene13",
+      target: "Intro_ClearBGPals",
       opcode: "call",
-      args: ["JoyTextDelay"],
+      args: ["Intro_ClearBGPals"],
       source_span: {
         file: "engine/movie/intro.asm",
-        start_line: 12,
-        end_line: 12,
+        start_line: 628,
+        end_line: 628,
       },
       compiled_prefix: {
         source_entry: "CrystalIntro",
@@ -1211,7 +1211,17 @@ describe("runtime title presentation source CFG", () => {
           },
           expect.objectContaining({
             op: "sprite_scheduler_step",
-            instances: [],
+            instances: expect.arrayContaining([
+              expect.stringContaining("engine/movie/intro.asm"),
+            ]),
+            instance_activation: expect.arrayContaining([
+              expect.objectContaining({
+                instance: expect.stringContaining("engine/movie/intro.asm"),
+                lifetime: expect.objectContaining({
+                  callback_before_frame_update: true,
+                }),
+              }),
+            ]),
             struct_slots: 10,
             callback_before_frame_update: true,
             oam_cursor: {
@@ -1278,10 +1288,357 @@ describe("runtime title presentation source CFG", () => {
               end_line: 22,
             },
           },
+          expect.objectContaining({
+            op: "sample_input",
+            routine: "JoyTextDelay",
+            sampler: "GetJoypad",
+            result: "hJoyLast",
+            menu_guard: "hInMenu",
+            menu_zero_source: "hJoyPressed",
+            menu_nonzero_source: "hJoyDown",
+            repeat_delay: "wTextDelayFrames",
+            pressed_repeat_reset: 15,
+            idle_repeat_restart: 5,
+            invocation: expect.objectContaining({
+              call_form: "call",
+              target: "JoyTextDelay",
+              source_span: {
+                file: "engine/movie/intro.asm",
+                start_line: 12,
+                end_line: 12,
+              },
+            }),
+          }),
+          expect.objectContaining({
+            op: "input_branch",
+            sample: "hJoyLast",
+            require_all: [],
+            require_any: [
+              expect.objectContaining({ symbol: "PAD_BUTTONS", value: 15 }),
+            ],
+            forbid_any: [],
+            target: ".ShutOffMusic@CrystalIntro",
+          }),
+          expect.objectContaining({
+            op: "memory_branch",
+            source: "wJumptableIndex",
+            predicate: "bit_set",
+            bit: expect.objectContaining({
+              symbol: "JUMPTABLE_EXIT_F",
+              value: 7,
+            }),
+            target: ".done@CrystalIntro",
+          }),
+          expect.objectContaining({
+            op: "dispatch_table",
+            dispatcher: "IntroSceneJumper",
+            table: "IntroScenes",
+            index: "wJumptableIndex",
+            entries: Array.from(
+              { length: 28 },
+              (_, index) => `IntroScene${index + 1}`,
+            ),
+            domain: {
+              minimum: 0,
+              maximum: 27,
+              values: Array.from({ length: 28 }, (_, index) => index),
+            },
+          }),
+          expect.objectContaining({
+            op: "postincrement_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            result: "intro_scene_frame",
+            delta: 1,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_frame",
+            predicate: "unsigned_greater_or_equal",
+            operand: 128,
+            target: ".endscene@IntroScene2",
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_frame",
+            predicate: "not_equal",
+            operand: 96,
+            target: ".nosound@IntroScene2",
+          }),
+          expect.objectContaining({
+            op: "sprite_init_group",
+            instances: expect.any(Array),
+            origin: { macro: "depixel", x: 11, y: 11 },
+            preserves: "intro_scene_frame",
+          }),
+          expect.objectContaining({
+            op: "sprite_activate",
+            object: expect.objectContaining({
+              symbol: "SPRITE_ANIM_OBJ_INTRO_SUICUNE",
+            }),
+            origin: {
+              macro: "depixel",
+              x_tile: 13,
+              y_tile: 27,
+              x_pixel: 4,
+              y_pixel: 0,
+              x: 108,
+              y: 216,
+            },
+          }),
+          expect.objectContaining({
+            op: "transform_memory_byte",
+            target: "wGlobalAnimXOffset",
+            input: "global_anim_x",
+            operator: "subtract",
+            operand: 8,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "deinitialize_all_sprites",
+            struct_indices: Array.from({ length: 10 }, (_, index) => index),
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wAttrmap",
+            target_offset: 0,
+            byte_count: 240,
+            value: 1,
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wAttrmap",
+            target_offset: 240,
+            byte_count: 60,
+            value: 2,
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wAttrmap",
+            target_offset: 300,
+            byte_count: 60,
+            value: 3,
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "hBGMapAddress",
+            value: 0x0c,
+          }),
+          expect.objectContaining({
+            op: "indexed_2bpp_request",
+            condition: expect.objectContaining({
+              source: "wIntroSceneFrameCounter",
+              predicate: "unsigned_less_than",
+              operand: 36,
+            }),
+            selector: {
+              source: "wIntroSceneFrameCounter",
+              mask: 0x0c,
+              shift_right: 1,
+              byte_offsets: [0, 2, 4, 6],
+            },
+            target: "vTiles2 tile $09",
+            tile_count: 4,
+            byte_count: 64,
+          }),
+          expect.objectContaining({
+            op: "sprite_activate",
+            object: expect.objectContaining({
+              symbol: "SPRITE_ANIM_OBJ_INTRO_PICHU",
+            }),
+            origin: expect.objectContaining({ x: 169, y: 128 }),
+          }),
+          expect.objectContaining({
+            op: "sprite_activate",
+            object: expect.objectContaining({
+              symbol: "SPRITE_ANIM_OBJ_INTRO_WOOPER",
+            }),
+            origin: expect.objectContaining({ x: 176, y: 48 }),
+          }),
+          expect.objectContaining({
+            op: "scheduled_audio",
+            clock: "wIntroSceneFrameCounter",
+            sentinel: 0xff,
+            entries: [
+              { frame: 0x00, audio: "SFX_INTRO_UNOWN_3" },
+              { frame: 0x20, audio: "SFX_INTRO_UNOWN_2" },
+              { frame: 0x40, audio: "SFX_INTRO_UNOWN_1" },
+              { frame: 0x60, audio: "SFX_INTRO_UNOWN_2" },
+              { frame: 0x80, audio: "SFX_INTRO_UNOWN_3" },
+              { frame: 0x90, audio: "SFX_INTRO_UNOWN_2" },
+              { frame: 0xa0, audio: "SFX_INTRO_UNOWN_1" },
+              { frame: 0xb0, audio: "SFX_INTRO_UNOWN_2" },
+            ],
+            on_match: {
+              stop_sfx_channels: [5, 6, 7, 8],
+              play_entry: true,
+            },
+          }),
+          expect.objectContaining({
+            op: "compute_byte",
+            input: "intro_scene_frame",
+            steps: [
+              { op: "mask", value: 0x0f },
+              { op: "shift_left", value: 1 },
+              { op: "shift_left", value: 1 },
+            ],
+            result: "intro_scene_timer_value",
+          }),
+          expect.objectContaining({
+            op: "play_audio",
+            audio: "SFX_INTRO_UNOWN_1",
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte_from_result",
+            target: "wIntroSceneTimer",
+            result: "intro_scene_frame",
+          }),
+          expect.objectContaining({
+            op: "set_local",
+            name: "accumulator",
+            value: 0,
+          }),
+          expect.objectContaining({
+            op: "palette_fade_lookup",
+            palette_selector: "accumulator",
+            selector_stride: 8,
+            first_color_offset: 2,
+            timer: expect.objectContaining({
+              source: "wIntroSceneTimer",
+              mask: 63,
+              fold_above: 31,
+              fold_from: 63,
+            }),
+            clear: { target: "wBGPals2", byte_count: 64, value: 0 },
+            tables: [
+              expect.objectContaining({ label: ".BWFade", colors: expect.any(Array) }),
+              expect.objectContaining({ label: ".BlackLBlueFade", colors: expect.any(Array) }),
+              expect.objectContaining({ label: ".BlackBlueFade", colors: expect.any(Array) }),
+            ],
+            writes: [
+              { target_offset: 2, table: ".BWFade", encoding: "rgb555_little_endian" },
+              { target_offset: 4, table: ".BlackLBlueFade", encoding: "rgb555_little_endian" },
+              { target_offset: 6, table: ".BlackBlueFade", encoding: "rgb555_little_endian" },
+            ],
+            transfer_request: { target: "hCGBPalUpdate", value: 1 },
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wLYOverrides",
+            byte_count: 144,
+            value: 0,
+            bank: { select: "BANK(wLYOverrides)", restore: true },
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "hLCDCPointer",
+            value: 0x43,
+          }),
+          expect.objectContaining({
+            op: "perspective_scroll",
+            target: "wLYOverrides",
+            byte_count: 144,
+            frame: expect.objectContaining({
+              source: "wIntroSceneFrameCounter",
+              parity_mask: 1,
+            }),
+            bands: [
+              expect.objectContaining({
+                id: "trees",
+                offset: 0,
+                byte_count: 0x5f,
+                delta: 1,
+                cadence: "odd_frames",
+              }),
+              expect.objectContaining({
+                id: "grass",
+                offset: 0x5f,
+                byte_count: 0x31,
+                delta: 2,
+                cadence: "every_frame",
+              }),
+            ],
+            horizontal_scroll: expect.objectContaining({
+              source_offset: 0,
+              target: "hSCX",
+            }),
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_frame",
+            predicate: "equal",
+            operand: 0x80,
+            target: ".endscene@IntroScene4",
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_frame",
+            predicate: "equal",
+            operand: 0x60,
+            target: ".SecondUnown@IntroScene6",
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_frame",
+            predicate: "unsigned_greater_or_equal",
+            operand: 0x40,
+            target: ".StopUnown@IntroScene6",
+          }),
+          expect.objectContaining({
+            op: "sprite_init_group",
+            origin: { macro: "depixel", x: 7, y: 15 },
+            preserves: "intro_scene_frame",
+          }),
+          expect.objectContaining({
+            op: "sprite_init_group",
+            origin: { macro: "depixel", x: 14, y: 6 },
+            preserves: "intro_scene_frame",
+          }),
+        ]),
+        sprite_programs: expect.arrayContaining([
+          expect.objectContaining({
+            initializer_source_span: expect.objectContaining({
+              file: "engine/movie/intro.asm",
+            }),
+          }),
         ]),
       },
     });
     const introPrefix = checkpoint.frontier?.compiled_prefix?.operations ?? [];
+    const unownFade = introPrefix.find(
+      (operation) => operation.op === "palette_fade_lookup",
+    );
+    expect(unownFade).toMatchObject({
+      tables: [
+        { colors: expect.arrayContaining([0, 16912, 32767]) },
+        { colors: expect.arrayContaining([0, 16640, 32224]) },
+        { colors: expect.arrayContaining([0, 16384, 31744]) },
+      ],
+    });
+    expect(
+      introPrefix.find(
+        (operation) =>
+          operation.op === "request_2bpp_transfer" &&
+          operation.tile_count === 255,
+      ),
+    ).toMatchObject({
+      byte_count: 4080,
+      source_segments: [
+        {
+          resource: "gfx/intro/suicune_run.2bpp.lz",
+          resource_offset: 0,
+          scratch_offset: 0,
+          byte_count: 3072,
+        },
+        {
+          resource: "wDecompressScratch",
+          resource_offset: 3072,
+          scratch_offset: 3072,
+          byte_count: 1008,
+          origin: "preexisting_memory",
+        },
+      ],
+    });
     expect(
       introPrefix.find(
         (operation) =>
@@ -1316,6 +1673,50 @@ describe("runtime title presentation source CFG", () => {
           operation.source_span.file === "engine/movie/intro.asm",
       ),
     ).toEqual([
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 21 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 3,
+        source_span: expect.objectContaining({ start_line: 452 }),
+      }),
+      expect.objectContaining({
+        frames: 3,
+        source_span: expect.objectContaining({ start_line: 457 }),
+      }),
       expect.objectContaining({
         frames: 1,
         source_span: expect.objectContaining({ start_line: 1569 }),
@@ -1620,7 +2021,7 @@ describe("runtime title presentation source CFG", () => {
     });
   });
 
-  it("fails closed at the next reachable callable without an exact typed contract", () => {
+  it("emits Scenes 2 through 12 before failing closed at Scene 13", () => {
     expect(() =>
       buildRuntimeTitlePresentationProgram({
         disassemblyRoot,
@@ -1628,8 +2029,200 @@ describe("runtime title presentation source CFG", () => {
         runtimeSpawnIdentifiers: new Set([0]),
       }),
     ).toThrow(
-      /source call JoyTextDelay.*engine\/movie\/intro\.asm:12.*typed subprogram contract/i,
+      /source call Intro_ClearBGPals.*engine\/movie\/intro\.asm:628.*typed subprogram contract/i,
     );
+  });
+
+  it.each([
+    {
+      name: "the end threshold changes",
+      before:
+        "IntroScene2:\n; First Unown (A) fades in, pulses, then fades out.\n\tld hl, wIntroSceneFrameCounter\n\tld a, [hl]\n\tinc [hl]\n\tcp $80\n\tjr nc, .endscene",
+      after:
+        "IntroScene2:\n; First Unown (A) fades in, pulses, then fades out.\n\tld hl, wIntroSceneFrameCounter\n\tld a, [hl]\n\tinc [hl]\n\tcp $81\n\tjr nc, .endscene",
+      diagnostic: /IntroScene2.*counter|threshold|\$80/i,
+    },
+    {
+      name: "the Unown trigger threshold changes",
+      before: "\tjr nc, .endscene\n\tcp $60\n\tjr nz, .nosound",
+      after: "\tjr nc, .endscene\n\tcp $61\n\tjr nz, .nosound",
+      diagnostic: /IntroScene2.*counter|threshold|\$60/i,
+    },
+    {
+      name: "the Unown sound changes",
+      before:
+        "\tjr nz, .nosound\n\tpush af\n\tdepixel 11, 11\n\tcall CrystalIntro_InitUnownAnim\n\tld de, SFX_INTRO_UNOWN_1\n\tcall PlaySFX",
+      after:
+        "\tjr nz, .nosound\n\tpush af\n\tdepixel 11, 11\n\tcall CrystalIntro_InitUnownAnim\n\tld de, SFX_INTRO_UNOWN_2\n\tcall PlaySFX",
+      diagnostic: /IntroScene2.*Unown trigger|SFX_INTRO_UNOWN_1/i,
+    },
+    {
+      name: "the Unown fade timer mask changes",
+      before:
+        "\tld a, [wIntroSceneTimer]\n\tand %111111\n\tcp %011111",
+      after:
+        "\tld a, [wIntroSceneTimer]\n\tand %011111\n\tcp %011111",
+      diagnostic: /CrystalIntro_UnownFade.*timer fold|%111111/i,
+    },
+    {
+      name: "the Unown fade clears seven palettes",
+      before:
+        "\tld hl, wBGPals2\n\tld bc, 8 palettes\n\txor a\n\tcall ByteFill",
+      after:
+        "\tld hl, wBGPals2\n\tld bc, 7 palettes\n\txor a\n\tcall ByteFill",
+      diagnostic: /CrystalIntro_UnownFade.*clear|8 palettes/i,
+    },
+    {
+      name: "the light-blue fade rounds its green channel up",
+      before:
+        ".BlackLBlueFade:\n; Fade between black and light blue.\nfor hue, 32\n\tRGB 0, hue / 2, hue\nendr",
+      after:
+        ".BlackLBlueFade:\n; Fade between black and light blue.\nfor hue, 32\n\tRGB 0, (hue + 1) / 2, hue\nendr",
+      diagnostic: /CrystalIntro_UnownFade.*BlackLBlueFade|generated RGB555 table/i,
+    },
+    {
+      name: "the Unown fade redirects its palette request",
+      before:
+        "\tpop af\n\tldh [rWBK], a\n\tld a, TRUE\n\tldh [hCGBPalUpdate], a\n\tret\n\n.BWFade:",
+      after:
+        "\tpop af\n\tldh [rWBK], a\n\tld a, TRUE\n\tldh [hBGMapUpdate], a\n\tret\n\n.BWFade:",
+      diagnostic: /CrystalIntro_UnownFade.*transfer request|hCGBPalUpdate/i,
+    },
+    {
+      name: "the LY override reset clears a fixed shorter range",
+      before:
+        "\tld hl, wLYOverrides\n\tld bc, wLYOverridesEnd - wLYOverrides\n\txor a\n\tcall ByteFill",
+      after:
+        "\tld hl, wLYOverrides\n\tld bc, $8f\n\txor a\n\tcall ByteFill",
+      diagnostic: /Intro_ResetLYOverrides.*banked clear|wLYOverridesEnd/i,
+    },
+    {
+      name: "the perspective trees band updates every frame",
+      before:
+        "\tld a, [wIntroSceneFrameCounter]\n\tand $1\n\tjr z, .skip",
+      after:
+        "\tld a, [wIntroSceneFrameCounter]\n\tand $0\n\tjr z, .skip",
+      diagnostic: /Intro_PerspectiveScrollBG.*trees band|and \$1/i,
+    },
+    {
+      name: "the perspective grass band advances by one pixel",
+      before:
+        ".skip\n\t; grass in the front\n\tld hl, wLYOverrides + $5f\n\tld a, [hl]\n\tinc a\n\tinc a\n\tld bc, $31",
+      after:
+        ".skip\n\t; grass in the front\n\tld hl, wLYOverrides + $5f\n\tld a, [hl]\n\tinc a\n\tld bc, $31",
+      diagnostic: /Intro_PerspectiveScrollBG.*grass band|inc a/i,
+    },
+    {
+      name: "Scene 6 starts its second Unown early",
+      before:
+        "\tcp $60\n\tjr z, .SecondUnown\n\tcp $40\n\tjr nc, .StopUnown",
+      after:
+        "\tcp $58\n\tjr z, .SecondUnown\n\tcp $40\n\tjr nc, .StopUnown",
+      diagnostic: /IntroScene6.*counter dispatch|cp \$60/i,
+    },
+    {
+      name: "Scene 6 swaps the first Unown sound",
+      before:
+        ".FirstUnown:\n\tpush af\n\tdepixel 7, 15\n\tcall CrystalIntro_InitUnownAnim\n\tld de, SFX_INTRO_UNOWN_2",
+      after:
+        ".FirstUnown:\n\tpush af\n\tdepixel 7, 15\n\tcall CrystalIntro_InitUnownAnim\n\tld de, SFX_INTRO_UNOWN_1",
+      diagnostic: /FirstUnown@IntroScene6.*trigger|SFX_INTRO_UNOWN_2/i,
+    },
+    {
+      name: "Scene 7 shifts Suicune one pixel right",
+      before:
+        "\tdepixel 13, 27, 4, 0\n\tld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE\n\tcall InitSpriteAnimStruct",
+      after:
+        "\tdepixel 13, 27, 5, 0\n\tld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE\n\tcall InitSpriteAnimStruct",
+      diagnostic: /IntroScene7.*allocation|depixel 13, 27, 4, 0/i,
+    },
+    {
+      name: "Scene 8 moves Suicune four pixels per frame",
+      before:
+        ".animate_suicune\n\tld a, [wGlobalAnimXOffset]\n\tand a\n\tjr z, .finish\n\tsub $8",
+      after:
+        ".animate_suicune\n\tld a, [wGlobalAnimXOffset]\n\tand a\n\tjr z, .finish\n\tsub $4",
+      diagnostic: /IntroScene8.*offset animation|sub \$8/i,
+    },
+    {
+      name: "Scene 9 shortens its first attrmap band",
+      before:
+        "\thlcoord 0, 0, wAttrmap\n\t; first 12 rows have palette 1\n\tld bc, 12 * SCREEN_WIDTH",
+      after:
+        "\thlcoord 0, 0, wAttrmap\n\t; first 12 rows have palette 1\n\tld bc, 11 * SCREEN_WIDTH",
+      diagnostic: /IntroScene9.*attrmap\/update program|12 \* SCREEN_WIDTH/i,
+    },
+    {
+      name: "Scene 9 points at BG map byte $0d",
+      before:
+        "\tcall DelayFrame\n\tld a, LOW(vBGMap0 + $c) ; $c\n\tldh [hBGMapAddress], a",
+      after:
+        "\tcall DelayFrame\n\tld a, LOW(vBGMap0 + $d) ; $d\n\tldh [hBGMapAddress], a",
+      diagnostic: /IntroScene9.*attrmap\/update program|LOW\(vBGMap0 \+ \$c\)/i,
+    },
+    {
+      name: "the grass rustle lasts one extra frame",
+      before:
+        "Intro_RustleGrass:\n\tld a, [wIntroSceneFrameCounter]\n\tcp 36\n\tret nc",
+      after:
+        "Intro_RustleGrass:\n\tld a, [wIntroSceneFrameCounter]\n\tcp 37\n\tret nc",
+      diagnostic: /Intro_RustleGrass.*gated asynchronous|cp 36/i,
+    },
+    {
+      name: "the grass animation skips its repeated second frame",
+      before:
+        ".RustlingGrassPointers:\n\tdw IntroGrass1GFX\n\tdw IntroGrass2GFX\n\tdw IntroGrass3GFX\n\tdw IntroGrass2GFX",
+      after:
+        ".RustlingGrassPointers:\n\tdw IntroGrass1GFX\n\tdw IntroGrass2GFX\n\tdw IntroGrass3GFX\n\tdw IntroGrass1GFX",
+      diagnostic: /Intro_RustleGrass.*four-entry animation table|IntroGrass2GFX/i,
+    },
+    {
+      name: "Scene 12 changes its $90 Unown sound",
+      before:
+        "\tdbw $80, SFX_INTRO_UNOWN_3\n\tdbw $90, SFX_INTRO_UNOWN_2\n\tdbw $a0, SFX_INTRO_UNOWN_1",
+      after:
+        "\tdbw $80, SFX_INTRO_UNOWN_3\n\tdbw $90, SFX_INTRO_UNOWN_3\n\tdbw $a0, SFX_INTRO_UNOWN_1",
+      diagnostic: /IntroScene12.*frame-to-sound table|SFX_INTRO_UNOWN_2/i,
+    },
+    {
+      name: "Scene 12 changes its double-speed timer mask",
+      before:
+        ".second_half\n; double speed\n\tld c, a\n\tand $f\n\tsla a\n\tsla a",
+      after:
+        ".second_half\n; double speed\n\tld c, a\n\tand $1f\n\tsla a\n\tsla a",
+      diagnostic: /IntroScene12.*double-speed second half|and \$f/i,
+    },
+  ])("fails closed when $name", ({ before, after, diagnostic }) => {
+    const mutatedIntro = replaceExact(canonicalRead("engine/movie/intro.asm"), before, after);
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === "engine/movie/intro.asm"
+            ? mutatedIntro
+            : canonicalRead(relativePath),
+      }),
+    ).toThrow(diagnostic);
+  });
+
+  it("fails closed when the contiguous decompression overflow allocation shrinks", () => {
+    const file = "ram/wram.asm";
+    const mutatedWram = replaceExact(
+      canonicalRead(file),
+      "wDecompressScratch:: ds $80 tiles\nwDecompressEnemyFrontpic:: ds $80 tiles",
+      "wDecompressScratch:: ds $80 tiles\nwDecompressEnemyFrontpic:: ds $7f tiles",
+    );
+    expect(() =>
+      analyzeRuntimeTitlePresentationEmission({
+        disassemblyRoot,
+        audioAssetIds: new Set(),
+        runtimeSpawnIdentifiers: new Set([0]),
+        readSource: (relativePath) =>
+          relativePath === file ? mutatedWram : canonicalRead(relativePath),
+      }),
+    ).toThrow(/decompression contiguous overflow capacity|wDecompressEnemyFrontpic/i);
   });
 
   it.each([
@@ -1643,8 +2236,10 @@ describe("runtime title presentation source CFG", () => {
     },
     {
       name: "the zero-instance scheduler stops clearing remaining OAM",
-      before: "\tjr nc, .done\n\txor a\n\tld [hli], a\n\tjr .loop2",
-      after: "\tjr nc, .done\n\tinc a\n\tld [hli], a\n\tjr .loop2",
+      before:
+        "\tcp LOW(wShadowOAMEnd)\n\tjr nc, .done\n\txor a\n\tld [hli], a\n\tjr .loop2",
+      after:
+        "\tcp LOW(wShadowOAMEnd)\n\tjr nc, .done\n\tinc a\n\tld [hli], a\n\tjr .loop2",
       diagnostic: /PlaySpriteAnimations|remaining OAM|xor a/i,
     },
   ])("fails closed when $name", ({ before, after, diagnostic }) => {

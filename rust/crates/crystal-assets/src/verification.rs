@@ -51,6 +51,7 @@ fn verify_game_data(
     verify_script_variable_commands(data, &mut diagnostics);
     verify_script_control_commands(data, &mut diagnostics);
     verify_standard_script_catalog(data, &mut diagnostics);
+    verify_overworld_event_catalog(data, &mut diagnostics);
     verify_map_section_commands(data, &mut diagnostics);
     verify_script_field_pickups(data, &mut diagnostics);
     verify_script_shop_commands(data, &mut diagnostics);
@@ -99,6 +100,16 @@ fn verify_standard_script_catalog(data: &GameDataSet, diagnostics: &mut Vec<Veri
         diagnostics.push(VerificationError::error(
             "invalid_runtime_standard_scripts",
             "story_events:StandardScripts",
+            error.to_string(),
+        ));
+    }
+}
+
+fn verify_overworld_event_catalog(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    if let Err(error) = validate_compiled_overworld_event_catalog(data) {
+        diagnostics.push(VerificationError::error(
+            "invalid_runtime_overworld_events",
+            "story_events:OverworldEvents",
             error.to_string(),
         ));
     }
@@ -264,6 +275,11 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         }
     }
     diagnostics.extend(
+        move_source_index_catalog_issues(&data.moves)
+            .into_iter()
+            .map(move_source_index_catalog_issue_diagnostic),
+    );
+    diagnostics.extend(
         growth_rate_catalog_issues(&data.growth_rates)
             .into_iter()
             .map(growth_rate_catalog_issue_diagnostic),
@@ -273,6 +289,24 @@ fn verify_species_and_moves(data: &GameDataSet, diagnostics: &mut Vec<Verificati
             .into_iter()
             .map(learnset_catalog_issue_diagnostic),
     );
+}
+
+fn move_source_index_catalog_issue_diagnostic(
+    issue: MoveSourceIndexCatalogIssue,
+) -> VerificationError {
+    match issue {
+        MoveSourceIndexCatalogIssue::DuplicateSourceIndex {
+            source_index,
+            first_move,
+            second_move,
+        } => VerificationError::error(
+            "duplicate_move_source_index",
+            source_index.to_string(),
+            format!(
+                "moves '{first_move}' and '{second_move}' both declare ASM move index {source_index}"
+            ),
+        ),
+    }
 }
 
 fn growth_rate_catalog_issue_diagnostic(issue: GrowthRateCatalogIssue) -> VerificationError {
@@ -458,6 +492,14 @@ fn field_rule_item_ids(data: &GameDataSet) -> BTreeSet<String> {
     ]
     .into_iter()
     .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone()))
+    .chain(
+        [
+            &data.field_moves.card_key,
+            &data.field_moves.basement_key,
+        ]
+        .into_iter()
+        .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone())),
+    )
     .chain(
         (!data.field_moves.escape_rope.item_id.is_empty())
             .then(|| data.field_moves.escape_rope.item_id.clone()),
@@ -1580,11 +1622,7 @@ fn scripted_trainer_object_is_backed_by_exact_script(
     };
     module.scripted_trainer_battles.iter().any(|battle| {
         script_references_exact_arg(&module.scripts, &battle.source_script, object_id)
-            && scripted_trainer_continuation_reaches_event_flag(
-                module,
-                battle,
-                &object.event_flag,
-            )
+            && scripted_trainer_continuation_reaches_event_flag(module, battle, &object.event_flag)
     })
 }
 
@@ -1603,11 +1641,7 @@ fn scripted_trainer_continuation_reaches_event_flag(
         if !visited.insert((source_script.clone(), command_index)) {
             continue;
         }
-        let Some(entries) = module
-            .scripts
-            .get(&source_script)
-            .and_then(Value::as_array)
-        else {
+        let Some(entries) = module.scripts.get(&source_script).and_then(Value::as_array) else {
             continue;
         };
         let Some(entry) = entries.get(command_index) else {
@@ -1619,11 +1653,7 @@ fn scripted_trainer_continuation_reaches_event_flag(
         let args = entry
             .get("args")
             .and_then(Value::as_array)
-            .and_then(|args| {
-                args.iter()
-                    .map(Value::as_str)
-                    .collect::<Option<Vec<_>>>()
-            });
+            .and_then(|args| args.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
 
         if command == "setevent"
             && args
@@ -1635,21 +1665,21 @@ fn scripted_trainer_continuation_reaches_event_flag(
 
         let next = (source_script.clone(), command_index + 1);
         match command {
-            "sjump" | "jump" | "farsjump" | "stopandsjump" => {
-                if let Some(target) = args
-                    .as_deref()
-                    .filter(|args| args.len() == 1)
-                    .and_then(|args| {
-                        resolve_script_target_label(&module.scripts, &source_script, args[0])
-                    })
+            "sjump" | "farsjump" | "stopandsjump" => {
+                if let Some(target) =
+                    args.as_deref()
+                        .filter(|args| args.len() == 1)
+                        .and_then(|args| {
+                            resolve_script_target_label(&module.scripts, &source_script, args[0])
+                        })
                 {
                     pending.push_back((target, 0));
                 }
             }
-            "loadtrainer" | "loadwildmon" | "catchtutorial" | "startbattle" | "end"
-            | "endall" | "endcallback" | "reloadend" | "return" | "jumpstd"
-            | "halloffame" | "credits" | "iftrue" | "iffalse" | "ifequal"
-            | "ifnotequal" | "ifgreater" | "ifless" | "scall" | "farscall" => {}
+            "loadtrainer" | "loadwildmon" | "catchtutorial" | "startbattle" | "end" | "endall"
+            | "endcallback" | "reloadend" | "return" | "jumpstd" | "halloffame" | "credits"
+            | "iftrue" | "iffalse" | "ifequal" | "ifnotequal" | "ifgreater" | "ifless"
+            | "scall" | "farscall" => {}
             _ => pending.push_back(next),
         }
     }
@@ -1901,25 +1931,33 @@ fn trainer_catalog_issue_diagnostic(issue: TrainerCatalogIssue) -> VerificationE
 }
 
 fn verify_runtime_title_screen(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    match data.runtime_title_screen.new_game_spawn_identifier {
-        Some(spawn_identifier) => {
-            if !data
-                .runtime_spawn_points
-                .contains_key(&spawn_identifier.to_string())
-            {
-                diagnostics.push(VerificationError::error(
-                    "unknown_runtime_title_spawn_identifier",
-                    "runtime_title_screen",
-                    format!(
-                        "runtime title screen references missing new-game spawn identifier {spawn_identifier}"
-                    ),
-                ));
-            }
-        }
+    match data
+        .story_event_script_constants
+        .global
+        .get("SPAWN_HOME")
+    {
+        Some(value) => match u16::try_from(*value) {
+            Ok(spawn_identifier)
+                if data
+                    .runtime_spawn_points
+                    .contains_key(&spawn_identifier.to_string()) => {}
+            Ok(spawn_identifier) => diagnostics.push(VerificationError::error(
+                "unknown_runtime_title_spawn_identifier",
+                "SPAWN_HOME",
+                format!(
+                    "source constant SPAWN_HOME={spawn_identifier} has no runtime spawn point"
+                ),
+            )),
+            Err(_) => diagnostics.push(VerificationError::error(
+                "invalid_runtime_title_spawn_identifier",
+                "SPAWN_HOME",
+                format!("source constant SPAWN_HOME={value} is not a u16"),
+            )),
+        },
         None => diagnostics.push(VerificationError::error(
             "missing_runtime_title_spawn_identifier",
-            "runtime_title_screen",
-            "runtime title screen requires explicit new-game spawn identifier",
+            "SPAWN_HOME",
+            "new-game startup requires exported source constant SPAWN_HOME",
         )),
     }
 
@@ -2565,172 +2603,6 @@ fn verify_map_command_source_scripts(data: &GameDataSet, diagnostics: &mut Vec<V
     }
 }
 
-#[cfg(test)]
-fn verify_unique_runtime_script_labels(
-    data: &GameDataSet,
-    diagnostics: &mut Vec<VerificationError>,
-) {
-    let runtime_source_labels = runtime_source_script_labels(data);
-    let mut labels: BTreeMap<&str, &str> = BTreeMap::new();
-    for (map_name, module) in &data.maps {
-        for script_label in module.scripts.keys() {
-            if !runtime_source_labels.contains(script_label) {
-                continue;
-            }
-            if let Some(existing_map) = labels.insert(script_label, map_name) {
-                diagnostics.push(VerificationError::error(
-                    "duplicate_runtime_script_label",
-                    script_label,
-                    format!(
-                        "script label '{script_label}' is duplicated in maps {existing_map} and {map_name}; runtime save references are label-only"
-                    ),
-                ));
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn runtime_source_script_labels(data: &GameDataSet) -> BTreeSet<String> {
-    let mut labels = BTreeSet::new();
-    for module in data.maps.values() {
-        labels.extend(module.trainer_scripts.keys().cloned());
-        labels.extend(
-            module
-                .scripted_trainer_battles
-                .iter()
-                .map(|battle| battle.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .scripted_wild_battles
-                .iter()
-                .map(|battle| battle.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_item_grants
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_item_checks
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_item_takes
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_economy_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .gift_pokemon_scripts
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_flag_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_scene_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_audio_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_block_changes
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_object_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_movements
-                .iter()
-                .filter_map(|movement| movement.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_map_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_text_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_variable_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_control_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_field_pickups
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_shop_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_phone_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_runtime_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-        labels.extend(
-            module
-                .script_swarm_commands
-                .iter()
-                .map(|command| command.source_script.clone()),
-        );
-    }
-    labels
-}
-
 fn verify_script_source_reference(
     map_name: &str,
     module: &MapModule,
@@ -2993,6 +2865,14 @@ fn script_flag_command_issue_diagnostic(
             format!(
                 "script flag command flag id must be exact and untrimmed, found {:?}",
                 command.flag_id
+            ),
+        ),
+        ScriptFlagCommandIssue::FlagKindMismatch => VerificationError::error(
+            "script_flag_kind_mismatch",
+            subject,
+            format!(
+                "script flag command '{}' cannot address flag '{}' from the other flag table",
+                command.command, command.flag_id
             ),
         ),
     }
@@ -3998,6 +3878,15 @@ fn script_object_command_issue_diagnostic(
             format!("{map_name}:{source_script}:{command_index}"),
             "showemote command is missing emote/duration fields",
         ),
+        ScriptObjectCommandIssue::EmoteDurationOutOfByteRange {
+            source_script,
+            command_index,
+            duration,
+        } => VerificationError::error(
+            "script_emote_duration_out_of_byte_range",
+            format!("{map_name}:{source_script}:{command_index}"),
+            format!("showemote duration {duration} does not fit a byte"),
+        ),
         ScriptObjectCommandIssue::UnknownCommand {
             source_script,
             command_index,
@@ -4038,7 +3927,7 @@ fn verify_script_movements(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
                 diagnostics.push(VerificationError::error(
                     "unterminated_script_movement",
                     subject,
-                    "script movement must end with step_end",
+                    "script movement must end with a terminating opcode",
                 ));
             }
             for step in &movement.steps {
@@ -4057,7 +3946,7 @@ fn script_movement_has_terminator(movement: &ScriptMovement) -> bool {
     movement
         .steps
         .last()
-        .is_some_and(|step| step.command == "step_end")
+        .is_some_and(|step| is_script_movement_terminator(&step.command))
 }
 
 fn script_movement_step_issue_diagnostic(
@@ -4071,6 +3960,11 @@ fn script_movement_step_issue_diagnostic(
             subject,
             format!("{} must not carry a direction", step.command),
         ),
+        ScriptMovementStepIssue::UnexpectedDuration => VerificationError::error(
+            "script_movement_unexpected_duration",
+            subject,
+            format!("{} must not carry a duration", step.command),
+        ),
         ScriptMovementStepIssue::MissingDirection => VerificationError::error(
             "missing_script_direction",
             subject,
@@ -4080,6 +3974,16 @@ fn script_movement_step_issue_diagnostic(
             "missing_script_movement_duration",
             subject,
             "script movement command is missing a duration",
+        ),
+        ScriptMovementStepIssue::DurationOutOfByteRange { duration } => VerificationError::error(
+            "script_movement_duration_out_of_byte_range",
+            subject,
+            format!("script movement duration {duration} does not fit a byte"),
+        ),
+        ScriptMovementStepIssue::ZeroSleepDuration => VerificationError::error(
+            "script_movement_zero_sleep_duration",
+            subject,
+            "step_sleep 0 cannot be encoded by the source macro",
         ),
         ScriptMovementStepIssue::UnknownDirection { direction } => VerificationError::error(
             "unknown_script_direction",
@@ -4244,8 +4148,8 @@ fn script_map_command_issue_diagnostic(
                 command.command
             ),
         ),
-        ScriptMapCommandError::MalformedNoWarpSentinel { .. } => VerificationError::error(
-            "malformed_script_no_warp_sentinel",
+        ScriptMapCommandError::MalformedBadWarpSentinel { .. } => VerificationError::error(
+            "malformed_script_bad_warp_sentinel",
             subject,
             "NONE is only valid for the exact warp NONE, 0, 0 sentinel",
         ),
@@ -4697,11 +4601,9 @@ fn verify_script_control_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                     .into_iter()
                     .map(|issue| script_control_command_issue_diagnostic(&subject, command, issue)),
             );
-            if let Some((target_script, target_command)) = non_executable_control_target(
-                &module.scripts,
-                &executable_positions,
-                command,
-            ) {
+            if let Some((target_script, target_command)) =
+                non_executable_control_target(&module.scripts, &executable_positions, command)
+            {
                 diagnostics.push(non_executable_script_control_target_diagnostic(
                     &subject,
                     command,
@@ -4710,6 +4612,12 @@ fn verify_script_control_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 ));
             }
         }
+        verify_executable_script_bodies(
+            map_name,
+            &module.scripts,
+            &executable_positions,
+            diagnostics,
+        );
     }
     if let Some(module) = data.global_scripts.as_ref() {
         let map_name = "GlobalScripts";
@@ -4734,11 +4642,9 @@ fn verify_script_control_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                     .into_iter()
                     .map(|issue| script_control_command_issue_diagnostic(&subject, command, issue)),
             );
-            if let Some((target_script, target_command)) = non_executable_control_target(
-                &module.scripts,
-                &executable_positions,
-                command,
-            ) {
+            if let Some((target_script, target_command)) =
+                non_executable_control_target(&module.scripts, &executable_positions, command)
+            {
                 diagnostics.push(non_executable_script_control_target_diagnostic(
                     &subject,
                     command,
@@ -4747,7 +4653,62 @@ fn verify_script_control_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
                 ));
             }
         }
+        verify_executable_script_bodies(
+            map_name,
+            &module.scripts,
+            &executable_positions,
+            diagnostics,
+        );
     }
+}
+
+fn verify_executable_script_bodies(
+    map_name: &str,
+    scripts: &BTreeMap<String, Value>,
+    executable_positions: &BTreeSet<(String, usize)>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    for (source_script, body) in scripts {
+        if !executable_positions.contains(&(source_script.clone(), 0)) {
+            continue;
+        }
+        let Some(commands) = body.as_array() else {
+            continue;
+        };
+        for (command_index, command) in commands.iter().enumerate() {
+            let command_name = command
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing command>");
+            if !executable_positions.contains(&(source_script.clone(), command_index)) {
+                diagnostics.push(VerificationError::error(
+                    "non_executable_script_command",
+                    format!("{map_name}:{source_script}:{command_index}"),
+                    format!(
+                        "executable compiled script body reaches '{command_name}', which has no Rust runtime mutation"
+                    ),
+                ));
+                break;
+            }
+            if script_command_ends_linear_execution(command_name) {
+                break;
+            }
+        }
+    }
+}
+
+fn script_command_ends_linear_execution(command: &str) -> bool {
+    matches!(
+        command,
+        "end"
+            | "endcallback"
+            | "sjump"
+            | "farsjump"
+            | "jumpstd"
+            | "jumptext"
+            | "jumptextfaceplayer"
+            | "trainer"
+    )
 }
 
 fn map_runtime_executable_script_command_positions(
@@ -4847,6 +4808,27 @@ fn global_runtime_executable_script_command_positions(
             .filter(|command| command.command != "conditional_event")
             .map(|command| (command.source_script.clone(), command.command_index)),
     );
+    // These five source-certified global paths enter battle through typed
+    // field/contest boundaries rather than a map-local scripted battle row.
+    for (source_script, command_index) in [
+        (".FightTheHookedPokemon@Script_GotABite", 6),
+        (".SweetScent@SweetScentFromMenu", 10),
+        ("BugCatchingContestBattleScript", 2),
+        ("HeadbuttScript", 8),
+        ("RockSmashScript", 12),
+    ] {
+        if module
+            .scripts
+            .get(source_script)
+            .and_then(Value::as_array)
+            .and_then(|commands| commands.get(command_index))
+            .and_then(|command| command.get("command"))
+            .and_then(Value::as_str)
+            == Some("startbattle")
+        {
+            positions.insert((source_script.to_string(), command_index));
+        }
+    }
     positions
 }
 
@@ -5390,6 +5372,161 @@ fn verify_phone_contacts(data: &GameDataSet, diagnostics: &mut Vec<VerificationE
         .into_iter()
         .map(phone_contact_catalog_issue_diagnostic),
     );
+
+    let global_module = data.global_scripts.as_ref();
+    let executable_positions = global_module
+        .map(global_runtime_executable_script_command_positions)
+        .unwrap_or_default();
+    if !data.phone_contacts.0.is_empty() {
+        for (script, diagnostic_name) in [
+            ("LoadPhoneScriptBank", "pokegear_phone_callback_script"),
+            ("LoadOutOfAreaScript", "pokegear_phone_callback_script"),
+            ("PhoneScript_JustTalkToThem", "pokegear_phone_same_map_script"),
+            ("PhoneOutOfAreaScript", "pokegear_phone_out_of_area_script"),
+        ] {
+            verify_dynamic_phone_script_root(
+                "phone_contacts",
+                diagnostic_name,
+                script,
+                global_module,
+                &executable_positions,
+                diagnostics,
+            );
+        }
+    }
+    for (contact_id, contact) in &data.phone_contacts.0 {
+        for (field, script) in [
+            ("calleeScript", contact.callee_script.as_deref()),
+            ("callerScript", contact.caller_script.as_deref()),
+        ] {
+            let Some(script) = script else {
+                continue;
+            };
+            verify_dynamic_phone_script_root(
+                &format!("phone_contacts:{contact_id}:{field}"),
+                if field == "calleeScript" {
+                    "phone_contact_callee_script"
+                } else {
+                    "phone_contact_caller_script"
+                },
+                script,
+                global_module,
+                &executable_positions,
+                diagnostics,
+            );
+        }
+    }
+
+    let mut values = BTreeMap::<u8, &str>::new();
+    for (call_id, rule) in &data.special_phone_calls {
+        let subject = format!("special_phone_calls:{call_id}");
+        if !is_exact_script_label_reference_token(call_id) {
+            diagnostics.push(VerificationError::error(
+                "invalid_special_phone_call_id",
+                &subject,
+                format!("special phone call id '{call_id}' is not an exact token"),
+            ));
+        }
+        if rule.value == 0 {
+            diagnostics.push(VerificationError::error(
+                "invalid_special_phone_call_value",
+                &subject,
+                "special phone call value zero is reserved for SPECIALCALL_NONE",
+            ));
+        } else if let Some(previous) = values.insert(rule.value, call_id) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_special_phone_call_value",
+                &subject,
+                format!(
+                    "special phone call value {} is already owned by {previous}",
+                    rule.value
+                ),
+            ));
+        }
+        if !matches!(
+            rule.condition.as_str(),
+            "SpecialCallOnlyWhenOutside" | "SpecialCallWhereverYouAre"
+        ) {
+            diagnostics.push(VerificationError::error(
+                "invalid_special_phone_call_condition",
+                &subject,
+                format!(
+                    "special phone call condition '{}' has no Rust runtime predicate",
+                    rule.condition
+                ),
+            ));
+        }
+        if !data.phone_contacts.0.contains_key(&rule.contact_id) {
+            diagnostics.push(VerificationError::error(
+                "unknown_special_phone_call_contact",
+                &subject,
+                format!(
+                    "special phone call references missing contact '{}'",
+                    rule.contact_id
+                ),
+            ));
+        }
+        if !is_exact_script_label_reference_token(&rule.caller_script) {
+            diagnostics.push(VerificationError::error(
+                "invalid_special_phone_call_caller_script",
+                &subject,
+                format!(
+                    "special phone call callerScript '{}' is not an exact script label",
+                    rule.caller_script
+                ),
+            ));
+        } else {
+            verify_dynamic_phone_script_root(
+                &subject,
+                "special_phone_call_caller_script",
+                &rule.caller_script,
+                global_module,
+                &executable_positions,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn verify_dynamic_phone_script_root(
+    subject: &str,
+    diagnostic_name: &str,
+    script: &str,
+    global_module: Option<&GlobalScriptModule>,
+    executable_positions: &BTreeSet<(String, usize)>,
+    diagnostics: &mut Vec<VerificationError>,
+) {
+    let Some(module) = global_module else {
+        diagnostics.push(VerificationError::error(
+            format!("unknown_{diagnostic_name}"),
+            subject,
+            format!("dynamic phone script '{script}' is absent from global scripts"),
+        ));
+        return;
+    };
+    let Some(body) = module.scripts.get(script) else {
+        diagnostics.push(VerificationError::error(
+            format!("unknown_{diagnostic_name}"),
+            subject,
+            format!("dynamic phone script '{script}' is absent from global scripts"),
+        ));
+        return;
+    };
+    let first_command = body
+        .as_array()
+        .and_then(|commands| commands.first())
+        .and_then(|command| command.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or("<missing command>");
+    if !executable_positions.contains(&(script.to_string(), 0)) {
+        diagnostics.push(VerificationError::error(
+            format!("non_executable_{diagnostic_name}"),
+            subject,
+            format!(
+                "dynamic phone script '{script}' begins with '{first_command}', which has no Rust runtime mutation"
+            ),
+        ));
+    }
 }
 
 fn phone_contact_catalog_issue_diagnostic(issue: PhoneContactCatalogIssue) -> VerificationError {
@@ -7709,14 +7846,6 @@ fn type_effectiveness_unknown_parts(
     }
 }
 
-#[cfg(test)]
-fn type_effectiveness_message_prefix(table: TypeEffectivenessTableKind) -> &'static str {
-    match table {
-        TypeEffectivenessTableKind::Matchups => "type effectiveness",
-        TypeEffectivenessTableKind::ForesightMatchups => "Foresight type effectiveness",
-    }
-}
-
 fn verify_type_categories(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     diagnostics.extend(
         type_category_issues(&data.type_categories, !data.moves.is_empty())
@@ -8198,9 +8327,11 @@ fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
             .into_iter()
             .map(roaming_pokemon_catalog_issue_diagnostic),
     );
-    if data.runtime_map_metadata.values().any(|metadata| {
-        metadata.group_id == u16::from(data.roaming_pokemon.inactive_map.map_group)
-    }) {
+    if data
+        .runtime_map_metadata
+        .values()
+        .any(|metadata| metadata.group_id == u16::from(data.roaming_pokemon.inactive_map.map_group))
+    {
         diagnostics.push(VerificationError::error(
             "roaming_inactive_group_collides_with_runtime_map",
             "roaming_pokemon:inactiveMap",
@@ -8212,8 +8343,7 @@ fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<Verificatio
     }
     let roaming_map_exists = |map_group: u8, map_number: u8| {
         data.runtime_map_metadata.values().any(|metadata| {
-            metadata.group_id == u16::from(map_group)
-                && metadata.map_id == u16::from(map_number)
+            metadata.group_id == u16::from(map_group) && metadata.map_id == u16::from(map_number)
         })
     };
     for write in &data.roaming_pokemon.init_writes {
@@ -8619,7 +8749,33 @@ fn script_event_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
             .keys()
             .map(|tree_id| fruit_tree_collected_flag(tree_id)),
     );
+    flags.extend(
+        data.decorations
+            .decorations
+            .iter()
+            .map(|decoration| decoration.event_flag.clone()),
+    );
     for module in data.maps.values() {
+        for command in &module.script_flag_commands {
+            if command.flag_id.starts_with("EVENT_") {
+                flags.insert(command.flag_id.clone());
+            }
+        }
+        for body in module.scripts.values().filter_map(Value::as_array) {
+            for command in body {
+                if command.get("command").and_then(Value::as_str) == Some("conditional_event")
+                    && let Some(flag) = command
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .and_then(|args| args.first())
+                        .and_then(Value::as_str)
+                {
+                    flags.insert(flag.to_string());
+                }
+            }
+        }
+    }
+    if let Some(module) = &data.global_scripts {
         for command in &module.script_flag_commands {
             if command.flag_id.starts_with("EVENT_") {
                 flags.insert(command.flag_id.clone());
@@ -8637,6 +8793,13 @@ fn script_engine_flag_ids(data: &GameDataSet) -> BTreeSet<String> {
         .cloned()
         .collect::<BTreeSet<_>>();
     for module in data.maps.values() {
+        for command in &module.script_flag_commands {
+            if command.flag_id.starts_with("ENGINE_") {
+                flags.insert(command.flag_id.clone());
+            }
+        }
+    }
+    if let Some(module) = &data.global_scripts {
         for command in &module.script_flag_commands {
             if command.flag_id.starts_with("ENGINE_") {
                 flags.insert(command.flag_id.clone());
@@ -8678,7 +8841,7 @@ fn verify_script_runtime_commands(data: &GameDataSet, diagnostics: &mut Vec<Veri
 fn verify_script_runtime_module_commands(
     data: &GameDataSet,
     map_name: &str,
-    scripts: &BTreeMap<String, Value>,
+    _scripts: &BTreeMap<String, Value>,
     callasm_definitions: &BTreeMap<String, Value>,
     commands: &[ScriptRuntimeCommand],
     diagnostics: &mut Vec<VerificationError>,
@@ -8711,22 +8874,21 @@ fn verify_script_runtime_module_commands(
             .iter()
             .map(|landmark| landmark.constant.clone())
             .collect(),
-        script_labels: scripts.keys().cloned().collect(),
+        script_labels: callasm_definitions.keys().cloned().collect(),
     };
     for command in commands {
         let subject = format!(
             "{map_name}:{}:{}",
             command.source_script, command.command_index
         );
-        // Phone scripts dispatch through cartridge CPU routines that are
-        // intentionally represented as host-managed runtime operations. They
-        // are not synchronous script bodies and must not prevent producing a
-        // playable compiled pack.
-        if map_name == "GlobalScripts"
-            && command.command == "callasm"
-            && command.source_script.starts_with("Script_")
+        if command.command == "writecmdqueue"
+            && let Err(error) = data.resolve_script_runtime_stone_table_queue(map_name, command)
         {
-            continue;
+            diagnostics.push(VerificationError::error(
+                "invalid_script_command_queue",
+                subject.clone(),
+                error.to_string(),
+            ));
         }
         if map_name == "GlobalScripts"
             && command.source_script == "TreeMons"
@@ -8742,17 +8904,13 @@ fn verify_script_runtime_module_commands(
         if command.command == "callasm"
             && let [target] = command.args.as_slice()
         {
-            let Some(resolved_target) = resolve_script_target_label(
-                callasm_definitions,
-                &command.source_script,
-                target,
-            ) else {
+            let Some(resolved_target) =
+                resolve_script_target_label(callasm_definitions, &command.source_script, target)
+            else {
                 diagnostics.push(VerificationError::error(
                     "non_executable_callasm_target",
                     subject.clone(),
-                    format!(
-                        "callasm target '{target}' has no exact resolvable CPU routine body"
-                    ),
+                    format!("callasm target '{target}' has no exact resolvable CPU routine body"),
                 ));
                 continue;
             };
@@ -8760,15 +8918,14 @@ fn verify_script_runtime_module_commands(
                 && command.command_index == 8
                 && target == "RockMonEncounter"
             {
-                certify_rock_mon_encounter_callasm_target(
-                    callasm_definitions,
-                    &resolved_target,
-                )
+                certify_rock_mon_encounter_callasm_target(callasm_definitions, &resolved_target)
+            } else if command.source_script == "HeadbuttScript"
+                && command.command_index == 4
+                && target == "TreeMonEncounter"
+            {
+                certify_tree_mon_encounter_callasm_target(callasm_definitions, &resolved_target)
             } else {
-                certify_synchronous_script_callasm_target(
-                    callasm_definitions,
-                    &resolved_target,
-                )
+                certify_synchronous_script_callasm_target(callasm_definitions, &resolved_target)
             };
             if let Err(failure) = certificate {
                 diagnostics.push(VerificationError::error(
@@ -9009,22 +9166,18 @@ fn script_runtime_command_issue_diagnostic(
             subject,
             format!("trade id must be an exact pack token, found {trade_id:?}"),
         ),
-        ScriptRuntimeCommandIssue::UnknownLandmark { landmark_id } => {
-            VerificationError::error(
-                "unknown_script_landmark_name",
-                subject,
-                format!("getlandmarkname references unknown landmark '{landmark_id}'"),
-            )
-        }
-        ScriptRuntimeCommandIssue::InvalidLandmark { landmark_id } => {
-            VerificationError::error(
-                "invalid_script_landmark_name",
-                subject,
-                format!(
-                    "getlandmarkname landmark id must use exact LANDMARK_* syntax, found {landmark_id:?}"
-                ),
-            )
-        }
+        ScriptRuntimeCommandIssue::UnknownLandmark { landmark_id } => VerificationError::error(
+            "unknown_script_landmark_name",
+            subject,
+            format!("getlandmarkname references unknown landmark '{landmark_id}'"),
+        ),
+        ScriptRuntimeCommandIssue::InvalidLandmark { landmark_id } => VerificationError::error(
+            "invalid_script_landmark_name",
+            subject,
+            format!(
+                "getlandmarkname landmark id must use exact LANDMARK_* syntax, found {landmark_id:?}"
+            ),
+        ),
         ScriptRuntimeCommandIssue::UnknownTarget { target_label } => VerificationError::error(
             "unknown_script_runtime_target",
             subject,
@@ -9187,28 +9340,15 @@ fn is_text_script(payload: &Value) -> bool {
     let Some(entries) = payload.as_array() else {
         return false;
     };
-    entries.iter().any(|entry| {
-        matches!(
-            entry.get("command").and_then(Value::as_str),
-            Some(
-                "text"
-                    | "line"
-                    | "para"
-                    | "cont"
-                    | "done"
-                    | "prompt"
-                    | "text_ram"
-                    | "text_decimal"
-                    | "text_far"
-                    | "sound_dex_fanfare_50_79"
-                    | "sound_dex_fanfare_80_109"
-                    | "sound_dex_fanfare_140_169"
-                    | "sound_dex_fanfare_170_199"
-                    | "sound_dex_fanfare_200_229"
-                    | "sound_dex_fanfare_230_plus"
-            )
-        )
-    })
+    let text_commands = text_body_command_arg_counts();
+    // Text bodies begin with a TX_* macro. Checking every later command would
+    // misclassify raw data such as mail strings, where `db` is followed by the
+    // charmap's `next` control token.
+    entries
+        .first()
+        .and_then(|entry| entry.get("command"))
+        .and_then(Value::as_str)
+        .is_some_and(|command| text_commands.contains_key(command))
 }
 
 fn script_audio_catalog_ids(
@@ -9283,19 +9423,76 @@ fn verify_battle_reward_rules(data: &GameDataSet, diagnostics: &mut Vec<Verifica
             .into_iter()
             .map(battle_reward_rules_issue_diagnostic),
     );
+    match data.currency_constants.0.get("START_MONEY") {
+        Some(_) => {}
+        None => diagnostics.push(VerificationError::error(
+            "missing_start_money_constant",
+            "currency_constants:START_MONEY",
+            "new-game initialization requires the exact START_MONEY constant",
+        )),
+    }
+    match data.currency_constants.0.get("MOM_MONEY") {
+        Some(value) if *value == data.battle_reward_rules.mom_money_increment => {}
+        Some(value) => diagnostics.push(VerificationError::error(
+            "mismatched_mom_money_constant",
+            "currency_constants:MOM_MONEY",
+            format!(
+                "MOM_MONEY is {value}, but the exported Mom purchase increment is {}",
+                data.battle_reward_rules.mom_money_increment
+            ),
+        )),
+        None => diagnostics.push(VerificationError::error(
+            "missing_mom_money_constant",
+            "currency_constants:MOM_MONEY",
+            "new-game initialization requires the exact MOM_MONEY constant",
+        )),
+    }
+    for (set_name, rules) in [
+        ("random", &data.battle_reward_rules.mom_random_items),
+        (
+            "progression",
+            &data.battle_reward_rules.mom_progression_items,
+        ),
+    ] {
+        for (index, rule) in rules.iter().enumerate() {
+            let subject = format!(
+                "battle_reward_rules:mom_{set_name}_items:{index}"
+            );
+            match rule.kind {
+                MomPurchaseKind::Item => {
+                    if !data.items.contains_key(&rule.target) {
+                        diagnostics.push(VerificationError::error(
+                            "unknown_mom_purchase_item",
+                            subject,
+                            format!(
+                                "Mom purchase rule references unknown item '{}'",
+                                rule.target
+                            ),
+                        ));
+                    }
+                }
+                MomPurchaseKind::Doll => {}
+            }
+        }
+    }
 }
 
 fn battle_reward_rules_issue_diagnostic(issue: BattleRewardRulesIssue) -> VerificationError {
     let message = match issue {
-        BattleRewardRulesIssue::MissingMaxLevel => "battle reward rules maxLevel must be nonzero",
+        BattleRewardRulesIssue::MissingMaxLevel => {
+            "battle reward rules maxLevel must be nonzero".to_string()
+        }
         BattleRewardRulesIssue::InvalidWildExpDivisor { .. } => {
-            "battle reward rules wildExpDivisor must be positive"
+            "battle reward rules wildExpDivisor must be positive".to_string()
         }
         BattleRewardRulesIssue::InvalidTrainerExpNumerator { .. } => {
-            "battle reward rules trainerExpNumerator must be positive"
+            "battle reward rules trainerExpNumerator must be positive".to_string()
         }
         BattleRewardRulesIssue::InvalidTrainerExpDenominator { .. } => {
-            "battle reward rules trainerExpDenominator must be positive"
+            "battle reward rules trainerExpDenominator must be positive".to_string()
+        }
+        BattleRewardRulesIssue::InvalidMomPurchaseRules { ref reason } => {
+            format!("battle reward rules Mom purchase data is invalid: {reason}")
         }
     };
     VerificationError::error(
@@ -9451,6 +9648,21 @@ fn fishing_catalog_issue_diagnostic(issue: FishingCatalogIssue) -> VerificationE
             "invalid_fishing_group_id",
             group_id,
             "fishing group id must be exact and nonempty",
+        ),
+        FishingCatalogIssue::InvalidFishingGroupSourceIndex { group_id } => {
+            VerificationError::error(
+                "invalid_fishing_group_source_index",
+                group_id,
+                "fishing group source index must be nonzero",
+            )
+        }
+        FishingCatalogIssue::DuplicateFishingGroupSourceIndex {
+            group_id,
+            source_index,
+        } => VerificationError::error(
+            "duplicate_fishing_group_source_index",
+            group_id,
+            format!("fishing group source index {source_index} is duplicated"),
         ),
         FishingCatalogIssue::InvalidFishingRod { group_id, rod } => VerificationError::error(
             "invalid_fishing_rod",
@@ -9616,10 +9828,71 @@ fn verify_field_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationErro
             .map(field_move_catalog_issue_diagnostic),
     );
     verify_field_move_block_replacements(data, diagnostics);
+    verify_story_key_rules(data, diagnostics);
     verify_field_box_items(data, diagnostics);
 }
 
+fn verify_story_key_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    for (rule_id, expected_effect, rule) in [
+        ("card_key", "CARD_KEY", &data.field_moves.card_key),
+        ("basement_key", "BASEMENT_KEY", &data.field_moves.basement_key),
+    ] {
+        let subject = format!("field_moves:{rule_id}");
+        if let Some(item) = data.items.get(&rule.item_id)
+            && item.effect != expected_effect
+        {
+            diagnostics.push(VerificationError::error(
+                "mismatched_story_key_effect",
+                &subject,
+                format!(
+                    "story key item {} has effect {}, expected {expected_effect}",
+                    rule.item_id, item.effect
+                ),
+            ));
+        }
+        let Some(module) = data.maps.get(&rule.map_name) else {
+            diagnostics.push(VerificationError::error(
+                "missing_story_key_map",
+                &subject,
+                format!("story key map {} is missing", rule.map_name),
+            ));
+            continue;
+        };
+        if !module.scripts.contains_key(&rule.target_script) {
+            diagnostics.push(VerificationError::error(
+                "missing_story_key_script",
+                &subject,
+                format!(
+                    "story key target script {} is missing from {}",
+                    rule.target_script, rule.map_name
+                ),
+            ));
+        }
+        match runtime_map_tile_bounds(module) {
+            Some((width, height))
+                if rule.target_tile.x >= 0
+                    && rule.target_tile.y >= 0
+                    && rule.target_tile.x < width
+                    && rule.target_tile.y < height => {}
+            Some((width, height)) => diagnostics.push(VerificationError::error(
+                "story_key_target_out_of_bounds",
+                &subject,
+                format!(
+                    "story key target ({}, {}) is outside {} bounds {width}x{height}",
+                    rule.target_tile.x, rule.target_tile.y, rule.map_name
+                ),
+            )),
+            None => diagnostics.push(VerificationError::error(
+                "story_key_map_bounds_overflow",
+                &subject,
+                format!("story key map {} bounds overflow", rule.map_name),
+            )),
+        }
+    }
+}
+
 fn verify_field_box_items(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    verify_decorations(data, diagnostics);
     for (rule_id, rule) in &data.field_box_items {
         if rule_id != &rule.item_id {
             diagnostics.push(VerificationError::error(
@@ -9700,6 +9973,122 @@ fn verify_field_box_items(data: &GameDataSet, diagnostics: &mut Vec<Verification
     }
 }
 
+fn verify_decorations(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
+    const CATEGORY_ORDER: &[DecorationCategory] = &[
+        DecorationCategory::Bed,
+        DecorationCategory::Carpet,
+        DecorationCategory::Plant,
+        DecorationCategory::Poster,
+        DecorationCategory::GameConsole,
+        DecorationCategory::Ornament,
+        DecorationCategory::BigDoll,
+    ];
+    if data.decorations.category_order != CATEGORY_ORDER {
+        diagnostics.push(VerificationError::error(
+            "invalid_decoration_category_order",
+            "decorations:category_order",
+            "decoration categories must preserve the seven-entry ASM menu order",
+        ));
+    }
+    if data.decorations.decorations.len() != 45 {
+        diagnostics.push(VerificationError::error(
+            "invalid_decoration_count",
+            "decorations:decorations",
+            format!(
+                "decoration catalog must contain all 45 ASM decorations, found {}",
+                data.decorations.decorations.len()
+            ),
+        ));
+    }
+
+    let mut indices = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    let mut flags = BTreeSet::new();
+    for (position, decoration) in data.decorations.decorations.iter().enumerate() {
+        let subject = format!("decorations:decorations:{position}");
+        if !indices.insert(decoration.index) {
+            diagnostics.push(VerificationError::error(
+                "duplicate_decoration_index",
+                &subject,
+                format!("duplicate decoration index {}", decoration.index),
+            ));
+        }
+        if !is_exact_pack_token(&decoration.id) || !ids.insert(decoration.id.as_str()) {
+            diagnostics.push(VerificationError::error(
+                "invalid_decoration_id",
+                &subject,
+                format!("decoration id '{}' must be exact and unique", decoration.id),
+            ));
+        }
+        if decoration.display_name.is_empty()
+            || decoration.display_name.trim() != decoration.display_name
+            || decoration.display_name.chars().any(char::is_control)
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_decoration_display_name",
+                &subject,
+                "decoration display_name must be nonempty, unpadded, and printable",
+            ));
+        }
+        let expected_action = match decoration.category {
+            DecorationCategory::Bed => "SET_UP_BED",
+            DecorationCategory::Carpet => "SET_UP_CARPET",
+            DecorationCategory::Plant => "SET_UP_PLANT",
+            DecorationCategory::Poster => "SET_UP_POSTER",
+            DecorationCategory::GameConsole => "SET_UP_CONSOLE",
+            DecorationCategory::Ornament => "SET_UP_DOLL",
+            DecorationCategory::BigDoll => "SET_UP_BIG_DOLL",
+        };
+        if decoration.action != expected_action {
+            diagnostics.push(VerificationError::error(
+                "invalid_decoration_action",
+                &subject,
+                format!(
+                    "decoration {} action '{}' must be {expected_action} for its category",
+                    decoration.id, decoration.action
+                ),
+            ));
+        }
+        if !decoration.event_flag.starts_with("EVENT_DECO_")
+            || !is_exact_pack_token(&decoration.event_flag)
+            || !flags.insert(decoration.event_flag.as_str())
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_decoration_event_flag",
+                &subject,
+                format!(
+                    "decoration {} ownership flag '{}' must be an exact unique EVENT_DECO_ token",
+                    decoration.id, decoration.event_flag
+                ),
+            ));
+        }
+        if decoration.sprite.is_empty()
+            || decoration.sprite.trim() != decoration.sprite
+            || decoration.sprite.chars().any(char::is_control)
+        {
+            diagnostics.push(VerificationError::error(
+                "invalid_decoration_sprite",
+                &subject,
+                "decoration sprite must be exact, nonempty, and unpadded",
+            ));
+        }
+    }
+    for category in CATEGORY_ORDER {
+        if !data
+            .decorations
+            .decorations
+            .iter()
+            .any(|decoration| decoration.category == *category)
+        {
+            diagnostics.push(VerificationError::error(
+                "empty_decoration_category",
+                "decorations:decorations",
+                format!("decoration category {category:?} has no entries"),
+            ));
+        }
+    }
+}
+
 fn verify_field_move_block_replacements(
     data: &GameDataSet,
     diagnostics: &mut Vec<VerificationError>,
@@ -9766,14 +10155,6 @@ fn verify_field_move_block_rule_replacements(
             }
         }
     }
-}
-
-#[cfg(test)]
-fn metatile_contains_any_collision(metatile: &MetatileCollision, collisions: &[u8]) -> bool {
-    metatile
-        .collision
-        .iter()
-        .any(|permission| collisions.contains(permission))
 }
 
 fn field_move_catalog_issue_diagnostic(issue: FieldMoveCatalogIssue) -> VerificationError {

@@ -814,9 +814,19 @@ fn field_fullscreen_owner_reuses_presenter_and_releases_only_after_map_is_staged
     runtime_shell.intro_screen = None;
     runtime_shell.title_menu = None;
     runtime_shell.visible_slot_machine = Some(VisibleSlotMachine {
+        phase: VisibleSlotMachinePhase::Betting,
+        animation: VisibleSlotMachineAnimation::None,
+        yes_no_index: 0,
         bet: 1,
         coins: 1234,
         payout: 0,
+        offsets: [14; 3],
+        spin_ticks: [0; 3],
+        spinning: [false; 3],
+        next_reel: 1,
+        actor: None,
+        secondary_actor: None,
+        background_y_offset: 0,
         windows: [
             ["CHERRY".into(), "SEVEN".into(), "SQUIRTLE".into()],
             ["PIKACHU".into(), "SEVEN".into(), "STARYU".into()],
@@ -923,7 +933,6 @@ fn retained_field_fullscreen_ownership_distinguishes_new_game_and_capture_name_c
             wobble_count: 3,
             animation_shakes: 3,
             final_catch_rate: u8::MAX,
-            rng_seed_after: 1,
             ball_id: Some("POKE_BALL".to_string()),
         },
         scripted_static_wild: None,

@@ -21,6 +21,7 @@ const NUM_POKEMON = 251;
 const NUM_UNOWN = 26;
 
 const defaultMove = {
+    source_index: 1,
     name: MoveName.POUND,
     type: PokemonType.NORMAL,
     power: 40,

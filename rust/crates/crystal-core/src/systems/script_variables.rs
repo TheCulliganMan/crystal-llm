@@ -101,8 +101,6 @@ pub enum ScriptVariableCommandError {
     InvalidSourceScript { source_script: String },
     #[error("script variable '{variable}' is unset")]
     UnsetVariable { variable: String },
-    #[error("script memory '{memory}' is unset")]
-    UnsetMemory { memory: String },
     #[error("script accumulator is unset")]
     UnsetAccumulator,
     #[error("unknown script time token '{time_token}'")]
@@ -193,9 +191,7 @@ pub fn apply_script_variable_command(
                 .memory
                 .get(&memory)
                 .cloned()
-                .ok_or_else(|| ScriptVariableCommandError::UnsetMemory {
-                    memory: memory.clone(),
-                })?;
+                .unwrap_or_else(|| "0".to_string());
             state.script_runtime.script_value = Some(value.clone());
             Ok(ScriptVariableOutcome::SetAccumulator {
                 value,
@@ -623,6 +619,14 @@ mod tests {
     #[test]
     fn memory_commands_write_exact_labels_without_aliasing() {
         let mut state = GameState::default();
+        apply_script_variable_command(
+            &mut state,
+            command("readmem", Some("wVanceFightCount"), &[]),
+            None,
+        )
+        .expect("unwritten WRAM starts cleared");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+
         apply_script_variable_command(
             &mut state,
             command("loadmem", Some("wVanceFightCount"), &["2"]),

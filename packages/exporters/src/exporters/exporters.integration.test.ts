@@ -40,6 +40,7 @@ describe("core exporters integration", () => {
       "marts.json",
       "menu_icons.json",
       "npcs.json",
+      "story_events/OverworldEvents.json",
       "pokedex.json",
       "pokedex_entries.json",
       "pokegear_landmarks.json",
@@ -395,6 +396,7 @@ describe("core exporters integration", () => {
       "trainers",
       "pokedex",
       "phone_scripts",
+      "story_events",
       "audio",
     ];
     for (const category of requiredCoreCategories) {

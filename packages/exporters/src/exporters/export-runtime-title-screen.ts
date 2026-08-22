@@ -7747,6 +7747,52 @@ const compileClearSpriteAnimsCall = (
   };
 };
 
+const compileDeinitializeAllSpritesCall = (
+  instruction: RuntimePresentationAsmInstruction,
+  instances: readonly string[],
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  const implementation = loadSource(
+    CLEAR_SPRITE_ANIMS_SOURCE_FILES.implementation,
+    options,
+  );
+  const blocks = parseAsmBlocks([implementation]);
+  const spriteConstants = parseAsmConstants([
+    loadSource(CLEAR_SPRITE_ANIMS_SOURCE_FILES.spriteConstants, options),
+  ]);
+  const structLength = spriteConstants.get("SPRITEANIMSTRUCT_LENGTH");
+  const structCount = spriteConstants.get("NUM_SPRITE_ANIM_STRUCTS");
+  if (structLength === undefined || structCount === undefined) {
+    throw new Error(
+      "DeinitializeAllSprites has no exact SPRITEANIMSTRUCT_LENGTH constant",
+    );
+  }
+  return {
+    op: "deinitialize_all_sprites",
+    instances: [...instances],
+    struct_indices: Array.from({ length: structCount }, (_, index) => index),
+    implementation_source_span: certifyBulkSpriteDeinitializer(blocks),
+    invocation: exactFarcallInvocation(
+      instruction,
+      "DeinitializeAllSprites",
+      options,
+      {
+        a: 0,
+        bc: structLength,
+        hl: "wSpriteAnimationStructs + NUM_SPRITE_ANIM_STRUCTS * SPRITEANIMSTRUCT_LENGTH",
+        de: "0",
+        flags: {
+          zero: true,
+          subtract: true,
+          half_carry: false,
+          carry: false,
+        },
+      },
+    ),
+    source_span: instruction.source_span,
+  };
+};
+
 const compileEmptySpriteSchedulerCall = (
   instruction: RuntimePresentationAsmInstruction,
   establishedReset: RuntimePresentationOperation,
@@ -8787,8 +8833,97 @@ type RuntimePresentationSourceOperationBoundary = {
   accepted_call_forms: RuntimePresentationHostEffectCallForm[];
   certify: (
     options: BuildRuntimeTitlePresentationProgramOptions,
+    invocation: RuntimePresentationAsmInstruction,
   ) => RuntimePresentationOperation[];
 };
+
+function certifyJoyTextDelayOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  invocation: RuntimePresentationAsmInstruction,
+): RuntimePresentationOperation[] {
+  if (
+    invocation.opcode !== "call" ||
+    runtimePresentationInstructionTarget(invocation) !== "JoyTextDelay"
+  ) {
+    throw new Error(
+      `JoyTextDelay operation certification requires an exact call JoyTextDelay invocation, reached ${instructionSignature(invocation)}`,
+    );
+  }
+  const joypad = loadSource("home/joypad.asm", options);
+  const blocks = parseAsmBlocks([joypad]);
+  const inputSpan = requireExactRoutineBlock(
+    blocks,
+    "JoyTextDelay",
+    [
+      "call GetJoypad",
+      "ldh a, [hInMenu]",
+      "and a",
+      "ldh a, [hJoyPressed]",
+      "jr z, .ok",
+      "ldh a, [hJoyDown]",
+    ],
+    "JoyTextDelay exact pressed-versus-held selection",
+  );
+  const inputOkSpan = requireExactRoutineBlock(
+    blocks,
+    ".ok@JoyTextDelay",
+    [
+      "ldh [hJoyLast], a",
+      "ldh a, [hJoyPressed]",
+      "and a",
+      "jr z, .checkframedelay",
+      "ld a, 15",
+      "ld [wTextDelayFrames], a",
+      "ret",
+    ],
+    "JoyTextDelay pressed input repeat reset",
+  );
+  const inputDelaySpan = requireExactRoutineBlock(
+    blocks,
+    ".checkframedelay@JoyTextDelay",
+    [
+      "ld a, [wTextDelayFrames]",
+      "and a",
+      "jr z, .restartframedelay",
+      "xor a",
+      "ldh [hJoyLast], a",
+      "ret",
+    ],
+    "JoyTextDelay repeat suppression",
+  );
+  const inputRestartSpan = requireExactRoutineBlock(
+    blocks,
+    ".restartframedelay@JoyTextDelay",
+    ["ld a, 5", "ld [wTextDelayFrames], a", "ret"],
+    "JoyTextDelay repeat restart",
+  );
+  return [
+    {
+      op: "sample_input",
+      routine: "JoyTextDelay",
+      sampler: "GetJoypad",
+      result: "hJoyLast",
+      menu_guard: "hInMenu",
+      menu_zero_source: "hJoyPressed",
+      menu_nonzero_source: "hJoyDown",
+      repeat_delay: "wTextDelayFrames",
+      pressed_repeat_reset: 15,
+      idle_repeat_restart: 5,
+      implementation_source_spans: [
+        inputSpan,
+        inputOkSpan,
+        inputDelaySpan,
+        inputRestartSpan,
+      ],
+      invocation: {
+        call_form: "call",
+        target: "JoyTextDelay",
+        source_span: invocation.source_span,
+      },
+      source_span: invocation.source_span,
+    },
+  ];
+}
 
 const RUNTIME_PRESENTATION_SOURCE_OPERATION_BOUNDARIES: Record<
   string,
@@ -8809,6 +8944,10 @@ const RUNTIME_PRESENTATION_SOURCE_OPERATION_BOUNDARIES: Record<
   WaitBGMap: {
     accepted_call_forms: ["call"],
     certify: certifyWaitBgMapOperations,
+  },
+  JoyTextDelay: {
+    accepted_call_forms: ["call"],
+    certify: certifyJoyTextDelayOperations,
   },
 };
 
@@ -11553,6 +11692,7 @@ type RuntimePresentationScratchSegment = {
   resource_offset: number;
   scratch_offset: number;
   byte_count: number;
+  origin?: "preexisting_memory";
 };
 
 type RuntimePresentationDecompressionImplementation = {
@@ -11565,6 +11705,12 @@ type RuntimePresentationDecompressionImplementation = {
   service_source_spans: RuntimePresentationSourceSpan[];
   vblank_source_span: RuntimePresentationSourceSpan;
   scratch_declaration_source_span: RuntimePresentationSourceSpan;
+  scratch_segments: Array<{
+    target: string;
+    target_offset: number;
+    byte_count: number;
+    declaration_source_span: RuntimePresentationSourceSpan;
+  }>;
   request_state_source_spans: RuntimePresentationSourceSpan[];
   tile_size_source_span: RuntimePresentationSourceSpan;
   coordinate_macro_source_span: RuntimePresentationSourceSpan;
@@ -12327,6 +12473,11 @@ const certifyIntroDecompressionImplementation = (
     "wDecompressScratch:: ds $80 tiles",
     "Intro decompression scratch capacity",
   );
+  const adjacentScratchDeclarationSourceSpan = requireExactNormalizedLine(
+    wram,
+    "wDecompressEnemyFrontpic:: ds $80 tiles",
+    "Intro decompression contiguous overflow capacity",
+  );
   const requestStateSourceSpans = [
     requireExactNormalizedLine(
       wram,
@@ -12415,13 +12566,27 @@ const certifyIntroDecompressionImplementation = (
     service_source_spans: serviceSourceSpans,
     vblank_source_span: vblankSourceSpan,
     scratch_declaration_source_span: scratchDeclarationSourceSpan,
+    scratch_segments: [
+      {
+        target: "wDecompressScratch",
+        target_offset: 0,
+        byte_count: 128 * 16,
+        declaration_source_span: scratchDeclarationSourceSpan,
+      },
+      {
+        target: "wDecompressEnemyFrontpic",
+        target_offset: 128 * 16,
+        byte_count: 128 * 16,
+        declaration_source_span: adjacentScratchDeclarationSourceSpan,
+      },
+    ],
     request_state_source_spans: requestStateSourceSpans,
     tile_size_source_span: tileSizeSourceSpan,
     coordinate_macro_source_span: coordinateMacroSourceSpan,
     tile_macro_source_span: tileMacroSourceSpan,
     default_tiles_per_cycle: 8,
     mobile_tiles_per_cycle: 6,
-    scratch_capacity_bytes: 128 * 16,
+    scratch_capacity_bytes: 256 * 16,
     bytes_per_tile: 16,
   };
 };
@@ -12449,6 +12614,7 @@ const overlayPresentationScratchPrefix = (
             segment.resource_offset + (start - segment.scratch_offset),
           scratch_offset: start,
           byte_count: end - start,
+          ...(segment.origin ? { origin: segment.origin } : {}),
         },
       ];
     }),
@@ -12548,7 +12714,15 @@ const compileIntroSceneDecompressionPrefix = (
 } => {
   const implementation = certifyIntroDecompressionImplementation(options);
   const operations: RuntimePresentationOperation[] = [];
-  let scratch: RuntimePresentationScratchSegment[] = [];
+  let scratch: RuntimePresentationScratchSegment[] = [
+    {
+      resource: "wDecompressScratch",
+      resource_offset: 0,
+      scratch_offset: 0,
+      byte_count: implementation.scratch_capacity_bytes,
+      origin: "preexisting_memory",
+    },
+  ];
   let resource: ReturnType<typeof requirePresentationResourceAtLabel> | null =
     null;
   let resourceSymbol: string | null = null;
@@ -12643,6 +12817,7 @@ const compileIntroSceneDecompressionPrefix = (
           target: "wDecompressScratch",
           target_offset: 0,
           target_capacity_bytes: implementation.scratch_capacity_bytes,
+          target_segments: implementation.scratch_segments,
           overwrites: "output_prefix_only",
           wram_bank: {
             register: "rWBK",
@@ -13008,6 +13183,787 @@ const compileIntroSceneCopyBytesPrefix = (
   return { operations, consumed: index - startIndex };
 };
 
+const compileIntroScenePaletteCopyScope = (
+  sceneName: string,
+  instructions: readonly RuntimePresentationAsmInstruction[],
+  startIndex: number,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): { operations: RuntimePresentationOperation[]; consumed: number } => {
+  const bankRead = instructions[startIndex];
+  const bankPush = instructions[startIndex + 1];
+  const bankValue = instructions[startIndex + 2];
+  const bankWrite = instructions[startIndex + 3];
+  const bankMatch = bankValue?.args[1]?.match(
+    /^BANK\(([A-Za-z_.][A-Za-z0-9_.@]*)\)$/,
+  );
+  if (
+    instructionSignature(bankRead) !== "ldh a, [rWBK]" ||
+    instructionSignature(bankPush) !== "push af" ||
+    bankValue?.opcode !== "ld" ||
+    bankValue.args[0] !== "a" ||
+    !bankMatch ||
+    instructionSignature(bankWrite) !== "ldh [rWBK], a"
+  ) {
+    throw new Error(`${sceneName} has no exact WRAM bank save/select scope`);
+  }
+  const wram = loadSource("ram/wram.asm", options);
+  const bankSymbolSpan = findAsmSymbolDeclarationSpan(bankMatch[1], [wram]);
+  if (!bankSymbolSpan) {
+    throw new Error(
+      `${sceneName} WRAM bank operand ${bankValue.args[1]} has no exact declaration`,
+    );
+  }
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "save_memory_byte",
+      source: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af" },
+      restore_required: true,
+      source_span: sourceSpanThrough(bankRead.source_span, bankPush.source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "rWBK",
+      address_space: "hardware_register",
+      value: bankValue.args[1],
+      condition: { source: null, predicate: "always", source_span: null },
+      value_source_span: bankSymbolSpan,
+      source_span: sourceSpanThrough(bankValue.source_span, bankWrite.source_span),
+    },
+  ];
+  let cursor = startIndex + 4;
+  const copyPrefix = compileIntroSceneCopyBytesPrefix(
+    instructions,
+    cursor,
+    intro,
+    bankValue.args[1],
+    options,
+  );
+  if (copyPrefix.operations.length !== 2) {
+    throw new Error(
+      `${sceneName} must source-prove two background palette copies; reached ${copyPrefix.operations.length}`,
+    );
+  }
+  operations.push(...copyPrefix.operations);
+  cursor += copyPrefix.consumed;
+  const bankPop = instructions[cursor];
+  const bankRestore = instructions[cursor + 1];
+  if (
+    instructionSignature(bankPop) !== "pop af" ||
+    instructionSignature(bankRestore) !== "ldh [rWBK], a"
+  ) {
+    throw new Error(`${sceneName} does not restore its saved WRAM bank`);
+  }
+  operations.push({
+    op: "restore_memory_byte",
+    target: "rWBK",
+    storage: { kind: "cpu_stack", register_pair: "af" },
+    matches_save_source_span: sourceSpanThrough(
+      bankRead.source_span,
+      bankPush.source_span,
+    ),
+    source_span: sourceSpanThrough(bankPop.source_span, bankRestore.source_span),
+  });
+  cursor += 2;
+  return { operations, consumed: cursor - startIndex };
+};
+
+const compileCrystalIntroUnownFadeCall = (
+  call: RuntimePresentationAsmInstruction,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (
+    instructionSignature(call) !== "call CrystalIntro_UnownFade"
+  ) {
+    throw new Error(
+      `CrystalIntro_UnownFade requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const intro = loadSource("engine/movie/intro.asm", options);
+  const copy = loadSource("home/copy.asm", options);
+  const wram = loadSource("ram/wram.asm", options);
+  const byteFillBlocks = parseAsmBlocks([copy]);
+  const implementation = certifyCopyBytesImplementation(options);
+  const fadeSetupSpan = requireNormalizedSourceSequence(
+    intro,
+    [
+      "CrystalIntro_UnownFade:",
+      "add a",
+      "add a",
+      "add a",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, wBGPals2",
+      "add hl, de",
+      "inc hl",
+      "inc hl",
+      "ld a, [wIntroSceneTimer]",
+      "and %111111",
+      "cp %011111",
+      "jr z, .okay",
+      "jr c, .okay",
+      "ld c, a",
+      "ld a, %111111",
+      "sub c",
+      ".okay",
+      "ld c, a",
+      "ld b, 0",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wBGPals2)",
+      "ldh [rWBK], a",
+    ],
+    "CrystalIntro_UnownFade exact selector, timer fold, and WRAM-bank setup",
+  );
+  const fadeBodySpan = requireNormalizedSourceSequence(
+    intro,
+    [
+      "push hl",
+      "push bc",
+      "ld hl, wBGPals2",
+      "ld bc, 8 palettes",
+      "xor a",
+      "call ByteFill",
+      "pop bc",
+      "pop hl",
+      "push hl",
+      "ld hl, .BWFade",
+      "add hl, bc",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "pop hl",
+      "ld a, e",
+      "ld [hli], a",
+      "ld a, d",
+      "ld [hli], a",
+      "push hl",
+      "ld hl, .BlackLBlueFade",
+      "add hl, bc",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "pop hl",
+      "ld a, e",
+      "ld [hli], a",
+      "ld a, d",
+      "ld [hli], a",
+      "push hl",
+      "ld hl, .BlackBlueFade",
+      "add hl, bc",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "pop hl",
+      "ld a, e",
+      "ld [hli], a",
+      "ld a, d",
+      "ld [hli], a",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, TRUE",
+      "ldh [hCGBPalUpdate], a",
+      "ret",
+    ],
+    "CrystalIntro_UnownFade exact clear, RGB555 lookup writes, bank restore, and transfer request",
+  );
+  const tableSpecs = [
+    { label: ".BWFade", expression: "RGB hue, hue, hue" },
+    { label: ".BlackLBlueFade", expression: "RGB 0, hue / 2, hue" },
+    { label: ".BlackBlueFade", expression: "RGB 0, 0, hue" },
+  ] as const;
+  const tables = tableSpecs.map(({ label, expression }, tableIndex) => {
+    const sourceSpan = requireNormalizedSourceSequence(
+      intro,
+      [label + ":", "for hue, 32", expression, "endr"],
+      `CrystalIntro_UnownFade ${label} exact generated RGB555 table`,
+    );
+    const colors = Array.from({ length: 32 }, (_, hue) => {
+      const channels =
+        tableIndex === 0
+          ? [hue, hue, hue]
+          : tableIndex === 1
+            ? [0, Math.floor(hue / 2), hue]
+            : [0, 0, hue];
+      return channels[0] | (channels[1] << 5) | (channels[2] << 10);
+    });
+    return { label, colors, source_span: sourceSpan };
+  });
+  const byteFillSpan = sourceSpanThrough(
+    requireExactRoutineBlock(
+      byteFillBlocks,
+      "ByteFill",
+      ["inc b", "inc c", "jr .HandleLoop"],
+      "CrystalIntro_UnownFade ByteFill entry",
+    ),
+    requireExactRoutineBlock(
+      byteFillBlocks,
+      ".HandleLoop@ByteFill",
+      ["dec c", "jr nz, .PutByte", "dec b", "jr nz, .PutByte", "ret"],
+      "CrystalIntro_UnownFade ByteFill count loop",
+    ),
+  );
+  requireExactRoutineBlock(
+    byteFillBlocks,
+    ".PutByte@ByteFill",
+    ["ld [hli], a"],
+    "CrystalIntro_UnownFade ByteFill write",
+  );
+  const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+  const paletteBufferDeclarationSpan = requireExactNormalizedLine(
+    wram,
+    "wBGPals2:: ds 8 palettes",
+    "CrystalIntro_UnownFade exact eight-palette buffer",
+  );
+  const paletteBufferSize = 8 * implementation.palette_size;
+  if (paletteBufferSize !== 64) {
+    throw new Error(
+      `CrystalIntro_UnownFade must clear exactly 8 palettes/64 bytes; reached ${paletteBufferSize}`,
+    );
+  }
+  return {
+    op: "palette_fade_lookup",
+    palette_selector: "accumulator",
+    selector_stride: implementation.palette_size,
+    first_color_offset: 2,
+    timer: {
+      source: timer.target,
+      mask: 0x3f,
+      fold_above: 0x1f,
+      fold_from: 0x3f,
+      source_declaration_span: timer.declaration_source_span,
+    },
+    clear: { target: "wBGPals2", byte_count: paletteBufferSize, value: 0 },
+    tables,
+    writes: tables.map((table, index) => ({
+      target_offset: 2 + index * 2,
+      table: table.label,
+      encoding: "rgb555_little_endian",
+    })),
+    bank: { register: "rWBK", select: "BANK(wBGPals2)", restore: true },
+    transfer_request: { target: "hCGBPalUpdate", value: 1 },
+    implementation_source_spans: [
+      fadeSetupSpan,
+      fadeBodySpan,
+      byteFillSpan,
+      ...implementation.palette_size_source_spans,
+      ...implementation.palette_encoding_source_spans,
+      implementation.destination_section_source_span,
+      paletteBufferDeclarationSpan,
+    ],
+    invocation: {
+      call_form: "call",
+      target: "CrystalIntro_UnownFade",
+      stack_effect: "push_return_address_then_ret",
+      source_span: call.source_span,
+    },
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroResetLyOverridesCall = (
+  call: RuntimePresentationAsmInstruction,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation[] => {
+  if (instructionSignature(call) !== "call Intro_ResetLYOverrides") {
+    throw new Error(
+      `Intro_ResetLYOverrides requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const intro = loadSource("engine/movie/intro.asm", options);
+  const copy = loadSource("home/copy.asm", options);
+  const wram = loadSource("ram/wram.asm", options);
+  const hram = loadSource("ram/hram.asm", options);
+  const hardware = loadSource("constants/hardware.inc", options);
+  const blocks = parseAsmBlocks([intro, copy]);
+  const routineSpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_ResetLYOverrides",
+    [
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wLYOverrides)",
+      "ldh [rWBK], a",
+      "ld hl, wLYOverrides",
+      "ld bc, wLYOverridesEnd - wLYOverrides",
+      "xor a",
+      "call ByteFill",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, LOW(rSCX)",
+      "ldh [hLCDCPointer], a",
+      "ret",
+    ],
+    "Intro_ResetLYOverrides exact banked clear and LCDC source selection",
+  );
+  [
+    requireExactRoutineBlock(
+      blocks,
+      "ByteFill",
+      ["inc b", "inc c", "jr .HandleLoop"],
+      "Intro_ResetLYOverrides ByteFill entry",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".PutByte@ByteFill",
+      ["ld [hli], a"],
+      "Intro_ResetLYOverrides ByteFill write",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".HandleLoop@ByteFill",
+      ["dec c", "jr nz, .PutByte", "dec b", "jr nz, .PutByte", "ret"],
+      "Intro_ResetLYOverrides ByteFill count loop",
+    ),
+  ];
+  const constants = parseAsmConstants([hardware]);
+  const byteCount = asmRegionByteSize(
+    wram,
+    "wLYOverrides:: ds SCREEN_HEIGHT_PX",
+    "wLYOverridesEnd::",
+    { constants },
+  );
+  const screenHeight = constants.get("SCREEN_HEIGHT_PX");
+  const scx = constants.get("rSCX");
+  if (byteCount !== screenHeight || byteCount !== 144 || scx === undefined) {
+    throw new Error(
+      `Intro_ResetLYOverrides must clear the exact 144-byte screen-height buffer; reached ${byteCount}`,
+    );
+  }
+  const lyDeclaration = requireExactNormalizedLine(
+    wram,
+    "wLYOverrides:: ds SCREEN_HEIGHT_PX",
+    "Intro_ResetLYOverrides scanline buffer declaration",
+  );
+  const lcdcDeclaration = requireExactNormalizedLine(
+    hram,
+    "hLCDCPointer:: db",
+    "Intro_ResetLYOverrides LCDC pointer declaration",
+  );
+  const scxDeclaration = requireExactNormalizedLine(
+    hardware,
+    "def rSCX equ $FF43",
+    "Intro_ResetLYOverrides SCX register declaration",
+  );
+  return [
+    {
+      op: "fill_memory",
+      target: "wLYOverrides",
+      byte_count: byteCount,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "BANK(wLYOverrides)", restore: true },
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: routineSpan,
+    },
+    {
+      op: "write_memory_byte",
+      target: "hLCDCPointer",
+      address_space: "hram",
+      value: scx & 0xff,
+      condition: { source: null, predicate: "always", source_span: null },
+      target_declaration_source_span: lcdcDeclaration,
+      value_source_span: scxDeclaration,
+      implementation_source_span: routineSpan,
+      source_span: call.source_span,
+    },
+  ];
+};
+
+const compileIntroPerspectiveScrollCall = (
+  call: RuntimePresentationAsmInstruction,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_PerspectiveScrollBG") {
+    throw new Error(
+      `Intro_PerspectiveScrollBG requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const intro = loadSource("engine/movie/intro.asm", options);
+  const copy = loadSource("home/copy.asm", options);
+  const wram = loadSource("ram/wram.asm", options);
+  const hram = loadSource("ram/hram.asm", options);
+  const hardware = loadSource("constants/hardware.inc", options);
+  const blocks = parseAsmBlocks([intro, copy]);
+  const entrySpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_PerspectiveScrollBG",
+    [
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wLYOverrides)",
+      "ldh [rWBK], a",
+      "ld a, [wIntroSceneFrameCounter]",
+      "and $1",
+      "jr z, .skip",
+      "ld hl, wLYOverrides",
+      "ld a, [hl]",
+      "inc a",
+      "ld bc, $5f",
+      "call ByteFill",
+    ],
+    "Intro_PerspectiveScrollBG exact alternating trees band",
+  );
+  const tailSpan = requireExactRoutineBlock(
+    blocks,
+    ".skip@Intro_PerspectiveScrollBG",
+    [
+      "ld hl, wLYOverrides + $5f",
+      "ld a, [hl]",
+      "inc a",
+      "inc a",
+      "ld bc, $31",
+      "call ByteFill",
+      "ld a, [wLYOverrides + 0]",
+      "ldh [hSCX], a",
+      "pop af",
+      "ldh [rWBK], a",
+      "ret",
+    ],
+    "Intro_PerspectiveScrollBG exact grass band, SCX copy, and bank restore",
+  );
+  requireExactRoutineBlock(
+    blocks,
+    "ByteFill",
+    ["inc b", "inc c", "jr .HandleLoop"],
+    "Intro_PerspectiveScrollBG ByteFill entry",
+  );
+  requireExactRoutineBlock(
+    blocks,
+    ".PutByte@ByteFill",
+    ["ld [hli], a"],
+    "Intro_PerspectiveScrollBG ByteFill write",
+  );
+  requireExactRoutineBlock(
+    blocks,
+    ".HandleLoop@ByteFill",
+    ["dec c", "jr nz, .PutByte", "dec b", "jr nz, .PutByte", "ret"],
+    "Intro_PerspectiveScrollBG ByteFill count loop",
+  );
+  const constants = parseAsmConstants([hardware]);
+  const byteCount = asmRegionByteSize(
+    wram,
+    "wLYOverrides:: ds SCREEN_HEIGHT_PX",
+    "wLYOverridesEnd::",
+    { constants },
+  );
+  if (byteCount !== 0x5f + 0x31 || byteCount !== 144) {
+    throw new Error(
+      `Intro_PerspectiveScrollBG bands must cover exactly 144 scanlines; reached ${byteCount}`,
+    );
+  }
+  const frameDeclaration = requireFixedWramWriteTarget(
+    "[wIntroSceneFrameCounter]",
+    options,
+  );
+  const lyDeclaration = requireExactNormalizedLine(
+    wram,
+    "wLYOverrides:: ds SCREEN_HEIGHT_PX",
+    "Intro_PerspectiveScrollBG scanline buffer declaration",
+  );
+  const scxDeclaration = requireExactNormalizedLine(
+    hram,
+    "hSCX:: db",
+    "Intro_PerspectiveScrollBG SCX mirror declaration",
+  );
+  return {
+    op: "perspective_scroll",
+    target: "wLYOverrides",
+    byte_count: byteCount,
+    bank: { select: "BANK(wLYOverrides)", restore: true },
+    frame: {
+      source: frameDeclaration.target,
+      parity_mask: 1,
+      source_declaration_span: frameDeclaration.declaration_source_span,
+    },
+    bands: [
+      {
+        id: "trees",
+        offset: 0,
+        byte_count: 0x5f,
+        delta: 1,
+        cadence: "odd_frames",
+        value_source: "first_byte",
+      },
+      {
+        id: "grass",
+        offset: 0x5f,
+        byte_count: 0x31,
+        delta: 2,
+        cadence: "every_frame",
+        value_source: "first_byte",
+      },
+    ],
+    horizontal_scroll: {
+      source: "wLYOverrides",
+      source_offset: 0,
+      target: "hSCX",
+      target_declaration_source_span: scxDeclaration,
+    },
+    target_declaration_source_span: lyDeclaration,
+    implementation_source_spans: [entrySpan, tailSpan],
+    invocation: {
+      call_form: "call",
+      target: "Intro_PerspectiveScrollBG",
+      stack_effect: "push_return_address_then_ret",
+      source_span: call.source_span,
+    },
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroRustleGrassCall = (
+  call: RuntimePresentationAsmInstruction,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_RustleGrass") {
+    throw new Error(
+      `Intro_RustleGrass requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const intro = loadSource("engine/movie/intro.asm", options);
+  const blocks = parseAsmBlocks([intro]);
+  const entrySpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_RustleGrass",
+    [
+      "ld a, [wIntroSceneFrameCounter]",
+      "cp 36",
+      "ret nc",
+      "and $c",
+      "srl a",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, .RustlingGrassPointers",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld [wRequested2bppSource], a",
+      "ld a, [hli]",
+      "ld [wRequested2bppSource + 1], a",
+      "ld a, LOW(vTiles2 tile $09)",
+      "ld [wRequested2bppDest], a",
+      "ld a, HIGH(vTiles2 tile $09)",
+      "ld [wRequested2bppDest + 1], a",
+      "ld a, 4",
+      "ld [wRequested2bppSize], a",
+      "ret",
+    ],
+    "Intro_RustleGrass exact gated asynchronous tile request",
+  );
+  const tableSpan = requireExactRoutineBlock(
+    blocks,
+    ".RustlingGrassPointers@Intro_RustleGrass",
+    [
+      "dw IntroGrass1GFX",
+      "dw IntroGrass2GFX",
+      "dw IntroGrass3GFX",
+      "dw IntroGrass2GFX",
+    ],
+    "Intro_RustleGrass exact four-entry animation table",
+  );
+  const resources = [
+    "IntroGrass1GFX",
+    "IntroGrass2GFX",
+    "IntroGrass3GFX",
+    "IntroGrass2GFX",
+  ].map((symbol) => {
+    const resource = requirePresentationResourceAtLabel(intro, symbol);
+    return {
+      symbol,
+      path: resource.path,
+      source_span: sourceSpanThrough(
+        resource.label_source_span,
+        resource.directive_source_span,
+      ),
+    };
+  });
+  const implementation = certifyIntroDecompressionImplementation(options);
+  const frame = requireFixedWramWriteTarget(
+    "[wIntroSceneFrameCounter]",
+    options,
+  );
+  const requestTargets = [
+    "wRequested2bppSource",
+    "wRequested2bppDest",
+    "wRequested2bppSize",
+  ].map((target) => {
+    const declaration = findAsmSymbolDeclarationSpan(target, [
+      loadSource("ram/wram.asm", options),
+    ]);
+    if (!declaration) {
+      throw new Error(`Intro_RustleGrass request target ${target} is undeclared`);
+    }
+    return { target, declaration_source_span: declaration };
+  });
+  return {
+    op: "indexed_2bpp_request",
+    condition: {
+      source: frame.target,
+      predicate: "unsigned_less_than",
+      operand: 36,
+      source_declaration_span: frame.declaration_source_span,
+    },
+    selector: {
+      source: frame.target,
+      mask: 0x0c,
+      shift_right: 1,
+      byte_offsets: [0, 2, 4, 6],
+    },
+    table: {
+      id: ".RustlingGrassPointers@Intro_RustleGrass",
+      entries: resources,
+      source_span: tableSpan,
+    },
+    target: "vTiles2 tile $09",
+    target_byte_offset: 9 * implementation.bytes_per_tile,
+    target_vram_bank: 0,
+    tile_count: 4,
+    bytes_per_tile: implementation.bytes_per_tile,
+    byte_count: 4 * implementation.bytes_per_tile,
+    request_state: {
+      size: "wRequested2bppSize",
+      source: "wRequested2bppSource",
+      destination: "wRequested2bppDest",
+      asynchronous: true,
+      declarations: requestTargets,
+    },
+    implementation_source_spans: [
+      entrySpan,
+      ...implementation.service_source_spans,
+      implementation.vblank_source_span,
+      implementation.tile_size_source_span,
+    ],
+    invocation: {
+      call_form: "call",
+      target: "Intro_RustleGrass",
+      stack_effect: "push_return_address_then_ret",
+      source_span: call.source_span,
+    },
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroPlayUnownSoundCall = (
+  call: RuntimePresentationAsmInstruction,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call .PlayUnownSound") {
+    throw new Error(
+      `IntroScene12 .PlayUnownSound requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const intro = loadSource("engine/movie/intro.asm", options);
+  const audio = loadSource("home/audio.asm", options);
+  const blocks = parseAsmBlocks([intro, audio]);
+  const entrySpan = requireExactRoutineBlock(
+    blocks,
+    ".PlayUnownSound@IntroScene12",
+    [
+      "ld a, [wIntroSceneFrameCounter]",
+      "ld c, a",
+      "ld hl, .UnownSounds",
+    ],
+    "IntroScene12 exact sound-table setup",
+  );
+  const loopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@IntroScene12",
+    [
+      "ld a, [hli]",
+      "cp -1",
+      "ret z",
+      "cp c",
+      "jr z, .playsound",
+      "inc hl",
+      "inc hl",
+      "jr .loop",
+    ],
+    "IntroScene12 exact sound-table sentinel scan",
+  );
+  const playSpan = requireExactRoutineBlock(
+    blocks,
+    ".playsound@IntroScene12",
+    [
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "push de",
+      "call SFXChannelsOff",
+      "pop de",
+      "call PlaySFX",
+      "ret",
+    ],
+    "IntroScene12 exact matched sound dispatch",
+  );
+  const tableSpan = requireExactRoutineBlock(
+    blocks,
+    ".UnownSounds@IntroScene12",
+    [
+      "dbw $00, SFX_INTRO_UNOWN_3",
+      "dbw $20, SFX_INTRO_UNOWN_2",
+      "dbw $40, SFX_INTRO_UNOWN_1",
+      "dbw $60, SFX_INTRO_UNOWN_2",
+      "dbw $80, SFX_INTRO_UNOWN_3",
+      "dbw $90, SFX_INTRO_UNOWN_2",
+      "dbw $a0, SFX_INTRO_UNOWN_1",
+      "dbw $b0, SFX_INTRO_UNOWN_2",
+      "db -1",
+    ],
+    "IntroScene12 exact frame-to-sound table",
+  );
+  const channelsOffSpan = requireExactRoutineBlock(
+    blocks,
+    "SFXChannelsOff",
+    [
+      "xor a",
+      "ld [wChannel5Flags1], a",
+      "ld [wChannel6Flags1], a",
+      "ld [wChannel7Flags1], a",
+      "ld [wChannel8Flags1], a",
+      "ld [wPitchSweep], a",
+      "ret",
+    ],
+    "IntroScene12 exact SFX-channel stop",
+  );
+  const frame = requireFixedWramWriteTarget(
+    "[wIntroSceneFrameCounter]",
+    options,
+  );
+  return {
+    op: "scheduled_audio",
+    clock: frame.target,
+    entries: [
+      [0x00, "SFX_INTRO_UNOWN_3"],
+      [0x20, "SFX_INTRO_UNOWN_2"],
+      [0x40, "SFX_INTRO_UNOWN_1"],
+      [0x60, "SFX_INTRO_UNOWN_2"],
+      [0x80, "SFX_INTRO_UNOWN_3"],
+      [0x90, "SFX_INTRO_UNOWN_2"],
+      [0xa0, "SFX_INTRO_UNOWN_1"],
+      [0xb0, "SFX_INTRO_UNOWN_2"],
+    ].map(([frameValue, audioId]) => ({
+      frame: frameValue,
+      audio: audioId,
+    })),
+    sentinel: 0xff,
+    on_match: { stop_sfx_channels: [5, 6, 7, 8], play_entry: true },
+    clock_declaration_source_span: frame.declaration_source_span,
+    table_source_span: tableSpan,
+    implementation_source_spans: [entrySpan, loopSpan, playSpan, channelsOffSpan],
+    invocation: {
+      call_form: "call",
+      target: ".PlayUnownSound@IntroScene12",
+      stack_effect: "push_return_address_then_ret",
+      source_span: call.source_span,
+    },
+    source_span: call.source_span,
+  };
+};
+
 function certifyCrystalIntroSubprogramFrontier(
   options: BuildRuntimeTitlePresentationProgramOptions,
   controlFlow: RuntimePresentationControlFlow,
@@ -13017,6 +13973,7 @@ function certifyCrystalIntroSubprogramFrontier(
   const clearSprites = loadSource("home/clear_sprites.asm", options);
   const delay = loadSource("home/delay.asm", options);
   const blocks = parseAsmBlocks([intro, joypad, clearSprites, delay]);
+  const delayFramesImplementationSpan = certifyDelayFrames(blocks);
 
   requireExactRoutineBlock(
     blocks,
@@ -13160,7 +14117,7 @@ function certifyCrystalIntroSubprogramFrontier(
   certifyClearBgPalettesOperations(options);
   const clearTileOperations = certifyClearTilemapOperations(options);
 
-  requireExactRoutineBlock(
+  const sceneDispatcherSpan = requireExactRoutineBlock(
     blocks,
     "IntroSceneJumper",
     ["jumptable IntroScenes, wJumptableIndex"],
@@ -13266,6 +14223,7 @@ function certifyCrystalIntroSubprogramFrontier(
     ...bgModeRun.operations,
     ...vramBankRun.operations,
   ];
+  let compiledSpritePrograms: RuntimePresentationSpriteProgram[] = [];
   const decompressionPrefix = compileIntroSceneDecompressionPrefix(
     firstScene,
     expectedPrefix.length,
@@ -13546,6 +14504,2510 @@ function certifyCrystalIntroSubprogramFrontier(
     );
     nextCall = loopInstructions[0];
   }
+  if (
+    runtimePresentationInstructionTarget(nextCall) === "JoyTextDelay" &&
+    nextCall.opcode === "call"
+  ) {
+    compiledPrefix.push(...certifyJoyTextDelayOperations(options, nextCall));
+    const frontierInstructions =
+      blocks.get(frontierBlock)?.instructions ?? [];
+    const invocationIndex = frontierInstructions.indexOf(nextCall);
+    if (invocationIndex < 0 || !frontierInstructions[invocationIndex + 1]) {
+      throw new Error(
+        "CrystalIntro JoyTextDelay invocation has no exact reachable continuation",
+      );
+    }
+    nextCall = frontierInstructions[invocationIndex + 1];
+  }
+  if (instructionSignature(nextCall) === "ldh a, [hJoyLast]") {
+    const loopBlock = blocks.get(frontierBlock);
+    if (!loopBlock) {
+      throw new Error("CrystalIntro input loop source block is missing");
+    }
+    const inputReadIndex = loopBlock.instructions.indexOf(nextCall);
+    const inputMask = loopBlock.instructions[inputReadIndex + 1];
+    const inputBranch = loopBlock.instructions[inputReadIndex + 2];
+    const exitRead = loopBlock.instructions[inputReadIndex + 3];
+    const exitBitTest = loopBlock.instructions[inputReadIndex + 4];
+    const exitBranch = loopBlock.instructions[inputReadIndex + 5];
+    if (
+      !inputMask ||
+      !inputBranch ||
+      !exitRead ||
+      !exitBitTest ||
+      !exitBranch ||
+      instructionSignature(inputMask) !== "and PAD_BUTTONS" ||
+      instructionSignature(inputBranch) !== "jr nz, .ShutOffMusic" ||
+      instructionSignature(exitRead) !== "ld a, [wJumptableIndex]" ||
+      instructionSignature(exitBitTest) !== "bit JUMPTABLE_EXIT_F, a" ||
+      instructionSignature(exitBranch) !== "jr nz, .done"
+    ) {
+      throw new Error(
+        "CrystalIntro input loop predicates do not match the exact source sequence",
+      );
+    }
+    const hardware = loadSource("constants/hardware.inc", options);
+    const ramConstants = loadSource("constants/ram_constants.asm", options);
+    const padButtons = parseAsmConstants([hardware]).get("PAD_BUTTONS");
+    const exitBit = parseAsmConstants([ramConstants]).get("JUMPTABLE_EXIT_F");
+    if (padButtons !== 0x0f || exitBit !== 7) {
+      throw new Error(
+        `CrystalIntro input predicate constants are not exact: PAD_BUTTONS=${String(padButtons)}, JUMPTABLE_EXIT_F=${String(exitBit)}`,
+      );
+    }
+    const padButtonsSpan = requireExactNormalizedLine(
+      hardware,
+      "def PAD_BUTTONS equ %0000_1111",
+      "CrystalIntro PAD_BUTTONS mask",
+    );
+    const exitBitSpan = requireExactNormalizedLine(
+      ramConstants,
+      "shift_const JUMPTABLE_EXIT",
+      "CrystalIntro JUMPTABLE_EXIT_F bit",
+    );
+    compiledPrefix.push(
+      {
+        op: "input_branch",
+        sample: "hJoyLast",
+        require_all: [],
+        require_any: [
+          {
+            symbol: "PAD_BUTTONS",
+            value: padButtons,
+            source_span: padButtonsSpan,
+          },
+        ],
+        forbid_any: [],
+        target: instructionTarget(loopBlock, inputBranch, blocks),
+        source_span: sourceSpanThrough(
+          nextCall.source_span,
+          inputBranch.source_span,
+        ),
+      },
+      {
+        op: "memory_branch",
+        source: "wJumptableIndex",
+        predicate: "bit_set",
+        bit: {
+          symbol: "JUMPTABLE_EXIT_F",
+          value: exitBit,
+          source_span: exitBitSpan,
+        },
+        target: instructionTarget(loopBlock, exitBranch, blocks),
+        source_span: sourceSpanThrough(
+          exitRead.source_span,
+          exitBranch.source_span,
+        ),
+      },
+    );
+    nextCall = loopBlock.instructions[inputReadIndex + 6];
+  }
+  if (
+    runtimePresentationInstructionTarget(nextCall) === "IntroSceneJumper" &&
+    nextCall.opcode === "call"
+  ) {
+    compiledPrefix.push({
+      op: "dispatch_table",
+      dispatcher: "IntroSceneJumper",
+      table: "IntroScenes",
+      index: "wJumptableIndex",
+      entries: [...sceneTable.entries],
+      domain: sceneDomain,
+      implementation_source_span: sceneDispatcherSpan,
+      table_source_span: sceneTable.source_span,
+      invocation: {
+        call_form: "call",
+        target: "IntroSceneJumper",
+        source_span: nextCall.source_span,
+      },
+      source_span: nextCall.source_span,
+    });
+    const loopInstructions = blocks.get(frontierBlock)?.instructions ?? [];
+    const invocationIndex = loopInstructions.indexOf(nextCall);
+    if (invocationIndex < 0 || !loopInstructions[invocationIndex + 1]) {
+      throw new Error(
+        "CrystalIntro scene dispatcher has no exact reachable scheduler continuation",
+      );
+    }
+    nextCall = loopInstructions[invocationIndex + 1];
+  }
+  if (
+    runtimePresentationInstructionTarget(nextCall) ===
+      "PlaySpriteAnimations" &&
+    nextCall.opcode === "farcall"
+  ) {
+    compiledSpritePrograms = controlFlow.sprite_programs.filter(
+      (program) =>
+        program.initializer_source_span.file === "engine/movie/intro.asm",
+    );
+    if (compiledSpritePrograms.length === 0) {
+      throw new Error(
+        "CrystalIntro stateful scheduler has no source-derived sprite programs",
+      );
+    }
+    const schedulerOperation = [...compiledPrefix]
+      .reverse()
+      .find(
+        (operation) =>
+          operation.op === "sprite_scheduler_step" &&
+          operation.source_span.file === "engine/movie/intro.asm" &&
+          operation.source_span.start_line === nextCall.source_span.start_line,
+      );
+    if (!schedulerOperation) {
+      throw new Error(
+        "CrystalIntro stateful scheduler has no exact source-certified implementation operation",
+      );
+    }
+    schedulerOperation.instances = compiledSpritePrograms.map(
+      (program) => program.instance,
+    );
+    schedulerOperation.instance_activation = compiledSpritePrograms.map(
+      (program) => ({
+        instance: program.instance,
+        lifetime: program.lifetime,
+      }),
+    );
+    const secondScene = blocks.get("IntroScene2");
+    const secondSceneEntry = secondScene?.instructions[0];
+    if (!secondScene || !secondSceneEntry) {
+      throw new Error(
+        "CrystalIntro stateful scheduler has no exact IntroScene2 continuation",
+      );
+    }
+    frontierBlock = secondScene.id;
+    nextCall = secondSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene2" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const instructions = scene.instructions;
+    const expectedPrefix = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $80",
+      "jr nc, .endscene",
+      "cp $60",
+      "jr nz, .nosound",
+    ];
+    const reachedPrefix = instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene2 counter predicates are not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const memory = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    const endThreshold = evaluateAsmInteger(instructions[3].args[0], new Map());
+    const soundThreshold = evaluateAsmInteger(
+      instructions[5].args[0],
+      new Map(),
+    );
+    if (endThreshold !== 0x80 || soundThreshold !== 0x60) {
+      throw new Error(
+        `IntroScene2 thresholds are not exact: end=${endThreshold}, sound=${soundThreshold}`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: sourceSpanThrough(
+          instructions[0].source_span,
+          instructions[2].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: endThreshold,
+        target: instructionTarget(scene, instructions[4], blocks),
+        source_span: sourceSpanThrough(
+          instructions[3].source_span,
+          instructions[4].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "not_equal",
+        operand: soundThreshold,
+        target: instructionTarget(scene, instructions[6], blocks),
+        source_span: sourceSpanThrough(
+          instructions[5].source_span,
+          instructions[6].source_span,
+        ),
+      },
+    );
+    nextCall = instructions[7]!;
+  }
+  if (
+    frontierBlock === "IntroScene2" &&
+    instructionSignature(nextCall) === "push af"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const startIndex = scene.instructions.indexOf(nextCall);
+    const trigger = scene.instructions.slice(startIndex, startIndex + 6);
+    const expectedTrigger = [
+      "push af",
+      "depixel 11, 11",
+      "call CrystalIntro_InitUnownAnim",
+      "ld de, SFX_INTRO_UNOWN_1",
+      "call PlaySFX",
+      "pop af",
+    ];
+    if (
+      trigger.map(instructionSignature).join("\0") !==
+      expectedTrigger.join("\0")
+    ) {
+      throw new Error(
+        `IntroScene2 Unown trigger is not exact; reached ${trigger.map(instructionSignature).join(" -> ")}`,
+      );
+    }
+    const initializedPrograms = compiledSpritePrograms.filter(
+      (program) =>
+        program.allocation_source_span.file === "engine/movie/intro.asm" &&
+        program.allocation_source_span.start_line ===
+          trigger[2].source_span.start_line,
+    );
+    if (initializedPrograms.length !== 4) {
+      throw new Error(
+        `IntroScene2 Unown trigger must source-prove four initialized programs; reached ${initializedPrograms.length}`,
+      );
+    }
+    const timerMemory = requireFixedWramWriteTarget(
+      "[wIntroSceneTimer]",
+      options,
+    );
+    const noSoundBlock = blocks.get(".nosound@IntroScene2");
+    const timerWrite = noSoundBlock?.instructions[0];
+    const accumulatorZero = noSoundBlock?.instructions[1];
+    const fadeCall = noSoundBlock?.instructions[2];
+    if (
+      !timerWrite ||
+      !accumulatorZero ||
+      !fadeCall ||
+      instructionSignature(timerWrite) !== "ld [wIntroSceneTimer], a" ||
+      instructionSignature(accumulatorZero) !== "xor a" ||
+      instructionSignature(fadeCall) !== "call CrystalIntro_UnownFade"
+    ) {
+      throw new Error(
+        "IntroScene2 Unown trigger has no exact timer/fade continuation",
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "sprite_init_group",
+        instances: initializedPrograms.map((program) => program.instance),
+        origin: { macro: "depixel", x: 11, y: 11 },
+        preserves: "intro_scene_frame",
+        source_span: sourceSpanThrough(
+          trigger[0].source_span,
+          trigger[5].source_span,
+        ),
+      },
+      {
+        op: "play_audio",
+        audio: "SFX_INTRO_UNOWN_1",
+        source_span: sourceSpanThrough(
+          trigger[3].source_span,
+          trigger[4].source_span,
+        ),
+      },
+      {
+        op: "write_memory_byte_from_result",
+        target: timerMemory.target,
+        address_space: timerMemory.address_space,
+        result: "intro_scene_frame",
+        target_declaration_source_span: timerMemory.declaration_source_span,
+        target_section_source_span: timerMemory.section_source_span,
+        source_span: timerWrite.source_span,
+      },
+      {
+        op: "set_local",
+        name: "accumulator",
+        value: 0,
+        source_span: accumulatorZero.source_span,
+      },
+    );
+    nextCall = fadeCall;
+  }
+  if (
+    frontierBlock === "IntroScene2" &&
+    instructionSignature(nextCall) === "call CrystalIntro_UnownFade"
+  ) {
+    compiledPrefix.push(
+      compileCrystalIntroUnownFadeCall(nextCall, options),
+    );
+    const noSoundInstructions = blocks.get(".nosound@IntroScene2")?.instructions;
+    const fadeIndex = noSoundInstructions?.indexOf(nextCall) ?? -1;
+    const returnInstruction = noSoundInstructions?.[fadeIndex + 1];
+    if (!returnInstruction || instructionSignature(returnInstruction) !== "ret") {
+      throw new Error(
+        "IntroScene2 fade continuation must return immediately after CrystalIntro_UnownFade",
+      );
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: returnInstruction.source_span,
+    });
+
+    const endScene = blocks.get(".endscene@IntroScene2")?.instructions ?? [];
+    if (
+      endScene.length !== 2 ||
+      instructionSignature(endScene[0]) !== "call NextIntroScene" ||
+      instructionSignature(endScene[1]) !== "ret"
+    ) {
+      throw new Error(
+        "IntroScene2 end branch must increment the scene index and return",
+      );
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        endScene[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: endScene[1].source_span },
+    );
+    const thirdScene = blocks.get("IntroScene3");
+    const thirdSceneEntry = thirdScene?.instructions[0];
+    if (!thirdScene || !thirdSceneEntry) {
+      throw new Error("IntroScene2 has no exact IntroScene3 continuation");
+    }
+    frontierBlock = thirdScene.id;
+    nextCall = thirdSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene3" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene3 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      5,
+      options,
+    );
+    if (
+      bgModeRun?.consumed !== 2 ||
+      vramBankRun?.consumed !== 2
+    ) {
+      throw new Error(
+        "IntroScene3 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      expectedPrefix.length,
+      1,
+      intro,
+      options,
+    );
+    if (decompression.operations.length === 0) {
+      throw new Error("IntroScene3 has no exact decompression prefix");
+    }
+    compiledPrefix.push(...decompression.operations);
+    nextCall = scene.instructions[expectedPrefix.length + decompression.consumed]!;
+  }
+  if (
+    frontierBlock === "IntroScene3" &&
+    instructionSignature(nextCall) === "ldh a, [rWBK]"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    let cursor = scene.instructions.indexOf(nextCall);
+    const bankRead = scene.instructions[cursor];
+    const bankPush = scene.instructions[cursor + 1];
+    const bankValue = scene.instructions[cursor + 2];
+    const bankWrite = scene.instructions[cursor + 3];
+    const bankMatch = bankValue?.args[1]?.match(
+      /^BANK\(([A-Za-z_.][A-Za-z0-9_.@]*)\)$/,
+    );
+    if (
+      instructionSignature(bankPush) !== "push af" ||
+      bankValue?.opcode !== "ld" ||
+      bankValue.args[0] !== "a" ||
+      !bankMatch ||
+      instructionSignature(bankWrite) !== "ldh [rWBK], a"
+    ) {
+      throw new Error("IntroScene3 has no exact WRAM bank save/select scope");
+    }
+    const wram = loadSource("ram/wram.asm", options);
+    const bankSymbolSpan = findAsmSymbolDeclarationSpan(bankMatch[1], [wram]);
+    if (!bankSymbolSpan) {
+      throw new Error(
+        `IntroScene3 WRAM bank operand ${bankValue.args[1]} has no exact declaration`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "save_memory_byte",
+        source: "rWBK",
+        storage: { kind: "cpu_stack", register_pair: "af" },
+        restore_required: true,
+        source_span: sourceSpanThrough(bankRead.source_span, bankPush.source_span),
+      },
+      {
+        op: "write_memory_byte",
+        target: "rWBK",
+        address_space: "hardware_register",
+        value: bankValue.args[1],
+        condition: { source: null, predicate: "always", source_span: null },
+        value_source_span: bankSymbolSpan,
+        source_span: sourceSpanThrough(bankValue.source_span, bankWrite.source_span),
+      },
+    );
+    cursor += 4;
+    const copyPrefix = compileIntroSceneCopyBytesPrefix(
+      scene.instructions,
+      cursor,
+      intro,
+      bankValue.args[1],
+      options,
+    );
+    if (copyPrefix.operations.length !== 2) {
+      throw new Error(
+        `IntroScene3 must source-prove two background palette copies; reached ${copyPrefix.operations.length}`,
+      );
+    }
+    compiledPrefix.push(...copyPrefix.operations);
+    cursor += copyPrefix.consumed;
+    const bankPop = scene.instructions[cursor];
+    const bankRestore = scene.instructions[cursor + 1];
+    if (
+      instructionSignature(bankPop) !== "pop af" ||
+      instructionSignature(bankRestore) !== "ldh [rWBK], a"
+    ) {
+      throw new Error("IntroScene3 does not restore its saved WRAM bank");
+    }
+    compiledPrefix.push({
+      op: "restore_memory_byte",
+      target: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af" },
+      matches_save_source_span: sourceSpanThrough(
+        bankRead.source_span,
+        bankPush.source_span,
+      ),
+      source_span: sourceSpanThrough(bankPop.source_span, bankRestore.source_span),
+    });
+    cursor += 2;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    nextCall = scene.instructions[cursor]!;
+  }
+  if (
+    frontierBlock === "IntroScene3" &&
+    instructionSignature(nextCall) === "call Intro_ResetLYOverrides"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    let cursor = scene.instructions.indexOf(nextCall);
+    compiledPrefix.push(...compileIntroResetLyOverridesCall(nextCall, options));
+    cursor += 1;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error(
+        "IntroScene3 must request a CGB palette update after resetting LY overrides",
+      );
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (
+      !stateWrites ||
+      stateWrites.consumed !== 2 ||
+      stateWrites.operations[0]?.target !== "wIntroSceneFrameCounter"
+    ) {
+      throw new Error(
+        "IntroScene3 must reset the exact intro frame counter before advancing",
+      );
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene3 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene3 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const fourthScene = blocks.get("IntroScene4");
+    const fourthSceneEntry = fourthScene?.instructions[0];
+    if (!fourthScene || !fourthSceneEntry) {
+      throw new Error("IntroScene3 has no exact IntroScene4 continuation");
+    }
+    frontierBlock = fourthScene.id;
+    nextCall = fourthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene4" &&
+    instructionSignature(nextCall) === "call Intro_PerspectiveScrollBG"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "call Intro_PerspectiveScrollBG",
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "cp $80",
+      "jr z, .endscene",
+      "inc [hl]",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene4 perspective counter loop is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const memory = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    compiledPrefix.push(
+      compileIntroPerspectiveScrollCall(nextCall, options),
+      {
+        op: "read_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        result: "intro_scene_frame",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: sourceSpanThrough(
+          scene.instructions[1].source_span,
+          scene.instructions[2].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "equal",
+        operand: 0x80,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[3].source_span,
+          scene.instructions[4].source_span,
+        ),
+      },
+      {
+        op: "increment_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: scene.instructions[5].source_span,
+      },
+      { op: "return", source_span: scene.instructions[6].source_span },
+    );
+    const endScene = blocks.get(".endscene@IntroScene4")?.instructions ?? [];
+    if (
+      endScene.length !== 2 ||
+      instructionSignature(endScene[0]) !== "call NextIntroScene" ||
+      instructionSignature(endScene[1]) !== "ret"
+    ) {
+      throw new Error(
+        "IntroScene4 end branch must increment the scene index and return",
+      );
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        endScene[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: endScene[1].source_span },
+    );
+    const fifthScene = blocks.get("IntroScene5");
+    const fifthSceneEntry = fifthScene?.instructions[0];
+    if (!fifthScene || !fifthSceneEntry) {
+      throw new Error("IntroScene4 has no exact IntroScene5 continuation");
+    }
+    frontierBlock = fifthScene.id;
+    nextCall = fifthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene5" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ldh [hLCDCPointer], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene5 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const displayWrites = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      6,
+      options,
+    );
+    if (
+      displayWrites?.consumed !== 3 ||
+      vramBankRun?.consumed !== 2
+    ) {
+      throw new Error(
+        "IntroScene5 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...displayWrites.operations,
+      ...vramBankRun.operations,
+    );
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      expectedPrefix.length,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 4 ||
+      decompression.operations.filter(
+        (operation) => operation.op === "request_2bpp_transfer",
+      ).length !== 4
+    ) {
+      throw new Error(
+        "IntroScene5 must source-prove four decompression/request pairs",
+      );
+    }
+    compiledPrefix.push(...decompression.operations);
+    nextCall = scene.instructions[expectedPrefix.length + decompression.consumed]!;
+  }
+  if (
+    frontierBlock === "IntroScene5" &&
+    instructionSignature(nextCall) === "ldh a, [rWBK]"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    let cursor = scene.instructions.indexOf(nextCall);
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene5 must clear sprite animations after setup");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene5 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error(
+        "IntroScene5 must reset both intro frame state bytes before advancing",
+      );
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene5 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene5 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const sixthScene = blocks.get("IntroScene6");
+    const sixthSceneEntry = sixthScene?.instructions[0];
+    if (!sixthScene || !sixthSceneEntry) {
+      throw new Error("IntroScene5 has no exact IntroScene6 continuation");
+    }
+    frontierBlock = sixthScene.id;
+    nextCall = sixthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene6" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $80",
+      "jr nc, .endscene",
+      "cp $60",
+      "jr z, .SecondUnown",
+      "cp $40",
+      "jr nc, .StopUnown",
+      "cp $20",
+      "jr z, .FirstUnown",
+      "jr .NoUnown",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene6 counter dispatch is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const memory = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    compiledPrefix.push({
+      op: "postincrement_memory_byte",
+      target: memory.target,
+      address_space: memory.address_space,
+      result: "intro_scene_frame",
+      delta: 1,
+      wrap: "u8",
+      target_declaration_source_span: memory.declaration_source_span,
+      target_section_source_span: memory.section_source_span,
+      source_span: sourceSpanThrough(
+        scene.instructions[0].source_span,
+        scene.instructions[2].source_span,
+      ),
+    });
+    for (const [compareIndex, branchIndex, predicate] of [
+      [3, 4, "unsigned_greater_or_equal"],
+      [5, 6, "equal"],
+      [7, 8, "unsigned_greater_or_equal"],
+      [9, 10, "equal"],
+    ] as const) {
+      compiledPrefix.push({
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate,
+        operand: evaluateAsmInteger(
+          scene.instructions[compareIndex].args[0],
+          new Map(),
+        ),
+        target: instructionTarget(
+          scene,
+          scene.instructions[branchIndex],
+          blocks,
+        ),
+        source_span: sourceSpanThrough(
+          scene.instructions[compareIndex].source_span,
+          scene.instructions[branchIndex].source_span,
+        ),
+      });
+    }
+    compiledPrefix.push({
+      op: "jump",
+      target: instructionTarget(scene, scene.instructions[11], blocks),
+      source_span: scene.instructions[11].source_span,
+    });
+
+    const timerMemory = requireFixedWramWriteTarget(
+      "[wIntroSceneTimer]",
+      options,
+    );
+    const compileUnownTrigger = (
+      blockId: string,
+      x: number,
+      y: number,
+      sound: string,
+    ): void => {
+      const triggerBlock = blocks.get(blockId);
+      const instructions = triggerBlock?.instructions ?? [];
+      const expectedTrigger = [
+        "push af",
+        `depixel ${x}, ${y}`,
+        "call CrystalIntro_InitUnownAnim",
+        `ld de, ${sound}`,
+        "call PlaySFX",
+        "pop af",
+      ];
+      if (
+        !triggerBlock ||
+        instructions.map(instructionSignature).join("\0") !==
+          expectedTrigger.join("\0")
+      ) {
+        throw new Error(`${blockId} Unown trigger is not exact`);
+      }
+      const programs = compiledSpritePrograms.filter(
+        (program) =>
+          program.allocation_source_span.file === "engine/movie/intro.asm" &&
+          program.allocation_source_span.start_line ===
+            instructions[2].source_span.start_line,
+      );
+      if (programs.length !== 4) {
+        throw new Error(
+          `${blockId} must source-prove four initialized Unown programs; reached ${programs.length}`,
+        );
+      }
+      compiledPrefix.push(
+        {
+          op: "sprite_init_group",
+          instances: programs.map((program) => program.instance),
+          origin: { macro: "depixel", x, y },
+          preserves: "intro_scene_frame",
+          source_span: sourceSpanThrough(
+            instructions[0].source_span,
+            instructions[5].source_span,
+          ),
+        },
+        {
+          op: "play_audio",
+          audio: sound,
+          source_span: sourceSpanThrough(
+            instructions[3].source_span,
+            instructions[4].source_span,
+          ),
+        },
+      );
+    };
+    compileUnownTrigger(".FirstUnown@IntroScene6", 7, 15, "SFX_INTRO_UNOWN_2");
+    const noUnown = blocks.get(".NoUnown@IntroScene6")?.instructions ?? [];
+    if (
+      noUnown.length !== 4 ||
+      instructionSignature(noUnown[0]) !== "ld [wIntroSceneTimer], a" ||
+      instructionSignature(noUnown[1]) !== "xor a" ||
+      instructionSignature(noUnown[2]) !== "call CrystalIntro_UnownFade" ||
+      instructionSignature(noUnown[3]) !== "ret"
+    ) {
+      throw new Error("IntroScene6 first fade branch is not exact");
+    }
+    compiledPrefix.push(
+      {
+        op: "write_memory_byte_from_result",
+        target: timerMemory.target,
+        address_space: timerMemory.address_space,
+        result: "intro_scene_frame",
+        target_declaration_source_span: timerMemory.declaration_source_span,
+        target_section_source_span: timerMemory.section_source_span,
+        source_span: noUnown[0].source_span,
+      },
+      { op: "set_local", name: "accumulator", value: 0, source_span: noUnown[1].source_span },
+      compileCrystalIntroUnownFadeCall(noUnown[2], options),
+      { op: "return", source_span: noUnown[3].source_span },
+    );
+
+    compileUnownTrigger(".SecondUnown@IntroScene6", 14, 6, "SFX_INTRO_UNOWN_1");
+    const stopUnown = blocks.get(".StopUnown@IntroScene6")?.instructions ?? [];
+    if (
+      stopUnown.length !== 4 ||
+      instructionSignature(stopUnown[0]) !== "ld [wIntroSceneTimer], a" ||
+      instructionSignature(stopUnown[1]) !== "ld a, $1" ||
+      instructionSignature(stopUnown[2]) !== "call CrystalIntro_UnownFade" ||
+      instructionSignature(stopUnown[3]) !== "ret"
+    ) {
+      throw new Error("IntroScene6 second fade branch is not exact");
+    }
+    compiledPrefix.push(
+      {
+        op: "write_memory_byte_from_result",
+        target: timerMemory.target,
+        address_space: timerMemory.address_space,
+        result: "intro_scene_frame",
+        target_declaration_source_span: timerMemory.declaration_source_span,
+        target_section_source_span: timerMemory.section_source_span,
+        source_span: stopUnown[0].source_span,
+      },
+      { op: "set_local", name: "accumulator", value: 1, source_span: stopUnown[1].source_span },
+      compileCrystalIntroUnownFadeCall(stopUnown[2], options),
+      { op: "return", source_span: stopUnown[3].source_span },
+    );
+    const endScene = blocks.get(".endscene@IntroScene6")?.instructions ?? [];
+    if (
+      endScene.length !== 2 ||
+      instructionSignature(endScene[0]) !== "call NextIntroScene" ||
+      instructionSignature(endScene[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene6 end branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        endScene[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: endScene[1].source_span },
+    );
+    const seventhScene = blocks.get("IntroScene7");
+    const seventhSceneEntry = seventhScene?.instructions[0];
+    if (!seventhScene || !seventhSceneEntry) {
+      throw new Error("IntroScene6 has no exact IntroScene7 continuation");
+    }
+    frontierBlock = seventhScene.id;
+    nextCall = seventhSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene7" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene7 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      5,
+      options,
+    );
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error(
+        "IntroScene7 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 5 ||
+      decompression.operations.filter(
+        (operation) => operation.op === "request_2bpp_transfer",
+      ).length !== 5
+    ) {
+      throw new Error(
+        "IntroScene7 must source-prove five decompression/request pairs",
+      );
+    }
+    compiledPrefix.push(...decompression.operations);
+    cursor += decompression.consumed;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_ResetLYOverrides"
+    ) {
+      throw new Error("IntroScene7 must reset its LY override buffer");
+    }
+    compiledPrefix.push(
+      ...compileIntroResetLyOverridesCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene7 must clear sprite animations before allocation");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    nextCall = scene.instructions[cursor]!;
+  }
+  if (
+    frontierBlock === "IntroScene7" &&
+    nextCall.opcode === "depixel"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    let cursor = scene.instructions.indexOf(nextCall);
+    const objectLoad = scene.instructions[cursor + 1];
+    const initCall = scene.instructions[cursor + 2];
+    if (
+      instructionSignature(nextCall) !== "depixel 13, 27, 4, 0" ||
+      instructionSignature(objectLoad) !==
+        "ld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE" ||
+      instructionSignature(initCall) !== "call InitSpriteAnimStruct"
+    ) {
+      throw new Error("IntroScene7 Suicune allocation is not exact");
+    }
+    const programs = compiledSpritePrograms.filter(
+      (program) =>
+        program.allocation_source_span.file === "engine/movie/intro.asm" &&
+        program.allocation_source_span.start_line === initCall.source_span.start_line,
+    );
+    if (programs.length !== 1) {
+      throw new Error(
+        `IntroScene7 must source-prove one Suicune sprite program; reached ${programs.length}`,
+      );
+    }
+    const program = programs[0];
+    compiledPrefix.push({
+      op: "sprite_activate",
+      instance: program.instance,
+      object: program.object,
+      origin: {
+        macro: "depixel",
+        x_tile: 13,
+        y_tile: 27,
+        x_pixel: 4,
+        y_pixel: 0,
+        x: 13 * 8 + 4,
+        y: 27 * 8,
+      },
+      lifetime: program.lifetime,
+      source_span: sourceSpanThrough(nextCall.source_span, initCall.source_span),
+    });
+    cursor += 3;
+    const offsetWrite = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (
+      !offsetWrite ||
+      offsetWrite.consumed !== 2 ||
+      offsetWrite.operations[0]?.target !== "wGlobalAnimXOffset" ||
+      offsetWrite.operations[0]?.value !== 0xf0
+    ) {
+      throw new Error("IntroScene7 must initialize the global sprite X offset to $f0");
+    }
+    compiledPrefix.push(...offsetWrite.operations);
+    cursor += offsetWrite.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene7 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene7 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene7 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene7 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const eighthScene = blocks.get("IntroScene8");
+    const eighthSceneEntry = eighthScene?.instructions[0];
+    if (!eighthScene || !eighthSceneEntry) {
+      throw new Error("IntroScene7 has no exact IntroScene8 continuation");
+    }
+    frontierBlock = eighthScene.id;
+    nextCall = eighthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene8" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $40",
+      "jr z, .suicune_sound",
+      "jr nc, .animate_suicune",
+      "call Intro_PerspectiveScrollBG",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene8 timing dispatch is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const memory = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: sourceSpanThrough(
+          scene.instructions[0].source_span,
+          scene.instructions[2].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "equal",
+        operand: 0x40,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[3].source_span,
+          scene.instructions[4].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: 0x40,
+        target: instructionTarget(scene, scene.instructions[5], blocks),
+        source_span: scene.instructions[5].source_span,
+      },
+      compileIntroPerspectiveScrollCall(scene.instructions[6], options),
+      { op: "return", source_span: scene.instructions[7].source_span },
+    );
+    const soundBlock = blocks.get(".suicune_sound@IntroScene8");
+    const soundInstructions = soundBlock?.instructions ?? [];
+    if (
+      soundInstructions.length !== 2 ||
+      instructionSignature(soundInstructions[0]) !==
+        "ld de, SFX_INTRO_SUICUNE_3" ||
+      instructionSignature(soundInstructions[1]) !== "call PlaySFX"
+    ) {
+      throw new Error("IntroScene8 Suicune sound trigger is not exact");
+    }
+    compiledPrefix.push({
+      op: "play_audio",
+      audio: "SFX_INTRO_SUICUNE_3",
+      source_span: sourceSpanThrough(
+        soundInstructions[0].source_span,
+        soundInstructions[1].source_span,
+      ),
+    });
+    const animateBlock = blocks.get(".animate_suicune@IntroScene8");
+    const animateEntry = animateBlock?.instructions[0];
+    if (!animateBlock || !animateEntry) {
+      throw new Error("IntroScene8 has no exact animation continuation");
+    }
+    frontierBlock = animateBlock.id;
+    nextCall = animateEntry;
+  }
+  if (
+    frontierBlock === ".animate_suicune@IntroScene8" &&
+    instructionSignature(nextCall) === "ld a, [wGlobalAnimXOffset]"
+  ) {
+    const animate = blocks.get(frontierBlock)!;
+    const instructions = animate.instructions;
+    const expected = [
+      "ld a, [wGlobalAnimXOffset]",
+      "and a",
+      "jr z, .finish",
+      "sub $8",
+      "ld [wGlobalAnimXOffset], a",
+      "ret",
+    ];
+    if (instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene8 Suicune offset animation is not exact");
+    }
+    const memory = requireFixedWramWriteTarget(
+      "[wGlobalAnimXOffset]",
+      options,
+    );
+    compiledPrefix.push(
+      {
+        op: "read_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        result: "global_anim_x",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: instructions[0].source_span,
+      },
+      {
+        op: "branch_compare",
+        value: "global_anim_x",
+        predicate: "equal",
+        operand: 0,
+        target: instructionTarget(animate, instructions[2], blocks),
+        source_span: sourceSpanThrough(
+          instructions[1].source_span,
+          instructions[2].source_span,
+        ),
+      },
+      {
+        op: "transform_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        input: "global_anim_x",
+        operator: "subtract",
+        operand: 8,
+        wrap: "u8",
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: sourceSpanThrough(
+          instructions[3].source_span,
+          instructions[4].source_span,
+        ),
+      },
+      { op: "return", source_span: instructions[5].source_span },
+    );
+    const finish = blocks.get(".finish@IntroScene8");
+    const finishInstructions = finish?.instructions ?? [];
+    if (
+      !finish ||
+      finishInstructions.length !== 5 ||
+      instructionSignature(finishInstructions[0]) !==
+        "ld de, SFX_INTRO_SUICUNE_2" ||
+      instructionSignature(finishInstructions[1]) !== "call PlaySFX" ||
+      instructionSignature(finishInstructions[2]) !==
+        "farcall DeinitializeAllSprites" ||
+      instructionSignature(finishInstructions[3]) !== "call NextIntroScene" ||
+      instructionSignature(finishInstructions[4]) !== "ret"
+    ) {
+      throw new Error("IntroScene8 finish branch is not exact");
+    }
+    compiledPrefix.push({
+      op: "play_audio",
+      audio: "SFX_INTRO_SUICUNE_2",
+      source_span: sourceSpanThrough(
+        finishInstructions[0].source_span,
+        finishInstructions[1].source_span,
+      ),
+    });
+    frontierBlock = finish.id;
+    nextCall = finishInstructions[2];
+  }
+  if (
+    frontierBlock === ".finish@IntroScene8" &&
+    instructionSignature(nextCall) === "farcall DeinitializeAllSprites"
+  ) {
+    const finish = blocks.get(frontierBlock)!;
+    const instructions = finish.instructions;
+    compiledPrefix.push(
+      compileDeinitializeAllSpritesCall(
+        nextCall,
+        compiledSpritePrograms.map((program) => program.instance),
+        options,
+      ),
+      compileIncrementMemoryByteSubprogramCall(
+        instructions[3],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: instructions[4].source_span },
+    );
+    const ninthScene = blocks.get("IntroScene9");
+    const ninthSceneEntry = ninthScene?.instructions[0];
+    if (!ninthScene || !ninthSceneEntry) {
+      throw new Error("IntroScene8 has no exact IntroScene9 continuation");
+    }
+    frontierBlock = ninthScene.id;
+    nextCall = ninthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene9" &&
+    instructionSignature(nextCall) === "xor a"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const instructions = scene.instructions;
+    const expected = [
+      "xor a",
+      "ldh [hLCDCPointer], a",
+      "call ClearSprites",
+      "hlcoord 0, 0, wAttrmap",
+      "ld bc, 12 * SCREEN_WIDTH",
+      "ld a, $1",
+      "call ByteFill",
+      "ld bc, 3 * SCREEN_WIDTH",
+      "ld a, $2",
+      "call ByteFill",
+      "ld bc, 3 * SCREEN_WIDTH",
+      "ld a, $3",
+      "call ByteFill",
+      "ld a, $2",
+      "ldh [hBGMapMode], a",
+      "call DelayFrame",
+      "call DelayFrame",
+      "call DelayFrame",
+      "ld a, LOW(vBGMap0 + $c)",
+      "ldh [hBGMapAddress], a",
+      "call DelayFrame",
+      "call DelayFrame",
+      "call DelayFrame",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ldh [hBGMapAddress], a",
+      "ld [wGlobalAnimXOffset], a",
+      "xor a",
+      "ld [wIntroSceneFrameCounter], a",
+      "call NextIntroScene",
+      "ret",
+    ];
+    const reached = instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene9 attrmap/update program is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const displayReset = compileAccumulatorHighMemoryWriteRun(
+      instructions,
+      0,
+      options,
+    );
+    if (displayReset?.consumed !== 2) {
+      throw new Error("IntroScene9 must clear hLCDCPointer before attrmap setup");
+    }
+    const copy = loadSource("home/copy.asm", options);
+    const copyBlocks = parseAsmBlocks([copy]);
+    requireExactRoutineBlock(
+      copyBlocks,
+      "ByteFill",
+      ["inc b", "inc c", "jr .HandleLoop"],
+      "IntroScene9 ByteFill entry",
+    );
+    requireExactRoutineBlock(
+      copyBlocks,
+      ".PutByte@ByteFill",
+      ["ld [hli], a"],
+      "IntroScene9 ByteFill write",
+    );
+    requireExactRoutineBlock(
+      copyBlocks,
+      ".HandleLoop@ByteFill",
+      ["dec c", "jr nz, .PutByte", "dec b", "jr nz, .PutByte", "ret"],
+      "IntroScene9 ByteFill loop",
+    );
+    const hardware = loadSource("constants/hardware.inc", options);
+    const constants = parseAsmConstants([hardware]);
+    const screenWidth = constants.get("SCREEN_WIDTH");
+    const screenHeight = constants.get("SCREEN_HEIGHT");
+    const wram = loadSource("ram/wram.asm", options);
+    const attrmapSize = asmRegionByteSize(
+      wram,
+      "wAttrmap::",
+      "wAttrmapEnd::",
+      { constants },
+    );
+    if (
+      screenWidth !== 20 ||
+      screenHeight !== 18 ||
+      attrmapSize !== screenWidth * screenHeight
+    ) {
+      throw new Error(
+        `IntroScene9 attrmap must be the exact 20x18 screen; reached ${screenWidth}x${screenHeight}/${attrmapSize}`,
+      );
+    }
+    const coords = loadSource("macros/coords.asm", options);
+    const coordSpan = requireNormalizedSourceSequence(
+      coords,
+      [
+        "MACRO? hlcoord",
+        "coord hl, \\#",
+        "ENDM",
+        "MACRO? bccoord",
+        "coord bc, \\#",
+        "ENDM",
+        "MACRO? decoord",
+        "coord de, \\#",
+        "ENDM",
+        "MACRO? coord",
+        "if _NARG < 4",
+        "ld \\1, (\\3) * SCREEN_WIDTH + (\\2) + wTilemap",
+        "else",
+        "ld \\1, (\\3) * SCREEN_WIDTH + (\\2) + \\4",
+        "endc",
+        "ENDM",
+      ],
+      "IntroScene9 exact coordinate macro",
+    );
+    compiledPrefix.push(...displayReset.operations, {
+      op: "fill_memory",
+      target: "wShadowOAM",
+      byte_count: 160,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+    });
+    let targetOffset = 0;
+    for (const [start, rows, value] of [
+      [4, 12, 1],
+      [7, 3, 2],
+      [10, 3, 3],
+    ] as const) {
+      const byteCount = rows * screenWidth;
+      compiledPrefix.push({
+        op: "fill_memory",
+        target: "wAttrmap",
+        target_offset: targetOffset,
+        byte_count: byteCount,
+        value,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(
+          instructions[start].source_span,
+          instructions[start + 2].source_span,
+        ),
+      });
+      targetOffset += byteCount;
+    }
+    if (targetOffset !== attrmapSize) {
+      throw new Error("IntroScene9 palette bands do not cover the exact attrmap");
+    }
+    const modeEnable = compileAccumulatorHighMemoryWriteRun(
+      instructions,
+      13,
+      options,
+    );
+    if (modeEnable?.consumed !== 2) {
+      throw new Error("IntroScene9 must enable BG-map mode 2");
+    }
+    compiledPrefix.push(...modeEnable.operations, {
+      op: "wait_frames",
+      frames: 3,
+      condition: { source: null, predicate: "always", source_span: null },
+      implementation_source_span: delayFramesImplementationSpan,
+      source_span: sourceSpanThrough(
+        instructions[15].source_span,
+        instructions[17].source_span,
+      ),
+    });
+    const hram = loadSource("ram/hram.asm", options);
+    compiledPrefix.push(
+      {
+        op: "write_memory_byte",
+        target: "hBGMapAddress",
+        address_space: "hram",
+        value: 0x0c,
+        condition: { source: null, predicate: "always", source_span: null },
+        value_source_span: instructions[18].source_span,
+        target_declaration_source_span: requireExactNormalizedLine(
+          hram,
+          "hBGMapAddress:: dw",
+          "IntroScene9 BG-map address declaration",
+        ),
+        source_span: sourceSpanThrough(
+          instructions[18].source_span,
+          instructions[19].source_span,
+        ),
+      },
+      {
+        op: "wait_frames",
+        frames: 3,
+        condition: { source: null, predicate: "always", source_span: null },
+        implementation_source_span: delayFramesImplementationSpan,
+        source_span: sourceSpanThrough(
+          instructions[20].source_span,
+          instructions[22].source_span,
+        ),
+      },
+    );
+    const finalHighWrites = compileAccumulatorHighMemoryWriteRun(
+      instructions,
+      23,
+      options,
+    );
+    if (finalHighWrites?.consumed !== 3) {
+      throw new Error("IntroScene9 must clear both BG-map control bytes");
+    }
+    compiledPrefix.push(...finalHighWrites.operations);
+    const globalOffset = requireFixedWramWriteTarget(
+      "[wGlobalAnimXOffset]",
+      options,
+    );
+    compiledPrefix.push({
+      op: "write_memory_byte",
+      target: globalOffset.target,
+      address_space: globalOffset.address_space,
+      value: 0,
+      condition: { source: null, predicate: "always", source_span: null },
+      target_declaration_source_span: globalOffset.declaration_source_span,
+      target_section_source_span: globalOffset.section_source_span,
+      source_span: instructions[26].source_span,
+    });
+    const frameReset = compileAccumulatorWramWriteRun(
+      instructions,
+      27,
+      options,
+    );
+    if (!frameReset || frameReset.operations[0]?.target !== "wIntroSceneFrameCounter") {
+      throw new Error("IntroScene9 must reset the intro frame counter");
+    }
+    compiledPrefix.push(
+      ...frameReset.operations,
+      compileIncrementMemoryByteSubprogramCall(
+        instructions[29],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: instructions[30].source_span },
+    );
+    const tenthScene = blocks.get("IntroScene10");
+    const tenthSceneEntry = tenthScene?.instructions[0];
+    if (!tenthScene || !tenthSceneEntry) {
+      throw new Error("IntroScene9 has no exact IntroScene10 continuation");
+    }
+    void coordSpan;
+    frontierBlock = tenthScene.id;
+    nextCall = tenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene10" &&
+    instructionSignature(nextCall) === "call Intro_RustleGrass"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const instructions = scene.instructions;
+    const expected = [
+      "call Intro_RustleGrass",
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $c0",
+      "jr z, .done",
+      "cp $20",
+      "jr z, .wooper",
+      "cp $40",
+      "jr z, .pichu",
+      "ret",
+    ];
+    if (instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene10 timing dispatch is not exact");
+    }
+    const frame = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    compiledPrefix.push(
+      compileIntroRustleGrassCall(instructions[0], options),
+      {
+        op: "postincrement_memory_byte",
+        target: frame.target,
+        address_space: frame.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: frame.declaration_source_span,
+        target_section_source_span: frame.section_source_span,
+        source_span: sourceSpanThrough(
+          instructions[1].source_span,
+          instructions[3].source_span,
+        ),
+      },
+    );
+    for (const [compareIndex, branchIndex] of [
+      [4, 5],
+      [6, 7],
+      [8, 9],
+    ] as const) {
+      compiledPrefix.push({
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "equal",
+        operand: evaluateAsmInteger(instructions[compareIndex].args[0], new Map()),
+        target: instructionTarget(scene, instructions[branchIndex], blocks),
+        source_span: sourceSpanThrough(
+          instructions[compareIndex].source_span,
+          instructions[branchIndex].source_span,
+        ),
+      });
+    }
+    compiledPrefix.push({ op: "return", source_span: instructions[10].source_span });
+
+    const compileCharacter = (
+      blockId: string,
+      expectedDepixel: string,
+      objectSymbol: string,
+      origin: {
+        x_tile: number;
+        y_tile: number;
+        x_pixel: number;
+        y_pixel: number;
+      },
+    ): void => {
+      const block = blocks.get(blockId);
+      const branch = block?.instructions ?? [];
+      if (
+        !block ||
+        branch.length !== 6 ||
+        instructionSignature(branch[0]) !== expectedDepixel ||
+        instructionSignature(branch[1]) !== `ld a, ${objectSymbol}` ||
+        instructionSignature(branch[2]) !== "call InitSpriteAnimStruct" ||
+        instructionSignature(branch[3]) !== "ld de, SFX_INTRO_PICHU" ||
+        instructionSignature(branch[4]) !== "call PlaySFX" ||
+        instructionSignature(branch[5]) !== "ret"
+      ) {
+        throw new Error(`${blockId} sprite/audio branch is not exact`);
+      }
+      const programs = compiledSpritePrograms.filter(
+        (program) =>
+          program.allocation_source_span.file === "engine/movie/intro.asm" &&
+          program.allocation_source_span.start_line === branch[2].source_span.start_line,
+      );
+      if (programs.length !== 1) {
+        throw new Error(
+          `${blockId} must source-prove one sprite program; reached ${programs.length}`,
+        );
+      }
+      const program = programs[0];
+      compiledPrefix.push(
+        {
+          op: "sprite_activate",
+          instance: program.instance,
+          object: program.object,
+          origin: {
+            macro: "depixel",
+            ...origin,
+            x: origin.x_tile * 8 + origin.x_pixel,
+            y: origin.y_tile * 8 + origin.y_pixel,
+          },
+          lifetime: program.lifetime,
+          source_span: sourceSpanThrough(branch[0].source_span, branch[2].source_span),
+        },
+        {
+          op: "play_audio",
+          audio: "SFX_INTRO_PICHU",
+          source_span: sourceSpanThrough(branch[3].source_span, branch[4].source_span),
+        },
+        { op: "return", source_span: branch[5].source_span },
+      );
+    };
+    compileCharacter(
+      ".pichu@IntroScene10",
+      "depixel 21, 16, 1, 0",
+      "SPRITE_ANIM_OBJ_INTRO_PICHU",
+      { x_tile: 21, y_tile: 16, x_pixel: 1, y_pixel: 0 },
+    );
+    compileCharacter(
+      ".wooper@IntroScene10",
+      "depixel 22, 6",
+      "SPRITE_ANIM_OBJ_INTRO_WOOPER",
+      { x_tile: 22, y_tile: 6, x_pixel: 0, y_pixel: 0 },
+    );
+    const done = blocks.get(".done@IntroScene10")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene10 done branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        done[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const eleventhScene = blocks.get("IntroScene11");
+    const eleventhSceneEntry = eleventhScene?.instructions[0];
+    if (!eleventhScene || !eleventhSceneEntry) {
+      throw new Error("IntroScene10 has no exact IntroScene11 continuation");
+    }
+    frontierBlock = eleventhScene.id;
+    nextCall = eleventhSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene11" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ldh [hLCDCPointer], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene11 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const displayWrites = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      6,
+      options,
+    );
+    if (displayWrites?.consumed !== 3 || vramBankRun?.consumed !== 2) {
+      throw new Error(
+        "IntroScene11 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...displayWrites.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 3 ||
+      decompression.operations.filter(
+        (operation) => operation.op === "request_2bpp_transfer",
+      ).length !== 3
+    ) {
+      throw new Error(
+        "IntroScene11 must source-prove three decompression/request pairs",
+      );
+    }
+    compiledPrefix.push(...decompression.operations);
+    cursor += decompression.consumed;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene11 must clear sprite animations after setup");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene11 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene11 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene11 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene11 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const twelfthScene = blocks.get("IntroScene12");
+    const twelfthSceneEntry = twelfthScene?.instructions[0];
+    if (!twelfthScene || !twelfthSceneEntry) {
+      throw new Error("IntroScene11 has no exact IntroScene12 continuation");
+    }
+    frontierBlock = twelfthScene.id;
+    nextCall = twelfthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene12" &&
+    instructionSignature(nextCall) === "call .PlayUnownSound"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const instructions = scene.instructions;
+    const expected = [
+      "call .PlayUnownSound",
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $c0",
+      "jr nc, .done",
+      "cp $80",
+      "jr nc, .second_half",
+      "ld c, a",
+      "and $1f",
+      "sla a",
+      "ld [wIntroSceneTimer], a",
+      "ld a, c",
+      "and $e0",
+      "srl a",
+      "swap a",
+      "call CrystalIntro_UnownFade",
+      "ret",
+    ];
+    if (instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene12 first-half program is not exact");
+    }
+    const frame = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+    compiledPrefix.push(
+      compileIntroPlayUnownSoundCall(instructions[0], options),
+      {
+        op: "postincrement_memory_byte",
+        target: frame.target,
+        address_space: frame.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: frame.declaration_source_span,
+        target_section_source_span: frame.section_source_span,
+        source_span: sourceSpanThrough(
+          instructions[1].source_span,
+          instructions[3].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: 0xc0,
+        target: instructionTarget(scene, instructions[5], blocks),
+        source_span: sourceSpanThrough(
+          instructions[4].source_span,
+          instructions[5].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: 0x80,
+        target: instructionTarget(scene, instructions[7], blocks),
+        source_span: sourceSpanThrough(
+          instructions[6].source_span,
+          instructions[7].source_span,
+        ),
+      },
+      {
+        op: "compute_byte",
+        input: "intro_scene_frame",
+        steps: [
+          { op: "mask", value: 0x1f },
+          { op: "shift_left", value: 1 },
+        ],
+        result: "intro_scene_timer_value",
+        source_span: sourceSpanThrough(
+          instructions[8].source_span,
+          instructions[10].source_span,
+        ),
+      },
+      {
+        op: "write_memory_byte_from_result",
+        target: timer.target,
+        address_space: timer.address_space,
+        result: "intro_scene_timer_value",
+        target_declaration_source_span: timer.declaration_source_span,
+        target_section_source_span: timer.section_source_span,
+        source_span: instructions[11].source_span,
+      },
+      {
+        op: "compute_byte",
+        input: "intro_scene_frame",
+        steps: [
+          { op: "mask", value: 0xe0 },
+          { op: "shift_right", value: 1 },
+          { op: "swap_nibbles", value: 0 },
+        ],
+        result: "accumulator",
+        source_span: sourceSpanThrough(
+          instructions[12].source_span,
+          instructions[15].source_span,
+        ),
+      },
+      compileCrystalIntroUnownFadeCall(instructions[16], options),
+      { op: "return", source_span: instructions[17].source_span },
+    );
+    const secondHalf = blocks.get(".second_half@IntroScene12");
+    const second = secondHalf?.instructions ?? [];
+    const expectedSecond = [
+      "ld c, a",
+      "and $f",
+      "sla a",
+      "sla a",
+      "ld [wIntroSceneTimer], a",
+      "ld a, c",
+      "and $70",
+      "or $40",
+      "swap a",
+      "call CrystalIntro_UnownFade",
+      "ret",
+    ];
+    if (
+      !secondHalf ||
+      second.map(instructionSignature).join("\0") !== expectedSecond.join("\0")
+    ) {
+      throw new Error("IntroScene12 double-speed second half is not exact");
+    }
+    compiledPrefix.push(
+      {
+        op: "compute_byte",
+        input: "intro_scene_frame",
+        steps: [
+          { op: "mask", value: 0x0f },
+          { op: "shift_left", value: 1 },
+          { op: "shift_left", value: 1 },
+        ],
+        result: "intro_scene_timer_value",
+        source_span: sourceSpanThrough(second[0].source_span, second[3].source_span),
+      },
+      {
+        op: "write_memory_byte_from_result",
+        target: timer.target,
+        address_space: timer.address_space,
+        result: "intro_scene_timer_value",
+        target_declaration_source_span: timer.declaration_source_span,
+        target_section_source_span: timer.section_source_span,
+        source_span: second[4].source_span,
+      },
+      {
+        op: "compute_byte",
+        input: "intro_scene_frame",
+        steps: [
+          { op: "mask", value: 0x70 },
+          { op: "or", value: 0x40 },
+          { op: "swap_nibbles", value: 0 },
+        ],
+        result: "accumulator",
+        source_span: sourceSpanThrough(second[5].source_span, second[8].source_span),
+      },
+      compileCrystalIntroUnownFadeCall(second[9], options),
+      { op: "return", source_span: second[10].source_span },
+    );
+    const done = blocks.get(".done@IntroScene12")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene12 done branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        done[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const thirteenthScene = blocks.get("IntroScene13");
+    const thirteenthSceneEntry = thirteenthScene?.instructions[0];
+    if (!thirteenthScene || !thirteenthSceneEntry) {
+      throw new Error("IntroScene12 has no exact IntroScene13 continuation");
+    }
+    frontierBlock = thirteenthScene.id;
+    nextCall = thirteenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene13" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene13 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      5,
+      options,
+    );
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error(
+        "IntroScene13 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 4 ||
+      decompression.operations.filter(
+        (operation) => operation.op === "request_2bpp_transfer",
+      ).length !== 4
+    ) {
+      throw new Error(
+        "IntroScene13 must source-prove four decompression/request pairs",
+      );
+    }
+    compiledPrefix.push(...decompression.operations);
+    cursor += decompression.consumed;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene13 must clear sprite animations before allocation");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    const depixel = scene.instructions[cursor];
+    const objectLoad = scene.instructions[cursor + 1];
+    const initCall = scene.instructions[cursor + 2];
+    if (
+      instructionSignature(depixel) !== "depixel 13, 11, 4, 0" ||
+      instructionSignature(objectLoad) !==
+        "ld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE" ||
+      instructionSignature(initCall) !== "call InitSpriteAnimStruct"
+    ) {
+      throw new Error("IntroScene13 Suicune allocation is not exact");
+    }
+    const programs = compiledSpritePrograms.filter(
+      (program) =>
+        program.allocation_source_span.file === "engine/movie/intro.asm" &&
+        program.allocation_source_span.start_line === initCall.source_span.start_line,
+    );
+    if (programs.length !== 1) {
+      throw new Error(
+        `IntroScene13 must source-prove one Suicune sprite program; reached ${programs.length}`,
+      );
+    }
+    const program = programs[0];
+    compiledPrefix.push({
+      op: "sprite_activate",
+      instance: program.instance,
+      object: program.object,
+      origin: {
+        macro: "depixel",
+        x_tile: 13,
+        y_tile: 11,
+        x_pixel: 4,
+        y_pixel: 0,
+        x: 108,
+        y: 88,
+      },
+      lifetime: program.lifetime,
+      source_span: sourceSpanThrough(depixel.source_span, initCall.source_span),
+    });
+    cursor += 3;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+        "ld de, MUSIC_CRYSTAL_OPENING" ||
+      instructionSignature(scene.instructions[cursor + 1]) !== "call PlayMusic"
+    ) {
+      throw new Error("IntroScene13 opening-music transition is not exact");
+    }
+    compiledPrefix.push({
+      op: "play_audio",
+      audio: "MUSIC_CRYSTAL_OPENING",
+      source_span: sourceSpanThrough(
+        scene.instructions[cursor].source_span,
+        scene.instructions[cursor + 1].source_span,
+      ),
+    });
+    cursor += 2;
+    const globalOffset = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (
+      !globalOffset ||
+      globalOffset.operations[0]?.target !== "wGlobalAnimXOffset" ||
+      globalOffset.operations[0]?.value !== 0
+    ) {
+      throw new Error("IntroScene13 must reset the global sprite X offset");
+    }
+    compiledPrefix.push(...globalOffset.operations);
+    cursor += globalOffset.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene13 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene13 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene13 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene13 must return after advancing");
+    }
+    compiledPrefix.push({ op: "return", source_span: scene.instructions[cursor].source_span });
+    const fourteenthScene = blocks.get("IntroScene14");
+    const fourteenthSceneEntry = fourteenthScene?.instructions[0];
+    if (!fourteenthScene || !fourteenthSceneEntry) {
+      throw new Error("IntroScene13 has no exact IntroScene14 continuation");
+    }
+    frontierBlock = fourteenthScene.id;
+    nextCall = fourteenthSceneEntry;
+  }
   const nextTarget = runtimePresentationInstructionTarget(nextCall);
   const reason = ["call", "callfar", "farcall"].includes(nextCall.opcode)
     ? "missing_subprogram_contract"
@@ -13561,6 +17023,9 @@ function certifyCrystalIntroSubprogramFrontier(
       source_entry: "CrystalIntro",
       block: "IntroScene1",
       operations: compiledPrefix,
+      ...(compiledSpritePrograms.length > 0
+        ? { sprite_programs: compiledSpritePrograms }
+        : {}),
     },
   };
 }
@@ -13593,6 +17058,7 @@ export type RuntimePresentationEmissionFrontier = {
     source_entry: string;
     block: string;
     operations: RuntimePresentationOperation[];
+    sprite_programs?: RuntimePresentationSpriteProgram[];
   };
 };
 
@@ -13744,7 +17210,7 @@ export function analyzeRuntimeTitlePresentationEmission(
           sourceBoundary &&
           sourceBoundary.accepted_call_forms.includes(external.call_form)
         ) {
-          operations.push(...sourceBoundary.certify(options));
+          operations.push(...sourceBoundary.certify(options, instruction));
           continue;
         }
         const boundary = RUNTIME_PRESENTATION_HOST_EFFECT_BOUNDARIES[target!];
@@ -14200,6 +17666,170 @@ const OPERATION_KEYS: Record<string, readonly string[]> = {
     "target",
     "source_span",
   ],
+  memory_branch: [
+    "op",
+    "source",
+    "predicate",
+    "bit",
+    "target",
+    "source_span",
+  ],
+  branch_compare: [
+    "op",
+    "value",
+    "predicate",
+    "operand",
+    "target",
+    "source_span",
+  ],
+  postincrement_memory_byte: [
+    "op",
+    "target",
+    "address_space",
+    "result",
+    "delta",
+    "wrap",
+    "target_declaration_source_span",
+    "target_section_source_span",
+    "source_span",
+  ],
+  read_memory_byte: [
+    "op",
+    "target",
+    "address_space",
+    "result",
+    "target_declaration_source_span",
+    "target_section_source_span",
+    "source_span",
+  ],
+  transform_memory_byte: [
+    "op",
+    "target",
+    "address_space",
+    "input",
+    "operator",
+    "operand",
+    "wrap",
+    "target_declaration_source_span",
+    "target_section_source_span",
+    "source_span",
+  ],
+  sprite_init_group: [
+    "op",
+    "instances",
+    "origin",
+    "preserves",
+    "source_span",
+  ],
+  sprite_activate: [
+    "op",
+    "instance",
+    "object",
+    "origin",
+    "lifetime",
+    "source_span",
+  ],
+  deinitialize_all_sprites: [
+    "op",
+    "instances",
+    "struct_indices",
+    "implementation_source_span",
+    "invocation",
+    "source_span",
+  ],
+  write_memory_byte_from_result: [
+    "op",
+    "target",
+    "address_space",
+    "result",
+    "target_declaration_source_span",
+    "target_section_source_span",
+    "source_span",
+  ],
+  palette_fade_lookup: [
+    "op",
+    "palette_selector",
+    "selector_stride",
+    "first_color_offset",
+    "timer",
+    "clear",
+    "tables",
+    "writes",
+    "bank",
+    "transfer_request",
+    "implementation_source_spans",
+    "invocation",
+    "source_span",
+  ],
+  perspective_scroll: [
+    "op",
+    "target",
+    "byte_count",
+    "bank",
+    "frame",
+    "bands",
+    "horizontal_scroll",
+    "target_declaration_source_span",
+    "implementation_source_spans",
+    "invocation",
+    "source_span",
+  ],
+  indexed_2bpp_request: [
+    "op",
+    "condition",
+    "selector",
+    "table",
+    "target",
+    "target_byte_offset",
+    "target_vram_bank",
+    "tile_count",
+    "bytes_per_tile",
+    "byte_count",
+    "request_state",
+    "implementation_source_spans",
+    "invocation",
+    "source_span",
+  ],
+  scheduled_audio: [
+    "op",
+    "clock",
+    "entries",
+    "sentinel",
+    "on_match",
+    "clock_declaration_source_span",
+    "table_source_span",
+    "implementation_source_spans",
+    "invocation",
+    "source_span",
+  ],
+  compute_byte: ["op", "input", "steps", "result", "source_span"],
+  dispatch_table: [
+    "op",
+    "dispatcher",
+    "table",
+    "index",
+    "entries",
+    "domain",
+    "implementation_source_span",
+    "table_source_span",
+    "invocation",
+    "source_span",
+  ],
+  sample_input: [
+    "op",
+    "routine",
+    "sampler",
+    "result",
+    "menu_guard",
+    "menu_zero_source",
+    "menu_nonzero_source",
+    "repeat_delay",
+    "pressed_repeat_reset",
+    "idle_repeat_restart",
+    "implementation_source_spans",
+    "invocation",
+    "source_span",
+  ],
   branch_result: [
     "op",
     "result",
@@ -14220,6 +17850,7 @@ const OPERATION_KEYS: Record<string, readonly string[]> = {
   sprite_scheduler_step: [
     "op",
     "instances",
+    "instance_activation",
     "struct_slots",
     "callback_before_frame_update",
     "oam_cursor",
@@ -14238,6 +17869,7 @@ const OPERATION_KEYS: Record<string, readonly string[]> = {
   fill_memory: [
     "op",
     "target",
+    "target_offset",
     "target_end_exclusive",
     "byte_count",
     "value",
@@ -14795,7 +18427,15 @@ export function assertRuntimePresentationProgram(
         operation.source_span,
         `block ${blockId} operation ${index} source_span`,
       );
-      if (["jump", "input_branch", "branch_result"].includes(op)) {
+      if (
+        [
+          "jump",
+          "input_branch",
+          "memory_branch",
+          "branch_compare",
+          "branch_result",
+        ].includes(op)
+      ) {
         for (const targetKey of ["target", "else_target"] as const) {
           const target = operation[targetKey];
           if (
@@ -14827,6 +18467,659 @@ export function assertRuntimePresentationProgram(
             `Runtime presentation operation for host effect ${effectId} has the wrong result slot or arguments`,
           );
         }
+      }
+      if (op === "sample_input") {
+        if (
+          operation.routine !== "JoyTextDelay" ||
+          operation.sampler !== "GetJoypad" ||
+          operation.result !== "hJoyLast" ||
+          operation.menu_guard !== "hInMenu" ||
+          operation.menu_zero_source !== "hJoyPressed" ||
+          operation.menu_nonzero_source !== "hJoyDown" ||
+          operation.repeat_delay !== "wTextDelayFrames" ||
+          operation.pressed_repeat_reset !== 15 ||
+          operation.idle_repeat_restart !== 5 ||
+          !Array.isArray(operation.implementation_source_spans) ||
+          operation.implementation_source_spans.length !== 4
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete sample_input operation`,
+          );
+        }
+        for (const [spanIndex, span] of (
+          operation.implementation_source_spans as unknown[]
+        ).entries()) {
+          assertSpan(
+            span,
+            `block ${blockId} sample_input implementation source span ${spanIndex}`,
+          );
+        }
+        const invocation = exactKeys(
+          operation.invocation,
+          ["call_form", "target", "source_span"],
+          `block ${blockId} sample_input invocation`,
+        );
+        if (
+          invocation.call_form !== "call" ||
+          invocation.target !== "JoyTextDelay"
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} sample_input invocation is incomplete`,
+          );
+        }
+        assertSpan(
+          invocation.source_span,
+          `block ${blockId} sample_input invocation source_span`,
+        );
+      }
+      if (op === "input_branch") {
+        if (
+          typeof operation.sample !== "string" ||
+          !operation.sample ||
+          !Array.isArray(operation.require_all) ||
+          !Array.isArray(operation.require_any) ||
+          !Array.isArray(operation.forbid_any) ||
+          (operation.require_all as unknown[]).length +
+            (operation.require_any as unknown[]).length +
+            (operation.forbid_any as unknown[]).length ===
+            0
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete input_branch operation`,
+          );
+        }
+        for (const [maskIndex, maskValue] of [
+          ...(operation.require_all as unknown[]),
+          ...(operation.require_any as unknown[]),
+          ...(operation.forbid_any as unknown[]),
+        ].entries()) {
+          const mask = exactKeys(
+            maskValue,
+            ["symbol", "value", "source_span"],
+            `block ${blockId} input_branch mask ${maskIndex}`,
+          );
+          if (
+            typeof mask.symbol !== "string" ||
+            !mask.symbol ||
+            !Number.isInteger(mask.value) ||
+            (mask.value as number) < 0 ||
+            (mask.value as number) > 0xff
+          ) {
+            throw new Error(
+              `Runtime presentation block ${blockId} input_branch mask ${maskIndex} is invalid`,
+            );
+          }
+          assertSpan(
+            mask.source_span,
+            `block ${blockId} input_branch mask ${maskIndex} source_span`,
+          );
+        }
+      }
+      if (op === "memory_branch") {
+        const bit = exactKeys(
+          operation.bit,
+          ["symbol", "value", "source_span"],
+          `block ${blockId} memory_branch bit`,
+        );
+        if (
+          typeof operation.source !== "string" ||
+          !operation.source ||
+          operation.predicate !== "bit_set" ||
+          typeof bit.symbol !== "string" ||
+          !bit.symbol ||
+          !Number.isInteger(bit.value) ||
+          (bit.value as number) < 0 ||
+          (bit.value as number) > 7
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete memory_branch operation`,
+          );
+        }
+        assertSpan(
+          bit.source_span,
+          `block ${blockId} memory_branch bit source_span`,
+        );
+      }
+      if (op === "branch_compare") {
+        if (
+          typeof operation.value !== "string" ||
+          !operation.value ||
+          !["unsigned_greater_or_equal", "not_equal", "equal"].includes(
+            String(operation.predicate),
+          ) ||
+          !Number.isInteger(operation.operand) ||
+          (operation.operand as number) < 0 ||
+          (operation.operand as number) > 0xff
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete branch_compare operation`,
+          );
+        }
+      }
+      if (op === "read_memory_byte") {
+        if (
+          typeof operation.target !== "string" ||
+          !operation.target ||
+          operation.address_space !== "wram" ||
+          typeof operation.result !== "string" ||
+          !operation.result
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete read_memory_byte operation`,
+          );
+        }
+        assertSpan(
+          operation.target_declaration_source_span,
+          `block ${blockId} read_memory_byte target declaration`,
+        );
+        assertSpan(
+          operation.target_section_source_span,
+          `block ${blockId} read_memory_byte target section`,
+        );
+      }
+      if (op === "transform_memory_byte") {
+        if (
+          typeof operation.target !== "string" ||
+          !operation.target ||
+          operation.address_space !== "wram" ||
+          typeof operation.input !== "string" ||
+          !operation.input ||
+          !["add", "subtract"].includes(String(operation.operator)) ||
+          !Number.isInteger(operation.operand) ||
+          (operation.operand as number) < 0 ||
+          (operation.operand as number) > 0xff ||
+          operation.wrap !== "u8"
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete transform_memory_byte operation`,
+          );
+        }
+        assertSpan(
+          operation.target_declaration_source_span,
+          `block ${blockId} transform_memory_byte target declaration`,
+        );
+        assertSpan(
+          operation.target_section_source_span,
+          `block ${blockId} transform_memory_byte target section`,
+        );
+      }
+      if (op === "postincrement_memory_byte") {
+        if (
+          typeof operation.target !== "string" ||
+          !operation.target ||
+          operation.address_space !== "wram" ||
+          typeof operation.result !== "string" ||
+          !operation.result ||
+          operation.delta !== 1 ||
+          operation.wrap !== "u8"
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete postincrement_memory_byte operation`,
+          );
+        }
+        assertSpan(
+          operation.target_declaration_source_span,
+          `block ${blockId} postincrement_memory_byte target declaration`,
+        );
+        assertSpan(
+          operation.target_section_source_span,
+          `block ${blockId} postincrement_memory_byte target section`,
+        );
+      }
+      if (op === "sprite_init_group") {
+        const origin = exactKeys(
+          operation.origin,
+          ["macro", "x", "y"],
+          `block ${blockId} sprite_init_group origin`,
+        );
+        const instances = operation.instances as unknown[];
+        if (
+          !Array.isArray(instances) ||
+          instances.length === 0 ||
+          instances.some((instance) => typeof instance !== "string" || !instance) ||
+          new Set(instances).size !== instances.length ||
+          origin.macro !== "depixel" ||
+          !Number.isInteger(origin.x) ||
+          !Number.isInteger(origin.y) ||
+          typeof operation.preserves !== "string" ||
+          !operation.preserves
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete sprite_init_group operation`,
+          );
+        }
+      }
+      if (op === "sprite_activate") {
+        const object = exactKeys(
+          operation.object,
+          ["symbol", "value"],
+          `block ${blockId} sprite_activate object`,
+        );
+        const origin = exactKeys(
+          operation.origin,
+          ["macro", "x_tile", "y_tile", "x_pixel", "y_pixel", "x", "y"],
+          `block ${blockId} sprite_activate origin`,
+        );
+        if (
+          typeof operation.instance !== "string" ||
+          !operation.instance ||
+          typeof object.symbol !== "string" ||
+          !object.symbol ||
+          !Number.isInteger(object.value) ||
+          origin.macro !== "depixel" ||
+          ![origin.x_tile, origin.y_tile, origin.x_pixel, origin.y_pixel, origin.x, origin.y].every(
+            Number.isInteger,
+          ) ||
+          !operation.lifetime ||
+          typeof operation.lifetime !== "object"
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete sprite_activate operation`,
+          );
+        }
+      }
+      if (op === "deinitialize_all_sprites") {
+        const instances = operation.instances as unknown[];
+        const structIndices = operation.struct_indices as unknown[];
+        if (
+          !Array.isArray(instances) ||
+          instances.length === 0 ||
+          instances.some((instance) => typeof instance !== "string" || !instance) ||
+          !Array.isArray(structIndices) ||
+          structIndices.length !== 10 ||
+          structIndices.some((value, index) => value !== index)
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete deinitialize_all_sprites operation`,
+          );
+        }
+        assertSpan(
+          operation.implementation_source_span,
+          `block ${blockId} deinitialize_all_sprites implementation`,
+        );
+        exactKeys(
+          operation.invocation,
+          [
+            "call_form",
+            "target",
+            "target_bank",
+            "restores_rom_bank",
+            "preserves_callee_bc",
+            "scratch_writes",
+            "register_result",
+            "source_span",
+            "macro_source_span",
+            "implementation_source_spans",
+          ],
+          `block ${blockId} deinitialize_all_sprites invocation`,
+        );
+      }
+      if (op === "write_memory_byte_from_result") {
+        if (
+          typeof operation.target !== "string" ||
+          !operation.target ||
+          operation.address_space !== "wram" ||
+          typeof operation.result !== "string" ||
+          !operation.result
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete write_memory_byte_from_result operation`,
+          );
+        }
+        assertSpan(
+          operation.target_declaration_source_span,
+          `block ${blockId} write_memory_byte_from_result target declaration`,
+        );
+        assertSpan(
+          operation.target_section_source_span,
+          `block ${blockId} write_memory_byte_from_result target section`,
+        );
+      }
+      if (op === "palette_fade_lookup") {
+        const timer = exactKeys(
+          operation.timer,
+          ["source", "mask", "fold_above", "fold_from", "source_declaration_span"],
+          `block ${blockId} palette_fade_lookup timer`,
+        );
+        const clear = exactKeys(
+          operation.clear,
+          ["target", "byte_count", "value"],
+          `block ${blockId} palette_fade_lookup clear`,
+        );
+        const bank = exactKeys(
+          operation.bank,
+          ["register", "select", "restore"],
+          `block ${blockId} palette_fade_lookup bank`,
+        );
+        const transfer = exactKeys(
+          operation.transfer_request,
+          ["target", "value"],
+          `block ${blockId} palette_fade_lookup transfer_request`,
+        );
+        const tables = operation.tables as Array<Record<string, unknown>>;
+        const writes = operation.writes as Array<Record<string, unknown>>;
+        if (
+          operation.palette_selector !== "accumulator" ||
+          operation.selector_stride !== 8 ||
+          operation.first_color_offset !== 2 ||
+          timer.source !== "wIntroSceneTimer" ||
+          timer.mask !== 0x3f ||
+          timer.fold_above !== 0x1f ||
+          timer.fold_from !== 0x3f ||
+          clear.target !== "wBGPals2" ||
+          clear.byte_count !== 64 ||
+          clear.value !== 0 ||
+          bank.register !== "rWBK" ||
+          bank.select !== "BANK(wBGPals2)" ||
+          bank.restore !== true ||
+          transfer.target !== "hCGBPalUpdate" ||
+          transfer.value !== 1 ||
+          !Array.isArray(tables) ||
+          tables.length !== 3 ||
+          !Array.isArray(writes) ||
+          writes.length !== 3
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete palette_fade_lookup operation`,
+          );
+        }
+        assertSpan(
+          timer.source_declaration_span,
+          `block ${blockId} palette_fade_lookup timer declaration`,
+        );
+        const expectedLabels = [".BWFade", ".BlackLBlueFade", ".BlackBlueFade"];
+        tables.forEach((rawTable, index) => {
+          const table = exactKeys(
+            rawTable,
+            ["label", "colors", "source_span"],
+            `block ${blockId} palette_fade_lookup table ${index}`,
+          );
+          const colors = table.colors as unknown[];
+          if (
+            table.label !== expectedLabels[index] ||
+            !Array.isArray(colors) ||
+            colors.length !== 32 ||
+            colors.some(
+              (color) =>
+                !Number.isInteger(color) ||
+                (color as number) < 0 ||
+                (color as number) > 0x7fff,
+            )
+          ) {
+            throw new Error(
+              `Runtime presentation block ${blockId} has malformed palette_fade_lookup table ${index}`,
+            );
+          }
+          assertSpan(
+            table.source_span,
+            `block ${blockId} palette_fade_lookup table ${index} source_span`,
+          );
+          const write = exactKeys(
+            writes[index],
+            ["target_offset", "table", "encoding"],
+            `block ${blockId} palette_fade_lookup write ${index}`,
+          );
+          if (
+            write.target_offset !== 2 + index * 2 ||
+            write.table !== expectedLabels[index] ||
+            write.encoding !== "rgb555_little_endian"
+          ) {
+            throw new Error(
+              `Runtime presentation block ${blockId} has malformed palette_fade_lookup write ${index}`,
+            );
+          }
+        });
+      }
+      if (op === "perspective_scroll") {
+        const bank = exactKeys(
+          operation.bank,
+          ["select", "restore"],
+          `block ${blockId} perspective_scroll bank`,
+        );
+        const frame = exactKeys(
+          operation.frame,
+          ["source", "parity_mask", "source_declaration_span"],
+          `block ${blockId} perspective_scroll frame`,
+        );
+        const horizontal = exactKeys(
+          operation.horizontal_scroll,
+          ["source", "source_offset", "target", "target_declaration_source_span"],
+          `block ${blockId} perspective_scroll horizontal_scroll`,
+        );
+        const bands = operation.bands as Array<Record<string, unknown>>;
+        if (
+          operation.target !== "wLYOverrides" ||
+          operation.byte_count !== 144 ||
+          bank.select !== "BANK(wLYOverrides)" ||
+          bank.restore !== true ||
+          frame.source !== "wIntroSceneFrameCounter" ||
+          frame.parity_mask !== 1 ||
+          !Array.isArray(bands) ||
+          bands.length !== 2 ||
+          horizontal.source !== "wLYOverrides" ||
+          horizontal.source_offset !== 0 ||
+          horizontal.target !== "hSCX"
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete perspective_scroll operation`,
+          );
+        }
+        const expectedBands = [
+          ["trees", 0, 0x5f, 1, "odd_frames"],
+          ["grass", 0x5f, 0x31, 2, "every_frame"],
+        ] as const;
+        bands.forEach((rawBand, index) => {
+          const band = exactKeys(
+            rawBand,
+            ["id", "offset", "byte_count", "delta", "cadence", "value_source"],
+            `block ${blockId} perspective_scroll band ${index}`,
+          );
+          const expected = expectedBands[index];
+          if (
+            band.id !== expected[0] ||
+            band.offset !== expected[1] ||
+            band.byte_count !== expected[2] ||
+            band.delta !== expected[3] ||
+            band.cadence !== expected[4] ||
+            band.value_source !== "first_byte"
+          ) {
+            throw new Error(
+              `Runtime presentation block ${blockId} has malformed perspective_scroll band ${index}`,
+            );
+          }
+        });
+        assertSpan(
+          frame.source_declaration_span,
+          `block ${blockId} perspective_scroll frame declaration`,
+        );
+        assertSpan(
+          horizontal.target_declaration_source_span,
+          `block ${blockId} perspective_scroll output declaration`,
+        );
+        assertSpan(
+          operation.target_declaration_source_span,
+          `block ${blockId} perspective_scroll target declaration`,
+        );
+      }
+      if (op === "indexed_2bpp_request") {
+        const condition = exactKeys(
+          operation.condition,
+          ["source", "predicate", "operand", "source_declaration_span"],
+          `block ${blockId} indexed_2bpp_request condition`,
+        );
+        const selector = exactKeys(
+          operation.selector,
+          ["source", "mask", "shift_right", "byte_offsets"],
+          `block ${blockId} indexed_2bpp_request selector`,
+        );
+        const table = exactKeys(
+          operation.table,
+          ["id", "entries", "source_span"],
+          `block ${blockId} indexed_2bpp_request table`,
+        );
+        const request = exactKeys(
+          operation.request_state,
+          ["size", "source", "destination", "asynchronous", "declarations"],
+          `block ${blockId} indexed_2bpp_request state`,
+        );
+        const entries = table.entries as Array<Record<string, unknown>>;
+        const offsets = selector.byte_offsets as unknown[];
+        if (
+          condition.source !== "wIntroSceneFrameCounter" ||
+          condition.predicate !== "unsigned_less_than" ||
+          condition.operand !== 36 ||
+          selector.source !== condition.source ||
+          selector.mask !== 0x0c ||
+          selector.shift_right !== 1 ||
+          !Array.isArray(offsets) ||
+          offsets.join(",") !== "0,2,4,6" ||
+          table.id !== ".RustlingGrassPointers@Intro_RustleGrass" ||
+          !Array.isArray(entries) ||
+          entries.length !== 4 ||
+          entries.map((entry) => entry.symbol).join(",") !==
+            "IntroGrass1GFX,IntroGrass2GFX,IntroGrass3GFX,IntroGrass2GFX" ||
+          operation.target !== "vTiles2 tile $09" ||
+          operation.target_byte_offset !== 144 ||
+          operation.target_vram_bank !== 0 ||
+          operation.tile_count !== 4 ||
+          operation.bytes_per_tile !== 16 ||
+          operation.byte_count !== 64 ||
+          request.size !== "wRequested2bppSize" ||
+          request.source !== "wRequested2bppSource" ||
+          request.destination !== "wRequested2bppDest" ||
+          request.asynchronous !== true
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete indexed_2bpp_request operation`,
+          );
+        }
+        assertSpan(
+          condition.source_declaration_span,
+          `block ${blockId} indexed_2bpp_request condition declaration`,
+        );
+        assertSpan(
+          table.source_span,
+          `block ${blockId} indexed_2bpp_request table span`,
+        );
+      }
+      if (op === "scheduled_audio") {
+        const entries = operation.entries as Array<Record<string, unknown>>;
+        const onMatch = exactKeys(
+          operation.on_match,
+          ["stop_sfx_channels", "play_entry"],
+          `block ${blockId} scheduled_audio on_match`,
+        );
+        const expectedFrames = [0x00, 0x20, 0x40, 0x60, 0x80, 0x90, 0xa0, 0xb0];
+        const expectedAudio = [3, 2, 1, 2, 3, 2, 1, 2].map(
+          (index) => `SFX_INTRO_UNOWN_${index}`,
+        );
+        if (
+          operation.clock !== "wIntroSceneFrameCounter" ||
+          !Array.isArray(entries) ||
+          entries.length !== 8 ||
+          entries.some(
+            (entry, index) =>
+              entry.frame !== expectedFrames[index] ||
+              entry.audio !== expectedAudio[index],
+          ) ||
+          operation.sentinel !== 0xff ||
+          !Array.isArray(onMatch.stop_sfx_channels) ||
+          (onMatch.stop_sfx_channels as unknown[]).join(",") !== "5,6,7,8" ||
+          onMatch.play_entry !== true
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete scheduled_audio operation`,
+          );
+        }
+        assertSpan(
+          operation.clock_declaration_source_span,
+          `block ${blockId} scheduled_audio clock declaration`,
+        );
+        assertSpan(
+          operation.table_source_span,
+          `block ${blockId} scheduled_audio table`,
+        );
+      }
+      if (op === "compute_byte") {
+        const steps = operation.steps as Array<Record<string, unknown>>;
+        if (
+          typeof operation.input !== "string" ||
+          !operation.input ||
+          typeof operation.result !== "string" ||
+          !operation.result ||
+          !Array.isArray(steps) ||
+          steps.length === 0 ||
+          steps.some((step) => {
+            const keys = Object.keys(step);
+            return (
+              keys.length !== 2 ||
+              !["mask", "shift_left", "shift_right", "or", "swap_nibbles"].includes(
+                String(step.op),
+              ) ||
+              !Number.isInteger(step.value) ||
+              (step.value as number) < 0 ||
+              (step.value as number) > 0xff
+            );
+          })
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete compute_byte operation`,
+          );
+        }
+      }
+      if (op === "dispatch_table") {
+        const domain = exactKeys(
+          operation.domain,
+          ["minimum", "maximum", "values"],
+          `block ${blockId} dispatch_table domain`,
+        );
+        const entries = operation.entries as unknown[];
+        const values = domain.values as unknown[];
+        if (
+          typeof operation.dispatcher !== "string" ||
+          !operation.dispatcher ||
+          typeof operation.table !== "string" ||
+          !operation.table ||
+          typeof operation.index !== "string" ||
+          !operation.index ||
+          !Array.isArray(entries) ||
+          entries.length === 0 ||
+          entries.some((entry) => typeof entry !== "string" || !entry) ||
+          !Number.isInteger(domain.minimum) ||
+          !Number.isInteger(domain.maximum) ||
+          !Array.isArray(values) ||
+          values.length !== entries.length ||
+          values.some((value) => !Number.isInteger(value))
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an incomplete dispatch_table operation`,
+          );
+        }
+        assertSpan(
+          operation.implementation_source_span,
+          `block ${blockId} dispatch_table implementation_source_span`,
+        );
+        assertSpan(
+          operation.table_source_span,
+          `block ${blockId} dispatch_table table_source_span`,
+        );
+        const invocation = exactKeys(
+          operation.invocation,
+          ["call_form", "target", "source_span"],
+          `block ${blockId} dispatch_table invocation`,
+        );
+        if (
+          invocation.call_form !== "call" ||
+          invocation.target !== operation.dispatcher
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} dispatch_table invocation is incomplete`,
+          );
+        }
+        assertSpan(
+          invocation.source_span,
+          `block ${blockId} dispatch_table invocation source_span`,
+        );
       }
       if (
         [
@@ -14922,6 +19215,15 @@ export function assertRuntimePresentationProgram(
         ) {
           throw new Error(
             `Runtime presentation block ${blockId} has an incomplete fill_memory operation`,
+          );
+        }
+        if (
+          operation.target_offset !== undefined &&
+          (!Number.isInteger(operation.target_offset) ||
+            (operation.target_offset as number) < 0)
+        ) {
+          throw new Error(
+            `Runtime presentation block ${blockId} has an invalid fill_memory target_offset`,
           );
         }
         if (operation.value_source_span !== undefined) {
@@ -15180,14 +19482,19 @@ export function assertRuntimePresentationProgram(
           operation.target_section_source_span,
           `block ${blockId} increment_memory_byte target section`,
         );
-        assertSpan(
-          operation.implementation_source_span,
-          `block ${blockId} increment_memory_byte implementation_source_span`,
-        );
-        assertDirectCallInvocation(
-          operation.invocation,
-          `block ${blockId} increment_memory_byte invocation`,
-        );
+        if (
+          operation.implementation_source_span !== undefined ||
+          operation.invocation !== undefined
+        ) {
+          assertSpan(
+            operation.implementation_source_span,
+            `block ${blockId} increment_memory_byte implementation_source_span`,
+          );
+          assertDirectCallInvocation(
+            operation.invocation,
+            `block ${blockId} increment_memory_byte invocation`,
+          );
+        }
       }
       if (op === "palette_transfer_request") {
         const request = exactKeys(

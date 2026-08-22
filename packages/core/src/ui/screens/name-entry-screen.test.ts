@@ -56,7 +56,8 @@ const installNamingAssets = (): jest.SpyInstance<ReturnType<typeof gameEngine.im
   cursorSurface.fill([0, 0, 255, 255], { x: 0, y: 0, width: TILE_SIZE, height: TILE_SIZE });
   cursorSurface.fill([255, 0, 255, 255], { x: 0, y: TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE });
 
-  const borderSurface = makeSolidSurface(TILE_SIZE, TILE_SIZE, [10, 20, 30, 255]);
+  const borderSurface = makeSolidSurface(TILE_SIZE, TILE_SIZE, [255, 255, 255, 255]);
+  borderSurface.set_at([1, 1], [85, 85, 85, 255]);
   const underlineSurface = makeSolidSurface(TILE_SIZE, TILE_SIZE, [200, 200, 0, 255]);
   const middleLineSurface = makeSolidSurface(TILE_SIZE, TILE_SIZE, [0, 200, 200, 255]);
 
@@ -381,6 +382,16 @@ describe("NameEntryScreen", () => {
     expect(tileset.specialTiles.cursor_1).toBeDefined();
   });
 
+  it("colors the border with the ASM diploma background palette", () => {
+    const ui = new NameEntryUiStub();
+    const screen = new NameEntryScreen(ui, "YOUR NAME?");
+
+    screen.draw();
+
+    expect(ui.screen.get_at([0, 0])).toEqual([222, 255, 222, 255]);
+    expect(ui.screen.get_at([1, 1])).toEqual([107, 107, 107, 255]);
+  });
+
   it("accepts numeric keycodes for text entry", () => {
     const ui = new NameEntryUiStub();
     const screen = new NameEntryScreen(ui, "RIVAL'S NAME?");
@@ -419,8 +430,8 @@ describe("NameEntryScreen", () => {
     // 160x144 scales to 320x288 in a 400x300 host and is centered at (40, 6).
     expect(ui.screen.get_at([0, 0])).toEqual([255, 255, 255, 255]);
     expect(ui.screen.get_at([39, 150])).toEqual([255, 255, 255, 255]);
-    expect(ui.screen.get_at([40, 6])).toEqual([10, 20, 30, 255]);
-    expect(ui.screen.get_at([359, 293])).toEqual([10, 20, 30, 255]);
+    expect(ui.screen.get_at([40, 6])).toEqual([222, 255, 222, 255]);
+    expect(ui.screen.get_at([359, 293])).toEqual([222, 255, 222, 255]);
     expect(ui.screen.get_at([360, 294])).toEqual([255, 255, 255, 255]);
   });
 

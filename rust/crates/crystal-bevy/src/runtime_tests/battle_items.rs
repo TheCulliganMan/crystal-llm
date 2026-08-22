@@ -158,6 +158,12 @@
                 source_script: "RuntimeItemScript".to_string(),
                 command_index: 3,
             });
+        map.script_runtime_commands.push(ScriptRuntimeCommand {
+            command: "verbosegiveitemvar".to_string(),
+            args: vec!["POTION".to_string(), "VAR_REWARD_QUANTITY".to_string()],
+            source_script: "RuntimeVariableItemScript".to_string(),
+            command_index: 0,
+        });
         map.script_economy_commands
             .push(crystal_core::systems::economy::ScriptEconomyCommand {
                 command: "checkmoney".to_string(),
@@ -303,12 +309,27 @@
         let grant = session
             .grant_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 1)
             .expect("grant script item");
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1"),
+            "giveitem must publish success for the following conditional"
+        );
         let check = session
             .check_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 2)
             .expect("check script item");
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1"),
+            "checkitem must publish the held result for the following conditional"
+        );
         let take = session
             .take_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 3)
             .expect("take script item");
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1"),
+            "takeitem must publish the removal result for the following conditional"
+        );
         let money_check = session
             .apply_script_economy_command(&runtime, "RuntimeMap", "RuntimeEconomyScript", 4)
             .expect("check money");
@@ -329,6 +350,78 @@
         assert!(check.outcome.held);
         assert!(take.outcome.removed);
         assert_eq!(session.state.bag.quantity(&runtime.data.items["POTION"]), 1);
+
+        session
+            .take_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 3)
+            .expect("take last script item");
+        session.state.script_runtime.script_value = Some("1".to_string());
+        let missing_check = session
+            .check_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 2)
+            .expect("check missing script item");
+        assert!(!missing_check.outcome.held);
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("0"),
+            "a missing checkitem must clear a stale true accumulator"
+        );
+        session.state.script_runtime.script_value = Some("1".to_string());
+        let missing_take = session
+            .take_script_item(&runtime, "RuntimeMap", "RuntimeItemScript", 3)
+            .expect("take missing script item");
+        assert!(!missing_take.outcome.removed);
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("0"),
+            "a failed takeitem must clear a stale true accumulator"
+        );
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("VAR_REWARD_QUANTITY".to_string(), "2".to_string());
+        let variable_grant = session
+            .apply_script_runtime_command(
+                &runtime,
+                "RuntimeMap",
+                "RuntimeVariableItemScript",
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("grant variable-quantity script item");
+        assert!(matches!(
+            variable_grant.outcome,
+            ScriptRuntimeOutcome::ScriptValueSet { ref value, .. } if value == "1"
+        ));
+        assert_eq!(
+            session.state.bag.quantity(&runtime.data.items["POTION"]),
+            2
+        );
+        assert!(
+            !session
+                .state
+                .script_runtime
+                .named_buffers
+                .contains_key("POTION"),
+            "verbosegiveitemvar operands are not string-buffer identifiers"
+        );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
+            Some("GiveItemScript")
+        );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .call_stack
+                .last()
+                .map(|frame| (frame.source_script.as_str(), frame.next_command_index)),
+            Some(("RuntimeVariableItemScript", 1))
+        );
         assert!(matches!(
             money_check.outcome,
             ScriptEconomyOutcome::Check {
@@ -2036,13 +2129,11 @@
 
         let mut state = GameState::default();
         state.bag.pc_items.insert("POKE_BALL".to_string(), 1);
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved PC item pocket must match compiled item pocket");
-        let error = error_debug(error);
-        assert!(error.contains(
-            "saved bag.pc_items item POKE_BALL is in compiled pocket BALL, expected ITEM"
-        ));
+        state.bag.tm_hm = vec![0, 0];
+        runtime
+            .data
+            .validate_saved_bag_references(&state.bag)
+            .expect("PC item storage accepts an exact compiled Ball item");
 
         let mut custom_data = data.clone();
         custom_data.items.insert(
@@ -2251,6 +2342,7 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "RuntimeMap".to_string(),
                 species: "CYNDAQUIL".to_string(),
                 level: 5,
@@ -2355,6 +2447,7 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "RuntimeMap".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 5,
@@ -2379,6 +2472,7 @@
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_NORMAL".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "RuntimeMap".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 5,
@@ -3043,6 +3137,11 @@
             banned_species: BTreeMap::new(),
             required_party_count: 3,
             challenge_streak_length: 7,
+            reward_candidates: vec!["HP_UP".to_string(), "LUCKY_PUNCH".to_string()],
+            excluded_reward_items: vec!["LUCKY_PUNCH".to_string()],
+            reward_quantity: 5,
+            reward_failure_sentinel: "POTION".to_string(),
+            reward_item_values: [("POTION".to_string(), 0x12), ("HP_UP".to_string(), 0x1a), ("LUCKY_PUNCH".to_string(), 0x1e)].into_iter().collect(),
             minimum_level_group: 10,
             maximum_level_group: 100,
             level_group_size: 10,
@@ -3622,16 +3721,13 @@
         ));
 
         let mut state = GameState::default();
-        state
-            .script_runtime
-            .special_phone_calls
-            .push("SPECIALCALL_MISSING".to_string());
+        state.script_runtime.special_phone_call = Some("SPECIALCALL_MISSING".to_string());
         let error = runtime
             .save_game(&save_path, state)
             .expect_err("saved special phone call must exist in pack");
         let error = format!("{error:#}");
         assert!(error.contains(
-            "saved script_runtime.special_phone_calls[0] SPECIALCALL_MISSING is missing"
+            "saved script_runtime.special_phone_call SPECIALCALL_MISSING is missing"
         ));
 
         let mut state = GameState::default();
@@ -3910,28 +4006,6 @@
         let mut state = GameState::default();
         state
             .script_runtime
-            .catch_tutorials
-            .push("BATTLETYPE_TUTORIAL".to_string());
-        runtime
-            .save_game(&save_path, state)
-            .expect("saved catch tutorial battle type declared by pack catchtutorial command");
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .catch_tutorials
-            .push("BATTLETYPE_STALE".to_string());
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved catch tutorial battle type must exist in pack");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.catch_tutorials[0] BATTLETYPE_STALE is missing from compiled pack catchtutorial commands"
-        ));
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
             .variable_sprites
             .insert("SPRITE_MON".to_string(), "SPRITE_MISSING".to_string());
         let error = runtime
@@ -3944,16 +4018,6 @@
             ),
             "{error}"
         );
-
-        let mut state = GameState::default();
-        state.script_runtime.blackout_mod = Some("MISSING_MAP_CONSTANT".to_string());
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved blackout map constant must exist in pack");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.blackout_mod MISSING_MAP_CONSTANT is missing from compiled pack map constants"
-        ));
 
         let mut metadata_mismatch_data = verified_runtime_bootstrap_data();
         metadata_mismatch_data.audio = runtime_audio.clone();
@@ -3987,16 +4051,6 @@
         ));
 
         let mut state = GameState::default();
-        state.script_runtime.battle_tower_text = Some("MissingTowerText".to_string());
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved Battle Tower text must exist in pack");
-        let error = format!("{error:#}");
-        assert!(
-            error.contains("saved script_runtime.battle_tower_text MissingTowerText is missing")
-        );
-
-        let mut state = GameState::default();
         state.script_runtime.next_script = Some(ScriptLocation {
             origin_map_name: "RuntimeMap".to_string(),
             script: "MissingScript".to_string(),
@@ -4007,79 +4061,6 @@
         let error = format!("{error:#}");
         assert!(error.contains(
             "saved script_runtime.next_script.script MissingScript is missing from compiled pack scripts"
-        ));
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .effects
-            .push(crystal_core::state::ScriptRuntimeEffect {
-                command: "special".to_string(),
-                args: vec!["RuntimeSpecial".to_string()],
-                source_script: "MissingScript".to_string(),
-                command_index: 0,
-            });
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("script runtime effect source script must exist in pack");
-        let error = format!("{error:#}");
-        assert!(
-            error
-                .contains("saved script_runtime.effects[0].source_script MissingScript is missing")
-        );
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .effects
-            .push(crystal_core::state::ScriptRuntimeEffect {
-                command: "special".to_string(),
-                args: vec!["RuntimeSpecial".to_string()],
-                source_script: "RuntimeScript".to_string(),
-                command_index: 3,
-            });
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("script runtime effect command index must exist in pack");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.effects[0].source_script RuntimeScript:3 is outside compiled script command count 3"
-        ));
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .effects
-            .push(crystal_core::state::ScriptRuntimeEffect {
-                command: "special".to_string(),
-                args: vec!["RuntimeSpecial".to_string()],
-                source_script: "RuntimeScript".to_string(),
-                command_index: 0,
-            });
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("script runtime effect command must match compiled command at saved index");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.effects[0].source_script RuntimeScript:0 command special does not match compiled command noop"
-        ));
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .effects
-            .push(crystal_core::state::ScriptRuntimeEffect {
-                command: "special".to_string(),
-                args: vec!["MissingRoutine".to_string()],
-                source_script: "RuntimeScript".to_string(),
-                command_index: 1,
-            });
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("script runtime effect args must match compiled command args");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            r#"saved script_runtime.effects[0].source_script RuntimeScript:1 args ["MissingRoutine"] do not match compiled args ["RuntimeSpecial"]"#
         ));
 
         let mut state = GameState::default();
@@ -4118,9 +4099,12 @@
             .save_game(&save_path, state)
             .expect_err("queued command target must exist in pack");
         let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.command_queue[0].target MissingQueuedScript is missing"
-        ));
+        assert!(
+            error.contains(
+                "saved script_runtime.command_queue[0].target MissingQueuedScript is missing"
+            ),
+            "{error}"
+        );
 
         let mut state = GameState::default();
         state
@@ -4183,55 +4167,6 @@
         ), "{error}");
 
         let mut state = GameState::default();
-        state
-            .script_runtime
-            .checked_mail_targets
-            .push("MissingMailScript".to_string());
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("checked mail target must exist in pack");
-        let error = format!("{error:#}");
-        assert!(
-            error.contains(
-                "saved script_runtime.checked_mail_targets[0] MissingMailScript is missing"
-            )
-        );
-
-        let mut state = GameState::default();
-        state
-            .script_runtime
-            .given_mail_targets
-            .push("MissingGivenMailScript".to_string());
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("given mail target must exist in pack");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            "saved script_runtime.given_mail_targets[0] MissingGivenMailScript is missing"
-        ));
-
-        let mut state = GameState::default();
-        state.script_runtime.elevator_floors.push(
-            crystal_core::state::ScriptRuntimeElevatorFloor {
-                floor: "FLOOR_2F".to_string(),
-                warp: 4,
-                target_map: "RuntimeMap".to_string(),
-                source_script: "RuntimePayloadScript".to_string(),
-                command_index: 0,
-            },
-        );
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved elevator floor payload must match compiled command args");
-        let error = format!("{error:#}");
-        assert!(
-            error.contains(
-                r#"saved script_runtime.elevator_floors[0].source_script RuntimePayloadScript:0 args ["FLOOR_2F", "4", "RUNTIME_MAP"] do not match compiled args ["FLOOR_1F", "4", "RuntimeMap"]"#
-            ),
-            "{error}"
-        );
-
-        let mut state = GameState::default();
         state.script_runtime.stone_table_entries.push(
             crystal_core::state::ScriptRuntimeStoneTableEntry {
                 warp: 5,
@@ -4247,57 +4182,6 @@
         let error = format!("{error:#}");
         assert!(error.contains(
             r#"saved script_runtime.stone_table_entries[0].source_script RuntimePayloadScript:1 args ["5", "STALE_BOULDER", "RuntimeScript"] do not match compiled args ["5", "RUNTIME_BOULDER", "RuntimeScript"]"#
-        ));
-
-        let mut state = GameState::default();
-        state.script_runtime.decoration_descriptions.push(
-            crystal_core::state::ScriptRuntimeDecorationDescription {
-                decoration: "DECODESC_POSTER".to_string(),
-                source_script: "RuntimePayloadScript".to_string(),
-                command_index: 2,
-            },
-        );
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved decoration description payload must match compiled command args");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            r#"saved script_runtime.decoration_descriptions[0].source_script RuntimePayloadScript:2 args ["DECODESC_POSTER"] do not match compiled args ["DECODESC_LEFT_DOLL"]"#
-        ));
-
-        let mut state = GameState::default();
-        state.script_runtime.variable_writes.push(
-            crystal_core::state::ScriptRuntimeVariableWrite {
-                target: "VAR_STALE_TARGET".to_string(),
-                value: "12".to_string(),
-                source_script: "RuntimePayloadScript".to_string(),
-                command_index: 3,
-            },
-        );
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved variable write target must match compiled command args");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            r#"saved script_runtime.variable_writes[0].source_script RuntimePayloadScript:3 args ["VAR_STALE_TARGET"] do not match compiled args ["VAR_BLUECARDBALANCE"]"#
-        ));
-
-        let mut state = GameState::default();
-        state.script_runtime.numeric_buffer_writes.push(
-            crystal_core::state::ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING_BUFFER_4".to_string(),
-                value: "37".to_string(),
-                width: 3,
-                source_script: "RuntimePayloadScript".to_string(),
-                command_index: 4,
-            },
-        );
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("saved numeric buffer target must match compiled command args");
-        let error = format!("{error:#}");
-        assert!(error.contains(
-            r#"saved script_runtime.numeric_buffer_writes[0].source_script RuntimePayloadScript:4 args ["STRING_BUFFER_4"] do not match compiled args ["STRING_BUFFER_3"]"#
         ));
 
         let mut state = GameState::default();
@@ -4795,7 +4679,9 @@
             .pending_delays
             .push(crystal_core::state::ScriptRuntimeDelay {
                 command: "pause".to_string(),
-                frames: 12,
+                parameter: 12,
+                frames: 24,
+                release_all_objects: false,
                 source_script: "RuntimePayloadScript".to_string(),
                 command_index: 17,
             });
@@ -4852,6 +4738,7 @@
                 emote: "EMOTE_SHOCK".to_string(),
                 object: "RuntimeObject".to_string(),
                 duration: 8,
+                frames: 16,
                 source_script: "RuntimePayloadScript".to_string(),
                 command_index: 19,
             });
@@ -4862,22 +4749,6 @@
         assert!(error.contains(
             r#"saved script_runtime.pending_emotes[0].source_script RuntimePayloadScript:19 args ["EMOTE_SHOCK", "RuntimeObject", "8"] do not match compiled args ["EMOTE_SHOCK", "RuntimeObject", "16"]"#
         ));
-
-        let mut state = GameState::default();
-        state.script_runtime.elevator_floors.push(
-            crystal_core::state::ScriptRuntimeElevatorFloor {
-                floor: "1F".to_string(),
-                warp: 0,
-                target_map: "MissingMap".to_string(),
-                source_script: "RuntimeScript".to_string(),
-                command_index: 0,
-            },
-        );
-        let error = runtime
-            .save_game(&save_path, state)
-            .expect_err("script runtime elevator target map must exist in pack");
-        let error = format!("{error:#}");
-        assert!(error.contains("saved script_runtime.elevator_floors[0].target_map MissingMap"));
 
         let mut state = GameState::default();
         state.script_runtime.current_music = Some("MUSIC_MISSING".to_string());

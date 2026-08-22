@@ -48,36 +48,38 @@ fn queue_visible_player_recall_animation(
     for event in &mut bg_events {
         event.frame = event.frame.saturating_add(WITHDRAW_DELAY_FRAMES);
     }
-    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-        trigger_message: trigger_message.to_string(),
-        move_id: "RETURN_MON".to_string(),
-        animation_label,
-        player_move: true,
-        started: false,
-        waiting_for_hp: false,
-        frame: 0,
-        total_frames: WITHDRAW_DELAY_FRAMES.saturating_add(animation_frames),
-        sound_events: sound_events
-            .into_iter()
-            .map(|(frame, sound)| (frame.saturating_add(WITHDRAW_DELAY_FRAMES), sound))
-            .collect(),
-        next_sound_event: 0,
-        cry_events: cry_events
-            .into_iter()
-            .map(|(frame, cry)| (frame.saturating_add(WITHDRAW_DELAY_FRAMES), cry))
-            .collect(),
-        next_cry_event: 0,
-        object_events: object_events
-            .into_iter()
-            .map(|mut event| {
-                event.frame = event.frame.saturating_add(WITHDRAW_DELAY_FRAMES);
-                event
-            })
-            .collect(),
-        bg_events,
-        actor_species_override: None,
-        actor_shiny_override: None,
-    });
+    runtime_shell
+        .visible_move_animations
+        .push_back(VisibleMoveAnimation {
+            trigger_message: trigger_message.to_string(),
+            move_id: "RETURN_MON".to_string(),
+            animation_label,
+            player_move: true,
+            started: false,
+            waiting_for_hp: false,
+            frame: 0,
+            total_frames: WITHDRAW_DELAY_FRAMES.saturating_add(animation_frames),
+            sound_events: sound_events
+                .into_iter()
+                .map(|(frame, sound)| (frame.saturating_add(WITHDRAW_DELAY_FRAMES), sound))
+                .collect(),
+            next_sound_event: 0,
+            cry_events: cry_events
+                .into_iter()
+                .map(|(frame, cry)| (frame.saturating_add(WITHDRAW_DELAY_FRAMES), cry))
+                .collect(),
+            next_cry_event: 0,
+            object_events: object_events
+                .into_iter()
+                .map(|mut event| {
+                    event.frame = event.frame.saturating_add(WITHDRAW_DELAY_FRAMES);
+                    event
+                })
+                .collect(),
+            bg_events,
+            actor_species_override: None,
+            actor_shiny_override: None,
+        });
 }
 
 fn stage_visible_battle_messages(
@@ -96,21 +98,17 @@ fn stage_visible_battle_messages(
     let active_player_party_index = battle
         .active_player_party_index
         .expect("battle events require an active player party slot");
-    let player_name = std::cell::RefCell::new(snapshot
-        .party
-        .slots
-        .iter()
-        .find(|slot| slot.index == active_player_party_index)
-        .map(|slot| slot.pokemon.nickname.as_str())
-        .expect("active battle party slot must exist in the runtime snapshot")
-        .to_string());
-    let enemy_name = std::cell::RefCell::new(
-        battle
-            .enemy_pokemon
-            .nickname
-            .as_str()
+    let player_name = std::cell::RefCell::new(
+        snapshot
+            .party
+            .slots
+            .iter()
+            .find(|slot| slot.index == active_player_party_index)
+            .map(|slot| slot.pokemon.nickname.as_str())
+            .expect("active battle party slot must exist in the runtime snapshot")
             .to_string(),
     );
+    let enemy_name = std::cell::RefCell::new(battle.enemy_pokemon.nickname.as_str().to_string());
     let name = |side: BattleSide| match side {
         BattleSide::Player => player_name.borrow().clone(),
         BattleSide::Enemy => enemy_name.borrow().clone(),
@@ -212,7 +210,9 @@ fn stage_visible_battle_messages(
     let missed_moves = events
         .iter()
         .filter_map(|event| match event {
-            BattleEvent::Missed { side, move_name, .. } => Some((*side, move_name.as_str())),
+            BattleEvent::Missed {
+                side, move_name, ..
+            } => Some((*side, move_name.as_str())),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -225,9 +225,7 @@ fn stage_visible_battle_messages(
         .iter()
         .filter_map(|event| match event {
             BattleEvent::ChargeStarted { side, move_name }
-            | BattleEvent::AirborneStarted { side, move_name } => {
-                Some((*side, move_name.as_str()))
-            }
+            | BattleEvent::AirborneStarted { side, move_name } => Some((*side, move_name.as_str())),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -235,9 +233,7 @@ fn stage_visible_battle_messages(
         .iter()
         .filter_map(|event| match event {
             BattleEvent::ChargeEnded { side, move_name }
-            | BattleEvent::AirborneEnded { side, move_name } => {
-                Some((*side, move_name.as_str()))
-            }
+            | BattleEvent::AirborneEnded { side, move_name } => Some((*side, move_name.as_str())),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -258,7 +254,11 @@ fn stage_visible_battle_messages(
                 move_name,
                 animation_param,
                 ..
-            } if matches!(move_name.as_str(), "MORNING_SUN" | "SYNTHESIS" | "MOONLIGHT") => {
+            } if matches!(
+                move_name.as_str(),
+                "MORNING_SUN" | "SYNTHESIS" | "MOONLIGHT"
+            ) =>
+            {
                 Some(((*side, move_name.as_str()), *animation_param))
             }
             _ => None,
@@ -440,8 +440,7 @@ fn stage_visible_battle_messages(
                 )
             });
             let is_pure_status = snapshot.moves.iter().any(|move_data| {
-                (move_data.move_id == key.1 || move_data.name == key.1)
-                    && move_data.power == 0
+                (move_data.move_id == key.1 || move_data.name == key.1) && move_data.power == 0
             });
             !has_success && is_pure_status
         })
@@ -484,10 +483,13 @@ fn stage_visible_battle_messages(
         let event_scene_before = event_scene.clone();
         if let BattleEvent::AirborneEnded { side, move_name } = event
             && semi_invulnerable_misses.contains(&(*side, move_name.as_str()))
-            && event_scene.battle.as_ref().is_some_and(|battle| match side {
-                BattleSide::Player => battle.player_substitute_hp == 0,
-                BattleSide::Enemy => battle.enemy_substitute_hp == 0,
-            })
+            && event_scene
+                .battle
+                .as_ref()
+                .is_some_and(|battle| match side {
+                    BattleSide::Player => battle.player_substitute_hp == 0,
+                    BattleSide::Enemy => battle.enemy_substitute_hp == 0,
+                })
         {
             // FailureText prints the miss first, then AppearUserRaiseSub
             // redraws Fly/Dig's user. Keep the hidden scene under that page
@@ -498,8 +500,7 @@ fn stage_visible_battle_messages(
                 event,
                 &mut event_scene_baton_pass_sides,
             );
-            deferred_airborne_end_scenes
-                .insert((*side, move_name.as_str()), revealed_scene);
+            deferred_airborne_end_scenes.insert((*side, move_name.as_str()), revealed_scene);
         } else {
             apply_visible_battle_event_to_scene(
                 &mut event_scene,
@@ -570,14 +571,10 @@ fn stage_visible_battle_messages(
             ..
         } = event
         {
-            if snapshot
-                .moves
-                .iter()
-                .any(|move_data| {
-                    (move_data.move_id == *move_name || move_data.name == *move_name)
-                        && move_data.effect == "OHKO"
-                })
-            {
+            if snapshot.moves.iter().any(|move_data| {
+                (move_data.move_id == *move_name || move_data.name == *move_name)
+                    && move_data.effect == "OHKO"
+            }) {
                 runtime_shell
                     .battle_messages
                     .push_back("It's a one-hit KO!".to_string());
@@ -624,24 +621,26 @@ fn stage_visible_battle_messages(
         let message = match event {
             BattleEvent::AutomaticStruggle { side } => {
                 let message = format!("{} has no moves left!", name(*side));
-                runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                    trigger_message: message.clone(),
-                    move_id: "STRUGGLE".to_string(),
-                    animation_label: "BattleCommand_NoMovesDelay".to_string(),
-                    player_move: *side == BattleSide::Player,
-                    started: false,
-                    waiting_for_hp: false,
-                    frame: 0,
-                    total_frames: 60,
-                    sound_events: Vec::new(),
-                    next_sound_event: 0,
-                    cry_events: Vec::new(),
-                    next_cry_event: 0,
-                    object_events: Vec::new(),
-                    bg_events: Vec::new(),
-                    actor_species_override: None,
-                    actor_shiny_override: None,
-                });
+                runtime_shell
+                    .visible_move_animations
+                    .push_back(VisibleMoveAnimation {
+                        trigger_message: message.clone(),
+                        move_id: "STRUGGLE".to_string(),
+                        animation_label: "BattleCommand_NoMovesDelay".to_string(),
+                        player_move: *side == BattleSide::Player,
+                        started: false,
+                        waiting_for_hp: false,
+                        frame: 0,
+                        total_frames: 60,
+                        sound_events: Vec::new(),
+                        next_sound_event: 0,
+                        cry_events: Vec::new(),
+                        next_cry_event: 0,
+                        object_events: Vec::new(),
+                        bg_events: Vec::new(),
+                        actor_species_override: None,
+                        actor_shiny_override: None,
+                    });
                 Some(message)
             }
             BattleEvent::MoveUsed { side, move_name } => {
@@ -651,12 +650,14 @@ fn stage_visible_battle_messages(
                     battle_move_display_name(snapshot, move_name)
                 );
                 last_move_message_by_side.insert(*side, message.clone());
-                let user_has_substitute = event_scene.battle.as_ref().is_some_and(|battle| {
-                    match side {
-                        BattleSide::Player => battle.player_substitute_hp > 0,
-                        BattleSide::Enemy => battle.enemy_substitute_hp > 0,
-                    }
-                });
+                let user_has_substitute =
+                    event_scene
+                        .battle
+                        .as_ref()
+                        .is_some_and(|battle| match side {
+                            BattleSide::Player => battle.player_substitute_hp > 0,
+                            BattleSide::Enemy => battle.enemy_substitute_hp > 0,
+                        });
                 if move_name != "BEAT_UP"
                     && (!missed_moves.contains(&(*side, move_name.as_str()))
                         || selfdestruct_moves.contains(&(*side, move_name.as_str())))
@@ -664,11 +665,9 @@ fn stage_visible_battle_messages(
                     && !curse_failures.contains(&(*side, move_name.as_str()))
                     && !failed_force_switch_moves.contains(&(*side, move_name.as_str()))
                     && !bide_storing_turns.contains(&(*side, move_name.as_str()))
-                    && !command_owned_animation_failures
-                        .contains(&(*side, move_name.as_str()))
+                    && !command_owned_animation_failures.contains(&(*side, move_name.as_str()))
                     && !queued_future_sight_moves.contains(&(*side, move_name.as_str()))
-                    && !unsuccessful_pure_stat_moves
-                        .contains(&(*side, move_name.as_str()))
+                    && !unsuccessful_pure_stat_moves.contains(&(*side, move_name.as_str()))
                 {
                     // Crystal passes parameter 1 on setup turns, initial Bide,
                     // non-Ghost Curse, successful forced switches, and
@@ -676,30 +675,22 @@ fn stage_visible_battle_messages(
                     // Present's healing branch. Their failed branches use
                     // AnimateFailedMove and never run the ordinary move
                     // animation.
-                    let animation_param = if let Some(animation_param) = time_based_heal_params
-                        .get(&(*side, move_name.as_str()))
+                    let animation_param = if let Some(animation_param) =
+                        time_based_heal_params.get(&(*side, move_name.as_str()))
                     {
                         *animation_param
-                    } else if present_heals
-                        .contains(&(*side, move_name.as_str()))
-                    {
+                    } else if present_heals.contains(&(*side, move_name.as_str())) {
                         3
-                    } else if non_ghost_curse_successes
-                        .contains(&(*side, move_name.as_str()))
-                    {
+                    } else if non_ghost_curse_successes.contains(&(*side, move_name.as_str())) {
                         1
-                    } else if successful_force_switch_moves
-                        .contains(&(*side, move_name.as_str()))
-                    {
+                    } else if successful_force_switch_moves.contains(&(*side, move_name.as_str())) {
                         1
                     } else if selfdestruct_moves.contains(&(*side, move_name.as_str())) {
                         1
                     } else if bide_starts.contains(&(*side, move_name.as_str())) {
                         1
                     } else {
-                        u8::from(
-                            preparation_moves.contains(&(*side, move_name.as_str())),
-                        )
+                        u8::from(preparation_moves.contains(&(*side, move_name.as_str())))
                     };
                     let animation_params = completed_multi_hits
                         .get(&(*side, move_name.as_str()))
@@ -727,46 +718,53 @@ fn stage_visible_battle_messages(
                             && animation_index + 1 == animation_count
                             && !(preparation_moves.contains(&move_key)
                                 && matches!(move_name.as_str(), "FLY" | "DIG"));
-                        if let Some((animation_label, total_frames, sound_events, cry_events, object_events, mut bg_events)) =
-                            visible_move_animation_definition_with_substitute(
-                                snapshot,
-                                move_name,
-                                i32::from(animation_param),
-                                lower_substitute,
-                                raise_substitute,
-                            )
-                        {
-                            if user_has_substitute
-                                && animation_count > 1
-                                && animation_index > 0
-                            {
-                                bg_events.insert(0, VisibleMoveBgEvent {
-                                frame: 0,
-                                    effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
-                                    duration: 0,
-                                    target: "BG_EFFECT_USER".to_string(),
-                                    param: 0,
-                                    incremented: false,
-                            });
+                        if let Some((
+                            animation_label,
+                            total_frames,
+                            sound_events,
+                            cry_events,
+                            object_events,
+                            mut bg_events,
+                        )) = visible_move_animation_definition_with_substitute(
+                            snapshot,
+                            move_name,
+                            i32::from(animation_param),
+                            lower_substitute,
+                            raise_substitute,
+                        ) {
+                            if user_has_substitute && animation_count > 1 && animation_index > 0 {
+                                bg_events.insert(
+                                    0,
+                                    VisibleMoveBgEvent {
+                                        frame: 0,
+                                        effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
+                                        duration: 0,
+                                        target: "BG_EFFECT_USER".to_string(),
+                                        param: 0,
+                                        incremented: false,
+                                    },
+                                );
                             }
-                            runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                                trigger_message: message.clone(),
-                                move_id: move_name.clone(),
-                                animation_label,
-                                player_move: *side == BattleSide::Player,
-                                started: false,
-                                waiting_for_hp: false,
-                                frame: 0,
-                                total_frames,
-                                sound_events,
-                                next_sound_event: 0,
-                                cry_events,
-                                next_cry_event: 0,
-                                object_events,
-                                bg_events,
-                                actor_species_override: None,
-                                actor_shiny_override: None,
-                            });
+                            runtime_shell
+                                .visible_move_animations
+                                .push_back(VisibleMoveAnimation {
+                                    trigger_message: message.clone(),
+                                    move_id: move_name.clone(),
+                                    animation_label,
+                                    player_move: *side == BattleSide::Player,
+                                    started: false,
+                                    waiting_for_hp: false,
+                                    frame: 0,
+                                    total_frames,
+                                    sound_events,
+                                    next_sound_event: 0,
+                                    cry_events,
+                                    next_cry_event: 0,
+                                    object_events,
+                                    bg_events,
+                                    actor_species_override: None,
+                                    actor_shiny_override: None,
+                                });
                         }
                     }
                     let mut next_called_move =
@@ -825,46 +823,56 @@ fn stage_visible_battle_messages(
                                     && called_animation_index + 1 == called_animation_count
                                     && !(preparation_moves.contains(&called_key)
                                         && matches!(called_move, "FLY" | "DIG"));
-                                if let Some((animation_label, total_frames, sound_events, cry_events, object_events, mut bg_events)) =
-                                    visible_move_animation_definition_with_substitute(
-                                        snapshot,
-                                        called_move,
-                                        i32::from(called_param),
-                                        lower_substitute,
-                                        raise_substitute,
-                                    )
-                                {
+                                if let Some((
+                                    animation_label,
+                                    total_frames,
+                                    sound_events,
+                                    cry_events,
+                                    object_events,
+                                    mut bg_events,
+                                )) = visible_move_animation_definition_with_substitute(
+                                    snapshot,
+                                    called_move,
+                                    i32::from(called_param),
+                                    lower_substitute,
+                                    raise_substitute,
+                                ) {
                                     if user_has_substitute
                                         && called_animation_count > 1
                                         && called_animation_index > 0
                                     {
-                                        bg_events.insert(0, VisibleMoveBgEvent {
-                                        frame: 0,
-                                            effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
-                                            duration: 0,
-                                            target: "BG_EFFECT_USER".to_string(),
-                                            param: 0,
-                                            incremented: false,
-                                        });
+                                        bg_events.insert(
+                                            0,
+                                            VisibleMoveBgEvent {
+                                                frame: 0,
+                                                effect_id: "BATTLE_ACTOR_DROPSUB".to_string(),
+                                                duration: 0,
+                                                target: "BG_EFFECT_USER".to_string(),
+                                                param: 0,
+                                                incremented: false,
+                                            },
+                                        );
                                     }
-                                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                                        trigger_message: message.clone(),
-                                        move_id: called_move.to_string(),
-                                        animation_label,
-                                        player_move: *side == BattleSide::Player,
-                                        started: false,
-                                        waiting_for_hp: false,
-                                        frame: 0,
-                                        total_frames,
-                                        sound_events,
-                                        next_sound_event: 0,
-                                        cry_events,
-                                        next_cry_event: 0,
-                                        object_events,
-                                        bg_events,
-                                        actor_species_override: None,
-                                        actor_shiny_override: None,
-                                    });
+                                    runtime_shell.visible_move_animations.push_back(
+                                        VisibleMoveAnimation {
+                                            trigger_message: message.clone(),
+                                            move_id: called_move.to_string(),
+                                            animation_label,
+                                            player_move: *side == BattleSide::Player,
+                                            started: false,
+                                            waiting_for_hp: false,
+                                            frame: 0,
+                                            total_frames,
+                                            sound_events,
+                                            next_sound_event: 0,
+                                            cry_events,
+                                            next_cry_event: 0,
+                                            object_events,
+                                            bg_events,
+                                            actor_species_override: None,
+                                            actor_shiny_override: None,
+                                        },
+                                    );
                                 }
                             }
                         } else {
@@ -884,27 +892,35 @@ fn stage_visible_battle_messages(
                                     Vec::new(),
                                 ))
                             };
-                            if let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                                delayed_animation
+                            if let Some((
+                                animation_label,
+                                total_frames,
+                                sound_events,
+                                cry_events,
+                                object_events,
+                                bg_events,
+                            )) = delayed_animation
                             {
-                                runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                                    trigger_message: message.clone(),
-                                    move_id: called_move.to_string(),
-                                    animation_label,
-                                    player_move: *side == BattleSide::Player,
-                                    started: false,
-                                    waiting_for_hp: false,
-                                    frame: 0,
-                                    total_frames,
-                                    sound_events,
-                                    next_sound_event: 0,
-                                    cry_events,
-                                    next_cry_event: 0,
-                                    object_events,
-                                    bg_events,
-                                    actor_species_override: None,
-                                    actor_shiny_override: None,
-                                });
+                                runtime_shell.visible_move_animations.push_back(
+                                    VisibleMoveAnimation {
+                                        trigger_message: message.clone(),
+                                        move_id: called_move.to_string(),
+                                        animation_label,
+                                        player_move: *side == BattleSide::Player,
+                                        started: false,
+                                        waiting_for_hp: false,
+                                        frame: 0,
+                                        total_frames,
+                                        sound_events,
+                                        next_sound_event: 0,
+                                        cry_events,
+                                        next_cry_event: 0,
+                                        object_events,
+                                        bg_events,
+                                        actor_species_override: None,
+                                        actor_shiny_override: None,
+                                    },
+                                );
                             }
                         }
                         next_called_move = called_moves.get(&called_key).copied();
@@ -914,10 +930,8 @@ fn stage_visible_battle_messages(
                     || present_failures.contains(&(*side, move_name.as_str()))
                     || curse_failures.contains(&(*side, move_name.as_str()))
                     || failed_force_switch_moves.contains(&(*side, move_name.as_str()))
-                    || command_owned_animation_failures
-                        .contains(&(*side, move_name.as_str()))
-                    || unsuccessful_pure_stat_moves
-                        .contains(&(*side, move_name.as_str()))
+                    || command_owned_animation_failures.contains(&(*side, move_name.as_str()))
+                    || unsuccessful_pure_stat_moves.contains(&(*side, move_name.as_str()))
                 {
                     // MoveAnimNoSub turns a miss into MoveDelay, while these
                     // command-owned failures call AnimateFailedMove or its
@@ -925,9 +939,7 @@ fn stage_visible_battle_messages(
                     // retain the used page for exactly 40 frames before the
                     // failure result is exposed when no Substitute is active.
                     let delayed_animation = if user_has_substitute {
-                        if semi_invulnerable_misses
-                            .contains(&(*side, move_name.as_str()))
-                        {
+                        if semi_invulnerable_misses.contains(&(*side, move_name.as_str())) {
                             visible_substitute_raise_after_delay_definition(snapshot)
                         } else {
                             visible_substitute_move_delay_definition(snapshot)
@@ -942,27 +954,35 @@ fn stage_visible_battle_messages(
                             Vec::new(),
                         ))
                     };
-                    if let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                        delayed_animation
+                    if let Some((
+                        animation_label,
+                        total_frames,
+                        sound_events,
+                        cry_events,
+                        object_events,
+                        bg_events,
+                    )) = delayed_animation
                     {
-                        runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                            trigger_message: message.clone(),
-                            move_id: move_name.clone(),
-                            animation_label,
-                            player_move: *side == BattleSide::Player,
-                            started: false,
-                            waiting_for_hp: false,
-                            frame: 0,
-                            total_frames,
-                            sound_events,
-                            next_sound_event: 0,
-                            cry_events,
-                            next_cry_event: 0,
-                            object_events,
-                            bg_events,
-                            actor_species_override: None,
-                            actor_shiny_override: None,
-                        });
+                        runtime_shell
+                            .visible_move_animations
+                            .push_back(VisibleMoveAnimation {
+                                trigger_message: message.clone(),
+                                move_id: move_name.clone(),
+                                animation_label,
+                                player_move: *side == BattleSide::Player,
+                                started: false,
+                                waiting_for_hp: false,
+                                frame: 0,
+                                total_frames,
+                                sound_events,
+                                next_sound_event: 0,
+                                cry_events,
+                                next_cry_event: 0,
+                                object_events,
+                                bg_events,
+                                actor_species_override: None,
+                                actor_shiny_override: None,
+                            });
                     }
                 }
                 Some(message)
@@ -974,9 +994,7 @@ fn stage_visible_battle_messages(
                 name(*side),
                 battle_move_display_name(snapshot, move_name)
             )),
-            BattleEvent::Missed { side, .. } => {
-                Some(format!("{}'s\nattack missed!", name(*side)))
-            }
+            BattleEvent::Missed { side, .. } => Some(format!("{}'s\nattack missed!", name(*side))),
             BattleEvent::AirborneAvoided { target, .. } => {
                 Some(format!("{}\nevaded the attack!", name(*target)))
             }
@@ -1008,37 +1026,45 @@ fn stage_visible_battle_messages(
                     BattleSide::Player => battle.active_player_party_index,
                     BattleSide::Enemy => battle.active_enemy_party_index,
                 });
-                let animation_param = if active_index == Some(*party_index) { 0 } else { 1 };
-                if let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                    visible_move_animation_definition(snapshot, move_name, animation_param)
+                let animation_param = if active_index == Some(*party_index) {
+                    0
+                } else {
+                    1
+                };
+                if let Some((
+                    animation_label,
+                    total_frames,
+                    sound_events,
+                    cry_events,
+                    object_events,
+                    bg_events,
+                )) = visible_move_animation_definition(snapshot, move_name, animation_param)
                 {
-                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                        trigger_message: message.clone(),
-                        move_id: move_name.clone(),
-                        animation_label,
-                        player_move: *side == BattleSide::Player,
-                        started: false,
-                        waiting_for_hp: false,
-                        frame: 0,
-                        total_frames,
-                        sound_events,
-                        next_sound_event: 0,
-                        cry_events,
-                        next_cry_event: 0,
-                        object_events,
-                        bg_events,
-                        actor_species_override: (animation_param != 0).then(|| species.clone()),
-                        actor_shiny_override: (animation_param != 0).then_some(*shiny),
-                    });
+                    runtime_shell
+                        .visible_move_animations
+                        .push_back(VisibleMoveAnimation {
+                            trigger_message: message.clone(),
+                            move_id: move_name.clone(),
+                            animation_label,
+                            player_move: *side == BattleSide::Player,
+                            started: false,
+                            waiting_for_hp: false,
+                            frame: 0,
+                            total_frames,
+                            sound_events,
+                            next_sound_event: 0,
+                            cry_events,
+                            next_cry_event: 0,
+                            object_events,
+                            bg_events,
+                            actor_species_override: (animation_param != 0).then(|| species.clone()),
+                            actor_shiny_override: (animation_param != 0).then_some(*shiny),
+                        });
                 }
                 Some(message)
             }
-            BattleEvent::MultiHitCount { hits, .. } => {
-                Some(format!("Hit {hits} times!"))
-            }
-            BattleEvent::PayDayMoney { .. } => {
-                Some("Coins scattered\neverywhere!".to_string())
-            }
+            BattleEvent::MultiHitCount { hits, .. } => Some(format!("Hit {hits} times!")),
+            BattleEvent::PayDayMoney { .. } => Some("Coins scattered\neverywhere!".to_string()),
             BattleEvent::PresentFailed { target, .. } => {
                 Some(format!("{} refused\nthe gift!", name(*target)))
             }
@@ -1071,9 +1097,7 @@ fn stage_visible_battle_messages(
             BattleEvent::Disobeyed { side } if disobedience_self_hit => {
                 Some(format!("{} won't\nobey!", name(*side)))
             }
-            BattleEvent::Disobeyed { side } => {
-                Some(format!("{} ignored\norders!", name(*side)))
-            }
+            BattleEvent::Disobeyed { side } => Some(format!("{} ignored\norders!", name(*side))),
             BattleEvent::DisobedienceIdle { side, roll } => Some(format!(
                 "{} {}",
                 name(*side),
@@ -1096,39 +1120,38 @@ fn stage_visible_battle_messages(
                 if move_name == "REST" {
                     None
                 } else {
-                if let Some(label) = match status.as_str() {
-                    "POISON" | "BAD_POISON" => Some("BattleAnim_Psn"),
-                    "BURN" => Some("BattleAnim_Brn"),
-                    "PARALYSIS" => Some("BattleAnim_Par"),
-                    "FREEZE" => Some("BattleAnim_Frz"),
-                    _ => None,
-                } && let Some(trigger_message) = last_move_message_by_side.get(side)
-                {
-                    queue_visible_status_animation(
-                        runtime_shell,
-                        snapshot,
-                        trigger_message,
-                        *target,
-                        label,
-                        false,
-                    );
-                }
-                let message = match status.as_str() {
-                    "SLEEP" if move_name == "DISOBEDIENCE_NAP" => {
-                        format!("{} began\nto nap!", name(*target))
-                }
-                    "SLEEP" => format!("{}\nfell asleep!", name(*target)),
-                    "POISON" => format!("{}\nwas poisoned!", name(*target)),
-                    "BAD_POISON" => format!("{}'s\nbadly poisoned!", name(*target)),
-                    "BURN" => format!("{}\nwas burned!", name(*target)),
-                    "PARALYSIS" => format!(
-                        "{}'s\nparalyzed! Maybe\nit can't attack!",
-                        name(*target)
-                    ),
-                    "FREEZE" => format!("{}\nwas frozen solid!", name(*target)),
-                    _ => unreachable!("core emitted unsupported battle status {status}"),
-                };
-                Some(message)
+                    if let Some(label) = match status.as_str() {
+                        "POISON" | "BAD_POISON" => Some("BattleAnim_Psn"),
+                        "BURN" => Some("BattleAnim_Brn"),
+                        "PARALYSIS" => Some("BattleAnim_Par"),
+                        "FREEZE" => Some("BattleAnim_Frz"),
+                        _ => None,
+                    } && let Some(trigger_message) = last_move_message_by_side.get(side)
+                    {
+                        queue_visible_status_animation(
+                            runtime_shell,
+                            snapshot,
+                            trigger_message,
+                            *target,
+                            label,
+                            false,
+                        );
+                    }
+                    let message = match status.as_str() {
+                        "SLEEP" if move_name == "DISOBEDIENCE_NAP" => {
+                            format!("{} began\nto nap!", name(*target))
+                        }
+                        "SLEEP" => format!("{}\nfell asleep!", name(*target)),
+                        "POISON" => format!("{}\nwas poisoned!", name(*target)),
+                        "BAD_POISON" => format!("{}'s\nbadly poisoned!", name(*target)),
+                        "BURN" => format!("{}\nwas burned!", name(*target)),
+                        "PARALYSIS" => {
+                            format!("{}'s\nparalyzed! Maybe\nit can't attack!", name(*target))
+                        }
+                        "FREEZE" => format!("{}\nwas frozen solid!", name(*target)),
+                        _ => unreachable!("core emitted unsupported battle status {status}"),
+                    };
+                    Some(message)
                 }
             }
             BattleEvent::StatusFailed {
@@ -1188,7 +1211,12 @@ fn stage_visible_battle_messages(
                 } else {
                     "fell"
                 };
-                Some(format!("{}'s\n{} {}!", name(*target), stat_name(stat), change))
+                Some(format!(
+                    "{}'s\n{} {}!",
+                    name(*target),
+                    stat_name(stat),
+                    change
+                ))
             }
             BattleEvent::RageBuilding { side, .. } => {
                 Some(format!("{}'s\nRAGE is building!", name(*side)))
@@ -1267,11 +1295,8 @@ fn stage_visible_battle_messages(
             BattleEvent::LeechSeedDamage { side, source, .. } => {
                 let message = format!("LEECH SEED saps\n{}!", name(*side));
                 let prior_message = runtime_shell.battle_messages.back().cloned();
-                let animation_trigger = prior_message
-                    .clone()
-                    .unwrap_or_else(|| message.clone());
-                leech_seed_animation_triggers
-                    .insert((*source, *side), animation_trigger.clone());
+                let animation_trigger = prior_message.clone().unwrap_or_else(|| message.clone());
+                leech_seed_animation_triggers.insert((*source, *side), animation_trigger.clone());
                 queue_visible_status_animation(
                     runtime_shell,
                     snapshot,
@@ -1288,24 +1313,26 @@ fn stage_visible_battle_messages(
                     )
                 }) {
                     for boundary in ["RESTORE", "COMPLETE"] {
-                        runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                            trigger_message: animation_trigger.clone(),
-                            move_id: format!("LEECH_SEED_{boundary}"),
-                            animation_label: format!("BattleCommand_LeechSeed{boundary}"),
-                            player_move: *source == BattleSide::Player,
-                            started: false,
-                            waiting_for_hp: false,
-                            frame: 0,
-                            total_frames: 1,
-                            sound_events: Vec::new(),
-                            next_sound_event: 0,
-                            cry_events: Vec::new(),
-                            next_cry_event: 0,
-                            object_events: Vec::new(),
-                            bg_events: Vec::new(),
-                            actor_species_override: None,
-                            actor_shiny_override: None,
-                        });
+                        runtime_shell
+                            .visible_move_animations
+                            .push_back(VisibleMoveAnimation {
+                                trigger_message: animation_trigger.clone(),
+                                move_id: format!("LEECH_SEED_{boundary}"),
+                                animation_label: format!("BattleCommand_LeechSeed{boundary}"),
+                                player_move: *source == BattleSide::Player,
+                                started: false,
+                                waiting_for_hp: false,
+                                frame: 0,
+                                total_frames: 1,
+                                sound_events: Vec::new(),
+                                next_sound_event: 0,
+                                cry_events: Vec::new(),
+                                next_cry_event: 0,
+                                object_events: Vec::new(),
+                                bg_events: Vec::new(),
+                                actor_species_override: None,
+                                actor_shiny_override: None,
+                            });
                     }
                 }
                 Some(message)
@@ -1332,10 +1359,9 @@ fn stage_visible_battle_messages(
                 Some(message)
             }
             BattleEvent::CurseApplied { side, target, .. } => {
-                runtime_shell.battle_messages.push_back(format!(
-                    "{}\ncut its own HP and",
-                    name(*side)
-                ));
+                runtime_shell
+                    .battle_messages
+                    .push_back(format!("{}\ncut its own HP and", name(*side)));
                 Some(format!("put a CURSE on\n{}!", name(*target)))
             }
             BattleEvent::NightmareDamage { side, .. } => {
@@ -1368,27 +1394,35 @@ fn stage_visible_battle_messages(
                 move_name,
             } => {
                 let message = format!("{}\nwas hit by FUTURE\nSIGHT!", name(*side));
-                if let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                    visible_move_animation_definition(snapshot, move_name, 0)
+                if let Some((
+                    animation_label,
+                    total_frames,
+                    sound_events,
+                    cry_events,
+                    object_events,
+                    bg_events,
+                )) = visible_move_animation_definition(snapshot, move_name, 0)
                 {
-                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                        trigger_message: message.clone(),
-                        move_id: move_name.clone(),
-                        animation_label,
-                        player_move: *source == BattleSide::Player,
-                        started: false,
-                        waiting_for_hp: false,
-                        frame: 0,
-                        total_frames,
-                        sound_events,
-                        next_sound_event: 0,
-                        cry_events,
-                        next_cry_event: 0,
-                        object_events,
-                        bg_events,
-                        actor_species_override: None,
-                        actor_shiny_override: None,
-                    });
+                    runtime_shell
+                        .visible_move_animations
+                        .push_back(VisibleMoveAnimation {
+                            trigger_message: message.clone(),
+                            move_id: move_name.clone(),
+                            animation_label,
+                            player_move: *source == BattleSide::Player,
+                            started: false,
+                            waiting_for_hp: false,
+                            frame: 0,
+                            total_frames,
+                            sound_events,
+                            next_sound_event: 0,
+                            cry_events,
+                            next_cry_event: 0,
+                            object_events,
+                            bg_events,
+                            actor_species_override: None,
+                            actor_shiny_override: None,
+                        });
                 }
                 Some(message)
             }
@@ -1410,9 +1444,10 @@ fn stage_visible_battle_messages(
             BattleEvent::SubstituteCreated { side, .. } => {
                 Some(format!("{}\nmade a SUBSTITUTE!", name(*side)))
             }
-            BattleEvent::SubstituteDamaged { target, .. } => {
-                Some(format!("The SUBSTITUTE\ntook damage for\n{}!", name(*target)))
-            }
+            BattleEvent::SubstituteDamaged { target, .. } => Some(format!(
+                "The SUBSTITUTE\ntook damage for\n{}!",
+                name(*target)
+            )),
             BattleEvent::SubstituteBroken { target, .. } => {
                 Some(format!("{}'s\nSUBSTITUTE faded!", name(*target)))
             }
@@ -1447,45 +1482,57 @@ fn stage_visible_battle_messages(
                     name(*side),
                     battle_move_display_name(snapshot, move_name)
                 );
-                let affected_is_hidden = event_scene.battle.as_ref().is_some_and(|battle| {
-                    match side {
-                        BattleSide::Player => battle.player_semi_invulnerable,
-                        BattleSide::Enemy => battle.enemy_semi_invulnerable,
-                    }
-                });
+                let affected_is_hidden =
+                    event_scene
+                        .battle
+                        .as_ref()
+                        .is_some_and(|battle| match side {
+                            BattleSide::Player => battle.player_semi_invulnerable,
+                            BattleSide::Enemy => battle.enemy_semi_invulnerable,
+                        });
                 if !affected_is_hidden
-                    && let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                        visible_move_animation_definition(snapshot, move_name, 0)
-                {
-                    let prior_message = runtime_shell.battle_messages.back().cloned();
-                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                        trigger_message: prior_message.clone().unwrap_or_else(|| message.clone()),
-                        move_id: move_name.clone(),
+                    && let Some((
                         animation_label,
-                        player_move: *source == BattleSide::Player,
-                        started: prior_message.is_none(),
-                        waiting_for_hp: false,
-                        frame: 0,
                         total_frames,
                         sound_events,
-                        next_sound_event: 0,
                         cry_events,
-                        next_cry_event: 0,
                         object_events,
                         bg_events,
-                        actor_species_override: None,
-                        actor_shiny_override: None,
-                    });
+                    )) = visible_move_animation_definition(snapshot, move_name, 0)
+                {
+                    let prior_message = runtime_shell.battle_messages.back().cloned();
+                    runtime_shell
+                        .visible_move_animations
+                        .push_back(VisibleMoveAnimation {
+                            trigger_message: prior_message
+                                .clone()
+                                .unwrap_or_else(|| message.clone()),
+                            move_id: move_name.clone(),
+                            animation_label,
+                            player_move: *source == BattleSide::Player,
+                            started: prior_message.is_none(),
+                            waiting_for_hp: false,
+                            frame: 0,
+                            total_frames,
+                            sound_events,
+                            next_sound_event: 0,
+                            cry_events,
+                            next_cry_event: 0,
+                            object_events,
+                            bg_events,
+                            actor_species_override: None,
+                            actor_shiny_override: None,
+                        });
                 }
                 Some(message)
             }
-            BattleEvent::TrapEnded { side, move_name, .. } => {
-                Some(format!(
-                    "{}\nwas released from\n{}!",
-                    name(*side),
-                    battle_move_display_name(snapshot, move_name)
-                ))
-            }
+            BattleEvent::TrapEnded {
+                side, move_name, ..
+            } => Some(format!(
+                "{}\nwas released from\n{}!",
+                name(*side),
+                battle_move_display_name(snapshot, move_name)
+            )),
             BattleEvent::EscapeTrapApplied { target, .. } => {
                 Some(format!("{}\ncan't escape now!", name(*target)))
             }
@@ -1504,7 +1551,8 @@ fn stage_visible_battle_messages(
                     event,
                     BattleEvent::ConfusionApplied { move_name, .. }
                         if move_name == "HELD_ATTACK_UP"
-                ) && let Some(trigger_message) = runtime_shell.battle_messages.back().cloned()
+                ) && let Some(trigger_message) =
+                    runtime_shell.battle_messages.back().cloned()
                 {
                     queue_visible_status_animation(
                         runtime_shell,
@@ -1561,11 +1609,7 @@ fn stage_visible_battle_messages(
             }
             BattleEvent::AttractFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::InfatuatedTurn { side, source, .. } => {
-                let message = format!(
-                    "{}\nis in love with\n{}!",
-                    name(*side),
-                    name(*source)
-                );
+                let message = format!("{}\nis in love with\n{}!", name(*side), name(*source));
                 queue_visible_status_animation(
                     runtime_shell,
                     snapshot,
@@ -1576,12 +1620,10 @@ fn stage_visible_battle_messages(
                 );
                 Some(message)
             }
-            BattleEvent::InfatuatedImmobilized { side, .. } => {
-                Some(format!(
-                    "{}'s\ninfatuation kept\nit from attacking!",
-                    name(*side)
-                ))
-            }
+            BattleEvent::InfatuatedImmobilized { side, .. } => Some(format!(
+                "{}'s\ninfatuation kept\nit from attacking!",
+                name(*side)
+            )),
             BattleEvent::DisableApplied {
                 target,
                 disabled_move,
@@ -1591,9 +1633,7 @@ fn stage_visible_battle_messages(
                 name(*target),
                 battle_move_display_name(snapshot, disabled_move)
             )),
-            BattleEvent::DisabledMove { .. } => {
-                Some("The move is\nDISABLED!".to_string())
-            }
+            BattleEvent::DisabledMove { .. } => Some("The move is\nDISABLED!".to_string()),
             BattleEvent::DisableEnded { side, .. } => {
                 Some(format!("{}'s\ndisabled no more!", name(*side)))
             }
@@ -1612,10 +1652,9 @@ fn stage_visible_battle_messages(
                 Some(format!("{}'s\nPROTECTING itself!", name(*target)))
             }
             BattleEvent::ProtectFailed { .. } => Some("But it failed!".to_string()),
-            BattleEvent::SpikesApplied { target, .. } => Some(format!(
-                "SPIKES scattered\nall around\n{}!",
-                name(*target)
-            )),
+            BattleEvent::SpikesApplied { target, .. } => {
+                Some(format!("SPIKES scattered\nall around\n{}!", name(*target)))
+            }
             BattleEvent::SpikesFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::FutureSightQueued { side, .. } => {
                 Some(format!("{}\nforesaw an attack!", name(*side)))
@@ -1651,9 +1690,7 @@ fn stage_visible_battle_messages(
                     .push_back(format!("{}\ncopied the stat", name(*side)));
                 Some(format!("changes of\n{}!", name(*target)))
             }
-            BattleEvent::TransformApplied {
-                side, species, ..
-            } => Some(format!(
+            BattleEvent::TransformApplied { side, species, .. } => Some(format!(
                 "{}\nTRANSFORMED into\n{}!",
                 name(*side),
                 crate::core::models::pokemon_species_display_name(species)
@@ -1682,38 +1719,42 @@ fn stage_visible_battle_messages(
             BattleEvent::StatsReset { .. } => {
                 Some("All stat changes\nwere eliminated!".to_string())
             }
-            BattleEvent::LockOnApplied { side, .. } => {
-                Some(format!("{}\ntook aim!", name(*side)))
-            }
-            BattleEvent::DestinyBondApplied { side, .. } => {
-                Some(format!(
-                    "{}'s\ntrying to take its\nopponent with it!",
-                    name(*side)
-                ))
-            }
+            BattleEvent::LockOnApplied { side, .. } => Some(format!("{}\ntook aim!", name(*side))),
+            BattleEvent::DestinyBondApplied { side, .. } => Some(format!(
+                "{}'s\ntrying to take its\nopponent with it!",
+                name(*side)
+            )),
             BattleEvent::DestinyBondActivated { side, source, .. } => {
                 if let Some(trigger_message) = runtime_shell.battle_messages.back().cloned()
-                    && let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                        visible_move_animation_definition(snapshot, "DESTINY_BOND", 1)
-                {
-                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                        trigger_message,
-                        move_id: "DESTINY_BOND".to_string(),
+                    && let Some((
                         animation_label,
-                        player_move: *side == BattleSide::Player,
-                        started: false,
-                        waiting_for_hp: false,
-                        frame: 0,
                         total_frames,
                         sound_events,
-                        next_sound_event: 0,
                         cry_events,
-                        next_cry_event: 0,
                         object_events,
                         bg_events,
-                        actor_species_override: None,
-                        actor_shiny_override: None,
-                    });
+                    )) = visible_move_animation_definition(snapshot, "DESTINY_BOND", 1)
+                {
+                    runtime_shell
+                        .visible_move_animations
+                        .push_back(VisibleMoveAnimation {
+                            trigger_message,
+                            move_id: "DESTINY_BOND".to_string(),
+                            animation_label,
+                            player_move: *side == BattleSide::Player,
+                            started: false,
+                            waiting_for_hp: false,
+                            frame: 0,
+                            total_frames,
+                            sound_events,
+                            next_sound_event: 0,
+                            cry_events,
+                            next_cry_event: 0,
+                            object_events,
+                            bg_events,
+                            actor_species_override: None,
+                            actor_shiny_override: None,
+                        });
                 }
                 Some(format!(
                     "{}\ntook down with it,\n{}!",
@@ -1774,7 +1815,11 @@ fn stage_visible_battle_messages(
                             .as_ref()
                             .and_then(|battle| battle.active_player_party_index)
                             .and_then(|active| {
-                                snapshot.party.slots.iter().find(|slot| slot.index == active)
+                                snapshot
+                                    .party
+                                    .slots
+                                    .iter()
+                                    .find(|slot| slot.index == active)
                             })
                             .is_some_and(|slot| slot.pokemon.status.is_some()),
                         BattleSide::Enemy => snapshot
@@ -1797,12 +1842,8 @@ fn stage_visible_battle_messages(
             BattleEvent::HpDrained { target, .. } => {
                 Some(format!("Sucked health from\n{}!", name(*target)))
             }
-            BattleEvent::PainSplitApplied { .. } => {
-                Some("The battlers\nshared pain!".to_string())
-            }
-            BattleEvent::HeldItemHpHealed {
-                side, item_id, ..
-            } => {
+            BattleEvent::PainSplitApplied { .. } => Some("The battlers\nshared pain!".to_string()),
+            BattleEvent::HeldItemHpHealed { side, item_id, .. } => {
                 let message = format!(
                     "{}\nrecovered with\n{}.",
                     name(*side),
@@ -1814,31 +1855,17 @@ fn stage_visible_battle_messages(
                     .find(|item| item.item_id == *item_id)
                     .is_some_and(|item| item.held_effect != "HELD_LEFTOVERS");
                 if uses_recovery_animation {
-                    queue_visible_item_recovery_animation(
-                        runtime_shell,
-                        snapshot,
-                        &message,
-                        *side,
-                    );
+                    queue_visible_item_recovery_animation(runtime_shell, snapshot, &message, *side);
                 }
                 Some(message)
             }
-            BattleEvent::HeldItemPpRestored {
-                side,
-                item_id,
-                ..
-            } => {
+            BattleEvent::HeldItemPpRestored { side, item_id, .. } => {
                 let message = format!(
                     "{}\nrecovered PP using\n{}.",
                     name(*side),
                     item_display_name(snapshot, item_id)
                 );
-                queue_visible_item_recovery_animation(
-                    runtime_shell,
-                    snapshot,
-                    &message,
-                    *side,
-                );
+                queue_visible_item_recovery_animation(runtime_shell, snapshot, &message, *side);
                 Some(message)
             }
             BattleEvent::HeldItemStatusHealed {
@@ -1850,24 +1877,11 @@ fn stage_visible_battle_messages(
             } => {
                 let display_name = item_display_name(snapshot, item_id);
                 let message = if status_before.is_none() && *confusion_turns_before > 0 {
-                    format!(
-                        "A {} rid\n{}\nof its confusion.",
-                        display_name,
-                        name(*side)
-                    )
+                    format!("A {} rid\n{}\nof its confusion.", display_name, name(*side))
                 } else {
-                    format!(
-                        "{}\nrecovered using a\n{}!",
-                        name(*side),
-                        display_name
-                    )
+                    format!("{}\nrecovered using a\n{}!", name(*side), display_name)
                 };
-                queue_visible_item_recovery_animation(
-                    runtime_shell,
-                    snapshot,
-                    &message,
-                    *side,
-                );
+                queue_visible_item_recovery_animation(runtime_shell, snapshot, &message, *side);
                 Some(message)
             }
             BattleEvent::HealFailed { .. } => Some("But it failed!".to_string()),
@@ -1878,27 +1892,35 @@ fn stage_visible_battle_messages(
                 side, move_name, ..
             } => {
                 let message = format!("{}\nkept going and\ncrashed!", name(*side));
-                if let Some((animation_label, total_frames, sound_events, cry_events, object_events, bg_events)) =
-                    visible_move_animation_definition(snapshot, move_name, 1)
+                if let Some((
+                    animation_label,
+                    total_frames,
+                    sound_events,
+                    cry_events,
+                    object_events,
+                    bg_events,
+                )) = visible_move_animation_definition(snapshot, move_name, 1)
                 {
-                    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                        trigger_message: message.clone(),
-                        move_id: move_name.clone(),
-                        animation_label,
-                        player_move: *side == BattleSide::Player,
-                        started: false,
-                        waiting_for_hp: false,
-                        frame: 0,
-                        total_frames,
-                        sound_events,
-                        next_sound_event: 0,
-                        cry_events,
-                        next_cry_event: 0,
-                        object_events,
-                        bg_events,
-                        actor_species_override: None,
-                        actor_shiny_override: None,
-                    });
+                    runtime_shell
+                        .visible_move_animations
+                        .push_back(VisibleMoveAnimation {
+                            trigger_message: message.clone(),
+                            move_id: move_name.clone(),
+                            animation_label,
+                            player_move: *side == BattleSide::Player,
+                            started: false,
+                            waiting_for_hp: false,
+                            frame: 0,
+                            total_frames,
+                            sound_events,
+                            next_sound_event: 0,
+                            cry_events,
+                            next_cry_event: 0,
+                            object_events,
+                            bg_events,
+                            actor_species_override: None,
+                            actor_shiny_override: None,
+                        });
                 }
                 Some(message)
             }
@@ -1945,15 +1967,15 @@ fn stage_visible_battle_messages(
                 };
                 Some(format!("{}\n{action}", name(*side)))
             }
-            BattleEvent::WeatherApplied { weather, .. } => {
-                Some(match weather {
+            BattleEvent::WeatherApplied { weather, .. } => Some(
+                match weather {
                     Weather::Rain => "A downpour\nstarted!",
                     Weather::Sun => "The sunlight got\nbright!",
                     Weather::Sandstorm => "A SANDSTORM\nbrewed!",
                     Weather::None => "The weather returned to normal.",
                 }
-                .to_string())
-            }
+                .to_string(),
+            ),
             BattleEvent::WeatherContinues { weather, .. } => {
                 let message = match weather {
                     Weather::Rain => "Rain continues to\nfall.",
@@ -1967,13 +1989,15 @@ fn stage_visible_battle_messages(
                 }
                 Some(message)
             }
-            BattleEvent::WeatherEnded { weather } => Some(match weather {
-                Weather::Rain => "The rain stopped.",
-                Weather::Sun => "The sunlight\nfaded.",
-                Weather::Sandstorm => "The SANDSTORM\nsubsided.",
-                Weather::None => unreachable!("core ended WEATHER_NONE"),
-            }
-            .to_string()),
+            BattleEvent::WeatherEnded { weather } => Some(
+                match weather {
+                    Weather::Rain => "The rain stopped.",
+                    Weather::Sun => "The sunlight\nfaded.",
+                    Weather::Sandstorm => "The SANDSTORM\nsubsided.",
+                    Weather::None => unreachable!("core ended WEATHER_NONE"),
+                }
+                .to_string(),
+            ),
             BattleEvent::ItemUsed { side, item_id } => {
                 let item_name = item_display_name(snapshot, item_id);
                 if *side == BattleSide::Enemy {
@@ -2071,31 +2095,35 @@ fn stage_visible_battle_messages(
                     BattleSide::Player => format!("{}\nfainted!", name(*side)),
                     BattleSide::Enemy => format!("Enemy {}\nfainted!", name(*side)),
                 };
-                runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-                    trigger_message: message.clone(),
-                    move_id: "FAINT_MON".to_string(),
-                    animation_label: "BattleAnim_FaintMon".to_string(),
-                    player_move: *side == BattleSide::Player,
-                    started: false,
-                    waiting_for_hp: false,
-                    frame: 0,
-                    total_frames: 24,
-                    sound_events: vec![(0, "SFX_FAINT".to_string())],
-                    next_sound_event: 0,
-                    cry_events: Vec::new(),
-                    next_cry_event: 0,
-                    object_events: Vec::new(),
-                    bg_events: vec![VisibleMoveBgEvent {
-                    frame: 0,
-                        effect_id: "BATTLE_BG_EFFECT_FAINT_MON".to_string(),
-                        duration: 20,
-                        target: "BG_EFFECT_USER".to_string(),
-                        param: 4,
-                        incremented: false,
-                    }],
-                    actor_species_override: None,
-                    actor_shiny_override: None,
-                });
+                runtime_shell
+                    .visible_move_animations
+                    .push_back(VisibleMoveAnimation {
+                        trigger_message: message.clone(),
+                        move_id: "FAINT_MON".to_string(),
+                        animation_label: "BattleAnim_FaintMon".to_string(),
+                        player_move: *side == BattleSide::Player,
+                        started: false,
+                        waiting_for_hp: false,
+                        frame: 0,
+                        // core.asm::MonFaintedAnimation performs seven bitmap
+                        // shifts with a two-frame delay after each one.
+                        total_frames: 14,
+                        sound_events: vec![(0, "SFX_FAINT".to_string())],
+                        next_sound_event: 0,
+                        cry_events: Vec::new(),
+                        next_cry_event: 0,
+                        object_events: Vec::new(),
+                        bg_events: vec![VisibleMoveBgEvent {
+                            frame: 0,
+                            effect_id: "BATTLE_BG_EFFECT_FAINT_MON".to_string(),
+                            duration: 14,
+                            target: "BG_EFFECT_USER".to_string(),
+                            param: 0,
+                            incremented: false,
+                        }],
+                        actor_species_override: None,
+                        actor_shiny_override: None,
+                    });
                 Some(message)
             }
             BattleEvent::Switched { side, party_index } if forced_switches.contains_key(side) => {
@@ -2148,9 +2176,7 @@ fn stage_visible_battle_messages(
             BattleEvent::FullyParalyzed { side, .. } => {
                 Some(format!("{}'s\nfully paralyzed!", name(*side)))
             }
-            BattleEvent::Flinched { side, .. } => {
-                Some(format!("{}\nflinched!", name(*side)))
-            }
+            BattleEvent::Flinched { side, .. } => Some(format!("{}\nflinched!", name(*side))),
             BattleEvent::FrozenTurn { side, .. } => {
                 Some(format!("{}\nis frozen solid!", name(*side)))
             }
@@ -2162,9 +2188,8 @@ fn stage_visible_battle_messages(
         }
         if stage_message_scenes {
             for _ in event_message_count_before..runtime_shell.battle_messages.len() {
-                runtime_shell
-                    .battle_message_scenes
-                    .push_back(Box::new(if matches!(
+                runtime_shell.battle_message_scenes.push_back(Box::new(
+                    if matches!(
                         event,
                         BattleEvent::Fainted { .. }
                             | BattleEvent::ResidualStatusDamage { .. }
@@ -2176,10 +2201,20 @@ fn stage_visible_battle_messages(
                         event_scene_before.clone()
                     } else {
                         event_scene.clone()
-                    }));
+                    },
+                ));
             }
-            if matches!(event, BattleEvent::Switched { side: BattleSide::Player, .. })
-                && runtime_shell.battle_messages.len().saturating_sub(event_message_count_before) == 2
+            if matches!(
+                event,
+                BattleEvent::Switched {
+                    side: BattleSide::Player,
+                    ..
+                }
+            ) && runtime_shell
+                .battle_messages
+                .len()
+                .saturating_sub(event_message_count_before)
+                == 2
                 && let Some(scene) = runtime_shell
                     .battle_message_scenes
                     .get_mut(event_message_count_before)
@@ -2205,12 +2240,15 @@ fn stage_visible_battle_messages(
                     .pending_battle_scenes_after_message
                     .push_back((trigger, Box::new(event_scene.clone())));
             }
-            if let BattleEvent::NightmareDamage { side, .. } | BattleEvent::CurseDamage { side, .. } = event {
-                let (kind, fallback_trigger) = if matches!(event, BattleEvent::NightmareDamage { .. }) {
-                    ("NIGHTMARE", format!("{} has a NIGHTMARE!", name(*side)))
-                } else {
-                    ("CURSE", format!("{} is hurt by the CURSE!", name(*side)))
-                };
+            if let BattleEvent::NightmareDamage { side, .. }
+            | BattleEvent::CurseDamage { side, .. } = event
+            {
+                let (kind, fallback_trigger) =
+                    if matches!(event, BattleEvent::NightmareDamage { .. }) {
+                        ("NIGHTMARE", format!("{} has a NIGHTMARE!", name(*side)))
+                    } else {
+                        ("CURSE", format!("{} is hurt by the CURSE!", name(*side)))
+                    };
                 let trigger = residual_animation_triggers
                     .get(&(kind, *side))
                     .cloned()
@@ -2235,9 +2273,11 @@ fn stage_visible_battle_messages(
                     .pending_battle_scenes_after_message
                     .push_back((trigger, Box::new(event_scene.clone())));
             }
-            if let BattleEvent::Missed { side, move_name, .. } = event
-                && let Some(revealed_scene) = deferred_airborne_end_scenes
-                    .remove(&(*side, move_name.as_str()))
+            if let BattleEvent::Missed {
+                side, move_name, ..
+            } = event
+                && let Some(revealed_scene) =
+                    deferred_airborne_end_scenes.remove(&(*side, move_name.as_str()))
             {
                 let trigger = format!("{}'s attack missed!", name(*side));
                 runtime_shell
@@ -2280,9 +2320,11 @@ fn stage_visible_battle_messages(
                     *scene = Box::new(event_scene.clone());
                 }
             }
-        } else if let BattleEvent::Missed { side, move_name, .. } = event
-            && let Some(revealed_scene) = deferred_airborne_end_scenes
-                .remove(&(*side, move_name.as_str()))
+        } else if let BattleEvent::Missed {
+            side, move_name, ..
+        } = event
+            && let Some(revealed_scene) =
+                deferred_airborne_end_scenes.remove(&(*side, move_name.as_str()))
         {
             event_scene = revealed_scene;
         }
@@ -2342,7 +2384,9 @@ fn stage_visible_battle_messages(
         let old_enemy_pixels = snapshot
             .battle
             .as_ref()
-            .map(|battle| battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp))
+            .map(|battle| {
+                battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp)
+            })
             .unwrap_or(0);
         let displayed_scene = if stage_message_scenes {
             runtime_shell
@@ -2382,7 +2426,9 @@ fn stage_visible_battle_messages(
         let new_enemy_pixels = displayed_scene
             .battle
             .as_ref()
-            .map(|battle| battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp))
+            .map(|battle| {
+                battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp)
+            })
             .unwrap_or(old_enemy_pixels);
         let tween = runtime_shell
             .battle_hp_tween
@@ -2511,10 +2557,7 @@ fn battle_message_pages(message: &str) -> Vec<String> {
         .split('\n')
         .map(str::to_string)
         .collect::<Vec<_>>();
-    lines
-        .chunks(2)
-        .map(|page| page.join("\n"))
-        .collect()
+    lines.chunks(2).map(|page| page.join("\n")).collect()
 }
 
 fn battle_message_page(message: &str, page_index: usize) -> String {
@@ -2524,10 +2567,7 @@ fn battle_message_page(message: &str, page_index: usize) -> String {
         .unwrap_or_default()
 }
 
-fn visible_battle_message_has_more_pages(
-    runtime_shell: &BevyRuntimeShell,
-    message: &str,
-) -> bool {
+fn visible_battle_message_has_more_pages(runtime_shell: &BevyRuntimeShell, message: &str) -> bool {
     runtime_shell
         .battle_text_reveal
         .as_ref()
@@ -2556,10 +2596,7 @@ fn advance_visible_battle_message_page(
     true
 }
 
-fn visible_battle_message_lines(
-    runtime_shell: &BevyRuntimeShell,
-    message: &str,
-) -> Vec<String> {
+fn visible_battle_message_lines(runtime_shell: &BevyRuntimeShell, message: &str) -> Vec<String> {
     visible_battle_message_text(runtime_shell, message)
         .split('\n')
         .map(str::to_string)
@@ -2573,7 +2610,9 @@ fn visible_battle_message_is_complete(runtime_shell: &BevyRuntimeShell, message:
         .is_some_and(|reveal| {
             reveal.text == message
                 && reveal.visible_chars
-                    >= battle_message_page(message, reveal.page_index).chars().count()
+                    >= battle_message_page(message, reveal.page_index)
+                        .chars()
+                        .count()
         })
 }
 
@@ -2624,26 +2663,28 @@ fn queue_visible_item_recovery_animation(
         return;
     };
     let prior_message = runtime_shell.battle_messages.back().cloned();
-    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-        trigger_message: prior_message
-            .clone()
-            .unwrap_or_else(|| result_message.to_string()),
-        move_id: "ITEM_RECOVERY".to_string(),
-        animation_label,
-        player_move: side == crate::core::battle::turn::BattleSide::Player,
-        started: prior_message.is_none(),
-        waiting_for_hp: false,
-        frame: 0,
-        total_frames,
-        sound_events,
-        next_sound_event: 0,
-        cry_events,
-        next_cry_event: 0,
-        object_events,
-        bg_events,
-        actor_species_override: None,
-        actor_shiny_override: None,
-    });
+    runtime_shell
+        .visible_move_animations
+        .push_back(VisibleMoveAnimation {
+            trigger_message: prior_message
+                .clone()
+                .unwrap_or_else(|| result_message.to_string()),
+            move_id: "ITEM_RECOVERY".to_string(),
+            animation_label,
+            player_move: side == crate::core::battle::turn::BattleSide::Player,
+            started: prior_message.is_none(),
+            waiting_for_hp: false,
+            frame: 0,
+            total_frames,
+            sound_events,
+            next_sound_event: 0,
+            cry_events,
+            next_cry_event: 0,
+            object_events,
+            bg_events,
+            actor_species_override: None,
+            actor_shiny_override: None,
+        });
 }
 
 fn queue_visible_pre_message_animation(
@@ -2670,24 +2711,26 @@ fn queue_visible_terminal_animation_boundary(
     side: crate::core::battle::turn::BattleSide,
     boundary_id: &str,
 ) {
-    runtime_shell.visible_move_animations.push_back(VisibleMoveAnimation {
-        trigger_message: trigger_message.to_string(),
-        move_id: boundary_id.to_string(),
-        animation_label: format!("BattleCommand_{boundary_id}"),
-        player_move: side == crate::core::battle::turn::BattleSide::Player,
-        started: false,
-        waiting_for_hp: false,
-        frame: 0,
-        total_frames: 1,
-        sound_events: Vec::new(),
-        next_sound_event: 0,
-        cry_events: Vec::new(),
-        next_cry_event: 0,
-        object_events: Vec::new(),
-        bg_events: Vec::new(),
-        actor_species_override: None,
-        actor_shiny_override: None,
-    });
+    runtime_shell
+        .visible_move_animations
+        .push_back(VisibleMoveAnimation {
+            trigger_message: trigger_message.to_string(),
+            move_id: boundary_id.to_string(),
+            animation_label: format!("BattleCommand_{boundary_id}"),
+            player_move: side == crate::core::battle::turn::BattleSide::Player,
+            started: false,
+            waiting_for_hp: false,
+            frame: 0,
+            total_frames: 1,
+            sound_events: Vec::new(),
+            next_sound_event: 0,
+            cry_events: Vec::new(),
+            next_cry_event: 0,
+            object_events: Vec::new(),
+            bg_events: Vec::new(),
+            actor_species_override: None,
+            actor_shiny_override: None,
+        });
 }
 
 fn visible_move_animation_definition(
@@ -2736,10 +2779,9 @@ fn visible_battle_animation_definition(
     // at an explicit wait (or while a live object/background effect continues).
     let final_sound_frame = sound_events.last().map_or(0, |(frame, _)| *frame);
     let final_cry_frame = cry_events.last().map_or(0, |(frame, _)| *frame);
-    let bundle = serde_json::from_str::<serde_json::Value>(
-        &snapshot.presentation.battle_anim_bundle,
-    )
-    .ok()?;
+    let bundle =
+        serde_json::from_str::<serde_json::Value>(&snapshot.presentation.battle_anim_bundle)
+            .ok()?;
     let final_object_frame = object_events
         .iter()
         .filter_map(|event| {
@@ -2804,8 +2846,7 @@ fn visible_battle_animation_definition(
                 "BATTLE_BG_EFFECT_WHITE_HUES" | "BATTLE_BG_EFFECT_BLACK_HUES" => {
                     reload_interval()?.saturating_mul(3)
                 }
-                "BATTLE_BG_EFFECT_ALTERNATE_HUES"
-                | "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED" => {
+                "BATTLE_BG_EFFECT_ALTERNATE_HUES" | "BATTLE_BG_EFFECT_CYCLE_BGPALS_INVERTED" => {
                     return Some(timeline_frame);
                 }
                 "BATTLE_BG_EFFECT_ACID_ARMOR" => {
@@ -2816,7 +2857,11 @@ fn visible_battle_animation_definition(
                     return Some(timeline_frame);
                 }
                 "BATTLE_BG_EFFECT_CYCLE_MON_LIGHT_DARK_REPEATING" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                    if effect.duration == 0 {
+                        6
+                    } else {
+                        effect.duration
+                    }
                 }
                 "BATTLE_BG_EFFECT_START_WATER" | "BATTLE_BG_EFFECT_END_WATER" => 1,
                 "BATTLE_BG_EFFECT_WATER" => 17,
@@ -2847,11 +2892,15 @@ fn visible_battle_animation_definition(
                     return terminating_increment.or(Some(timeline_frame));
                 }
                 "BATTLE_BG_EFFECT_DOUBLE_TEAM" => {
-                    let second_increment = bg_events.iter().filter(|candidate| {
-                        candidate.incremented
-                            && candidate.effect_id == effect.effect_id
-                            && candidate.frame >= effect.frame
-                    }).nth(1).map(|candidate| candidate.frame);
+                    let second_increment = bg_events
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.incremented
+                                && candidate.effect_id == effect.effect_id
+                                && candidate.frame >= effect.frame
+                        })
+                        .nth(1)
+                        .map(|candidate| candidate.frame);
                     return second_increment.or(Some(timeline_frame));
                 }
                 "BATTLE_BG_EFFECT_BOUNCE_DOWN" => {
@@ -2866,7 +2915,7 @@ fn visible_battle_animation_definition(
                     37
                 }
                 "BATTLE_BG_EFFECT_FAINT_MON" => {
-                    if effect.duration == 0 { 14 } else { effect.duration }
+                    14
                 }
                 "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" => {
                     let second_increment = bg_events
@@ -2887,7 +2936,11 @@ fn visible_battle_animation_definition(
                 "BATTLE_BG_EFFECT_ENTER_MON" => 12,
                 "BATTLE_BG_EFFECT_RETURN_MON" => 16,
                 "BATTLE_BG_EFFECT_BATTLEROBJ_1ROW" | "BATTLE_BG_EFFECT_BATTLEROBJ_2ROW" => {
-                    if effect.duration == 0 { 6 } else { effect.duration }
+                    if effect.duration == 0 {
+                        6
+                    } else {
+                        effect.duration
+                    }
                 }
                 "BATTLE_BG_EFFECT_FADE_MON_TO_LIGHT"
                 | "BATTLE_BG_EFFECT_FADE_MON_TO_BLACK"
@@ -2950,11 +3003,23 @@ fn visible_move_animation_definition_with_substitute(
     }
     let mut parts = Vec::new();
     if lower_substitute {
-        parts.push(visible_move_animation_definition(snapshot, "SUBSTITUTE", 1)?);
+        parts.push(visible_move_animation_definition(
+            snapshot,
+            "SUBSTITUTE",
+            1,
+        )?);
     }
-    parts.push(visible_move_animation_definition(snapshot, move_id, animation_param)?);
+    parts.push(visible_move_animation_definition(
+        snapshot,
+        move_id,
+        animation_param,
+    )?);
     if raise_substitute {
-        parts.push(visible_move_animation_definition(snapshot, "SUBSTITUTE", 2)?);
+        parts.push(visible_move_animation_definition(
+            snapshot,
+            "SUBSTITUTE",
+            2,
+        )?);
     }
 
     let mut labels = Vec::new();
@@ -3141,7 +3206,9 @@ fn execute_visible_battle_animation_script(
         pointer += 1;
         let (opcode, raw_arguments) = command
             .split_once(char::is_whitespace)
-            .map_or((command.as_str(), ""), |(opcode, arguments)| (opcode, arguments));
+            .map_or((command.as_str(), ""), |(opcode, arguments)| {
+                (opcode, arguments)
+            });
         let arguments = raw_arguments
             .split(',')
             .map(str::trim)
@@ -3174,9 +3241,9 @@ fn execute_visible_battle_animation_script(
             }
             "anim_obj" if arguments.len() == 4 => {
                 let (x, y, param) = (
-                        parse_visible_battle_animation_int(arguments[1])?,
-                        parse_visible_battle_animation_int(arguments[2])?,
-                        parse_visible_battle_animation_int(arguments[3])?,
+                    parse_visible_battle_animation_int(arguments[1])?,
+                    parse_visible_battle_animation_int(arguments[2])?,
+                    parse_visible_battle_animation_int(arguments[3])?,
                 );
                 timeline.objects.push(VisibleMoveObjectEvent {
                     frame: timeline.frame.saturating_add(1),
@@ -3233,7 +3300,10 @@ fn execute_visible_battle_animation_script(
                 let value = parse_visible_battle_animation_int(arguments.first()?)?;
                 timeline.bg_effects.push(VisibleMoveBgEvent {
                     frame: timeline.frame.saturating_add(1),
-                    effect_id: format!("BATTLE_PALETTE_{}", opcode.trim_start_matches("anim_").to_ascii_uppercase()),
+                    effect_id: format!(
+                        "BATTLE_PALETTE_{}",
+                        opcode.trim_start_matches("anim_").to_ascii_uppercase()
+                    ),
                     duration: 0,
                     target: String::new(),
                     param: u8::try_from(value & 0xff).ok()?,
@@ -3258,8 +3328,12 @@ fn execute_visible_battle_animation_script(
                 param: u8::try_from(timeline.anim_param & 0xff).ok()?,
                 incremented: false,
             }),
-            "anim_1gfx" | "anim_2gfx" | "anim_3gfx" | "anim_battlergfx_1row"
-            | "anim_battlergfx_2row" | "anim_checkpokeball"
+            "anim_1gfx"
+            | "anim_2gfx"
+            | "anim_3gfx"
+            | "anim_battlergfx_1row"
+            | "anim_battlergfx_2row"
+            | "anim_checkpokeball"
             | "anim_keepsprites" => {}
             "anim_bgeffect" if arguments.len() >= 4 => {
                 let duration = parse_visible_battle_animation_int(arguments[1])?;
@@ -3322,7 +3396,12 @@ fn execute_visible_battle_animation_script(
                     if target.starts_with('.') {
                         pointer = *labels.get(target)?;
                     } else {
-                        execute_visible_battle_animation_script(snapshot, target, timeline, depth + 1)?;
+                        execute_visible_battle_animation_script(
+                            snapshot,
+                            target,
+                            timeline,
+                            depth + 1,
+                        )?;
                         return Some(());
                     }
                 }
@@ -3334,7 +3413,12 @@ fn execute_visible_battle_animation_script(
                     if target.starts_with('.') {
                         pointer = *labels.get(target)?;
                     } else {
-                        execute_visible_battle_animation_script(snapshot, target, timeline, depth + 1)?;
+                        execute_visible_battle_animation_script(
+                            snapshot,
+                            target,
+                            timeline,
+                            depth + 1,
+                        )?;
                         return Some(());
                     }
                 }
@@ -3448,9 +3532,7 @@ fn battle_stat_display_name(stat: &str) -> &str {
     }
 }
 
-fn battle_event_changes_visible_scene(
-    event: &crate::core::battle::turn::BattleEvent,
-) -> bool {
+fn battle_event_changes_visible_scene(event: &crate::core::battle::turn::BattleEvent) -> bool {
     use crate::core::battle::turn::BattleEvent;
 
     matches!(
@@ -3909,7 +3991,10 @@ fn use_visible_bicycle(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             snapshot.trainer.player_name, display_name
         ),
         MovementMode::Skate | MovementMode::Surf | MovementMode::SurfPika => {
-            anyhow::bail!("bicycle use ended in invalid mode {:?}", item_use.mode_after)
+            anyhow::bail!(
+                "bicycle use ended in invalid mode {:?}",
+                item_use.mode_after
+            )
         }
     });
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -4040,8 +4125,6 @@ fn present_visible_fishing_cast(
 ) -> Result<()> {
     retain_visible_field_notice_scene(runtime_shell, scene);
     runtime_shell.field_notice_queue.clear();
-    runtime_shell.pending_sweet_scent_nothing_notice = false;
-    runtime_shell.visible_strength_notice_phase = None;
     runtime_shell.field_notice = None;
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.visible_fishing_animation = Some(VisibleFishingAnimation {
@@ -4081,7 +4164,12 @@ fn use_visible_itemfinder(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     ));
     set_shell_action_status(runtime_shell, format!("ITEMFINDER {:?}", item_use.found));
     close_visible_field_pack_without_log(runtime_shell);
-    continue_visible_script_after_prompt(runtime_shell)?;
+    present_visible_itemfinder_feedback(
+        runtime_shell,
+        &snapshot,
+        item_use.found.is_some(),
+        item_use.itemfinder_sound_cues,
+    )?;
     Ok(())
 }
 
@@ -4216,44 +4304,18 @@ fn use_visible_surf(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 }
 
 fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
-    if !visible_field_shortcut_allowed(runtime_shell) {
+    if !visible_field_shortcut_allowed(runtime_shell)? {
         return Ok(false);
     }
     let snapshot = runtime_shell.shell.snapshot()?;
     let Some(permission) = runtime_shell.shell.facing_tile_collision_permission()? else {
         return Ok(false);
     };
-    if runtime_shell_has_object_movement_target(
-        runtime_shell,
-        &snapshot,
-        "SPRITEMOVEDATA_STRENGTH_BOULDER",
-    )? {
-        if snapshot
-            .progression
-            .active_engine_flags
-            .contains("ENGINE_STRENGTH_ACTIVE")
-        {
-            runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "BouldersMoveText")?);
-            mark_runtime_snapshot_dirty(runtime_shell);
-        } else if snapshot_has_field_move_actor_and_badge(
-            &snapshot,
-            &runtime_shell.shell,
-            "strength",
-        )? {
-            open_visible_contextual_field_move_prompt(
-                runtime_shell,
-                PartyFieldMove::Strength,
-                "AskStrengthText",
-            )?;
-        } else {
-            runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "BouldersMayMoveText")?);
-            mark_runtime_snapshot_dirty(runtime_shell);
-        }
-        return Ok(true);
-    }
     if field_move_rule_contains_target_collision(&runtime_shell.shell, "waterfall", permission)? {
-        if matches!(snapshot.overworld.mode, MovementMode::Surf | MovementMode::SurfPika)
-            && snapshot.overworld.facing == crate::core::world::map::Direction::Up
+        if matches!(
+            snapshot.overworld.mode,
+            MovementMode::Surf | MovementMode::SurfPika
+        ) && snapshot.overworld.facing == crate::core::world::map::Direction::Up
             && snapshot_has_field_move_actor_and_badge(
                 &snapshot,
                 &runtime_shell.shell,
@@ -4266,14 +4328,19 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
                 "AskWaterfallText",
             )?;
         } else {
-            runtime_shell.field_notice =
-                Some(visible_asm_text(&snapshot, "HugeWaterfallText")?);
+            runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "HugeWaterfallText")?);
             mark_runtime_snapshot_dirty(runtime_shell);
         }
         return Ok(true);
     }
-    if !matches!(snapshot.overworld.mode, MovementMode::Surf | MovementMode::SurfPika)
-        && field_move_rule_allows_surf_target(&runtime_shell.shell, permission)?
+    if source_allows_contextual_surf_prompt(
+        snapshot.overworld.mode,
+        snapshot
+            .progression
+            .active_engine_flags
+            .contains("ENGINE_ALWAYS_ON_BIKE"),
+    ) && field_move_rule_allows_surf_target(&runtime_shell.shell, permission)?
+        && !runtime_shell.shell.contextual_surf_direction_is_blocked()?
         && snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "surf")?
     {
         open_visible_contextual_field_move_prompt(
@@ -4297,19 +4364,20 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
         return Ok(true);
     }
     if field_move_rule_contains_target_collision(&runtime_shell.shell, "whirlpool", permission)? {
-        if snapshot_has_field_move_actor_and_badge(
-            &snapshot,
-            &runtime_shell.shell,
-            "whirlpool",
-        )? {
+        if snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "whirlpool")?
+            && snapshot_has_field_move_block_replacement(
+                &snapshot,
+                &runtime_shell.shell,
+                "whirlpool",
+            )?
+        {
             open_visible_contextual_field_move_prompt(
                 runtime_shell,
                 PartyFieldMove::Whirlpool,
                 "AskWhirlpoolText",
             )?;
         } else {
-            runtime_shell.field_notice =
-                Some(visible_asm_text(&snapshot, "MayPassWhirlpoolText")?);
+            runtime_shell.field_notice = Some(visible_asm_text(&snapshot, "MayPassWhirlpoolText")?);
             mark_runtime_snapshot_dirty(runtime_shell);
         }
         return Ok(true);
@@ -4317,7 +4385,11 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
     // Smashable rocks are OBJECTTYPE_SCRIPT interactions. Their A-button
     // path must continue through jumpstd SmashRockScript -> AskRockSmashScript;
     // only an explicit party-menu selection queues RockSmashFromMenuScript.
-    if snapshot_has_headbutt_target(&snapshot)?
+    if field_move_rule_contains_move_only_target_collision(
+        &runtime_shell.shell,
+        "headbutt",
+        permission,
+    )?
         && snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "headbutt")?
     {
         open_visible_contextual_field_move_prompt(
@@ -4328,6 +4400,89 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
         return Ok(true);
     }
     Ok(false)
+}
+
+fn source_allows_contextual_surf_prompt(
+    movement_mode: MovementMode,
+    always_on_bike: bool,
+) -> bool {
+    !always_on_bike
+        && !matches!(movement_mode, MovementMode::Surf | MovementMode::SurfPika)
+}
+
+fn source_allows_contextual_block_field_move_prompt(
+    rule: &crate::RuntimeFieldMoveRuleKey,
+    tileset_name: &str,
+    target_block: Option<u16>,
+) -> bool {
+    target_block.is_some_and(|block| {
+        rule.replacements
+            .get(tileset_name)
+            .is_some_and(|blocks| blocks.contains_key(&block))
+    })
+}
+
+fn source_allows_contextual_move_only_target_prompt(
+    rule: &crate::RuntimeFieldMoveRuleKey,
+    permission: u8,
+) -> bool {
+    rule.target_collisions.contains(&permission)
+}
+
+fn field_move_rule_contains_move_only_target_collision(
+    shell: &RuntimeGameShell,
+    rule_id: &str,
+    permission: u8,
+) -> Result<bool> {
+    let Some(rule) = shell
+        .field_move_rule_keys()
+        .into_iter()
+        .find(|key| key.rule_id == rule_id)
+    else {
+        return Ok(false);
+    };
+    if !matches!(rule.move_id.as_deref(), Some(move_id) if !move_id.is_empty()) {
+        anyhow::bail!("compiled field move rule {rule_id} has no move_id");
+    }
+    if rule.badge_region.is_some() || rule.badge_index.is_some() {
+        anyhow::bail!(
+            "compiled move-only field move rule {rule_id} has unexpected badge requirement {:?} {:?}",
+            rule.badge_region,
+            rule.badge_index
+        );
+    }
+    Ok(source_allows_contextual_move_only_target_prompt(
+        &rule, permission,
+    ))
+}
+
+fn snapshot_has_field_move_block_replacement(
+    snapshot: &RuntimeShellSnapshot,
+    shell: &RuntimeGameShell,
+    rule_id: &str,
+) -> Result<bool> {
+    let Some(rule) = shell
+        .field_move_rule_keys()
+        .into_iter()
+        .find(|key| key.rule_id == rule_id)
+    else {
+        return Ok(false);
+    };
+    let map = snapshot
+        .maps
+        .iter()
+        .find(|map| map.map_name == snapshot.overworld.map_name)
+        .with_context(|| {
+            format!(
+                "active overworld map {} is missing from verified map catalog",
+                snapshot.overworld.map_name
+            )
+        })?;
+    Ok(source_allows_contextual_block_field_move_prompt(
+        &rule,
+        &map.attributes.tileset_name,
+        facing_metatile_block(snapshot)?,
+    ))
 }
 
 fn open_visible_contextual_field_move_prompt(
@@ -4369,8 +4524,6 @@ fn resolve_visible_contextual_field_move_prompt(
     runtime_shell.yes_no_cursor = None;
     runtime_shell.field_notice = None;
     runtime_shell.field_notice_queue.clear();
-    runtime_shell.pending_sweet_scent_nothing_notice = false;
-    runtime_shell.visible_strength_notice_phase = None;
     runtime_shell.field_notice_scene = None;
     if !accepted {
         record_visible_runtime_action(
@@ -4382,6 +4535,9 @@ fn resolve_visible_contextual_field_move_prompt(
         )?;
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
+    }
+    if field_move == PartyFieldMove::Headbutt {
+        return use_visible_headbutt(runtime_shell, false);
     }
     execute_visible_party_field_move(runtime_shell, field_move)
 }
@@ -4516,39 +4672,6 @@ fn runtime_shell_has_object_movement_target(
     Ok(false)
 }
 
-fn snapshot_has_headbutt_target(snapshot: &RuntimeShellSnapshot) -> Result<bool> {
-    let Some(block) = facing_metatile_block(snapshot)? else {
-        return Ok(false);
-    };
-    let map = snapshot
-        .maps
-        .iter()
-        .find(|map| map.map_name == snapshot.overworld.map_name)
-        .with_context(|| {
-            format!(
-                "active overworld map {} is missing from verified map catalog",
-                snapshot.overworld.map_name
-            )
-        })?;
-    let tileset = snapshot
-        .tilesets
-        .iter()
-        .find(|tileset| tileset.tileset_id == map.attributes.tileset_name)
-        .with_context(|| {
-            format!(
-                "active map {} references missing verified tileset {}",
-                map.map_name, map.attributes.tileset_name
-            )
-        })?;
-    Ok(
-        tileset_collision_tokens(tileset, block).is_some_and(|tokens| {
-            tokens
-                .iter()
-                .any(|token| matches!(token.as_str(), "HEADBUTT_TREE" | "HEADBUTT_TREE_1D"))
-        }),
-    )
-}
-
 fn facing_metatile_block(snapshot: &RuntimeShellSnapshot) -> Result<Option<u16>> {
     let map = snapshot
         .maps
@@ -4617,8 +4740,7 @@ fn use_visible_cut(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         variant: field_move.outcome.variant.clone(),
         frame: 0,
     });
-    runtime_shell.pending_field_notice_sound =
-        Some("SFX_PLACE_PUZZLE_PIECE_DOWN".to_string());
+    runtime_shell.pending_field_notice_sound = Some("SFX_PLACE_PUZZLE_PIECE_DOWN".to_string());
     runtime_shell.pending_field_notice_effect_frames = Some(32);
     runtime_shell.last_audio_events.push(format!(
         "field cut party_index={} target=({}, {}) outcome={:?} checksum={:?}",
@@ -4669,8 +4791,11 @@ fn use_visible_whirlpool(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     );
     trim_event_log(&mut runtime_shell.last_audio_events);
     retain_visible_field_notice_scene(runtime_shell, &snapshot);
-    runtime_shell.field_notice =
-        Some(visible_field_move_use_text(&snapshot, party_index, "WHIRLPOOL")?);
+    runtime_shell.field_notice = Some(visible_field_move_use_text(
+        &snapshot,
+        party_index,
+        "WHIRLPOOL",
+    )?);
     runtime_shell.pending_field_notice_sound = Some("SFX_SURF".to_string());
     runtime_shell.pending_field_notice_effect_frames = Some(32);
     runtime_shell.visible_whirlpool_animation = Some(VisibleWhirlpoolAnimation {
@@ -4689,37 +4814,17 @@ fn use_visible_strength(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         "strength",
         runtime_shell.party_cursor,
     )?;
-    anyhow::ensure!(
-        runtime_shell.field_notice_queue.is_empty(),
-        "Strength started while another field notice sequence was queued"
-    );
     record_visible_runtime_action(runtime_shell, format!("field_move:strength:{party_index}"))?;
-    let field_move = runtime_shell.shell.use_strength_field_move(party_index)?;
-    let strength_user = snapshot
-        .party
-        .slots
-        .iter()
-        .find(|slot| slot.index == party_index)
-        .context("Strength user disappeared from the retained party")?;
+    let dispatch = runtime_shell.shell.queue_strength_from_menu(party_index)?;
     runtime_shell.last_audio_events.push(format!(
-        "field strength party_index={} outcome={:?} checksum={:?}",
-        party_index, field_move.outcome, field_move.state_checksum
+        "field strength party_index={} script={} checksum={:?}",
+        party_index, dispatch.next_script, dispatch.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
-        format!("STRENGTH PARTY #{} {:?}", party_index, field_move.outcome),
+        format!("STRENGTH {}", dispatch.next_script),
     );
-    retain_visible_field_notice_scene(runtime_shell, &snapshot);
-    runtime_shell.field_notice =
-        Some(visible_field_move_use_text(&snapshot, party_index, "STRENGTH")?);
-    runtime_shell.pending_field_notice_cry = Some(strength_user.pokemon.species.id.clone());
-    runtime_shell
-        .field_notice_queue
-        .push_back(format!("{} can\nmove boulders.", strength_user.pokemon.nickname));
-    runtime_shell.visible_strength_notice_phase = Some(VisibleStrengthNoticePhase::UseText);
-    mark_runtime_snapshot_dirty(runtime_shell);
-    continue_visible_script_after_prompt(runtime_shell)?;
-    Ok(())
+    consume_visible_dispatched_field_script(runtime_shell)
 }
 
 fn use_visible_flash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -4741,7 +4846,11 @@ fn use_visible_flash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         format!("FLASH PARTY #{} {:?}", party_index, field_move.outcome),
     );
     retain_visible_field_notice_scene(runtime_shell, &snapshot);
-    runtime_shell.field_notice = Some(visible_field_move_use_text(&snapshot, party_index, "FLASH")?);
+    runtime_shell.field_notice = Some(visible_field_move_use_text(
+        &snapshot,
+        party_index,
+        "FLASH",
+    )?);
     runtime_shell.visible_flash_animation = Some(VisibleFlashAnimation { frame: 0 });
     runtime_shell.pending_field_notice_sound = Some("SFX_FLASH".to_string());
     runtime_shell.pending_field_notice_effect_frames = Some(16);
@@ -4768,8 +4877,11 @@ fn use_visible_waterfall(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         format!("WATERFALL PARTY #{} {:?}", party_index, field_move.outcome),
     );
     retain_visible_field_notice_scene(runtime_shell, &snapshot);
-    runtime_shell.field_notice =
-        Some(visible_field_move_use_text(&snapshot, party_index, "WATERFALL")?);
+    runtime_shell.field_notice = Some(visible_field_move_use_text(
+        &snapshot,
+        party_index,
+        "WATERFALL",
+    )?);
     runtime_shell.pending_field_notice_sound = Some("SFX_BUBBLEBEAM".to_string());
     runtime_shell.visible_waterfall_animation = Some(VisibleWaterfallAnimation {
         from_tile: field_move.outcome.from_tile,
@@ -4789,7 +4901,7 @@ fn use_visible_fly(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         "fly",
         runtime_shell.party_cursor,
     )?;
-    let destinations = active_fly_destinations(&snapshot, &runtime_shell.shell);
+    let destinations = active_fly_destinations(&snapshot, &runtime_shell.shell)?;
     if destinations.is_empty() {
         runtime_shell.fly_cursor = None;
         record_visible_runtime_action(runtime_shell, "field_move:fly:no_destinations")?;
@@ -4800,11 +4912,12 @@ fn use_visible_fly(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let selected_index = visible_cursor_index(
-        &mut runtime_shell.fly_cursor,
+    let selected_index = strict_readonly_cursor_index(
+        &runtime_shell.fly_cursor,
         "fly:destinations",
         destinations.len(),
-    );
+    )
+    .context("Fly destination surface fly:destinations is active without a valid cursor")?;
     let destination = destinations[selected_index].clone();
     record_visible_runtime_action(
         runtime_shell,
@@ -4868,13 +4981,13 @@ fn use_visible_fly(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 fn active_fly_destinations(
     snapshot: &RuntimeShellSnapshot,
     shell: &RuntimeGameShell,
-) -> Vec<RuntimeFlyDestinationKey> {
-    let use_kanto_map = visible_pokegear_region(snapshot) == "KANTO"
+) -> Result<Vec<RuntimeFlyDestinationKey>> {
+    let use_kanto_map = visible_pokegear_region(snapshot)? == "KANTO"
         && snapshot
             .progression
             .active_engine_flags
             .contains("ENGINE_FLYPOINT_INDIGO_PLATEAU");
-    shell
+    Ok(shell
         .fly_destination_keys()
         .into_iter()
         .filter(|destination| {
@@ -4899,7 +5012,7 @@ fn active_fly_destinations(
                     .active_engine_flags
                     .contains(&destination.flypoint_flag)
         })
-        .collect()
+        .collect())
 }
 
 fn fly_destination_label(destination: &RuntimeFlyDestinationKey) -> String {
@@ -4976,52 +5089,47 @@ fn use_visible_teleport(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     retain_visible_field_notice_scene(runtime_shell, &snapshot);
     runtime_shell.pending_field_travel_arrival = true;
     runtime_shell.pending_field_travel_delay_frames = Some(60);
-    runtime_shell.visible_field_travel_animation =
-        Some(VisibleFieldTravelAnimation::TeleportFrom);
+    runtime_shell.visible_field_travel_animation = Some(VisibleFieldTravelAnimation::TeleportFrom);
     Ok(())
 }
 
-fn use_visible_headbutt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+fn source_headbutt_script_root(from_menu: bool) -> &'static str {
+    if from_menu {
+        "HeadbuttFromMenuScript"
+    } else {
+        "HeadbuttScript"
+    }
+}
+
+fn use_visible_headbutt(runtime_shell: &mut BevyRuntimeShell, from_menu: bool) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let target_tile = facing_runtime_tile(&snapshot)?;
     let party_index = party_index_for_field_move_rule(
         &snapshot,
         &runtime_shell.shell,
         "headbutt",
         runtime_shell.party_cursor,
     )?;
-    let player_id = snapshot.trainer.player_id;
     record_visible_runtime_action(
         runtime_shell,
-        format!("field_move:headbutt:{party_index}:player:{player_id}"),
+        format!("field_move:headbutt:{party_index}"),
     )?;
-    let field_move = runtime_shell
+    let dispatch = runtime_shell
         .shell
-        .use_headbutt_field_move(party_index, player_id)?;
-    runtime_shell.visible_headbutt_animation = Some(VisibleHeadbuttAnimation {
-        target_tile,
-        facing: snapshot.overworld.facing,
-        frame: 0,
-    });
-    runtime_shell.pending_field_notice_sound = Some("SFX_SANDSTORM".to_string());
-    runtime_shell.pending_field_notice_effect_frames = Some(32);
+        .queue_headbutt_script(party_index, from_menu)?;
+    anyhow::ensure!(
+        dispatch.next_script == source_headbutt_script_root(from_menu),
+        "HEADBUTT dispatch returned {} for from_menu={from_menu}",
+        dispatch.next_script
+    );
     runtime_shell.last_audio_events.push(format!(
-        "field headbutt party_index={} encounter={:?} battle={:?} checksum={:?}",
-        party_index, field_move.field_encounter, field_move.wild_battle, field_move.state_checksum
+        "field headbutt party_index={} script={} checksum={:?}",
+        party_index, dispatch.next_script, dispatch.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
-        format!(
-            "HEADBUTT {:?} {:?}",
-            field_move.field_encounter, field_move.wild_battle
-        ),
+        format!("HEADBUTT {}", dispatch.next_script),
     );
-    settle_visible_field_move_after_possible_battle(
-        runtime_shell,
-        &snapshot,
-        visible_field_move_use_text(&snapshot, party_index, "HEADBUTT")?,
-    )?;
-    Ok(())
+    consume_visible_dispatched_field_script(runtime_shell)
 }
 
 fn use_visible_rock_smash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -5041,10 +5149,7 @@ fn use_visible_rock_smash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         .queue_rock_smash_from_menu(party_index)?;
     runtime_shell.last_audio_events.push(format!(
         "field rock_smash party_index={} script={} last_talked={:?} checksum={:?}",
-        party_index,
-        dispatch.next_script,
-        dispatch.last_talked_object,
-        dispatch.state_checksum
+        party_index, dispatch.next_script, dispatch.last_talked_object, dispatch.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
@@ -5065,47 +5170,18 @@ fn use_visible_sweet_scent(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         runtime_shell,
         format!("field_move:sweet_scent:{party_index}"),
     )?;
-    let field_move = runtime_shell
+    let dispatch = runtime_shell
         .shell
-        .use_sweet_scent_field_move(party_index)?;
+        .queue_sweet_scent_from_menu(party_index)?;
     runtime_shell.last_audio_events.push(format!(
-        "field sweet_scent party_index={} encounter={:?} battle={:?} checksum={:?}",
-        party_index,
-        field_move.wild_encounter,
-        field_move.wild_battle,
-        field_move.state_checksum
+        "field sweet_scent party_index={} script={} checksum={:?}",
+        party_index, dispatch.next_script, dispatch.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
-        format!(
-            "SWEET SCENT {:?} {:?}",
-            field_move.wild_encounter, field_move.wild_battle
-        ),
+        format!("SWEET SCENT {}", dispatch.next_script),
     );
-    if field_move
-        .wild_encounter
-        .as_ref()
-        .and_then(|encounter| encounter.resolved.as_ref())
-        .is_none()
-    {
-        runtime_shell.pending_sweet_scent_nothing_notice = true;
-        runtime_shell
-            .field_notice_queue
-            .push_back(visible_asm_text(&snapshot, "SweetScentNothingText")?);
-    } else {
-        // TypeScript main holds the resolved encounter behind its twenty-frame
-        // SWEET_SCENT field-animation timer and starts the sound at that
-        // boundary. The battle must not replace the use textbox immediately.
-        runtime_shell.pending_field_notice_sound = Some("SFX_SWEET_SCENT".to_string());
-        runtime_shell.pending_field_notice_effect_frames = Some(20);
-        runtime_shell.visible_sweet_scent_delay = true;
-    }
-    settle_visible_field_move_after_possible_battle(
-        runtime_shell,
-        &snapshot,
-        visible_field_move_use_text(&snapshot, party_index, "SWEET SCENT")?,
-    )?;
-    Ok(())
+    consume_visible_dispatched_field_script(runtime_shell)
 }
 
 fn use_visible_sweet_scent_current_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -5190,6 +5266,14 @@ fn carried_item_ids(snapshot: &RuntimeShellSnapshot) -> impl Iterator<Item = &st
         )
         .filter(|item| item.quantity > 0)
         .map(|item| item.item_id.as_str())
+        .chain(
+            snapshot
+                .bag
+                .tm_hm
+                .iter()
+                .filter(|item| item.quantity > 0)
+                .map(|item| item.item_id.as_str()),
+        )
 }
 
 fn carried_item_quantity(snapshot: &RuntimeShellSnapshot, item_id: &str) -> Option<u16> {
@@ -5222,7 +5306,11 @@ fn shop_buy_item_label(snapshot: &RuntimeShellSnapshot, item_id: &str) -> String
     let Some(item) = snapshot.items.iter().find(|item| item.item_id == item_id) else {
         return format!("{item_id} INVALID ITEM");
     };
-    format!("{} ${}", item.name.replace('_', " "), item.price)
+    format!(
+        "{} {}",
+        item.name.replace('_', " "),
+        format_price(u32::from(item.price))
+    )
 }
 
 fn shop_sell_item_label(snapshot: &RuntimeShellSnapshot, item_id: &str) -> String {
@@ -5232,12 +5320,7 @@ fn shop_sell_item_label(snapshot: &RuntimeShellSnapshot, item_id: &str) -> Strin
     let Some(item) = snapshot.items.iter().find(|item| item.item_id == item_id) else {
         return format!("{item_id} x{quantity} INVALID ITEM");
     };
-    format!(
-        "{} x{} ${}",
-        item.name.replace('_', " "),
-        quantity,
-        u32::from(item.price / 2)
-    )
+    format!("{} ×{:02}", item.name.replace('_', " "), quantity.min(99))
 }
 
 fn sellable_carried_item_ids(snapshot: &RuntimeShellSnapshot) -> Vec<String> {
@@ -5249,6 +5332,14 @@ fn sellable_carried_item_ids(snapshot: &RuntimeShellSnapshot) -> Vec<String> {
         .filter(|item| item.quantity > 0)
         .map(|item| item.item_id.clone())
         .collect::<Vec<_>>();
+    item_ids.extend(
+        snapshot
+            .bag
+            .tm_hm
+            .iter()
+            .filter(|item| item.quantity > 0)
+            .map(|item| item.item_id.clone()),
+    );
     item_ids.extend(
         snapshot
             .bag
@@ -5466,11 +5557,12 @@ fn switch_visible_battle_pokemon(runtime_shell: &mut BevyRuntimeShell) -> Result
     let Some(ref battle) = snapshot.battle else {
         return handle_visible_no_active_battle(runtime_shell, "switch_confirm");
     };
-    let selected_index = visible_cursor_index(
-        &mut runtime_shell.battle_switch_cursor,
+    let selected_index = strict_readonly_cursor_index(
+        &runtime_shell.battle_switch_cursor,
         "battle:switch",
         battle_switch_option_count(&snapshot),
-    );
+    )
+    .context("battle switch surface battle:switch is active without a valid cursor")?;
     if selected_index >= snapshot.party.slots.len() {
         return press_visible_battle_b_button(runtime_shell);
     }
@@ -5499,7 +5591,13 @@ fn switch_visible_battle_pokemon(runtime_shell: &mut BevyRuntimeShell) -> Result
     {
         let active_name = battle
             .active_player_party_index
-            .and_then(|active| snapshot.party.slots.iter().find(|slot| slot.index == active))
+            .and_then(|active| {
+                snapshot
+                    .party
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == active)
+            })
             .map(|slot| slot.pokemon.nickname.as_str())
             .context("trapped battle switch requires the active player party Pokemon")?;
         record_visible_runtime_action(runtime_shell, "battle:switch:trapped")?;
@@ -5585,9 +5683,15 @@ fn resolve_visible_battle_move_switch_to(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let (enemy_action, enemy_rng_seed_after) =
-        selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &enemy_action)?;
+    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+        runtime_shell,
+        &snapshot,
+        battle,
+        BattleAction::MoveSwitch {
+            slot: move_slot,
+            party_index,
+        },
+    )?;
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         _ => None,
@@ -5603,15 +5707,6 @@ fn resolve_visible_battle_move_switch_to(
             party_index,
         },
     )?;
-    let turn = resolve_active_battle_turn_with_enemy_rng(
-        runtime_shell,
-        enemy_rng_seed_after,
-        BattleAction::MoveSwitch {
-            slot: move_slot,
-            party_index,
-        },
-        enemy_action,
-    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
     let events = format_battle_turn_events(&turn.outcome.events);
@@ -5624,11 +5719,7 @@ fn resolve_visible_battle_move_switch_to(
         events,
         turn.state_checksum
     ));
-    defer_visible_party_index_cry_after_send_out(
-        runtime_shell,
-        party_index,
-        "battle_move_switch",
-    )?;
+    defer_visible_party_index_cry_after_send_out(runtime_shell, party_index, "battle_move_switch")?;
     trim_event_log(&mut runtime_shell.last_audio_events);
     set_shell_action_status(
         runtime_shell,
@@ -5665,9 +5756,12 @@ fn switch_visible_battle_pokemon_to(
     if visible_active_battle_player_fainted(&snapshot) {
         return switch_visible_battle_party_without_turn(runtime_shell, party_index);
     }
-    let (enemy_action, enemy_rng_seed_after) =
-        selected_enemy_battle_action(&snapshot, battle, &mut runtime_shell.trainer_items_used)?;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &enemy_action)?;
+    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+        runtime_shell,
+        &snapshot,
+        battle,
+        BattleAction::Switch { party_index },
+    )?;
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         _ => None,
@@ -5677,12 +5771,6 @@ fn switch_visible_battle_pokemon_to(
         format!("battle:switch:{party_index}:enemy:{enemy_action:?}"),
     )?;
     record_visible_battle_action_frame(runtime_shell, BattleAction::Switch { party_index })?;
-    let turn = resolve_active_battle_turn_with_enemy_rng(
-        runtime_shell,
-        enemy_rng_seed_after,
-        BattleAction::Switch { party_index },
-        enemy_action,
-    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
     let events = format_battle_turn_events(&turn.outcome.events);
@@ -5987,7 +6075,9 @@ fn switch_visible_battle_party_without_turn(
     ));
     let replacement = runtime_shell.shell.snapshot()?;
     let send_out_message = visible_player_send_out_message(&replacement, switched.party_index)?;
-    runtime_shell.battle_messages.push_back(send_out_message.clone());
+    runtime_shell
+        .battle_messages
+        .push_back(send_out_message.clone());
     runtime_shell.battle_player_send_out_pending = true;
     runtime_shell.battle_message_scene = Some(Box::new(replacement));
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -6062,18 +6152,20 @@ fn switch_visible_trainer_shift_party_without_turn(
     runtime_shell
         .battle_messages
         .push_back(withdraw_message.clone());
-    runtime_shell.battle_messages.push_back(send_out_message.clone());
+    runtime_shell
+        .battle_messages
+        .push_back(send_out_message.clone());
     runtime_shell.battle_player_send_out_pending = false;
-    runtime_shell.battle_message_scenes.push_back(enemy_send_out_scene.clone());
-    runtime_shell.battle_message_scenes.push_back(enemy_send_out_scene.clone());
+    runtime_shell
+        .battle_message_scenes
+        .push_back(enemy_send_out_scene.clone());
+    runtime_shell
+        .battle_message_scenes
+        .push_back(enemy_send_out_scene.clone());
     runtime_shell
         .battle_message_scenes
         .push_back(Box::new(replacement.clone()));
-    queue_visible_player_recall_animation(
-        runtime_shell,
-        &enemy_send_out_scene,
-        &withdraw_message,
-    );
+    queue_visible_player_recall_animation(runtime_shell, &enemy_send_out_scene, &withdraw_message);
     runtime_shell.battle_message_scene = Some(enemy_send_out_scene);
     mark_runtime_snapshot_dirty(runtime_shell);
     let species_id = runtime_shell
@@ -6186,14 +6278,21 @@ fn throw_visible_battle_ball_id(
         format!("battle:ball:{ball_id}:index:{}", ball_index + 1),
     )?;
     let capture = runtime_shell.shell.throw_ball_at_active_battle(&ball_id)?;
-    if capture.outcome.as_ref().is_some_and(|outcome| outcome.storage_full) {
+    if capture
+        .outcome
+        .as_ref()
+        .is_some_and(|outcome| outcome.storage_full)
+    {
         runtime_shell
             .battle_messages
             .push_back("The <PKMN> BOX\nis full. That\ncan't be used now.".to_string());
         runtime_shell.battle_message_scene = Some(Box::new(snapshot));
         record_visible_runtime_action(
             runtime_shell,
-            format!("battle:capture_storage_full:{ball_id}:index:{}", ball_index + 1),
+            format!(
+                "battle:capture_storage_full:{ball_id}:index:{}",
+                ball_index + 1
+            ),
         )?;
         mark_runtime_snapshot_dirty(runtime_shell);
         set_shell_action_status(runtime_shell, "BOX FULL");
@@ -6283,10 +6382,7 @@ fn throw_visible_battle_ball_id(
                 runtime_shell,
                 format!("battle:capture_complete:{ball_id}:index:{}", ball_index + 1),
             )?;
-            if matches!(
-                battle_type,
-                "BATTLETYPE_TUTORIAL" | "BATTLETYPE_CONTEST"
-            ) {
+            if matches!(battle_type, "BATTLETYPE_TUTORIAL" | "BATTLETYPE_CONTEST") {
                 complete_visible_standard_capture(
                     runtime_shell,
                     outcome.clone(),
@@ -6406,11 +6502,7 @@ fn queue_visible_pay_day_payout(
     let Some(battle) = snapshot.battle.as_ref() else {
         return;
     };
-    queue_visible_pay_day_payout_for_battle(
-        runtime_shell,
-        battle,
-        &snapshot.trainer.player_name,
-    );
+    queue_visible_pay_day_payout_for_battle(runtime_shell, battle, &snapshot.trainer.player_name);
 }
 
 fn queue_visible_pay_day_payout_for_battle(
@@ -6444,7 +6536,6 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
         .find(|slot| slot.index == reward_recipient_index)
         .map(|slot| slot.pokemon.nickname.clone())
         .context("battle rewards are missing the active player Pokemon")?;
-    let map_name = snapshot.overworld.map_name.clone();
     let scripted_static_origin = visible_static_wild_source(&snapshot, &battle);
     let plain_wild_battle = matches!(battle.kind, crate::RuntimeBattleKind::Wild { .. });
     let trainer_battle = matches!(battle.kind, crate::RuntimeBattleKind::Trainer { .. });
@@ -6511,9 +6602,10 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
             runtime_shell.last_audio_events.push(message);
             finish_visible_wild_battle_exit(
                 runtime_shell,
-                Some(scripted_static_origin.context(
-                    "static wild reward completion lost its captured origin",
-                )?),
+                Some(
+                    scripted_static_origin
+                        .context("static wild reward completion lost its captured origin")?,
+                ),
                 "wild_battle_victory",
             )?;
             return Ok(());
@@ -6659,11 +6751,23 @@ fn stage_visible_battle_exp_tween(
     else {
         return Ok(());
     };
-    let Some(before_mon) = before.party.slots.iter().find(|slot| slot.index == active_index).map(|slot| &slot.pokemon) else {
+    let Some(before_mon) = before
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == active_index)
+        .map(|slot| &slot.pokemon)
+    else {
         return Ok(());
     };
     let after = runtime_shell.shell.snapshot()?;
-    let Some(after_mon) = after.party.slots.iter().find(|slot| slot.index == active_index).map(|slot| &slot.pokemon) else {
+    let Some(after_mon) = after
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == active_index)
+        .map(|slot| &slot.pokemon)
+    else {
         return Ok(());
     };
     let awards = if outcome.recipient_outcomes.is_empty() {
@@ -6678,12 +6782,14 @@ fn stage_visible_battle_exp_tween(
             .recipient_outcomes
             .iter()
             .filter(|recipient| recipient.party_index == active_index)
-            .map(|recipient| (
-                recipient.experience_awarded,
-                recipient.level_before,
-                recipient.level_after,
-                recipient.nickname.clone(),
-            ))
+            .map(|recipient| {
+                (
+                    recipient.experience_awarded,
+                    recipient.level_before,
+                    recipient.level_after,
+                    recipient.nickname.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     let mut staged = VecDeque::new();
@@ -6710,9 +6816,7 @@ fn stage_visible_battle_exp_tween(
             .pop_front()
             .context("staged EXP animation has no initial bar target")?;
         staged.push_back(VisibleBattleExpTween {
-            trigger_message: format!(
-                "{nickname} gained\n{experience_awarded} EXP. Points!"
-            ),
+            trigger_message: format!("{nickname} gained\n{experience_awarded} EXP. Points!"),
             started: false,
             pixels: visible_battle_exp_pixels(runtime_shell, &segment_before)?,
             level: level_before,
@@ -6744,19 +6848,28 @@ fn stage_visible_battle_level_stats(
                     .slots
                     .iter()
                     .find(|slot| slot.index == party_index)
-                    .map(|slot| vec![(party_index, outcome.level_before, outcome.level_after, slot.pokemon.nickname.clone())])
+                    .map(|slot| {
+                        vec![(
+                            party_index,
+                            outcome.level_before,
+                            outcome.level_after,
+                            slot.pokemon.nickname.clone(),
+                        )]
+                    })
             })
             .unwrap_or_default()
     } else {
         outcome
             .recipient_outcomes
             .iter()
-            .map(|recipient| (
-                recipient.party_index,
-                recipient.level_before,
-                recipient.level_after,
-                recipient.nickname.clone(),
-            ))
+            .map(|recipient| {
+                (
+                    recipient.party_index,
+                    recipient.level_before,
+                    recipient.level_after,
+                    recipient.nickname.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     for (party_index, level_before, level_after, nickname) in recipients {
@@ -6772,17 +6885,19 @@ fn stage_visible_battle_level_stats(
         else {
             continue;
         };
-        runtime_shell.battle_level_stats.push_back(VisibleBattleLevelStats {
-            trigger_message: format!("{nickname} grew to\nlevel {level_after}!"),
-            triggered: false,
-            active: false,
-            frames_before_input: 0,
-            attack: pokemon.attack,
-            defense: pokemon.defense,
-            speed: pokemon.speed,
-            special_attack: pokemon.special_attack,
-            special_defense: pokemon.special_defense,
-        });
+        runtime_shell
+            .battle_level_stats
+            .push_back(VisibleBattleLevelStats {
+                trigger_message: format!("{nickname} grew to\nlevel {level_after}!"),
+                triggered: false,
+                active: false,
+                frames_before_input: 0,
+                attack: pokemon.attack,
+                defense: pokemon.defense,
+                speed: pokemon.speed,
+                special_attack: pokemon.special_attack,
+                special_defense: pokemon.special_defense,
+            });
     }
     Ok(())
 }
@@ -6828,11 +6943,10 @@ fn push_visible_battle_reward_events(
     ));
     if outcome.level_after > outcome.level_before {
         for level in outcome.level_before.saturating_add(1)..=outcome.level_after {
-            let message = format!(
-                "{} grew to\nlevel {}!",
-                recipient_name, level
-            );
-            runtime_shell.battle_fanfare_messages.push_back(message.clone());
+            let message = format!("{} grew to\nlevel {}!", recipient_name, level);
+            runtime_shell
+                .battle_fanfare_messages
+                .push_back(message.clone());
             runtime_shell.battle_messages.push_back(message);
         }
         runtime_shell.last_audio_events.push(format!(
@@ -6843,7 +6957,9 @@ fn push_visible_battle_reward_events(
     for move_id in &outcome.learned_moves {
         let move_name = battle_move_display_name(&snapshot, move_id);
         let message = format!("{} learned\n{}!", recipient_name, move_name);
-        runtime_shell.battle_fanfare_messages.push_back(message.clone());
+        runtime_shell
+            .battle_fanfare_messages
+            .push_back(message.clone());
         runtime_shell.battle_messages.push_back(message);
         runtime_shell
             .last_audio_events
@@ -6856,11 +6972,13 @@ fn push_visible_battle_reward_events(
             .iter()
             .any(|evolution_move| evolution_move.name == learned.name)
     }) {
-        let move_name = battle_move_display_name(&snapshot, &learned.name);
-        runtime_shell.battle_messages.push_back(format!(
-            "{} is\ntrying to learn\n{}.",
-            recipient_name, move_name
-        ));
+        runtime_shell.battle_messages.extend(
+            visible_pending_move_learn_intro_pages(
+                runtime_shell,
+                recipient_name,
+                &learned.name,
+            )?,
+        );
         runtime_shell
             .last_audio_events
             .push(format!("battle reward pending move learn {}", learned.name));
@@ -6872,33 +6990,33 @@ fn push_visible_battle_reward_events(
             "Congratulations! {} evolved into {}!",
             recipient_name, species_name
         );
-        runtime_shell.battle_messages.push_back(evolving_message.clone());
-        runtime_shell.battle_messages.push_back(evolved_message.clone());
-        let pending_move_messages = outcome
-            .evolution
-            .pending_move_learns
-            .iter()
-            .map(|learned| {
-                format!(
-                    "{} is\ntrying to learn\n{}.",
-                    recipient_name,
-                    battle_move_display_name(&snapshot, &learned.name)
-                )
-            })
-            .collect::<Vec<_>>();
+        runtime_shell
+            .battle_messages
+            .push_back(evolving_message.clone());
+        runtime_shell
+            .battle_messages
+            .push_back(evolved_message.clone());
+        let mut pending_move_messages = Vec::new();
+        for learned in &outcome.evolution.pending_move_learns {
+            pending_move_messages.extend(visible_pending_move_learn_intro_pages(
+                runtime_shell,
+                recipient_name,
+                &learned.name,
+            )?);
+        }
         runtime_shell
             .battle_messages
             .extend(pending_move_messages.iter().cloned());
         if outcome.evolution.cancel_snapshot.is_some() {
-            runtime_shell.battle_evolution_cancellations.push_back(
-                VisibleEvolutionCancellation {
+            runtime_shell
+                .battle_evolution_cancellations
+                .push_back(VisibleEvolutionCancellation {
                     party_index,
                     trigger_message: evolving_message.clone(),
                     evolved_message: evolved_message.clone(),
                     pending_move_messages,
                     report: outcome.evolution.clone(),
-                },
-            );
+                });
         }
         runtime_shell
             .battle_evolution_cries
@@ -6982,7 +7100,9 @@ fn advance_visible_trainer_battle(runtime_shell: &mut BevyRuntimeShell) -> Resul
             "{}\nsent out\n{}!",
             trainer_name, replacement_battle.enemy_pokemon.nickname
         );
-        runtime_shell.battle_messages.push_back(send_out_message.clone());
+        runtime_shell
+            .battle_messages
+            .push_back(send_out_message.clone());
         runtime_shell.battle_enemy_send_out_pending = true;
         defer_visible_battle_cry_after_message(
             runtime_shell,
@@ -7031,16 +7151,23 @@ fn queue_visible_trainer_result_text(
 }
 
 fn confirm_visible_shop_top_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.shop_top_cursor,
-        "shop:top",
-        3,
-    )
-    .context("shop top menu requires a valid cursor")?;
+    let selected = strict_readonly_cursor_index(&runtime_shell.shop_top_cursor, "shop:top", 3)
+        .context("shop top menu requires a valid cursor")?;
     match selected {
         0 => {
             let snapshot = runtime_shell.shell.snapshot()?;
-            let shop = snapshot.pending_shop.as_ref().context("shop top menu has no shop")?;
+            let shop = snapshot
+                .pending_shop
+                .as_ref()
+                .context("shop top menu has no shop")?;
+            if shop.inventory.is_empty() {
+                let notice = "Sorry, we're sold out.".to_string();
+                set_shell_action_status(runtime_shell, notice.clone());
+                runtime_shell.shop_notice = Some(notice);
+                runtime_shell.shop_return_to_top_after_notice = true;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             runtime_shell.shop_top_cursor = None;
             runtime_shell.sell_cursor = None;
             visible_cursor_index(
@@ -7078,11 +7205,12 @@ fn buy_visible_shop_cursor_item(runtime_shell: &mut BevyRuntimeShell) -> Result<
         anyhow::bail!("shop {} has no compiled inventory", shop.mart_id);
     }
     let surface_id = shop_cursor_surface_id(&shop);
-    let selected_index = visible_cursor_index(
-        &mut runtime_shell.menu_cursor,
+    let selected_index = strict_readonly_cursor_index(
+        &runtime_shell.menu_cursor,
         &surface_id,
         shop.inventory.len(),
-    );
+    )
+    .with_context(|| format!("shop item surface {surface_id} is active without a valid cursor"))?;
     begin_visible_shop_quantity(runtime_shell, &shop, selected_index, false)
 }
 
@@ -7094,29 +7222,62 @@ fn begin_visible_shop_quantity(
 ) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let item_id = if selling {
-        sellable_carried_item_ids(&snapshot).get(selected_index).cloned()
+        sellable_carried_item_ids(&snapshot)
+            .get(selected_index)
+            .cloned()
     } else {
         shop.inventory.get(selected_index).cloned()
     }
     .context("shop quantity selection has no item")?;
-    let item = snapshot.items.iter().find(|item| item.item_id == item_id)
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.item_id == item_id)
         .with_context(|| format!("shop quantity item {item_id} is missing from catalog"))?;
     let unit_price = if selling { item.price / 2 } else { item.price };
     let max_quantity = if selling {
-        carried_item_quantity(&snapshot, &item_id).unwrap_or(0).min(99)
+        carried_item_quantity(&snapshot, &item_id)
+            .unwrap_or(0)
+            .min(99)
     } else if unit_price == 0 {
         0
     } else {
-        let owned = carried_item_quantity(&snapshot, &item_id).unwrap_or(0).min(99);
+        let owned = carried_item_quantity(&snapshot, &item_id)
+            .unwrap_or(0)
+            .min(99);
         let stack_limit: u16 = match item.pocket.as_str() {
-            "KEY_ITEM" | "TM_HM" => 1,
+            "KEY_ITEM" => 1,
             _ => 99,
         };
         let pocket_has_room = owned > 0
             || match item.pocket.as_str() {
-                "ITEM" => snapshot.bag.items.iter().filter(|entry| entry.quantity > 0).count() < 20,
-                "BALL" => snapshot.bag.balls.iter().filter(|entry| entry.quantity > 0).count() < 12,
-                "KEY_ITEM" => snapshot.bag.key_items.iter().filter(|entry| entry.quantity > 0).count() < 25,
+                "ITEM" => {
+                    snapshot
+                        .bag
+                        .items
+                        .iter()
+                        .filter(|entry| entry.quantity > 0)
+                        .count()
+                        < 20
+                }
+                "BALL" => {
+                    snapshot
+                        .bag
+                        .balls
+                        .iter()
+                        .filter(|entry| entry.quantity > 0)
+                        .count()
+                        < 12
+                }
+                "KEY_ITEM" => {
+                    snapshot
+                        .bag
+                        .key_items
+                        .iter()
+                        .filter(|entry| entry.quantity > 0)
+                        .count()
+                        < 25
+                }
                 "TM_HM" => true,
                 _ => true,
             };
@@ -7125,11 +7286,18 @@ fn begin_visible_shop_quantity(
         } else {
             0
         };
-        capacity
-            .min((snapshot.trainer.money / u32::from(unit_price)).min(99) as u16)
+        capacity.min((snapshot.trainer.money / u32::from(unit_price)).min(99) as u16)
     };
     if max_quantity == 0 {
-        let notice = if selling { "You don't have any left." } else { "You can't buy any." };
+        let notice = if selling {
+            "You don't have any left."
+        } else if unit_price == 0 {
+            "That item isn't for sale right now."
+        } else if snapshot.trainer.money < u32::from(unit_price) {
+            "You don't have\nenough money."
+        } else {
+            "You can't carry\nany more items."
+        };
         set_shell_action_status(runtime_shell, notice);
         runtime_shell.shop_notice = Some(notice.to_string());
         runtime_shell.shop_return_to_top_after_notice = true;
@@ -7158,7 +7326,10 @@ fn adjust_visible_shop_quantity(runtime_shell: &mut BevyRuntimeShell, delta: i16
 }
 
 fn confirm_visible_shop_quantity(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let quantity = runtime_shell.shop_quantity.take().context("shop quantity prompt is not open")?;
+    let quantity = runtime_shell
+        .shop_quantity
+        .take()
+        .context("shop quantity prompt is not open")?;
     let snapshot = runtime_shell.shell.snapshot()?;
     let shop = snapshot
         .pending_shop
@@ -7166,11 +7337,21 @@ fn confirm_visible_shop_quantity(runtime_shell: &mut BevyRuntimeShell) -> Result
         .context("shop quantity prompt has no active shop")?;
     if quantity.selling {
         let sellable = sellable_carried_item_ids(&snapshot);
-        let selected_index = sellable.iter().position(|item| item == &quantity.item_id)
+        let selected_index = sellable
+            .iter()
+            .position(|item| item == &quantity.item_id)
             .context("selected sell item disappeared during quantity prompt")?;
-        sell_visible_shop_item_from_list(runtime_shell, &sellable, selected_index, quantity.quantity)
+        sell_visible_shop_item_from_list(
+            runtime_shell,
+            &sellable,
+            selected_index,
+            quantity.quantity,
+        )
     } else {
-        let selected_index = shop.inventory.iter().position(|item| item == &quantity.item_id)
+        let selected_index = shop
+            .inventory
+            .iter()
+            .position(|item| item == &quantity.item_id)
             .context("selected buy item disappeared during quantity prompt")?;
         buy_visible_shop_item_from_snapshot(runtime_shell, &shop, selected_index, quantity.quantity)
     }
@@ -7255,8 +7436,12 @@ fn sell_selected_bag_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let selected_index =
-        visible_cursor_index(&mut runtime_shell.sell_cursor, "sell:bag", sellable.len());
+    let selected_index = strict_readonly_cursor_index(
+        &runtime_shell.sell_cursor,
+        "sell:bag",
+        sellable.len(),
+    )
+    .context("shop sell surface sell:bag is active without a valid cursor")?;
     begin_visible_shop_quantity(
         runtime_shell,
         snapshot.pending_shop.as_ref().context("no active shop")?,
@@ -7284,7 +7469,10 @@ fn sell_visible_shop_item_from_list(
             sellable.len()
         )
     })?;
-    record_visible_runtime_action(runtime_shell, format!("shop:sell:{mart_id}:{item_id}:{quantity}"))?;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("shop:sell:{mart_id}:{item_id}:{quantity}"),
+    )?;
     let transaction = runtime_shell.shell.sell_shop_item(&item_id, quantity)?;
     runtime_shell.last_audio_events.push(format!(
         "shop sell {}/{} item={} outcome={:?} checksum={:?}",
@@ -7373,7 +7561,11 @@ fn visible_shop_transaction_status(
             _ => outcome.message.clone(),
         }
     } else {
-        outcome.message.clone()
+        match outcome.message.as_str() {
+            "You don't have enough money." => "You don't have\nenough money.".to_string(),
+            "Your Pack is full." => "You can't carry\nany more items.".to_string(),
+            _ => outcome.message.clone(),
+        }
     }
 }
 
@@ -7384,6 +7576,7 @@ fn close_visible_pc_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     runtime_shell.pc_item_action = None;
     runtime_shell.pc_item_quantity = None;
     runtime_shell.player_pc_action_cursor = None;
+    runtime_shell.decoration_menu = None;
     runtime_shell.mailbox_cursor = None;
     runtime_shell.mailbox_action_cursor = None;
     runtime_shell.mailbox_attach_index = None;
@@ -7394,8 +7587,11 @@ fn close_visible_pc_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     runtime_shell.bill_pc_pokemon_action_cursor = None;
     runtime_shell.bill_pc_box_summary = None;
     runtime_shell.pending_pc_release = None;
+    runtime_shell.pc_release_sequence = None;
+    runtime_shell.pc_transfer_sequence = None;
     runtime_shell.pc_notice = None;
     runtime_shell.bill_pc_box_cursor = None;
+    runtime_shell.bill_pc_box_action_cursor = None;
     if runtime_shell.bill_pc_session_open {
         runtime_shell.party_menu_open = false;
         runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
@@ -7426,7 +7622,11 @@ fn close_visible_pc_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
 
 fn visible_pc_hub_actions(snapshot: &RuntimeShellSnapshot) -> Vec<VisiblePcHubAction> {
     let mut actions = vec![VisiblePcHubAction::BillsPc, VisiblePcHubAction::PlayerPc];
-    if snapshot.progression.active_engine_flags.contains("ENGINE_POKEDEX") {
+    if snapshot
+        .progression
+        .active_engine_flags
+        .contains("ENGINE_POKEDEX")
+    {
         actions.push(VisiblePcHubAction::OakPc);
     }
     if snapshot.progression.hall_of_fame.count > 0
@@ -7456,10 +7656,10 @@ fn visible_pc_hub_action_label(
 
 fn visible_bill_pc_action_label(action: VisibleBillPcAction) -> &'static str {
     match action {
-        VisibleBillPcAction::Withdraw => "WITHDRAW POKEMON",
-        VisibleBillPcAction::Deposit => "DEPOSIT POKEMON",
+        VisibleBillPcAction::Withdraw => "WITHDRAW <PK><MN>",
+        VisibleBillPcAction::Deposit => "DEPOSIT <PK><MN>",
         VisibleBillPcAction::ChangeBox => "CHANGE BOX",
-        VisibleBillPcAction::MoveWithoutMail => "MOVE PKMN W/O MAIL",
+        VisibleBillPcAction::MoveWithoutMail => "MOVE <PK><MN> W/O MAIL",
         VisibleBillPcAction::SeeYa => "SEE YA!",
     }
 }
@@ -7485,7 +7685,7 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
                 option_index: 0,
             });
             runtime_shell.party_menu_open = false;
-            set_shell_action_status(runtime_shell, "WITHDRAW POKEMON");
+            set_shell_action_status(runtime_shell, "WITHDRAW <PK><MN>");
         }
         VisibleBillPcAction::Deposit => {
             let snapshot = runtime_shell.shell.snapshot()?;
@@ -7494,7 +7694,7 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
                 option_index: 0,
             });
             open_visible_party_menu(runtime_shell)?;
-            set_shell_action_status(runtime_shell, "DEPOSIT POKEMON");
+            set_shell_action_status(runtime_shell, "DEPOSIT <PK><MN>");
         }
         VisibleBillPcAction::ChangeBox => {
             let snapshot = runtime_shell.shell.snapshot()?;
@@ -7506,14 +7706,29 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
         }
         VisibleBillPcAction::MoveWithoutMail => {
             let snapshot = runtime_shell.shell.snapshot()?;
-            runtime_shell.bill_pc_move_open = true;
-            runtime_shell.bill_pc_move_party_open = false;
-            runtime_shell.bill_pc_move_source = None;
-            runtime_shell.storage_cursor = Some(MenuCursor {
-                surface_id: storage_cursor_surface_id(snapshot.storage.current_pc_box),
-                option_index: 0,
+            if visible_storage_contains_mail(&snapshot) {
+                runtime_shell.pc_notice = Some(
+                    "There is a #MON holding MAIL.\n\nPlease remove the MAIL.".to_string(),
+                );
+                runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
+                    surface_id: "pc:bill-actions".to_string(),
+                    option_index: 3,
+                });
+                set_shell_action_status(runtime_shell, "PLEASE REMOVE THE MAIL");
+                return Ok(());
+            }
+            let path = runtime_shell
+                .quick_save_path
+                .as_ref()
+                .context("Bill's PC MOVE has no configured .crystalsave path")?;
+            runtime_shell.save_menu_open = true;
+            runtime_shell.save_flow = Some(VisibleSaveFlow {
+                stage: VisibleSaveFlowStage::Prompt,
+                origin: VisibleSaveFlowOrigin::BillsPcMove,
+                save_exists: path.exists(),
+                yes_no_index: 0,
             });
-            set_shell_action_status(runtime_shell, "CHOOSE A POKEMON TO MOVE");
+            set_shell_action_status(runtime_shell, "MOVE POKEMON SAVE");
         }
         VisibleBillPcAction::SeeYa => return close_visible_bill_pc_actions(runtime_shell),
     }
@@ -7522,23 +7737,112 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
 }
 
 fn confirm_visible_bill_pc_box(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let selected = strict_readonly_cursor_index(
+    let _selected = strict_readonly_cursor_index(
         &runtime_shell.bill_pc_box_cursor,
         "pc:bill-boxes",
         crate::core::models::MAX_PC_BOXES,
     )
     .context("Bill's PC box menu is open without a valid cursor")?;
-    let switched = runtime_shell.shell.switch_current_pc_box(selected)?;
-    runtime_shell.bill_pc_box_cursor = None;
-    runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
-        surface_id: "pc:bill-actions".to_string(),
-        option_index: 2,
+    runtime_shell.bill_pc_box_action_cursor = Some(MenuCursor {
+        surface_id: "pc:bill-box-actions".to_string(),
+        option_index: 0,
     });
-    mark_runtime_snapshot_dirty(runtime_shell);
-    set_shell_action_status(
-        runtime_shell,
-        format!("BOX {} SELECTED", switched.box_index_after + 1),
-    );
+    set_shell_action_status(runtime_shell, "WHAT'S UP?");
+    Ok(())
+}
+
+fn confirm_visible_bill_pc_box_action(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let action = strict_readonly_cursor_index(
+        &runtime_shell.bill_pc_box_action_cursor,
+        "pc:bill-box-actions",
+        4,
+    )
+    .context("Bill's PC box action menu is open without a valid cursor")?;
+    let selected = strict_readonly_cursor_index(
+        &runtime_shell.bill_pc_box_cursor,
+        "pc:bill-boxes",
+        crate::core::models::MAX_PC_BOXES,
+    )
+    .context("Bill's PC box action menu lost its selected box")?;
+    match action {
+        0 => begin_visible_bill_pc_box_switch(runtime_shell, selected),
+        1 => {
+            runtime_shell.bill_pc_box_action_cursor = None;
+            runtime_shell.pending_name_input = Some(PendingNameInput {
+                label: "BOX NAME?".to_string(),
+                value: String::new(),
+                max_length: 8,
+                cursor_column: 0,
+                cursor_row: 0,
+                case: NameInputCase::Upper,
+            });
+            set_shell_action_status(runtime_shell, "BOX NAME");
+            mark_runtime_snapshot_dirty(runtime_shell);
+            Ok(())
+        }
+        2 => {
+            runtime_shell.bill_pc_box_action_cursor = None;
+            let snapshot = runtime_shell.shell.snapshot()?;
+            let pc_box = snapshot
+                .storage
+                .boxes
+                .iter()
+                .find(|pc_box| pc_box.index == selected)
+                .with_context(|| format!("selected PC box {selected} is missing"))?;
+            if pc_box.slots.is_empty() {
+                begin_visible_pc_transfer_refusal(
+                    runtime_shell,
+                    VisiblePcTransferKind::BoxPrint,
+                    snapshot.storage.current_pc_box,
+                    "There's no <PK><MN>.",
+                )?;
+                set_shell_action_status(runtime_shell, "THERE'S NO POKEMON");
+            } else {
+                runtime_shell.pc_notice = Some(
+                    "Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.".to_string(),
+                );
+                runtime_shell.last_audio_events.push(
+                    "Game Boy Printer link unavailable: source Printer Error 2".to_string(),
+                );
+                set_shell_action_status(runtime_shell, "PRINTER ERROR 2");
+                mark_runtime_presentation_dirty(runtime_shell);
+            }
+            Ok(())
+        }
+        _ => {
+            runtime_shell.bill_pc_box_action_cursor = None;
+            set_shell_action_status(runtime_shell, "CHOOSE A BOX");
+            Ok(())
+        }
+    }
+}
+
+fn begin_visible_bill_pc_box_switch(
+    runtime_shell: &mut BevyRuntimeShell,
+    selected: usize,
+) -> Result<()> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    if selected == snapshot.storage.current_pc_box {
+        runtime_shell.bill_pc_box_action_cursor = None;
+        set_shell_action_status(runtime_shell, format!("BOX {} SELECTED", selected + 1));
+        return Ok(());
+    }
+    let path = runtime_shell
+        .quick_save_path
+        .as_ref()
+        .context("Bill's PC CHANGE BOX has no configured .crystalsave path")?;
+    runtime_shell.bill_pc_box_cursor = None;
+    runtime_shell.bill_pc_box_action_cursor = None;
+    runtime_shell.save_menu_open = true;
+    runtime_shell.save_flow = Some(VisibleSaveFlow {
+        stage: VisibleSaveFlowStage::Prompt,
+        origin: VisibleSaveFlowOrigin::BillsPcChangeBox {
+            box_index: selected,
+        },
+        save_exists: path.exists(),
+        yes_no_index: 0,
+    });
+    set_shell_action_status(runtime_shell, "CHANGE BOX SAVE");
     Ok(())
 }
 
@@ -7558,10 +7862,12 @@ fn confirm_visible_bill_pc_move(runtime_shell: &mut BevyRuntimeShell) -> Result<
                 .slots
                 .iter()
                 .any(|candidate| candidate.index == *slot),
-            crystal_assets::RuntimePokemonStorageLocation::Box { .. } => current_storage_box(&snapshot)?
-                .slots
-                .iter()
-                .any(|candidate| candidate.index == slot),
+            crystal_assets::RuntimePokemonStorageLocation::Box { .. } => {
+                current_storage_box(&snapshot)?
+                    .slots
+                    .iter()
+                    .any(|candidate| candidate.index == slot)
+            }
         };
         if !occupied {
             set_shell_action_status(runtime_shell, "NO POKEMON THERE");
@@ -7576,24 +7882,122 @@ fn confirm_visible_bill_pc_move(runtime_shell: &mut BevyRuntimeShell) -> Result<
         set_shell_action_status(runtime_shell, "MOVE CANCELLED");
         return Ok(());
     }
-    let moved = runtime_shell.shell.move_pokemon_without_mail(source, target)?;
     runtime_shell.bill_pc_move_source = None;
+    runtime_shell.bill_pc_move_save = Some(VisibleBillPcMoveSave {
+        source,
+        target,
+        phase: VisibleBillPcMoveSavePhase::BeforeMove,
+        frames_remaining: 20,
+    });
+    set_shell_action_status(runtime_shell, "SAVING... LEAVE ON!");
+    mark_runtime_presentation_dirty(runtime_shell);
+    Ok(())
+}
+
+fn advance_visible_bill_pc_move_save(
+    runtime_shell: &mut BevyRuntimeShell,
+    elapsed_frames: u32,
+) -> Result<()> {
+    let mut elapsed_frames = elapsed_frames;
+    while elapsed_frames > 0 {
+        let Some(active) = runtime_shell.bill_pc_move_save.as_mut() else {
+            break;
+        };
+        let elapsed = elapsed_frames.min(u32::from(active.frames_remaining));
+        active.frames_remaining = active
+            .frames_remaining
+            .saturating_sub(u8::try_from(elapsed).unwrap_or(u8::MAX));
+        elapsed_frames -= elapsed;
+        if active.frames_remaining > 0 {
+            break;
+        }
+        match active.phase {
+            VisibleBillPcMoveSavePhase::BeforeMove => {
+                commit_visible_bill_pc_move_save(runtime_shell)?;
+            }
+            VisibleBillPcMoveSavePhase::AfterSave => {
+                runtime_shell.bill_pc_move_save = None;
+                set_shell_action_status(runtime_shell, "POKEMON MOVED");
+                mark_runtime_presentation_dirty(runtime_shell);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn commit_visible_bill_pc_move_save(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let pending = runtime_shell
+        .bill_pc_move_save
+        .as_ref()
+        .filter(|pending| {
+            pending.phase == VisibleBillPcMoveSavePhase::BeforeMove
+                && pending.frames_remaining == 0
+        })
+        .cloned()
+        .context("Bill's PC MOVE save reached commit without its completed 20-frame hold")?;
+    let moved = runtime_shell
+        .shell
+        .move_pokemon_without_mail(pending.source, pending.target)?;
     match moved.target {
         crystal_assets::RuntimePokemonStorageLocation::Party { .. } => {
             runtime_shell.bill_pc_move_party_open = true;
             runtime_shell.storage_cursor = Some(MenuCursor {
-                surface_id: pc_move_party_surface_id().to_string(), option_index: 0,
+                surface_id: pc_move_party_surface_id().to_string(),
+                option_index: 0,
             });
         }
         crystal_assets::RuntimePokemonStorageLocation::Box { box_index, .. } => {
             runtime_shell.bill_pc_move_party_open = false;
             runtime_shell.storage_cursor = Some(MenuCursor {
-                surface_id: storage_cursor_surface_id(box_index), option_index: 0,
+                surface_id: storage_cursor_surface_id(box_index),
+                option_index: 0,
             });
         }
     }
     mark_runtime_snapshot_dirty(runtime_shell);
-    set_shell_action_status(runtime_shell, "POKEMON MOVED");
+    quick_save_from_bill_pc(runtime_shell)?;
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_SAVE")?;
+    let active = runtime_shell
+        .bill_pc_move_save
+        .as_mut()
+        .context("Bill's PC MOVE save disappeared after its storage commit")?;
+    active.phase = VisibleBillPcMoveSavePhase::AfterSave;
+    active.frames_remaining = 24;
+    Ok(())
+}
+
+fn visible_storage_contains_mail(snapshot: &RuntimeShellSnapshot) -> bool {
+    snapshot
+        .party
+        .slots
+        .iter()
+        .map(|slot| &slot.pokemon)
+        .chain(
+            snapshot
+                .storage
+                .boxes
+                .iter()
+                .flat_map(|pc_box| pc_box.slots.iter().map(|slot| &slot.pokemon)),
+        )
+        .any(|pokemon| {
+            pokemon.mail.is_some()
+                || pokemon
+                    .item
+                    .as_deref()
+                    .is_some_and(crate::core::models::item::is_mail_item_id)
+        })
+}
+
+fn open_visible_bill_pc_move_mode(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    runtime_shell.bill_pc_move_open = true;
+    runtime_shell.bill_pc_move_party_open = false;
+    runtime_shell.bill_pc_move_source = None;
+    runtime_shell.storage_cursor = Some(MenuCursor {
+        surface_id: storage_cursor_surface_id(snapshot.storage.current_pc_box),
+        option_index: 0,
+    });
+    set_shell_action_status(runtime_shell, "CHOOSE A POKEMON TO MOVE");
     Ok(())
 }
 
@@ -7602,6 +8006,7 @@ fn close_visible_bill_pc_actions(runtime_shell: &mut BevyRuntimeShell) -> Result
     runtime_shell.bill_pc_session_open = false;
     runtime_shell.bill_pc_action_cursor = None;
     runtime_shell.bill_pc_box_cursor = None;
+    runtime_shell.bill_pc_box_action_cursor = None;
     runtime_shell.bill_pc_move_open = false;
     runtime_shell.bill_pc_move_party_open = false;
     runtime_shell.bill_pc_move_source = None;
@@ -7619,14 +8024,18 @@ fn close_visible_bill_pc_actions(runtime_shell: &mut BevyRuntimeShell) -> Result
 fn confirm_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let actions = visible_pc_hub_actions(&snapshot);
-    let selected = strict_readonly_cursor_index(&runtime_shell.pc_hub_cursor, "pc:hub", actions.len())
-        .context("Pokemon Center PC hub is open without a valid cursor")?;
+    let selected =
+        strict_readonly_cursor_index(&runtime_shell.pc_hub_cursor, "pc:hub", actions.len())
+            .context("Pokemon Center PC hub is open without a valid cursor")?;
     let action = actions[selected];
     record_visible_runtime_action(
         runtime_shell,
         format!("pc:hub:{}", visible_pc_hub_action_label(&snapshot, action)),
     )?;
     runtime_shell.pc_hub_cursor = None;
+    if action != VisiblePcHubAction::TurnOff {
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_CHOOSE_PC_OPTION")?;
+    }
     match action {
         VisiblePcHubAction::BillsPc => {
             runtime_shell.bill_pc_session_open = true;
@@ -7634,6 +8043,13 @@ fn confirm_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
                 surface_id: "pc:bill-actions".to_string(),
                 option_index: 0,
+            });
+            runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+                label: "PokecenterBillsPCText".to_string(),
+                details: vec![
+                    "BILL'S PC accessed.".to_string(),
+                    "<PK><MN> Storage System opened.".to_string(),
+                ],
             });
             set_shell_action_status(runtime_shell, "BILL'S PC");
         }
@@ -7644,6 +8060,13 @@ fn confirm_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             runtime_shell.player_pc_action_cursor = Some(MenuCursor {
                 surface_id: "pc:player-actions".to_string(),
                 option_index: 0,
+            });
+            runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+                label: "PokecenterPlayersPCText".to_string(),
+                details: vec![
+                    "Accessed own PC.".to_string(),
+                    "Item Storage System opened.".to_string(),
+                ],
             });
             set_shell_action_status(runtime_shell, "PLAYER'S PC");
         }
@@ -7657,19 +8080,32 @@ fn confirm_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             else {
                 anyhow::bail!("Prof. Oak PC returned the wrong special effect");
             };
-            open_visible_prof_oak_rating(
-                runtime_shell,
-                *seen_count,
-                *caught_count,
-                rating_label,
-            )?;
+            open_visible_prof_oak_rating(runtime_shell, *seen_count, *caught_count, rating_label)?;
+            let rating_boundary = runtime_shell
+                .special_boundary
+                .take()
+                .context("Prof. Oak PC did not open its rating boundary")?;
+            runtime_shell.special_boundary_queue.push_front(rating_boundary);
+            runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+                label: "PokecenterOaksPCText".to_string(),
+                details: vec![
+                    "PROF.OAK'S PC accessed.".to_string(),
+                    "#DEX Rating System opened.".to_string(),
+                ],
+            });
         }
         VisiblePcHubAction::HallOfFame => {
             runtime_shell.hall_of_fame_pc_index = Some(0);
             refresh_visible_hall_of_fame_pc(runtime_shell, &snapshot)?;
             set_shell_action_status(runtime_shell, "HALL OF FAME");
         }
-        VisiblePcHubAction::TurnOff => return turn_off_visible_pc_hub(runtime_shell),
+        VisiblePcHubAction::TurnOff => {
+            runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+                label: "PokecenterPCOaksClosedText".to_string(),
+                details: vec!["…".to_string(), "Link closed…".to_string()],
+            });
+            set_shell_action_status(runtime_shell, "LINK CLOSED");
+        }
     }
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
@@ -7680,7 +8116,10 @@ fn refresh_visible_hall_of_fame_pc(
     snapshot: &RuntimeShellSnapshot,
 ) -> Result<()> {
     let entries = &snapshot.progression.hall_of_fame.entries;
-    anyhow::ensure!(!entries.is_empty(), "Hall of Fame PC opened without a record");
+    anyhow::ensure!(
+        !entries.is_empty(),
+        "Hall of Fame PC opened without a record"
+    );
     let index = runtime_shell
         .hall_of_fame_pc_index
         .context("Hall of Fame PC is open without an entry index")?;
@@ -7774,6 +8213,349 @@ fn visible_player_pc_actions(runtime_shell: &BevyRuntimeShell) -> &'static [Visi
     }
 }
 
+fn visible_decoration_category_label(category: DecorationCategory) -> &'static str {
+    match category {
+        DecorationCategory::Bed => "BED",
+        DecorationCategory::Carpet => "CARPET",
+        DecorationCategory::Plant => "PLANT",
+        DecorationCategory::Poster => "POSTER",
+        DecorationCategory::GameConsole => "GAME CONSOLE",
+        DecorationCategory::Ornament => "ORNAMENT",
+        DecorationCategory::BigDoll => "BIG DOLL",
+    }
+}
+
+fn visible_decoration_entries(
+    runtime_shell: &BevyRuntimeShell,
+    category: DecorationCategory,
+) -> Result<Vec<VisibleDecorationEntry>> {
+    Ok(runtime_shell
+        .shell
+        .owned_decorations(category)?
+        .into_iter()
+        .map(|decoration| VisibleDecorationEntry {
+            id: decoration.id,
+            display_name: decoration.display_name,
+        })
+        .collect())
+}
+
+fn open_visible_decoration_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let categories = runtime_shell.shell.owned_decoration_categories()?;
+    runtime_shell.decoration_menu = Some(VisibleDecorationMenu {
+        phase: VisibleDecorationMenuPhase::Categories {
+            categories,
+            cursor: MenuCursor {
+                surface_id: "pc:decorations:categories".to_string(),
+                option_index: 0,
+            },
+        },
+        changed: false,
+        notice_queue: VecDeque::new(),
+    });
+    Ok(())
+}
+
+fn visible_decoration_name(
+    runtime_shell: &BevyRuntimeShell,
+    decoration_id: &str,
+) -> Result<String> {
+    let VisibleDecorationMenu {
+        phase: VisibleDecorationMenuPhase::Decorations { decorations, .. },
+        ..
+    } = runtime_shell
+        .decoration_menu
+        .as_ref()
+        .context("decoration action requires its item menu")?
+    else {
+        anyhow::bail!("decoration action requires its item menu");
+    };
+    Ok(decorations
+        .iter()
+        .find(|decoration| decoration.id == decoration_id)
+        .with_context(|| format!("decoration menu is missing {decoration_id}"))?
+        .display_name
+        .clone())
+}
+
+fn apply_visible_decoration_outcome(
+    runtime_shell: &mut BevyRuntimeShell,
+    outcome: DecorationActionOutcome,
+    selected_name: Option<&str>,
+) -> Result<()> {
+    let notices = match &outcome {
+        DecorationActionOutcome::SetUp { decoration } => vec![format!(
+            "Set up the\n{}.",
+            selected_name.unwrap_or(decoration.as_str())
+        )],
+        DecorationActionOutcome::Replaced {
+            decoration,
+            previous,
+        } => {
+            let previous_name = visible_decoration_name(runtime_shell, previous)
+                .unwrap_or_else(|_| previous.clone());
+            vec![
+                format!("Put away the\n{}.", previous_name),
+                format!(
+                    "And set up the\n{}.",
+                    selected_name.unwrap_or(decoration.as_str())
+                ),
+            ]
+        }
+        DecorationActionOutcome::PutAway { decoration } => {
+            let name = visible_decoration_name(runtime_shell, decoration)
+                .unwrap_or_else(|_| decoration.clone());
+            vec![format!("Put away the\n{}.", name)]
+        }
+        DecorationActionOutcome::AlreadySetUp { .. } => {
+            vec!["That's already set\nup.".to_string()]
+        }
+        DecorationActionOutcome::NothingToPutAway => {
+            vec!["There's nothing to\nput away.".to_string()]
+        }
+    };
+    if outcome.changed() {
+        runtime_shell
+            .decoration_menu
+            .as_mut()
+            .context("decoration outcome requires an active menu")?
+            .changed = true;
+    }
+    let mut notices = notices.into_iter();
+    runtime_shell.pc_notice = notices.next();
+    runtime_shell
+        .decoration_menu
+        .as_mut()
+        .context("decoration notice requires an active menu")?
+        .notice_queue
+        .extend(notices);
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn dismiss_visible_pc_notice(runtime_shell: &mut BevyRuntimeShell) {
+    runtime_shell.pc_notice = runtime_shell
+        .decoration_menu
+        .as_mut()
+        .and_then(|menu| menu.notice_queue.pop_front());
+    mark_runtime_snapshot_dirty(runtime_shell);
+}
+
+fn confirm_visible_decoration_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let phase = runtime_shell
+        .decoration_menu
+        .as_ref()
+        .context("decoration menu is not open")?
+        .phase
+        .clone();
+    match phase {
+        VisibleDecorationMenuPhase::Categories { categories, cursor } => {
+            let selected = strict_readonly_cursor_index(
+                &Some(cursor),
+                "pc:decorations:categories",
+                categories.len() + 1,
+            )
+            .context("decoration category menu requires a valid cursor")?;
+            if selected == categories.len() {
+                return close_visible_decoration_menu(runtime_shell);
+            }
+            let category = categories[selected];
+            let decorations = visible_decoration_entries(runtime_shell, category)?;
+            anyhow::ensure!(
+                !decorations.is_empty(),
+                "owned decoration category {category:?} has no owned decorations"
+            );
+            runtime_shell
+                .decoration_menu
+                .as_mut()
+                .expect("menu was checked")
+                .phase = VisibleDecorationMenuPhase::Decorations {
+                category,
+                decorations,
+                cursor: MenuCursor {
+                    surface_id: "pc:decorations:items".to_string(),
+                    option_index: 0,
+                },
+            };
+        }
+        VisibleDecorationMenuPhase::Decorations {
+            category,
+            decorations,
+            cursor,
+        } => {
+            let selected = strict_readonly_cursor_index(
+                &Some(cursor),
+                "pc:decorations:items",
+                decorations.len() + 2,
+            )
+            .context("decoration item menu requires a valid cursor")?;
+            if selected == decorations.len() + 1 {
+                return return_visible_decoration_to_categories(runtime_shell, category);
+            }
+            if selected == decorations.len() {
+                if category == DecorationCategory::Ornament {
+                    runtime_shell
+                        .decoration_menu
+                        .as_mut()
+                        .expect("menu was checked")
+                        .phase = VisibleDecorationMenuPhase::Side {
+                        category,
+                        decoration_id: None,
+                        item_cursor_index: selected,
+                        cursor: MenuCursor {
+                            surface_id: "pc:decorations:side".to_string(),
+                            option_index: 0,
+                        },
+                    };
+                } else {
+                    let outcome = runtime_shell.shell.put_away_decoration(category, None)?;
+                    apply_visible_decoration_outcome(runtime_shell, outcome, None)?;
+                }
+                return Ok(());
+            }
+            let decoration = &decorations[selected];
+            if category == DecorationCategory::Ornament {
+                runtime_shell
+                    .decoration_menu
+                    .as_mut()
+                    .expect("menu was checked")
+                    .phase = VisibleDecorationMenuPhase::Side {
+                    category,
+                    decoration_id: Some(decoration.id.clone()),
+                    item_cursor_index: selected,
+                    cursor: MenuCursor {
+                        surface_id: "pc:decorations:side".to_string(),
+                        option_index: 0,
+                    },
+                };
+            } else {
+                let outcome = runtime_shell
+                    .shell
+                    .set_up_decoration(&decoration.id, None)?;
+                apply_visible_decoration_outcome(
+                    runtime_shell,
+                    outcome,
+                    Some(&decoration.display_name),
+                )?;
+            }
+        }
+        VisibleDecorationMenuPhase::Side {
+            category,
+            decoration_id,
+            item_cursor_index,
+            cursor,
+        } => {
+            let selected =
+                strict_readonly_cursor_index(&Some(cursor), "pc:decorations:side", 3)
+                    .context("decoration side menu requires a valid cursor")?;
+            if selected == 2 {
+                return return_visible_decoration_to_items(
+                    runtime_shell,
+                    category,
+                    item_cursor_index,
+                );
+            }
+            let side = if selected == 0 {
+                DecorationSide::Right
+            } else {
+                DecorationSide::Left
+            };
+            let selected_name = decoration_id.as_deref().map(|id| {
+                visible_decoration_entries(runtime_shell, category).and_then(|decorations| {
+                    Ok(decorations
+                        .into_iter()
+                        .find(|decoration| decoration.id == id)
+                        .with_context(|| format!("decoration menu is missing {id}"))?
+                        .display_name)
+                })
+            }).transpose()?;
+            let outcome = if let Some(decoration_id) = decoration_id {
+                runtime_shell
+                    .shell
+                    .set_up_decoration(&decoration_id, Some(side))?
+            } else {
+                runtime_shell
+                    .shell
+                    .put_away_decoration(category, Some(side))?
+            };
+            return_visible_decoration_to_items(runtime_shell, category, item_cursor_index)?;
+            apply_visible_decoration_outcome(runtime_shell, outcome, selected_name.as_deref())?;
+        }
+    }
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn return_visible_decoration_to_categories(
+    runtime_shell: &mut BevyRuntimeShell,
+    selected_category: DecorationCategory,
+) -> Result<()> {
+    let categories = runtime_shell.shell.owned_decoration_categories()?;
+    let option_index = categories
+        .iter()
+        .position(|category| *category == selected_category)
+        .unwrap_or(0);
+    runtime_shell
+        .decoration_menu
+        .as_mut()
+        .context("decoration menu is not open")?
+        .phase = VisibleDecorationMenuPhase::Categories {
+        categories,
+        cursor: MenuCursor {
+            surface_id: "pc:decorations:categories".to_string(),
+            option_index,
+        },
+    };
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn return_visible_decoration_to_items(
+    runtime_shell: &mut BevyRuntimeShell,
+    category: DecorationCategory,
+    option_index: usize,
+) -> Result<()> {
+    let decorations = visible_decoration_entries(runtime_shell, category)?;
+    anyhow::ensure!(
+        option_index < decorations.len() + 2,
+        "decoration item cursor {option_index} exceeds {} entries",
+        decorations.len() + 2
+    );
+    runtime_shell
+        .decoration_menu
+        .as_mut()
+        .context("decoration menu is not open")?
+        .phase = VisibleDecorationMenuPhase::Decorations {
+        category,
+        decorations,
+        cursor: MenuCursor {
+            surface_id: "pc:decorations:items".to_string(),
+            option_index,
+        },
+    };
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn close_visible_decoration_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let changed = runtime_shell
+        .decoration_menu
+        .take()
+        .context("decoration menu is not open")?
+        .changed;
+    if changed {
+        runtime_shell.shell.set_script_runtime_accumulator("1")?;
+        close_visible_player_pc(runtime_shell)
+    } else {
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 4,
+        });
+        mark_runtime_snapshot_dirty(runtime_shell);
+        Ok(())
+    }
+}
+
 fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let actions = visible_player_pc_actions(runtime_shell);
     let selected = strict_readonly_cursor_index(
@@ -7783,7 +8565,10 @@ fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Res
     )
     .context("Player PC action menu requires a valid cursor")?;
     let action = actions[selected];
-    record_visible_runtime_action(runtime_shell, format!("pc:player:{}", visible_player_pc_action_label(action)))?;
+    record_visible_runtime_action(
+        runtime_shell,
+        format!("pc:player:{}", visible_player_pc_action_label(action)),
+    )?;
     runtime_shell.player_pc_action_cursor = None;
     match action {
         VisiblePlayerPcAction::WithdrawItem | VisiblePlayerPcAction::TossItem => {
@@ -7791,11 +8576,15 @@ fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Res
             if carried_item_count(&snapshot.bag.pc_items) == 0 {
                 runtime_shell.pc_notice = Some("No items here!".to_string());
                 runtime_shell.player_pc_action_cursor = Some(MenuCursor {
-                    surface_id: "pc:player-actions".to_string(), option_index: selected,
+                    surface_id: "pc:player-actions".to_string(),
+                    option_index: selected,
                 });
             } else {
                 runtime_shell.pc_item_action = Some(action);
-                runtime_shell.pc_item_cursor = Some(MenuCursor { surface_id: "pc:items".to_string(), option_index: 0 });
+                runtime_shell.pc_item_cursor = Some(MenuCursor {
+                    surface_id: "pc:items".to_string(),
+                    option_index: 0,
+                });
             }
         }
         VisiblePlayerPcAction::DepositItem => {
@@ -7804,7 +8593,8 @@ fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Res
             if !visible_field_pack_is_open(runtime_shell) {
                 runtime_shell.pc_item_action = None;
                 runtime_shell.player_pc_action_cursor = Some(MenuCursor {
-                    surface_id: "pc:player-actions".to_string(), option_index: selected,
+                    surface_id: "pc:player-actions".to_string(),
+                    option_index: selected,
                 });
                 runtime_shell.pc_notice = Some("No items here!".to_string());
             }
@@ -7814,21 +8604,21 @@ fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Res
             if snapshot.mailbox.is_empty() {
                 runtime_shell.pc_notice = Some("There's no MAIL here.".to_string());
                 runtime_shell.player_pc_action_cursor = Some(MenuCursor {
-                    surface_id: "pc:player-actions".to_string(), option_index: selected,
+                    surface_id: "pc:player-actions".to_string(),
+                    option_index: selected,
                 });
             } else {
-                runtime_shell.mailbox_cursor = Some(MenuCursor { surface_id: "pc:mailbox".to_string(), option_index: 0 });
+                runtime_shell.mailbox_cursor = Some(MenuCursor {
+                    surface_id: "pc:mailbox".to_string(),
+                    option_index: 0,
+                });
             }
         }
         VisiblePlayerPcAction::Decoration => {
-            runtime_shell.pc_notice = Some("DECORATION".to_string());
-            runtime_shell.player_pc_action_cursor = Some(MenuCursor {
-                surface_id: "pc:player-actions".to_string(),
-                option_index: selected,
-            });
+            open_visible_decoration_menu(runtime_shell)?;
         }
         VisiblePlayerPcAction::LogOff | VisiblePlayerPcAction::TurnOff => {
-            return close_visible_player_pc(runtime_shell)
+            return close_visible_player_pc(runtime_shell);
         }
     }
     Ok(())
@@ -7836,6 +8626,7 @@ fn confirm_visible_player_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Res
 
 fn close_visible_player_pc(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.player_pc_action_cursor = None;
+    runtime_shell.decoration_menu = None;
     runtime_shell.pc_item_cursor = None;
     runtime_shell.pc_item_action = None;
     runtime_shell.pc_item_quantity = None;
@@ -7843,7 +8634,10 @@ fn close_visible_player_pc(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.mailbox_action_cursor = None;
     runtime_shell.mailbox_attach_index = None;
     if runtime_shell.pc_hub_session_open {
-        runtime_shell.pc_hub_cursor = Some(MenuCursor { surface_id: "pc:hub".to_string(), option_index: 0 });
+        runtime_shell.pc_hub_cursor = Some(MenuCursor {
+            surface_id: "pc:hub".to_string(),
+            option_index: 0,
+        });
         set_shell_action_status(runtime_shell, "ACCESS WHOSE PC?");
         return Ok(());
     }
@@ -7862,10 +8656,15 @@ fn close_visible_player_pc(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 
 fn confirm_visible_mailbox_selection(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let selected = strict_readonly_cursor_index(&runtime_shell.mailbox_cursor, "pc:mailbox", snapshot.mailbox.len())
-        .context("mailbox requires a valid cursor")?;
+    let selected = strict_readonly_cursor_index(
+        &runtime_shell.mailbox_cursor,
+        "pc:mailbox",
+        snapshot.mailbox.len(),
+    )
+    .context("mailbox requires a valid cursor")?;
     runtime_shell.mailbox_action_cursor = Some(MenuCursor {
-        surface_id: "pc:mailbox-actions".to_string(), option_index: 0,
+        surface_id: "pc:mailbox-actions".to_string(),
+        option_index: 0,
     });
     record_visible_runtime_action(runtime_shell, format!("pc:mailbox:select:{selected}"))?;
     Ok(())
@@ -7879,15 +8678,29 @@ fn confirm_visible_mailbox_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
     )
     .context("mailbox action menu requires a valid cursor")?;
     let snapshot = runtime_shell.shell.snapshot()?;
-    let mailbox_index = strict_readonly_cursor_index(&runtime_shell.mailbox_cursor, "pc:mailbox", snapshot.mailbox.len())
-        .context("mailbox action has no selected message")?;
+    let mailbox_index = strict_readonly_cursor_index(
+        &runtime_shell.mailbox_cursor,
+        "pc:mailbox",
+        snapshot.mailbox.len(),
+    )
+    .context("mailbox action has no selected message")?;
     let entry = &snapshot.mailbox[mailbox_index];
     match action {
-        0 => runtime_shell.pc_notice = Some(format!("{}\n\nFrom {}", entry.mail.message, entry.mail.author)),
+        0 => {
+            runtime_shell.pending_mail_read = Some(VisibleMailRead {
+                mail: entry.mail.clone(),
+            });
+            runtime_shell.pc_notice = None;
+        }
         1 => {
-            runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::PutMailInPack(mailbox_index));
-            runtime_shell.yes_no_cursor = Some(MenuCursor { surface_id: "pc:confirmation".to_string(), option_index: 0 });
-            runtime_shell.pc_notice = Some("The MAIL's message will be lost. Is that OK?".to_string());
+            runtime_shell.pc_confirmation =
+                Some(VisiblePcConfirmation::PutMailInPack(mailbox_index));
+            runtime_shell.yes_no_cursor = Some(MenuCursor {
+                surface_id: "pc:confirmation".to_string(),
+                option_index: 0,
+            });
+            runtime_shell.pc_notice =
+                Some("The MAIL's message will be lost. Is that OK?".to_string());
             return Ok(());
         }
         2 => {
@@ -7903,15 +8716,24 @@ fn confirm_visible_mailbox_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
     let latest = runtime_shell.shell.snapshot()?;
     if latest.mailbox.is_empty() {
         runtime_shell.mailbox_cursor = None;
-        runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 3 });
+        runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+            surface_id: "pc:player-actions".to_string(),
+            option_index: 3,
+        });
     } else if let Some(cursor) = runtime_shell.mailbox_cursor.as_mut() {
         cursor.option_index = cursor.option_index.min(latest.mailbox.len() - 1);
     }
     Ok(())
 }
 
-fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepted: bool) -> Result<()> {
-    let confirmation = runtime_shell.pc_confirmation.take().context("no PC confirmation is active")?;
+fn resolve_visible_pc_confirmation(
+    runtime_shell: &mut BevyRuntimeShell,
+    accepted: bool,
+) -> Result<()> {
+    let confirmation = runtime_shell
+        .pc_confirmation
+        .take()
+        .context("no PC confirmation is active")?;
     runtime_shell.yes_no_cursor = None;
     runtime_shell.pc_notice = None;
     if !accepted
@@ -7919,10 +8741,12 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
             &confirmation,
             VisiblePcConfirmation::NpcTrade(_)
                 | VisiblePcConfirmation::ScriptPartyIntro(_)
+                | VisiblePcConfirmation::NameRaterRename
                 | VisiblePcConfirmation::MoveDeletion { .. }
                 | VisiblePcConfirmation::MoveTutorForget { .. }
                 | VisiblePcConfirmation::MoveTutorStop { .. }
                 | VisiblePcConfirmation::DayCareWithdraw { .. }
+                | VisiblePcConfirmation::DayCareEggPickup
         )
     {
         return Ok(());
@@ -7959,15 +8783,22 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
         }
         VisiblePcConfirmation::PutMailInPack(mailbox_index) => {
             match runtime_shell.shell.move_mailbox_mail_to_bag(mailbox_index) {
-                Ok(_) => runtime_shell.pc_notice = Some("The MAIL was put in the PACK.".to_string()),
-                Err(error) if error.to_string().contains("bag") => runtime_shell.pc_notice = Some("The PACK is full.".to_string()),
+                Ok(_) => {
+                    runtime_shell.pc_notice = Some("The MAIL was put in the PACK.".to_string())
+                }
+                Err(error) if error.to_string().contains("bag") => {
+                    runtime_shell.pc_notice = Some("The PACK is full.".to_string())
+                }
                 Err(error) => return Err(error),
             }
             runtime_shell.mailbox_action_cursor = None;
             let snapshot = runtime_shell.shell.snapshot()?;
             if snapshot.mailbox.is_empty() {
                 runtime_shell.mailbox_cursor = None;
-                runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 3 });
+                runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+                    surface_id: "pc:player-actions".to_string(),
+                    option_index: 3,
+                });
             } else if let Some(cursor) = runtime_shell.mailbox_cursor.as_mut() {
                 cursor.option_index = cursor.option_index.min(snapshot.mailbox.len() - 1);
             }
@@ -7983,14 +8814,13 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
                 anyhow::bail!("NPC trade confirmation contains a non-trade party request");
             };
             if accepted {
-                runtime_shell.pending_script_party_selection = Some(
-                    PendingScriptPartySelection::NpcTrade {
+                runtime_shell.pending_script_party_selection =
+                    Some(PendingScriptPartySelection::NpcTrade {
                         origin_map_name,
                         source_script,
                         command_index,
                         trade_id,
-                    },
-                );
+                    });
                 open_visible_party_menu(runtime_shell)?;
                 set_shell_action_status(runtime_shell, "CHOOSE A POKEMON");
             } else {
@@ -8006,41 +8836,105 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
         }
         VisiblePcConfirmation::ScriptPartyIntro(pending) => {
             if accepted {
-                let status = match &pending {
-                    PendingScriptPartySelection::NameRater => "WHICH POKéMON'S NICKNAME?",
-                    PendingScriptPartySelection::MoveDeletion { party_index: None } => {
-                        "WHICH POKéMON?"
+                match pending {
+                    PendingScriptPartySelection::NameRater => {
+                        runtime_shell.pending_script_party_selection =
+                            Some(PendingScriptPartySelection::NameRater);
+                        let mut boundaries = visible_exported_special_text_boundaries(
+                            runtime_shell,
+                            "NameRaterWhichMonText",
+                            "_NameRaterWhichMonText",
+                        )?;
+                        runtime_shell.special_boundary = boundaries.pop_front();
+                        runtime_shell.special_boundary_queue = boundaries;
+                        set_shell_action_status(runtime_shell, "WHICH POKEMON?");
                     }
-                    PendingScriptPartySelection::DayCareDeposit { .. } => "WHICH POKéMON?",
+                    PendingScriptPartySelection::MoveDeletion { party_index: None } => {
+                        runtime_shell.pending_script_party_selection =
+                            Some(PendingScriptPartySelection::MoveDeletion { party_index: None });
+                        let mut boundaries = visible_exported_special_text_boundaries(
+                            runtime_shell,
+                            "DeleterAskWhichMonText",
+                            "_DeleterAskWhichMonText",
+                        )?;
+                        runtime_shell.special_boundary = boundaries.pop_front();
+                        runtime_shell.special_boundary_queue = boundaries;
+                        set_shell_action_status(runtime_shell, "WHICH POKEMON?");
+                    }
+                    pending @ PendingScriptPartySelection::DayCareDeposit { .. } => {
+                        runtime_shell.pending_script_party_selection = Some(pending);
+                        let mut boundaries = visible_exported_special_text_boundaries(
+                            runtime_shell,
+                            "WhatShouldIRaiseText",
+                            "_WhatShouldIRaiseText",
+                        )?;
+                        runtime_shell.special_boundary = boundaries.pop_front();
+                        runtime_shell.special_boundary_queue = boundaries;
+                        set_shell_action_status(runtime_shell, "WHICH POKéMON?");
+                    }
                     _ => anyhow::bail!(
                         "script party intro contains an unsupported selection request"
                     ),
-                };
-                runtime_shell.pending_script_party_selection = Some(pending);
-                open_visible_party_menu(runtime_shell)?;
-                set_shell_action_status(runtime_shell, status);
+                }
             } else {
-                let (label, details) = match pending {
-                    PendingScriptPartySelection::NameRater => (
-                        "NameRaterComeAgainText",
-                        vec!["OK, then. Come".to_string(), "again sometime.".to_string()],
-                    ),
-                    PendingScriptPartySelection::MoveDeletion { party_index: None } => (
-                        "DeleterNoComeAgainText",
-                        vec!["No? Come visit me".to_string(), "again.".to_string()],
-                    ),
-                    PendingScriptPartySelection::DayCareDeposit { .. } => (
-                        "DayCareOhFineText",
-                        vec!["Oh, fine then.".to_string(), "Come again.".to_string()],
-                    ),
+                let source_text = match pending {
+                    PendingScriptPartySelection::NameRater => {
+                        Some(("NameRaterComeAgainText", "_NameRaterComeAgainText"))
+                    }
+                    PendingScriptPartySelection::MoveDeletion { party_index: None } => {
+                        Some(("DeleterNoComeAgainText", "_DeleterNoComeAgainText"))
+                    }
+                    PendingScriptPartySelection::DayCareDeposit { .. } => {
+                        let mut boundaries = visible_exported_special_text_boundaries(
+                            runtime_shell,
+                            "OhFineThenText",
+                            "_OhFineThenText",
+                        )?;
+                        boundaries.extend(visible_exported_special_text_boundaries(
+                            runtime_shell,
+                            "ComeAgainText",
+                            "_ComeAgainText",
+                        )?);
+                        runtime_shell.special_boundary = boundaries.pop_front();
+                        runtime_shell.special_boundary_queue = boundaries;
+                        None
+                    }
                     _ => anyhow::bail!(
                         "script party intro contains an unsupported selection request"
                     ),
                 };
-                runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-                    label: label.to_string(),
-                    details,
-                });
+                if let Some((label, text_target)) = source_text {
+                    let mut boundaries = visible_exported_special_text_boundaries(
+                        runtime_shell,
+                        label,
+                        text_target,
+                    )?;
+                    runtime_shell.special_boundary = boundaries.pop_front();
+                    runtime_shell.special_boundary_queue = boundaries;
+                }
+            }
+            mark_runtime_snapshot_dirty(runtime_shell);
+        }
+        VisiblePcConfirmation::NameRaterRename => {
+            if accepted {
+                let mut boundaries = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "NameRaterWhatNameText",
+                    "_NameRaterWhatNameText",
+                )?;
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
+                set_shell_action_status(runtime_shell, "WHAT NAME?");
+            } else {
+                runtime_shell.pending_script_party_selection = None;
+                let mut boundaries = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "NameRaterComeAgainText",
+                    "_NameRaterComeAgainText",
+                )?;
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
+                set_shell_action_status(runtime_shell, "COME AGAIN");
             }
             mark_runtime_snapshot_dirty(runtime_shell);
         }
@@ -8060,22 +8954,31 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
                     "move deletion outcome={:?} checksum={:?}",
                     special.outcome.effect, special.state_checksum
                 ));
-                queue_visible_shell_sound_effect(runtime_shell, "SFX_MOVE_DELETED")?;
-                runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-                    label: "DeleterForgotMoveText".to_string(),
-                    details: vec![
-                        "Done! Your POKéMON".to_string(),
-                        "forgot the move.".to_string(),
-                    ],
-                });
+                let mut completion_pages = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "DeleterForgotMoveText",
+                    "_DeleterForgotMoveText",
+                )?;
+                let completion = completion_pages
+                    .pop_front()
+                    .context("Move Deleter completion text rendered no source page")?;
+                anyhow::ensure!(
+                    completion_pages.is_empty(),
+                    "Move Deleter completion unexpectedly rendered multiple source pages"
+                );
+                begin_visible_wait_play_sfx_sequence_with_completion(
+                    runtime_shell,
+                    ["SFX_MOVE_DELETED".to_string()],
+                    VisibleWaitPlaySfxCompletion::SpecialBoundary(completion),
+                )?;
             } else {
-                runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-                    label: "DeleterNoComeAgainText".to_string(),
-                    details: vec![
-                        "No? Come visit me".to_string(),
-                        "again.".to_string(),
-                    ],
-                });
+                let mut boundaries = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "DeleterNoComeAgainText",
+                    "_DeleterNoComeAgainText",
+                )?;
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
             }
             mark_runtime_snapshot_dirty(runtime_shell);
         }
@@ -8084,11 +8987,53 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
             party_index,
         } => {
             if accepted {
-                runtime_shell.pending_script_party_selection = Some(
-                    PendingScriptPartySelection::MoveTutor {
+                runtime_shell.pending_script_party_selection =
+                    Some(PendingScriptPartySelection::MoveTutor {
                         move_id,
                         party_index: Some(party_index),
-                    },
+                    });
+                let snapshot = runtime_shell.shell.snapshot()?;
+                let nickname = snapshot
+                    .party
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == party_index)
+                    .map(|slot| {
+                        if slot.pokemon.nickname.trim().is_empty() {
+                            canonical_species_display_name(&slot.pokemon.species.id)
+                        } else {
+                            slot.pokemon.nickname.clone()
+                        }
+                    })
+                    .context("Move Tutor party selection is no longer present")?;
+                let retained_move_id = match runtime_shell
+                    .pending_script_party_selection
+                    .as_ref()
+                {
+                    Some(PendingScriptPartySelection::MoveTutor { move_id, .. }) => {
+                        move_id.clone()
+                    }
+                    _ => unreachable!("Move Tutor selection was just retained"),
+                };
+                let mut prompt = visible_move_tutor_text_boundaries(
+                    runtime_shell,
+                    "MoveAskForgetText",
+                    "_MoveAskForgetText",
+                    &nickname,
+                    &retained_move_id,
+                )?;
+                runtime_shell.pc_notice = Some(
+                    prompt
+                        .pop_front()
+                        .context("Move Tutor move-list prompt rendered no source page")?
+                        .details
+                        .into_iter()
+                        .next()
+                        .context("Move Tutor move-list prompt page is empty")?,
+                );
+                anyhow::ensure!(
+                    prompt.is_empty(),
+                    "Move Tutor move-list prompt rendered multiple source pages"
                 );
                 runtime_shell.party_move_cursor = Some(MenuCursor {
                     surface_id: party_move_cursor_surface_id(party_index),
@@ -8096,7 +9041,38 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
                 });
                 set_shell_action_status(runtime_shell, "WHICH MOVE SHOULD BE FORGOTTEN?");
             } else {
-                runtime_shell.pc_notice = Some("Stop learning this move?".to_string());
+                let snapshot = runtime_shell.shell.snapshot()?;
+                let nickname = snapshot
+                    .party
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == party_index)
+                    .map(|slot| {
+                        if slot.pokemon.nickname.trim().is_empty() {
+                            canonical_species_display_name(&slot.pokemon.species.id)
+                        } else {
+                            slot.pokemon.nickname.clone()
+                        }
+                    })
+                    .context("Move Tutor party selection is no longer present")?;
+                let mut boundaries = visible_move_tutor_text_boundaries(
+                    runtime_shell,
+                    "StopLearningMoveText",
+                    "_StopLearningMoveText",
+                    &nickname,
+                    &move_id,
+                )?;
+                runtime_shell.pc_notice = Some(
+                    boundaries
+                        .pop_back()
+                        .context("Move Tutor stop prompt rendered no source page")?
+                        .details
+                        .into_iter()
+                        .next()
+                        .context("Move Tutor stop prompt page is empty")?,
+                );
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
                 runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::MoveTutorStop {
                     move_id,
                     party_index,
@@ -8132,13 +9108,15 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
                         }
                     })
                     .context("Move Tutor party selection is no longer present")?;
-                runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-                    label: "DidNotLearnMoveText".to_string(),
-                    details: vec![format!(
-                        "{nickname} did not learn\n{}.",
-                        move_id.replace('_', " ")
-                    )],
-                });
+                let mut boundaries = visible_move_tutor_text_boundaries(
+                    runtime_shell,
+                    "DidNotLearnMoveText",
+                    "_DidNotLearnMoveText",
+                    &nickname,
+                    &move_id,
+                )?;
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
             } else {
                 let snapshot = runtime_shell.shell.snapshot()?;
                 let nickname = snapshot
@@ -8154,16 +9132,28 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
                         }
                     })
                     .context("Move Tutor party selection is no longer present")?;
-                runtime_shell.pc_notice = Some(format!(
-                    "{nickname} is\ntrying to learn\n{}.\nIt can't learn\nover four moves.\nDelete a move?",
-                    move_id.replace('_', " ")
-                ));
-                runtime_shell.pc_confirmation = Some(
-                    VisiblePcConfirmation::MoveTutorForget {
-                        move_id,
-                        party_index,
-                    },
+                let mut boundaries = visible_move_tutor_text_boundaries(
+                    runtime_shell,
+                    "AskForgetMoveText",
+                    "_AskForgetMoveText",
+                    &nickname,
+                    &move_id,
+                )?;
+                runtime_shell.pc_notice = Some(
+                    boundaries
+                        .pop_back()
+                        .context("Move Tutor forget prompt has no final yes/no page")?
+                        .details
+                        .into_iter()
+                        .next()
+                        .context("Move Tutor forget prompt final page is empty")?,
                 );
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
+                runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::MoveTutorForget {
+                    move_id,
+                    party_index,
+                });
                 runtime_shell.yes_no_cursor = Some(MenuCursor {
                     surface_id: "pc:confirmation".to_string(),
                     option_index: 0,
@@ -8172,12 +9162,23 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
             }
             mark_runtime_snapshot_dirty(runtime_shell);
         }
-        VisiblePcConfirmation::DayCareWithdraw { caretaker } => {
+        VisiblePcConfirmation::DayCareWithdraw {
+            caretaker,
+            confirm_withdrawal,
+        } => {
             if !accepted {
-                runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
-                    label: "DayCareOhFineText".to_string(),
-                    details: vec!["Oh, fine then.".to_string(), "Come again.".to_string()],
-                });
+                let mut boundaries = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "DayCareOhFineText",
+                    "_OhFineThenText",
+                )?;
+                boundaries.extend(visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "DayCareComeAgainText",
+                    "_ComeAgainText",
+                )?);
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(());
             }
@@ -8186,49 +9187,140 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
             } else {
                 RuntimeDayCareCaretaker::Lady
             };
+            let before = runtime_shell.shell.snapshot()?;
+            let resident = match caretaker_kind {
+                RuntimeDayCareCaretaker::Man => &before.day_care.man,
+                RuntimeDayCareCaretaker::Lady => &before.day_care.lady,
+            };
+            let pokemon = resident
+                .pokemon
+                .as_ref()
+                .context("Day-Care withdrawal confirmation has no resident Pokemon")?;
+            let nickname = pokemon.nickname.clone();
+            let gained = pokemon.level.saturating_sub(resident.initial_level);
+            if !confirm_withdrawal {
+                let fee = 100u32.saturating_add(u32::from(gained) * 100);
+                let mut named_buffers = before.script_events.named_buffers.clone();
+                named_buffers.insert("STRING_BUFFER_1".to_string(), nickname.clone());
+                named_buffers.insert(
+                    "wStringBuffer2 + 1".to_string(),
+                    gained.to_string(),
+                );
+                named_buffers.insert("wStringBuffer2 + 2".to_string(), fee.to_string());
+                let mut boundaries = visible_exported_special_text_boundaries_with_named_buffers(
+                    runtime_shell,
+                    "DayCareYourMonHasGrownText",
+                    "_YourMonHasGrownText",
+                    &named_buffers,
+                )?;
+                let prompt = boundaries
+                    .pop_back()
+                    .context("Day-Care price text has no final yes/no page")?;
+                runtime_shell.pc_notice = Some(
+                    prompt
+                        .details
+                        .into_iter()
+                        .next()
+                        .context("Day-Care price final page is empty")?,
+                );
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
+                runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::DayCareWithdraw {
+                    caretaker,
+                    confirm_withdrawal: true,
+                });
+                runtime_shell.yes_no_cursor = Some(MenuCursor {
+                    surface_id: "pc:confirmation".to_string(),
+                    option_index: 0,
+                });
+                set_shell_action_status(runtime_shell, "DAY-CARE RESULTS");
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             let used = runtime_shell.shell.use_day_care(
                 caretaker_kind,
                 RuntimeDayCareAction::Withdraw,
                 None,
             )?;
             let snapshot = runtime_shell.shell.snapshot()?;
-            let interaction = snapshot.day_care.last_interaction.as_ref().context("Day-Care withdrawal produced no result")?;
+            let interaction = snapshot
+                .day_care
+                .last_interaction
+                .as_ref()
+                .context("Day-Care withdrawal produced no result")?;
             runtime_shell.special_boundary_queue.clear();
-            runtime_shell.special_boundary = Some(match interaction.reason.as_deref() {
+            let (label, text_target) = match interaction.reason.as_deref() {
                 None if interaction.success => {
-                    let species = interaction
-                        .pokemon
-                        .as_deref()
-                        .context("successful Day-Care withdrawal is missing its Pokémon")?;
-                    SpecialBoundaryDisplay {
-                        label: "DayCareWithdrawText".to_string(),
-                        details: vec![format!(
-                            "Perfect! Here's your\n{} back.",
-                            canonical_species_display_name(species)
-                        )],
-                    }
+                    ("DayCareWithdrawText", "_PerfectHeresYourMonText")
                 }
-                Some("party_full") => SpecialBoundaryDisplay {
-                    label: "DayCarePartyFullText".to_string(),
-                    details: vec!["You have no room\nfor it.".to_string()],
-                },
-                Some("not_enough_money") => SpecialBoundaryDisplay {
-                    label: "DayCareNotEnoughMoneyText".to_string(),
-                    details: vec!["You don't have\nenough money.".to_string()],
-                },
-                _ => SpecialBoundaryDisplay {
-                    label: "DayCareOhFineText".to_string(),
-                    details: vec!["Oh, fine then.".to_string()],
-                },
-            });
+                Some("party_full") => ("DayCarePartyFullText", "_HaveNoRoomText"),
+                Some("not_enough_money") => {
+                    ("DayCareNotEnoughMoneyText", "_NotEnoughMoneyText")
+                }
+                _ => ("DayCareOhFineText", "_OhFineThenText"),
+            };
+            let mut boundaries = visible_exported_special_text_boundaries(
+                runtime_shell,
+                label,
+                text_target,
+            )?;
             if interaction.success {
                 runtime_shell.pending_special_cry = interaction.pokemon.clone();
-                runtime_shell.special_boundary_queue.push_back(SpecialBoundaryDisplay {
-                    label: "DayCareGotBackText".to_string(),
-                    details: vec!["Come again.".to_string()],
-                });
+                boundaries.extend(visible_exported_special_text_boundaries_with_buffer(
+                    runtime_shell,
+                    "DayCareGotBackText",
+                    "_GotBackMonText",
+                    Some(&nickname),
+                )?);
             }
-            runtime_shell.last_audio_events.push(format!("day-care withdrawal outcome={:?}", used.outcome.effect));
+            boundaries.extend(visible_exported_special_text_boundaries(
+                runtime_shell,
+                "DayCareComeAgainText",
+                "_ComeAgainText",
+            )?);
+            runtime_shell.special_boundary = boundaries.pop_front();
+            runtime_shell.special_boundary_queue = boundaries;
+            runtime_shell.last_audio_events.push(format!(
+                "day-care withdrawal outcome={:?}",
+                used.outcome.effect
+            ));
+            mark_runtime_snapshot_dirty(runtime_shell);
+        }
+        VisiblePcConfirmation::DayCareEggPickup => {
+            if !accepted {
+                runtime_shell
+                    .shell
+                    .set_script_runtime_accumulator("FALSE")?;
+                let mut boundaries = visible_exported_special_text_boundaries(
+                    runtime_shell,
+                    "DayCareIllKeepItThanksText",
+                    "_IllKeepItThanksText",
+                )?;
+                runtime_shell.special_boundary = boundaries.pop_front();
+                runtime_shell.special_boundary_queue = boundaries;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
+            let used = runtime_shell.shell.use_day_care(
+                RuntimeDayCareCaretaker::Man,
+                RuntimeDayCareAction::CollectEgg,
+                None,
+            )?;
+            let success = runtime_shell
+                .shell
+                .snapshot()?
+                .day_care
+                .last_interaction
+                .as_ref()
+                .is_some_and(|interaction| interaction.success);
+            runtime_shell
+                .shell
+                .set_script_runtime_accumulator(if success { "FALSE" } else { "TRUE" })?;
+            runtime_shell.last_audio_events.push(format!(
+                "day-care egg pickup outcome={:?}",
+                used.outcome.effect
+            ));
+            activate_visible_special_boundary_if_needed(runtime_shell, &used.outcome.effect)?;
             mark_runtime_snapshot_dirty(runtime_shell);
         }
         VisiblePcConfirmation::BuenaPrize { item_id } => {
@@ -8264,9 +9356,14 @@ fn resolve_visible_pc_confirmation(runtime_shell: &mut BevyRuntimeShell, accepte
 }
 
 fn attach_visible_mailbox_mail(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let mailbox_index = runtime_shell.mailbox_attach_index.context("no mailbox message selected")?;
+    let mailbox_index = runtime_shell
+        .mailbox_attach_index
+        .context("no mailbox message selected")?;
     let party_index = selected_party_index(runtime_shell)?;
-    match runtime_shell.shell.attach_mailbox_mail_to_party(mailbox_index, party_index) {
+    match runtime_shell
+        .shell
+        .attach_mailbox_mail_to_party(mailbox_index, party_index)
+    {
         Ok(_) => {
             runtime_shell.pc_notice = Some("The MAIL was attached.".to_string());
             runtime_shell.mailbox_attach_index = None;
@@ -8274,13 +9371,23 @@ fn attach_visible_mailbox_mail(runtime_shell: &mut BevyRuntimeShell) -> Result<(
             let snapshot = runtime_shell.shell.snapshot()?;
             if snapshot.mailbox.is_empty() {
                 runtime_shell.mailbox_cursor = None;
-                runtime_shell.player_pc_action_cursor = Some(MenuCursor { surface_id: "pc:player-actions".to_string(), option_index: 3 });
+                runtime_shell.player_pc_action_cursor = Some(MenuCursor {
+                    surface_id: "pc:player-actions".to_string(),
+                    option_index: 3,
+                });
             } else {
-                runtime_shell.mailbox_cursor = Some(MenuCursor { surface_id: "pc:mailbox".to_string(), option_index: mailbox_index.min(snapshot.mailbox.len() - 1) });
+                runtime_shell.mailbox_cursor = Some(MenuCursor {
+                    surface_id: "pc:mailbox".to_string(),
+                    option_index: mailbox_index.min(snapshot.mailbox.len() - 1),
+                });
             }
         }
-        Err(error) if error.to_string().contains("Egg") => runtime_shell.pc_notice = Some("An EGG can't hold MAIL.".to_string()),
-        Err(error) if error.to_string().contains("already holding") => runtime_shell.pc_notice = Some("That Pokemon is holding an item.".to_string()),
+        Err(error) if error.to_string().contains("Egg") => {
+            runtime_shell.pc_notice = Some("An EGG can't hold MAIL.".to_string())
+        }
+        Err(error) if error.to_string().contains("already holding") => {
+            runtime_shell.pc_notice = Some("That Pokemon is holding an item.".to_string())
+        }
         Err(error) => return Err(error),
     }
     Ok(())
@@ -8288,6 +9395,7 @@ fn attach_visible_mailbox_mail(runtime_shell: &mut BevyRuntimeShell) -> Result<(
 
 fn turn_off_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     record_visible_runtime_action(runtime_shell, "pc:hub:turn_off")?;
+    queue_visible_shell_sound_effect(runtime_shell, "SFX_SHUT_DOWN_PC")?;
     runtime_shell.pc_hub_session_open = false;
     runtime_shell.pc_hub_cursor = None;
     runtime_shell.hall_of_fame_pc_index = None;
@@ -8407,16 +9515,13 @@ fn begin_visible_plain_battle_map_reload(runtime_shell: &mut BevyRuntimeShell) -
     runtime_shell.pending_plain_battle_map_reload = false;
     // Random encounters execute WildBattleScript's reloadmapafterbattle even
     // though they do not have a compiled map-script cursor in the desktop
-    // runtime. Preserve that same MAPSETUP_RELOADMAP tiles-callback and white
-    // fade boundary before field input resumes.
+    // runtime. Preserve MAPSETUP_RELOADMAP's TILES then SPRITES callbacks and
+    // white fade boundary before field input resumes.
     runtime_shell.pending_scene_script = None;
-    runtime_shell.map_callback_return_cursor = None;
     runtime_shell.map_reload_return_cursor = None;
-    runtime_shell.pending_map_callbacks = visible_current_map_callback_scripts(
-        runtime_shell,
-        Some("MAPCALLBACK_TILES"),
-    )?;
-    take_next_visible_map_callback(runtime_shell)?;
+    runtime_shell
+        .shell
+        .apply_current_map_setup_callbacks("MAPSETUP_RELOADMAP")?;
     continue_visible_script_after_prompt(runtime_shell)?;
     runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::MapReloadFadeIn);
     runtime_shell.screen_fade = Some(VisibleScreenFade::new(
@@ -8425,4 +9530,29 @@ fn begin_visible_plain_battle_map_reload(runtime_shell: &mut BevyRuntimeShell) -
         8,
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod battle_messages_tests {
+    use super::{VISIBLE_BILL_PC_ACTIONS, visible_bill_pc_action_label};
+
+    #[test]
+    fn bills_pc_top_menu_uses_the_asm_pokemon_logo_labels() {
+        let labels = VISIBLE_BILL_PC_ACTIONS
+            .iter()
+            .map(|action| visible_bill_pc_action_label(*action))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            [
+                "WITHDRAW <PK><MN>",
+                "DEPOSIT <PK><MN>",
+                "CHANGE BOX",
+                "MOVE <PK><MN> W/O MAIL",
+                "SEE YA!",
+            ],
+            "BillsPC.MenuData.strings is the source for every rendered top-menu label"
+        );
+    }
 }

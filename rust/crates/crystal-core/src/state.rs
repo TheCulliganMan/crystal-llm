@@ -11,12 +11,12 @@ use crate::models::{
 use crate::random::{
     CrystalRandom, CrystalRandomState, DividerSource, LinkBattleRandom, LinkBattleRandomState,
 };
+use crate::systems::field_moves::{
+    FieldMoveBlockOutcome, FieldMoveFlagOutcome, FieldMoveTravelOutcome,
+};
 use crate::systems::script_audio::{
     SCRIPT_AUDIO_CRY_COMMANDS, SCRIPT_AUDIO_MUSIC_COMMANDS, SCRIPT_AUDIO_MUSIC_FADE_COMMANDS,
     SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS, SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS,
-};
-use crate::systems::script_runtime::{
-    ScriptRuntimeCpuCondition, script_runtime_command_arg_counts,
 };
 use crate::systems::script_text::SCRIPT_TEXT_LABEL_COMMANDS;
 use crate::systems::script_warps::{SCRIPT_MAP_LOAD_COMMANDS, SCRIPT_MAP_REFRESH_COMMANDS};
@@ -26,7 +26,7 @@ use crate::systems::special_routines::{
 };
 use crate::systems::step_events::StepEventCounters;
 use crate::systems::time::{ClockTime, TimeState};
-use crate::timing::Frame;
+use crate::timing::{Frame, wrapping_byte_counter_frames, wrapping_byte_counter_ticks};
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
 use crate::world::session::{
@@ -80,6 +80,9 @@ pub struct GameState {
     pub moms_money: u32,
     pub mom_saving_active: bool,
     pub mom_saving_some_money: bool,
+    pub mom_item_index: u8,
+    pub mom_item_trigger_balance: u32,
+    pub pending_mom_purchase: Option<PendingMomPurchase>,
     pub coins: u16,
     pub pokedex: PokedexState,
     pub link_battle_stats: LinkBattleStats,
@@ -99,6 +102,9 @@ pub struct GameState {
     pub repel_steps_remaining: u16,
     pub active_repel_item: Option<String>,
     pub registered_key_item: Option<String>,
+    /// Exact persisted `wRadioTuningKnob` byte. The Pokegear changes it by
+    /// two and clamps it to the even range 0..=80.
+    pub radio_tuning_knob: u8,
     pub dig_warp_map_name: Option<String>,
     pub dig_warp_index: Option<u16>,
     pub previous_warp_map_name: Option<String>,
@@ -175,6 +181,9 @@ impl<'de> Deserialize<'de> for GameState {
             moms_money: u32,
             mom_saving_active: bool,
             mom_saving_some_money: bool,
+            mom_item_index: u8,
+            mom_item_trigger_balance: u32,
+            pending_mom_purchase: Option<PendingMomPurchase>,
             coins: u16,
             pokedex: PokedexState,
             link_battle_stats: LinkBattleStats,
@@ -195,6 +204,7 @@ impl<'de> Deserialize<'de> for GameState {
             repel_steps_remaining: u16,
             active_repel_item: Option<String>,
             registered_key_item: Option<String>,
+            radio_tuning_knob: u8,
             dig_warp_map_name: Option<String>,
             dig_warp_index: Option<u16>,
             #[serde(default)]
@@ -263,6 +273,9 @@ impl<'de> Deserialize<'de> for GameState {
             moms_money: raw.moms_money,
             mom_saving_active: raw.mom_saving_active,
             mom_saving_some_money: raw.mom_saving_some_money,
+            mom_item_index: raw.mom_item_index,
+            mom_item_trigger_balance: raw.mom_item_trigger_balance,
+            pending_mom_purchase: raw.pending_mom_purchase,
             coins: raw.coins,
             pokedex: raw.pokedex,
             link_battle_stats: raw.link_battle_stats,
@@ -282,6 +295,7 @@ impl<'de> Deserialize<'de> for GameState {
             repel_steps_remaining: raw.repel_steps_remaining,
             active_repel_item: raw.active_repel_item,
             registered_key_item: raw.registered_key_item,
+            radio_tuning_knob: raw.radio_tuning_knob,
             dig_warp_map_name: raw.dig_warp_map_name,
             dig_warp_index: raw.dig_warp_index,
             previous_warp_map_name: raw.previous_warp_map_name,
@@ -366,6 +380,9 @@ impl GameState {
             moms_money: 0,
             mom_saving_active: false,
             mom_saving_some_money: false,
+            mom_item_index: 0,
+            mom_item_trigger_balance: 0,
+            pending_mom_purchase: None,
             coins: 0,
             pokedex: PokedexState::default(),
             link_battle_stats: LinkBattleStats::default(),
@@ -385,6 +402,7 @@ impl GameState {
             repel_steps_remaining: 0,
             active_repel_item: None,
             registered_key_item: None,
+            radio_tuning_knob: 0,
             dig_warp_map_name: None,
             dig_warp_index: None,
             previous_warp_map_name: None,
@@ -1595,9 +1613,6 @@ impl DayCareState {
 impl DayCareResidentState {
     fn validate_saved_state(&self, field: &str) -> Result<(), String> {
         let Some(pokemon) = &self.pokemon else {
-            if self.active {
-                return Err(format!("{field}.active cannot be saved without a Pokemon"));
-            }
             if self.initial_experience != 0 {
                 return Err(format!(
                     "{field}.initial_experience {} cannot be saved without a Pokemon",
@@ -2443,6 +2458,34 @@ pub struct PendingStaticWildBattleTerminal {
     pub win_cleanup_applied: bool,
 }
 
+/// A purchase already delivered by `Mom_GiveItemOrDoll` whose deferred
+/// memory script has not yet deducted the cost and advanced Mom's table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingMomPurchase {
+    pub progression: bool,
+    pub selected_index: u8,
+    pub cost: u32,
+    pub target: String,
+    pub decoration_flag: Option<String>,
+}
+
+impl PendingMomPurchase {
+    pub fn validate_saved_state(&self) -> Result<(), String> {
+        if self.cost == 0 || self.cost > 0x00ff_ffff {
+            return Err(format!(
+                "pending Mom purchase cost {} is outside cartridge range 1..=0xffffff",
+                self.cost
+            ));
+        }
+        validate_script_runtime_token("pending_mom_purchase.target", &self.target)?;
+        if let Some(flag) = &self.decoration_flag {
+            validate_script_runtime_token("pending_mom_purchase.decoration_flag", flag)?;
+        }
+        Ok(())
+    }
+}
+
 impl PendingStaticWildBattleTerminal {
     pub fn validate_saved_state(&self) -> Result<(), String> {
         validate_script_runtime_token(
@@ -2512,6 +2555,7 @@ pub enum BattleMemory {
     StaticWild {
         battle_type: String,
         battle_music: String,
+        roaming_slot: Option<u8>,
         origin_map_name: String,
         species: String,
         level: u8,
@@ -2562,6 +2606,7 @@ impl<'de> Deserialize<'de> for BattleMemory {
             StaticWild {
                 battle_type: String,
                 battle_music: String,
+                roaming_slot: Option<u8>,
                 origin_map_name: String,
                 species: String,
                 level: u8,
@@ -2613,6 +2658,7 @@ impl<'de> Deserialize<'de> for BattleMemory {
             RawBattleMemory::StaticWild {
                 battle_type,
                 battle_music,
+                roaming_slot,
                 origin_map_name,
                 species,
                 level,
@@ -2624,6 +2670,7 @@ impl<'de> Deserialize<'de> for BattleMemory {
             } => Self::StaticWild {
                 battle_type,
                 battle_music,
+                roaming_slot,
                 origin_map_name,
                 species,
                 level,
@@ -2710,6 +2757,7 @@ impl BattleMemory {
             Self::StaticWild {
                 battle_type,
                 battle_music,
+                roaming_slot,
                 origin_map_name,
                 species,
                 level,
@@ -2721,6 +2769,20 @@ impl BattleMemory {
             } => {
                 validate_script_runtime_token("battle.static_wild.battle_type", battle_type)?;
                 validate_script_runtime_token("battle.static_wild.battle_music", battle_music)?;
+                if battle_type == "BATTLETYPE_ROAMING" {
+                    let slot = roaming_slot.ok_or_else(|| {
+                        "battle.static_wild BATTLETYPE_ROAMING requires roaming_slot".to_string()
+                    })?;
+                    if usize::from(slot) >= ROAMING_POKEMON_SLOT_COUNT {
+                        return Err(format!(
+                            "battle.static_wild.roaming_slot {slot} is outside slot range 0..{ROAMING_POKEMON_SLOT_COUNT}"
+                        ));
+                    }
+                } else if roaming_slot.is_some() {
+                    return Err(format!(
+                        "battle.static_wild type {battle_type} must not declare roaming_slot"
+                    ));
+                }
                 validate_script_runtime_token(
                     "battle.static_wild.origin_map_name",
                     origin_map_name,
@@ -2940,6 +3002,20 @@ pub struct PhoneCallTimerState {
     pub last_minute: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingFieldTravel {
+    pub move_id: String,
+    pub actor_party_index: Option<usize>,
+    pub actor_species: Option<String>,
+    pub source_map: String,
+    pub destination_map: String,
+    pub destination_tile: TilePosition,
+    pub destination_spawn_identifier: Option<u16>,
+    pub destination_warp_index: Option<u16>,
+    pub flypoint_flag: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeMemory {
@@ -2950,15 +3026,9 @@ pub struct ScriptRuntimeMemory {
     pub active_battle_combat: Option<BattleCombatState>,
     pub script_value: Option<String>,
     pub variables: BTreeMap<String, String>,
-    pub variable_writes: Vec<ScriptRuntimeVariableWrite>,
     pub memory: BTreeMap<String, String>,
-    pub effects: Vec<ScriptRuntimeEffect>,
     pub named_buffers: BTreeMap<String, String>,
-    pub asm_directives: Vec<ScriptRuntimeAsmDirective>,
-    pub numeric_buffer_writes: Vec<ScriptRuntimeNumericBufferWrite>,
-    pub elevator_floors: Vec<ScriptRuntimeElevatorFloor>,
     pub stone_table_entries: Vec<ScriptRuntimeStoneTableEntry>,
-    pub decoration_descriptions: Vec<ScriptRuntimeDecorationDescription>,
     pub variable_sprites: BTreeMap<String, String>,
     pub phone_numbers: BTreeSet<String>,
     /// Crystal's ten `wPhoneList` slots in exact slot order. `None` preserves
@@ -2966,17 +3036,33 @@ pub struct ScriptRuntimeMemory {
     /// later slot and which therefore affects deterministic caller sampling.
     pub phone_number_order: Vec<Option<String>>,
     pub phone_call_timer: PhoneCallTimerState,
-    pub special_phone_calls: Vec<String>,
+    /// Crystal's live `wSpecialPhoneCallID` slot. This is gameplay state, not
+    /// a drainable command record; it remains set until `SPECIALCALL_NONE`.
+    pub special_phone_call: Option<String>,
     pub pending_delays: Vec<ScriptRuntimeDelay>,
     pub pending_earthquakes: Vec<ScriptRuntimeEarthquake>,
     pub pending_emotes: Vec<ScriptRuntimeEmote>,
+    /// Exact Cut/Whirlpool block data captured by the field-move check and
+    /// consumed later by the source `CutDownTreeOrGrass` or
+    /// `DisappearWhirlpool` callasm boundary.
+    pub pending_block_field_move: Option<FieldMoveBlockOutcome>,
+    /// Flash actor/flag data validated before the use text and consumed by
+    /// the later source `BlindingFlash` callasm.
+    pub pending_flash_field_move: Option<FieldMoveFlagOutcome>,
+    /// Surf actor/travel data validated before the use text and consumed by
+    /// the later source `UsedSurfScript` movement boundary.
+    pub pending_surf_field_move: Option<FieldMoveTravelOutcome>,
+    /// Remaining Waterfall path validated before the use text and consumed
+    /// one `turn_waterfall` step at a time by the source script loop.
+    pub pending_waterfall_field_move: Option<FieldMoveTravelOutcome>,
+    /// Cross-map Fly/Dig/Teleport transition prepared by the field-move menu
+    /// and committed only at the source warp boundary after departure.
+    pub pending_field_travel: Option<PendingFieldTravel>,
     pub command_queue: Vec<ScriptRuntimeQueuedCommand>,
-    pub stack: Vec<String>,
     pub last_special_routine: Option<String>,
     pub last_talked_object: Option<String>,
     pub active_menu: Option<String>,
     pub active_pokemon_picture: Option<String>,
-    pub menu_coords: Option<[i16; 4]>,
     pub map_music_restart_disabled: bool,
     pub map_music_requested: bool,
     pub window_open: bool,
@@ -2991,12 +3077,7 @@ pub struct ScriptRuntimeMemory {
     pub reset_requested: bool,
     pub menu_2d_requested: bool,
     pub version_check_requested: bool,
-    pub blackout_mod: Option<String>,
-    pub battle_tower_text: Option<String>,
     pub completed_trades: Vec<String>,
-    pub catch_tutorials: Vec<String>,
-    pub checked_mail_targets: Vec<String>,
-    pub given_mail_targets: Vec<String>,
     pub audio_events: Vec<ScriptAudioRuntimeEvent>,
     pub current_music: Option<String>,
     pub pending_music_fade: Option<ScriptMusicFade>,
@@ -3008,7 +3089,6 @@ pub struct ScriptRuntimeMemory {
     pub pending_script_warp: Option<ScriptWarpRequest>,
     pub pending_map_load: Option<ScriptMapLoadRequest>,
     pub pending_map_refresh: Option<ScriptMapRefreshRequest>,
-    pub warp_check_requested: bool,
     pub text_events: Vec<ScriptTextRuntimeEvent>,
     pub text_window_open: bool,
     pub pending_text_label: Option<String>,
@@ -3018,6 +3098,7 @@ pub struct ScriptRuntimeMemory {
     pub next_script: Option<ScriptLocation>,
     pub call_stack: Vec<ScriptReturnFrame>,
     pub deferred_scripts: Vec<ScriptLocation>,
+    pub map_reentry_script: Option<ScriptLocation>,
     pub script_ended: Option<ScriptEndState>,
     pub shop_events: Vec<ScriptShopRuntimeEvent>,
     pub pending_shop: Option<ScriptShopRequest>,
@@ -3036,30 +3117,27 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             active_battle_combat: Option<BattleCombatState>,
             script_value: Option<String>,
             variables: BTreeMap<String, String>,
-            variable_writes: Vec<ScriptRuntimeVariableWrite>,
             memory: BTreeMap<String, String>,
-            effects: Vec<ScriptRuntimeEffect>,
             named_buffers: BTreeMap<String, String>,
-            asm_directives: Vec<ScriptRuntimeAsmDirective>,
-            numeric_buffer_writes: Vec<ScriptRuntimeNumericBufferWrite>,
-            elevator_floors: Vec<ScriptRuntimeElevatorFloor>,
             stone_table_entries: Vec<ScriptRuntimeStoneTableEntry>,
-            decoration_descriptions: Vec<ScriptRuntimeDecorationDescription>,
             variable_sprites: BTreeMap<String, String>,
             phone_numbers: BTreeSet<String>,
             phone_number_order: Vec<Option<String>>,
             phone_call_timer: PhoneCallTimerState,
-            special_phone_calls: Vec<String>,
+            special_phone_call: Option<String>,
             pending_delays: Vec<ScriptRuntimeDelay>,
             pending_earthquakes: Vec<ScriptRuntimeEarthquake>,
             pending_emotes: Vec<ScriptRuntimeEmote>,
+            pending_block_field_move: Option<FieldMoveBlockOutcome>,
+            pending_flash_field_move: Option<FieldMoveFlagOutcome>,
+            pending_surf_field_move: Option<FieldMoveTravelOutcome>,
+            pending_waterfall_field_move: Option<FieldMoveTravelOutcome>,
+            pending_field_travel: Option<PendingFieldTravel>,
             command_queue: Vec<ScriptRuntimeQueuedCommand>,
-            stack: Vec<String>,
             last_special_routine: Option<String>,
             last_talked_object: Option<String>,
             active_menu: Option<String>,
             active_pokemon_picture: Option<String>,
-            menu_coords: Option<[i16; 4]>,
             map_music_restart_disabled: bool,
             map_music_requested: bool,
             window_open: bool,
@@ -3074,12 +3152,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             reset_requested: bool,
             menu_2d_requested: bool,
             version_check_requested: bool,
-            blackout_mod: Option<String>,
-            battle_tower_text: Option<String>,
             completed_trades: Vec<String>,
-            catch_tutorials: Vec<String>,
-            checked_mail_targets: Vec<String>,
-            given_mail_targets: Vec<String>,
             audio_events: Vec<ScriptAudioRuntimeEvent>,
             current_music: Option<String>,
             pending_music_fade: Option<ScriptMusicFade>,
@@ -3091,7 +3164,6 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_script_warp: Option<ScriptWarpRequest>,
             pending_map_load: Option<ScriptMapLoadRequest>,
             pending_map_refresh: Option<ScriptMapRefreshRequest>,
-            warp_check_requested: bool,
             text_events: Vec<ScriptTextRuntimeEvent>,
             text_window_open: bool,
             pending_text_label: Option<String>,
@@ -3101,6 +3173,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             next_script: Option<ScriptLocation>,
             call_stack: Vec<ScriptReturnFrame>,
             deferred_scripts: Vec<ScriptLocation>,
+            map_reentry_script: Option<ScriptLocation>,
             script_ended: Option<ScriptEndState>,
             shop_events: Vec<ScriptShopRuntimeEvent>,
             pending_shop: Option<ScriptShopRequest>,
@@ -3112,30 +3185,27 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             active_battle_combat: raw.active_battle_combat,
             script_value: raw.script_value,
             variables: raw.variables,
-            variable_writes: raw.variable_writes,
             memory: raw.memory,
-            effects: raw.effects,
             named_buffers: raw.named_buffers,
-            asm_directives: raw.asm_directives,
-            numeric_buffer_writes: raw.numeric_buffer_writes,
-            elevator_floors: raw.elevator_floors,
             stone_table_entries: raw.stone_table_entries,
-            decoration_descriptions: raw.decoration_descriptions,
             variable_sprites: raw.variable_sprites,
             phone_numbers: raw.phone_numbers,
             phone_number_order: raw.phone_number_order,
             phone_call_timer: raw.phone_call_timer,
-            special_phone_calls: raw.special_phone_calls,
+            special_phone_call: raw.special_phone_call,
             pending_delays: raw.pending_delays,
             pending_earthquakes: raw.pending_earthquakes,
             pending_emotes: raw.pending_emotes,
+            pending_block_field_move: raw.pending_block_field_move,
+            pending_flash_field_move: raw.pending_flash_field_move,
+            pending_surf_field_move: raw.pending_surf_field_move,
+            pending_waterfall_field_move: raw.pending_waterfall_field_move,
+            pending_field_travel: raw.pending_field_travel,
             command_queue: raw.command_queue,
-            stack: raw.stack,
             last_special_routine: raw.last_special_routine,
             last_talked_object: raw.last_talked_object,
             active_menu: raw.active_menu,
             active_pokemon_picture: raw.active_pokemon_picture,
-            menu_coords: raw.menu_coords,
             map_music_restart_disabled: raw.map_music_restart_disabled,
             map_music_requested: raw.map_music_requested,
             window_open: raw.window_open,
@@ -3150,12 +3220,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             reset_requested: raw.reset_requested,
             menu_2d_requested: raw.menu_2d_requested,
             version_check_requested: raw.version_check_requested,
-            blackout_mod: raw.blackout_mod,
-            battle_tower_text: raw.battle_tower_text,
             completed_trades: raw.completed_trades,
-            catch_tutorials: raw.catch_tutorials,
-            checked_mail_targets: raw.checked_mail_targets,
-            given_mail_targets: raw.given_mail_targets,
             audio_events: raw.audio_events,
             current_music: raw.current_music,
             pending_music_fade: raw.pending_music_fade,
@@ -3167,7 +3232,6 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_script_warp: raw.pending_script_warp,
             pending_map_load: raw.pending_map_load,
             pending_map_refresh: raw.pending_map_refresh,
-            warp_check_requested: raw.warp_check_requested,
             text_events: raw.text_events,
             text_window_open: raw.text_window_open,
             pending_text_label: raw.pending_text_label,
@@ -3177,6 +3241,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             next_script: raw.next_script,
             call_stack: raw.call_stack,
             deferred_scripts: raw.deferred_scripts,
+            map_reentry_script: raw.map_reentry_script,
             script_ended: raw.script_ended,
             shop_events: raw.shop_events,
             pending_shop: raw.pending_shop,
@@ -3196,6 +3261,118 @@ impl ScriptRuntimeMemory {
             )?;
             validate_script_runtime_label("next_script.script", &next_script.script)?;
         }
+        if let Some(pending) = &self.pending_block_field_move {
+            validate_script_runtime_token("pending_block_field_move.move_id", &pending.move_id)?;
+            validate_script_runtime_token(
+                "pending_block_field_move.actor_species",
+                &pending.actor_species,
+            )?;
+            validate_script_runtime_token("pending_block_field_move.map_name", &pending.map_name)?;
+            validate_script_runtime_token(
+                "pending_block_field_move.tileset_name",
+                &pending.tileset_name,
+            )?;
+            validate_script_runtime_token("pending_block_field_move.variant", &pending.variant)?;
+            if pending.previous_block_id == pending.replacement_block_id {
+                return Err(format!(
+                    "pending block field move {} does not replace block {:#04x}",
+                    pending.move_id, pending.previous_block_id
+                ));
+            }
+        }
+        if let Some(pending) = &self.pending_flash_field_move {
+            validate_script_runtime_token("pending_flash_field_move.move_id", &pending.move_id)?;
+            validate_script_runtime_token(
+                "pending_flash_field_move.actor_species",
+                &pending.actor_species,
+            )?;
+            validate_script_runtime_token(
+                "pending_flash_field_move.engine_flag",
+                &pending.engine_flag,
+            )?;
+            if !pending.is_set || pending.was_set {
+                return Err(
+                    "pending Flash field move must describe a false-to-true source transition"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(pending) = &self.pending_surf_field_move {
+            validate_script_runtime_token("pending_surf_field_move.move_id", &pending.move_id)?;
+            validate_script_runtime_token(
+                "pending_surf_field_move.actor_species",
+                &pending.actor_species,
+            )?;
+            validate_script_runtime_token("pending_surf_field_move.map_name", &pending.map_name)?;
+            if pending.move_id != "SURF"
+                || pending.steps != 1
+                || !matches!(pending.mode, MovementMode::Surf | MovementMode::SurfPika)
+            {
+                return Err(
+                    "pending Surf field move must describe one source slow_step into water"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(pending) = &self.pending_waterfall_field_move {
+            validate_script_runtime_token(
+                "pending_waterfall_field_move.move_id",
+                &pending.move_id,
+            )?;
+            validate_script_runtime_token(
+                "pending_waterfall_field_move.actor_species",
+                &pending.actor_species,
+            )?;
+            validate_script_runtime_token(
+                "pending_waterfall_field_move.map_name",
+                &pending.map_name,
+            )?;
+            if pending.move_id != "WATERFALL"
+                || pending.steps == 0
+                || !matches!(pending.mode, MovementMode::Surf | MovementMode::SurfPika)
+                || pending.from_tile == pending.to_tile
+            {
+                return Err(
+                    "pending Waterfall field move must describe a nonempty Surf-mode climb"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(pending) = &self.pending_field_travel {
+            validate_script_runtime_token("pending_field_travel.move_id", &pending.move_id)?;
+            if let Some(actor_species) = &pending.actor_species {
+                validate_script_runtime_token("pending_field_travel.actor_species", actor_species)?;
+            }
+            validate_script_runtime_token("pending_field_travel.source_map", &pending.source_map)?;
+            validate_script_runtime_token(
+                "pending_field_travel.destination_map",
+                &pending.destination_map,
+            )?;
+            if let Some(flag) = &pending.flypoint_flag {
+                validate_script_runtime_token("pending_field_travel.flypoint_flag", flag)?;
+            }
+            if pending.actor_party_index.is_some() != pending.actor_species.is_some() {
+                return Err(
+                    "pending field travel actor index and species must both be present or absent"
+                        .to_string(),
+                );
+            }
+            match (
+                pending.destination_spawn_identifier,
+                pending.destination_warp_index,
+                pending.flypoint_flag.as_ref(),
+            ) {
+                (Some(_), None, Some(_)) => {}
+                (None, Some(_), None) => {}
+                (Some(_), None, None) => {}
+                _ => {
+                    return Err(
+                        "pending field travel has an invalid move/destination identifier shape"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         validate_optional_script_runtime_label(
             "last_special_routine",
             self.last_special_routine.as_deref(),
@@ -3209,13 +3386,11 @@ impl ScriptRuntimeMemory {
             "active_pokemon_picture",
             self.active_pokemon_picture.as_deref(),
         )?;
-        validate_optional_script_runtime_token("blackout_mod", self.blackout_mod.as_deref())?;
-        validate_optional_script_runtime_token(
-            "battle_tower_text",
-            self.battle_tower_text.as_deref(),
-        )?;
-        if let Some(coords) = self.menu_coords {
-            validate_menu_coords(coords)?;
+        if self.deferred_scripts.len() > 1 {
+            return Err(format!(
+                "deferred_scripts has {} entries but Crystal retains only one deferred script pointer",
+                self.deferred_scripts.len()
+            ));
         }
         for (index, script) in self.deferred_scripts.iter().enumerate() {
             validate_script_runtime_token(
@@ -3227,8 +3402,12 @@ impl ScriptRuntimeMemory {
                 &script.script,
             )?;
         }
-        for (index, script) in self.stack.iter().enumerate() {
-            validate_script_runtime_label(&format!("stack[{index}]"), script)?;
+        if let Some(script) = &self.map_reentry_script {
+            validate_script_runtime_token(
+                "map_reentry_script.origin_map_name",
+                &script.origin_map_name,
+            )?;
+            validate_script_runtime_label("map_reentry_script.script", &script.script)?;
         }
         for key in self.variables.keys() {
             validate_script_runtime_token(&format!("variables[{key}]"), key)?;
@@ -3311,23 +3490,11 @@ impl ScriptRuntimeMemory {
         {
             return Err("uninitialized phone_call_timer must be cleared".to_string());
         }
-        if self.special_phone_calls.len() > 1 {
-            return Err("special_phone_calls must contain at most one active call".to_string());
-        }
-        for (index, call_id) in self.special_phone_calls.iter().enumerate() {
-            validate_script_runtime_token(&format!("special_phone_calls[{index}]"), call_id)?;
+        if let Some(call_id) = &self.special_phone_call {
+            validate_script_runtime_token("special_phone_call", call_id)?;
         }
         for (index, trade_id) in self.completed_trades.iter().enumerate() {
             validate_script_runtime_token(&format!("completed_trades[{index}]"), trade_id)?;
-        }
-        for (index, species_id) in self.catch_tutorials.iter().enumerate() {
-            validate_script_runtime_token(&format!("catch_tutorials[{index}]"), species_id)?;
-        }
-        for (index, target) in self.checked_mail_targets.iter().enumerate() {
-            validate_script_runtime_label(&format!("checked_mail_targets[{index}]"), target)?;
-        }
-        for (index, target) in self.given_mail_targets.iter().enumerate() {
-            validate_script_runtime_label(&format!("given_mail_targets[{index}]"), target)?;
         }
         for (index, frame) in self.call_stack.iter().enumerate() {
             validate_script_runtime_token(
@@ -3355,61 +3522,6 @@ impl ScriptRuntimeMemory {
             validate_script_runtime_label("script_ended.source_script", &end.source_script)?;
             validate_script_end_state(end)?;
         }
-        for (index, effect) in self.effects.iter().enumerate() {
-            validate_script_runtime_token(&format!("effects[{index}].command"), &effect.command)?;
-            validate_script_runtime_label(
-                &format!("effects[{index}].source_script"),
-                &effect.source_script,
-            )?;
-            validate_runtime_effect_payload(index, effect)?;
-        }
-        for (index, write) in self.variable_writes.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("variable_writes[{index}].target"),
-                &write.target,
-            )?;
-            validate_script_runtime_label(
-                &format!("variable_writes[{index}].source_script"),
-                &write.source_script,
-            )?;
-            validate_variable_write_payload(index, write, &self.variables)?;
-        }
-        for (index, directive) in self.asm_directives.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("asm_directives[{index}].command"),
-                &directive.command,
-            )?;
-            validate_script_runtime_label(
-                &format!("asm_directives[{index}].source_script"),
-                &directive.source_script,
-            )?;
-            validate_asm_directive_payload(index, directive)?;
-        }
-        for (index, write) in self.numeric_buffer_writes.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("numeric_buffer_writes[{index}].target_buffer"),
-                &write.target_buffer,
-            )?;
-            validate_script_runtime_label(
-                &format!("numeric_buffer_writes[{index}].source_script"),
-                &write.source_script,
-            )?;
-            validate_numeric_buffer_write_payload(index, write, &self.named_buffers)?;
-        }
-        for (index, floor) in self.elevator_floors.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("elevator_floors[{index}].floor"),
-                &floor.floor,
-            )?;
-            validate_script_runtime_token(
-                &format!("elevator_floors[{index}].target_map"),
-                &floor.target_map,
-            )?;
-            validate_script_runtime_label(
-                &format!("elevator_floors[{index}].source_script"),
-                &floor.source_script,
-            )?;
-        }
         for (index, entry) in self.stone_table_entries.iter().enumerate() {
             validate_script_runtime_token(
                 &format!("stone_table_entries[{index}].object_event"),
@@ -3422,16 +3534,6 @@ impl ScriptRuntimeMemory {
             validate_script_runtime_label(
                 &format!("stone_table_entries[{index}].source_script"),
                 &entry.source_script,
-            )?;
-        }
-        for (index, description) in self.decoration_descriptions.iter().enumerate() {
-            validate_script_runtime_token(
-                &format!("decoration_descriptions[{index}].decoration"),
-                &description.decoration,
-            )?;
-            validate_script_runtime_label(
-                &format!("decoration_descriptions[{index}].source_script"),
-                &description.source_script,
             )?;
         }
         for (index, delay) in self.pending_delays.iter().enumerate() {
@@ -3462,6 +3564,7 @@ impl ScriptRuntimeMemory {
                 &format!("pending_emotes[{index}].source_script"),
                 &emote.source_script,
             )?;
+            validate_emote_payload(index, emote)?;
         }
         for (index, command) in self.command_queue.iter().enumerate() {
             validate_script_runtime_token(
@@ -3753,27 +3856,6 @@ fn validate_script_shop_mart_type(
     Ok(())
 }
 
-fn validate_menu_coords(coords: [i16; 4]) -> Result<(), String> {
-    let [left, top, right, bottom] = coords;
-    if left < 0 || top < 0 || right < 0 || bottom < 0 {
-        return Err(format!(
-            "menu_coords {:?} cannot contain negative coordinates",
-            coords
-        ));
-    }
-    if right < left {
-        return Err(format!(
-            "menu_coords right {right} cannot be less than left {left}"
-        ));
-    }
-    if bottom < top {
-        return Err(format!(
-            "menu_coords bottom {bottom} cannot be less than top {top}"
-        ));
-    }
-    Ok(())
-}
-
 fn validate_item_use_event_context(index: usize, context: &str) -> Result<(), String> {
     if matches!(context, "field" | "battle") {
         Ok(())
@@ -3782,106 +3864,6 @@ fn validate_item_use_event_context(index: usize, context: &str) -> Result<(), St
             "item_use_events[{index}].context {context} is not a saved item-use context"
         ))
     }
-}
-
-fn validate_asm_directive_payload(
-    index: usize,
-    directive: &ScriptRuntimeAsmDirective,
-) -> Result<(), String> {
-    if !matches!(
-        directive.command.as_str(),
-        "dw" | "ldh" | "ld" | "dn" | "dba" | "dbw"
-    ) {
-        return Err(format!(
-            "asm_directives[{index}].command {} is not a saved asm directive",
-            directive.command
-        ));
-    }
-    let expected = script_runtime_command_arg_counts()
-        .get(directive.command.as_str())
-        .copied()
-        .ok_or_else(|| {
-            format!(
-                "asm_directives[{index}].command {} is missing runtime arity",
-                directive.command
-            )
-        })?;
-    if directive.args.len() != expected {
-        return Err(format!(
-            "asm_directives[{index}].args has {} entries, expected {expected} for {}",
-            directive.args.len(),
-            directive.command
-        ));
-    }
-    for (arg_index, arg) in directive.args.iter().enumerate() {
-        if arg.is_empty() || arg.trim() != arg {
-            return Err(format!(
-                "asm_directives[{index}].args[{arg_index}] has invalid arg '{arg}'"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_numeric_buffer_write_payload(
-    index: usize,
-    write: &ScriptRuntimeNumericBufferWrite,
-    named_buffers: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    let parsed = write.value.parse::<u16>().map_err(|_| {
-        format!(
-            "numeric_buffer_writes[{index}].value {} is not a saved u16 value",
-            write.value
-        )
-    })?;
-    if write.value != parsed.to_string() {
-        return Err(format!(
-            "numeric_buffer_writes[{index}].value {} is not canonical",
-            write.value
-        ));
-    }
-    if write.width != 3 {
-        return Err(format!(
-            "numeric_buffer_writes[{index}].width {} must be 3",
-            write.width
-        ));
-    }
-    match named_buffers.get(&write.target_buffer) {
-        Some(value) if value == &write.value => Ok(()),
-        Some(value) => Err(format!(
-            "numeric_buffer_writes[{index}].value {} does not match named_buffers[{}] {}",
-            write.value, write.target_buffer, value
-        )),
-        None => Err(format!(
-            "numeric_buffer_writes[{index}].target_buffer {} is missing from named_buffers",
-            write.target_buffer
-        )),
-    }
-}
-
-pub fn saved_variable_write_command_payload(
-    write: &ScriptRuntimeVariableWrite,
-) -> (&'static str, Vec<String>) {
-    ("writevar", vec![write.target.clone()])
-}
-
-pub fn saved_numeric_buffer_write_command_payload(
-    write: &ScriptRuntimeNumericBufferWrite,
-) -> (&'static str, Vec<String>) {
-    ("getnum", vec![write.target_buffer.clone()])
-}
-
-pub fn saved_elevator_floor_command_payload(
-    floor: &ScriptRuntimeElevatorFloor,
-) -> (&'static str, Vec<String>) {
-    (
-        "elevfloor",
-        vec![
-            floor.floor.clone(),
-            floor.warp.to_string(),
-            floor.target_map.clone(),
-        ],
-    )
 }
 
 pub fn saved_stone_table_entry_command_payload(
@@ -3897,45 +3879,90 @@ pub fn saved_stone_table_entry_command_payload(
     )
 }
 
-pub fn saved_decoration_description_command_payload(
-    description: &ScriptRuntimeDecorationDescription,
-) -> (&'static str, Vec<String>) {
-    ("describedecoration", vec![description.decoration.clone()])
-}
-
 fn validate_delay_payload(index: usize, delay: &ScriptRuntimeDelay) -> Result<(), String> {
-    if matches!(delay.command.as_str(), "pause" | "wait") {
-        Ok(())
-    } else {
-        Err(format!(
+    if !matches!(
+        delay.command.as_str(),
+        "pause" | "wait" | "deactivatefacing"
+    ) {
+        return Err(format!(
             "pending_delays[{index}].command {} is not a saved delay command",
             delay.command
-        ))
+        ));
     }
+    if delay.parameter > u16::from(u8::MAX) {
+        return Err(format!(
+            "pending_delays[{index}].parameter {} does not fit the script byte",
+            delay.parameter
+        ));
+    }
+    let frames_per_tick = match delay.command.as_str() {
+        "pause" => 2,
+        "wait" => 6,
+        "deactivatefacing" => 1,
+        _ => unreachable!("validated delay command"),
+    };
+    let expected = wrapping_byte_counter_frames(delay.parameter as u8, frames_per_tick);
+    if delay.frames != expected {
+        return Err(format!(
+            "pending_delays[{index}].frames {} must equal the {}-frame wrapping byte counter ({expected})",
+            delay.frames, frames_per_tick
+        ));
+    }
+    let expected_release = delay.command == "deactivatefacing";
+    if delay.release_all_objects != expected_release {
+        return Err(format!(
+            "pending_delays[{index}].release_all_objects {} must equal {expected_release} for {}",
+            delay.release_all_objects, delay.command
+        ));
+    }
+    Ok(())
 }
 
 fn validate_earthquake_payload(
     index: usize,
     earthquake: &ScriptRuntimeEarthquake,
 ) -> Result<(), String> {
+    if earthquake.parameter > u16::from(u8::MAX) {
+        return Err(format!(
+            "pending_earthquakes[{index}].parameter {} does not fit the earthquake script byte",
+            earthquake.parameter
+        ));
+    }
     if earthquake.shake_frames != earthquake.parameter {
         return Err(format!(
             "pending_earthquakes[{index}].shake_frames {} must equal parameter {}",
             earthquake.shake_frames, earthquake.parameter
         ));
     }
-    let expected_sleep_frames = earthquake.parameter & 0x3f;
+    let expected_sleep_frames = wrapping_byte_counter_ticks((earthquake.parameter & 0x3f) as u8);
     if earthquake.sleep_frames != expected_sleep_frames {
         return Err(format!(
-            "pending_earthquakes[{index}].sleep_frames {} must equal parameter & 0x3f ({expected_sleep_frames})",
+            "pending_earthquakes[{index}].sleep_frames {} must equal the wrapping low-six-bit counter ({expected_sleep_frames})",
             earthquake.sleep_frames
         ));
     }
     Ok(())
 }
 
+fn validate_emote_payload(index: usize, emote: &ScriptRuntimeEmote) -> Result<(), String> {
+    if emote.duration > u16::from(u8::MAX) {
+        return Err(format!(
+            "pending_emotes[{index}].duration {} does not fit the showemote script byte",
+            emote.duration
+        ));
+    }
+    let expected = wrapping_byte_counter_frames(emote.duration as u8, 2);
+    if emote.frames != expected {
+        return Err(format!(
+            "pending_emotes[{index}].frames {} must equal the two-frame wrapping duration counter ({expected})",
+            emote.frames
+        ));
+    }
+    Ok(())
+}
+
 pub fn saved_delay_command_payload(delay: &ScriptRuntimeDelay) -> (&str, Vec<String>) {
-    (&delay.command, vec![delay.frames.to_string()])
+    (&delay.command, vec![delay.parameter.to_string()])
 }
 
 pub fn saved_music_fade_command_payload(fade: &ScriptMusicFade) -> (&'static str, Vec<String>) {
@@ -6390,24 +6417,6 @@ fn money_runtime_routine_kind(routine: &str) -> Option<ScriptMoneyRuntimeKind> {
 
 fn validate_map_event_payload(index: usize, event: &ScriptMapRuntimeEvent) -> Result<(), String> {
     match event.kind {
-        ScriptMapRuntimeKind::NoWarp => {
-            if event.command != "warp" {
-                return Err(format!(
-                    "map_events[{index}].command {} is not valid for NoWarp",
-                    event.command
-                ));
-            }
-            if event.target_map.is_some()
-                || event.tile.is_some()
-                || event.facing.is_some()
-                || event.map_setup.is_some()
-            {
-                return Err(format!(
-                    "map_events[{index}] {:?} cannot carry map payload",
-                    event.kind
-                ));
-            }
-        }
         ScriptMapRuntimeKind::WarpCheck => {
             if event.command != "warpcheck" {
                 return Err(format!(
@@ -6593,7 +6602,11 @@ pub fn saved_map_runtime_event_command_args(
 ) -> Result<Option<Vec<String>>, ScriptMapRuntimeCommandError> {
     match event.command.as_str() {
         "warp" => {
-            if event.facing.is_some() || event.map_setup.is_some() {
+            let bad_warp = event.target_map.is_none()
+                && event.tile.is_none()
+                && event.facing.is_none()
+                && event.map_setup.as_deref() == Some("MAPSETUP_BADWARP");
+            if event.facing.is_some() || (event.map_setup.is_some() && !bad_warp) {
                 return Err(map_command_error(
                     path,
                     event,
@@ -6653,7 +6666,7 @@ pub fn saved_map_runtime_event_command_args(
         "newloadmap" | "reanchormap" => Ok(Some(saved_optional_map_setup_arg(
             event.map_setup.as_deref(),
         ))),
-        "warpcheck" | "reloadmap" | "reloadmappart" | "reloadmapafterbattle" | "refreshmap" => {
+        "warpcheck" | "reloadmap" | "reloadmapafterbattle" | "refreshmap" => {
             if event.target_map.is_some()
                 || event.tile.is_some()
                 || event.facing.is_some()
@@ -6767,6 +6780,12 @@ fn saved_optional_map_setup_arg(map_setup: Option<&str>) -> Vec<String> {
 }
 
 pub fn saved_map_load_command_payload(load: &ScriptMapLoadRequest) -> (&str, Vec<String>) {
+    if load.command == "warp" && load.map_setup.as_deref() == Some("MAPSETUP_BADWARP") {
+        return (
+            "warp",
+            vec!["NONE".to_string(), "0".to_string(), "0".to_string()],
+        );
+    }
     (
         &load.command,
         saved_optional_map_setup_arg(load.map_setup.as_deref()),
@@ -6837,10 +6856,14 @@ fn validate_map_load_command_payload(
     command: &str,
     map_setup: Option<&str>,
 ) -> Result<(), String> {
-    if !SCRIPT_MAP_LOAD_COMMANDS.contains(&command) {
+    let bad_warp = command == "warp" && map_setup == Some("MAPSETUP_BADWARP");
+    if !bad_warp && !SCRIPT_MAP_LOAD_COMMANDS.contains(&command) {
         return Err(format!(
             "{field}.command {command} is not a saved map load command"
         ));
+    }
+    if bad_warp {
+        return Ok(());
     }
     if command == "newloadmap" {
         if map_setup.is_none() {
@@ -7002,65 +7025,6 @@ pub fn saved_script_end_command(
             command_index: end.command_index,
         }),
     }
-}
-
-fn validate_variable_write_payload(
-    index: usize,
-    write: &ScriptRuntimeVariableWrite,
-    variables: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    match variables.get(&write.target) {
-        Some(value) if value == &write.value => Ok(()),
-        Some(value) => Err(format!(
-            "variable_writes[{index}].value {} does not match variables[{}] {}",
-            write.value, write.target, value
-        )),
-        None => Err(format!(
-            "variable_writes[{index}].target {} is missing from variables",
-            write.target
-        )),
-    }
-}
-
-fn validate_runtime_effect_payload(
-    index: usize,
-    effect: &ScriptRuntimeEffect,
-) -> Result<(), String> {
-    if effect.command == "conditional_event" {
-        return Err(format!(
-            "effects[{index}].command conditional_event is background-event data, not a saved runtime effect"
-        ));
-    }
-    let expected = script_runtime_command_arg_counts()
-        .get(effect.command.as_str())
-        .copied()
-        .ok_or_else(|| {
-            format!(
-                "effects[{index}].command {} is not a saved runtime command",
-                effect.command
-            )
-        })?;
-    let arity_is_valid = if effect.command == "ret" {
-        effect.args.len() <= 1
-    } else {
-        effect.args.len() == expected
-    };
-    if !arity_is_valid {
-        return Err(format!(
-            "effects[{index}].args has {} entries, expected {expected} for {}",
-            effect.args.len(),
-            effect.command
-        ));
-    }
-    if effect.command == "ret"
-        && let Some(condition) = effect.args.first()
-        && ScriptRuntimeCpuCondition::from_asm_token(condition).is_none()
-    {
-        return Err(format!(
-            "effects[{index}].args has unknown CPU return condition {condition}"
-        ));
-    }
-    Ok(())
 }
 
 fn validate_queued_command_payload(
@@ -7590,43 +7554,6 @@ impl<'de> Deserialize<'de> for ItemUseRuntimeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ScriptRuntimeEffect {
-    pub command: String,
-    pub args: Vec<String>,
-    pub source_script: String,
-    pub command_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScriptRuntimeVariableWrite {
-    pub target: String,
-    pub value: String,
-    pub source_script: String,
-    pub command_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScriptRuntimeAsmDirective {
-    pub command: String,
-    pub args: Vec<String>,
-    pub source_script: String,
-    pub command_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScriptRuntimeNumericBufferWrite {
-    pub target_buffer: String,
-    pub value: String,
-    pub width: u8,
-    pub source_script: String,
-    pub command_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeElevatorFloor {
     pub floor: String,
     pub warp: u16,
@@ -7641,14 +7568,6 @@ pub struct ScriptRuntimeStoneTableEntry {
     pub warp: u16,
     pub object_event: String,
     pub script: String,
-    pub source_script: String,
-    pub command_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScriptRuntimeDecorationDescription {
-    pub decoration: String,
     pub source_script: String,
     pub command_index: usize,
 }
@@ -7781,7 +7700,6 @@ pub struct ScriptMapRuntimeEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMapRuntimeKind {
-    NoWarp,
     Warp,
     WarpCheck,
     LoadMap,
@@ -7977,7 +7895,9 @@ impl<'de> Deserialize<'de> for ScriptShopRequest {
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeDelay {
     pub command: String,
+    pub parameter: u16,
     pub frames: u16,
+    pub release_all_objects: bool,
     pub source_script: String,
     pub command_index: usize,
 }
@@ -7991,7 +7911,9 @@ impl<'de> Deserialize<'de> for ScriptRuntimeDelay {
         #[serde(deny_unknown_fields)]
         struct RawScriptRuntimeDelay {
             command: String,
+            parameter: u16,
             frames: u16,
+            release_all_objects: bool,
             source_script: String,
             command_index: usize,
         }
@@ -7999,7 +7921,9 @@ impl<'de> Deserialize<'de> for ScriptRuntimeDelay {
         let raw = RawScriptRuntimeDelay::deserialize(deserializer)?;
         let delay = Self {
             command: raw.command,
+            parameter: raw.parameter,
             frames: raw.frames,
+            release_all_objects: raw.release_all_objects,
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
@@ -8061,6 +7985,7 @@ pub struct ScriptRuntimeEmote {
     pub emote: String,
     pub object: String,
     pub duration: u16,
+    pub frames: u16,
     pub source_script: String,
     pub command_index: usize,
 }
@@ -8076,6 +8001,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeEmote {
             emote: String,
             object: String,
             duration: u16,
+            frames: u16,
             source_script: String,
             command_index: usize,
         }
@@ -8085,6 +8011,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeEmote {
             emote: raw.emote,
             object: raw.object,
             duration: raw.duration,
+            frames: raw.frames,
             source_script: raw.source_script,
             command_index: raw.command_index,
         };
@@ -8094,6 +8021,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeEmote {
             .map_err(D::Error::custom)?;
         validate_script_runtime_label("pending_emote.source_script", &emote.source_script)
             .map_err(D::Error::custom)?;
+        validate_emote_payload(0, &emote).map_err(D::Error::custom)?;
         Ok(emote)
     }
 }
@@ -8165,10 +8093,37 @@ impl GameState {
     pub fn validate_saved_state(&self) -> Result<(), String> {
         validate_saved_player_name(&self.player_name)?;
         validate_saved_player_gender(self.player_gender)?;
+        if self.blue_card_balance > 30 {
+            return Err(format!(
+                "blue_card_balance {} exceeds Crystal's 30-point cap",
+                self.blue_card_balance
+            ));
+        }
+        if self.mom_item_trigger_balance > 0x00ff_ffff {
+            return Err(format!(
+                "mom_item_trigger_balance {} exceeds cartridge money range",
+                self.mom_item_trigger_balance
+            ));
+        }
+        if let Some(purchase) = &self.pending_mom_purchase {
+            purchase.validate_saved_state()?;
+            if purchase.cost > self.moms_money {
+                return Err(format!(
+                    "pending Mom purchase cost {} exceeds Mom's saved money {}",
+                    purchase.cost, self.moms_money
+                ));
+            }
+        }
         if self.wild_encounter_cooldown > 5 {
             return Err(format!(
                 "wild_encounter_cooldown {} is outside Crystal range 0..=5",
                 self.wild_encounter_cooldown
+            ));
+        }
+        if self.radio_tuning_knob > 80 || self.radio_tuning_knob % 2 != 0 {
+            return Err(format!(
+                "radio_tuning_knob {} is outside Crystal's even range 0..=80",
+                self.radio_tuning_knob
             ));
         }
         self.bag
@@ -8228,9 +8183,6 @@ impl GameState {
                     entry.item_id
                 ));
             }
-            if entry.mail.message.is_empty() {
-                return Err(format!("mailbox[{index}] has an empty message"));
-            }
             if entry.mail.author.is_empty() {
                 return Err(format!("mailbox[{index}] has an empty author"));
             }
@@ -8238,6 +8190,12 @@ impl GameState {
                 &format!("mailbox[{index}].mail.species"),
                 &entry.mail.species,
             )?;
+            if entry.mail.mail_type != entry.item_id {
+                return Err(format!(
+                    "mailbox[{index}] Mail type '{}' does not match item '{}'",
+                    entry.mail.mail_type, entry.item_id
+                ));
+            }
         }
         self.time
             .validate_saved_state()
@@ -8323,6 +8281,14 @@ impl GameState {
         self.script_runtime
             .validate()
             .map_err(|error| format!("invalid saved script runtime: {error}"))?;
+        if let Some(value) = self.script_runtime.variables.get("VAR_BLUECARDBALANCE")
+            && value != &self.blue_card_balance.to_string()
+        {
+            return Err(format!(
+                "script_runtime.variables[VAR_BLUECARDBALANCE] {value} does not match saved blue_card_balance {}",
+                self.blue_card_balance
+            ));
+        }
         Ok(())
     }
 
@@ -9596,12 +9562,6 @@ impl FishingMemory {
                         self.bites_remaining
                     ));
                 }
-                if self.result != 0 {
-                    return Err(format!(
-                        "fishing.result {} cannot be saved while idle",
-                        self.result
-                    ));
-                }
             }
             FishingRodState::Waiting | FishingRodState::Bite | FishingRodState::Battle => {
                 let Some(rod_index) = self.rod_index else {
@@ -9616,6 +9576,12 @@ impl FishingMemory {
                     ));
                 }
             }
+        }
+        if self.result > 2 {
+            return Err(format!(
+                "fishing.result {} is outside Crystal range 0..=2",
+                self.result
+            ));
         }
         Ok(())
     }
@@ -9898,6 +9864,50 @@ mod tests {
             "#[cfg(any(test, feature = \"test-fixtures\"))]\nimpl Default for GameState"
         ));
         assert_eq!(GameState::default(), GameState::reset_wram_for_new_game());
+    }
+
+    #[test]
+    fn saved_blue_card_variable_must_match_the_authoritative_wram_field() {
+        let mut state = GameState::default();
+        state.blue_card_balance = 4;
+        state
+            .script_runtime
+            .variables
+            .insert("VAR_BLUECARDBALANCE".to_string(), "5".to_string());
+
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "script_runtime.variables[VAR_BLUECARDBALANCE] 5 does not match saved blue_card_balance 4"
+                    .to_string()
+            )
+        );
+
+        state.script_runtime.variables.remove("VAR_BLUECARDBALANCE");
+        state.blue_card_balance = 31;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("blue_card_balance 31 exceeds Crystal's 30-point cap".to_string())
+        );
+    }
+
+    #[test]
+    fn saved_radio_tuning_knob_requires_an_even_source_position() {
+        let mut state = GameState::default();
+        state.radio_tuning_knob = 79;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("radio_tuning_knob 79 is outside Crystal's even range 0..=80".to_string())
+        );
+
+        state.radio_tuning_knob = 82;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("radio_tuning_knob 82 is outside Crystal's even range 0..=80".to_string())
+        );
+
+        state.radio_tuning_knob = 80;
+        assert_eq!(state.validate_saved_state(), Ok(()));
     }
 
     use super::*;
@@ -10456,6 +10466,7 @@ mod tests {
 
         state = GameState::default();
         state.time.registers.hours = 10;
+        state.time.time_of_day = crate::world::encounters::TimeOfDay::Day;
         state.time.game_time_hours = 9;
         assert_eq!(state.validate_saved_state(), Ok(()));
 
@@ -10819,10 +10830,7 @@ mod tests {
 
         state = GameState::default();
         state.day_care.man.active = true;
-        assert_eq!(
-            state.validate_saved_state(),
-            Err("day_care.man.active cannot be saved without a Pokemon".to_string())
-        );
+        assert_eq!(state.validate_saved_state(), Ok(()));
 
         state = GameState::default();
         let mut day_care_species = crate::models::PokemonSpecies::new_for_tests(
@@ -11111,7 +11119,10 @@ mod tests {
         state.bag.items.insert("POTION".to_string(), 100);
         assert_eq!(
             state.validate_saved_state(),
-            Err("invalid saved bag: items.POTION quantity 100 exceeds stack limit 99".to_string())
+            Err(
+                "invalid saved bag: items.POTION quantity 100 is outside stack range 1..=99"
+                    .to_string()
+            )
         );
 
         state = GameState::default();
@@ -12446,6 +12457,7 @@ mod tests {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "LAKE_OF_RAGE".to_string(),
                 species: "RED GYARADOS".to_string(),
                 level: 30,
@@ -12466,6 +12478,7 @@ mod tests {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "LAKE_OF_RAGE".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 0,
@@ -12486,6 +12499,7 @@ mod tests {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "LAKE_OF_RAGE".to_string(),
                 species: "CYNDAQUIL".to_string(),
                 level: 6,
@@ -12509,6 +12523,7 @@ mod tests {
             battle: BattleMemory::StaticWild {
                 battle_type: "BATTLETYPE_FORCESHINY".to_string(),
                 battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+                roaming_slot: None,
                 origin_map_name: "LAKE_OF_RAGE".to_string(),
                 species: "CHIKORITA".to_string(),
                 level: 7,
@@ -12582,24 +12597,6 @@ mod tests {
             Err("next_script.script has invalid script label ' .Done@Script'".to_string())
         );
 
-        runtime = ScriptRuntimeMemory {
-            blackout_mod: Some("BLACKOUT MOD".to_string()),
-            ..ScriptRuntimeMemory::default()
-        };
-        assert_eq!(
-            runtime.validate(),
-            Err("blackout_mod has invalid token 'BLACKOUT MOD'".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory {
-            battle_tower_text: Some("BATTLE TOWER INTRO".to_string()),
-            ..ScriptRuntimeMemory::default()
-        };
-        assert_eq!(
-            runtime.validate(),
-            Err("battle_tower_text has invalid token 'BATTLE TOWER INTRO'".to_string())
-        );
-
         runtime = ScriptRuntimeMemory::default();
         runtime.next_script = Some(ScriptLocation {
             origin_map_name: "TestMap".to_string(),
@@ -12613,6 +12610,25 @@ mod tests {
             runtime.validate(),
             Err(
                 "deferred_scripts[0].script has invalid script label '.Deferred @Script'"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.deferred_scripts = vec![
+            ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: ".First@Script".to_string(),
+            },
+            ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: ".Second@Script".to_string(),
+            },
+        ];
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "deferred_scripts has 2 entries but Crystal retains only one deferred script pointer"
                     .to_string()
             )
         );
@@ -12744,48 +12760,6 @@ mod tests {
         );
 
         runtime = ScriptRuntimeMemory::default();
-        runtime.effects.push(ScriptRuntimeEffect {
-            command: "macroeffect".to_string(),
-            args: Vec::new(),
-            source_script: "EffectScript".to_string(),
-            command_index: 3,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("effects[0].command macroeffect is not a saved runtime command".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.effects.push(ScriptRuntimeEffect {
-            command: "special".to_string(),
-            args: Vec::new(),
-            source_script: "EffectScript".to_string(),
-            command_index: 3,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("effects[0].args has 0 entries, expected 1 for special".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.effects.push(ScriptRuntimeEffect {
-            command: "conditional_event".to_string(),
-            args: vec![
-                "EVENT_OPENED_LOCKED_DOOR".to_string(),
-                ".Script".to_string(),
-            ],
-            source_script: "LockedDoorData".to_string(),
-            command_index: 0,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "effects[0].command conditional_event is background-event data, not a saved runtime effect"
-                    .to_string()
-            )
-        );
-
-        runtime = ScriptRuntimeMemory::default();
         runtime
             .variables
             .insert("VAR BAD".to_string(), "TRUE".to_string());
@@ -12846,12 +12820,10 @@ mod tests {
         );
 
         runtime = ScriptRuntimeMemory::default();
-        runtime
-            .special_phone_calls
-            .push("SPECIALCALL MASTERBALL".to_string());
+        runtime.special_phone_call = Some("SPECIALCALL MASTERBALL".to_string());
         assert_eq!(
             runtime.validate(),
-            Err("special_phone_calls[0] has invalid token 'SPECIALCALL MASTERBALL'".to_string())
+            Err("special_phone_call has invalid token 'SPECIALCALL MASTERBALL'".to_string())
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -12859,34 +12831,6 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("completed_trades[0] has invalid token 'NPC TRADE KYLE'".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.catch_tutorials.push("RED GYARADOS".to_string());
-        assert_eq!(
-            runtime.validate(),
-            Err("catch_tutorials[0] has invalid token 'RED GYARADOS'".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .checked_mail_targets
-            .push("Checked Mail Script".to_string());
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "checked_mail_targets[0] has invalid script label 'Checked Mail Script'"
-                    .to_string()
-            )
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .given_mail_targets
-            .push("Given Mail Script".to_string());
-        assert_eq!(
-            runtime.validate(),
-            Err("given_mail_targets[0] has invalid script label 'Given Mail Script'".to_string())
         );
 
         let mut runtime = ScriptRuntimeMemory {
@@ -13046,6 +12990,20 @@ mod tests {
         assert_eq!(
             saved_map_load_command_payload(&map_load),
             ("newloadmap", vec!["MAPSETUP_WARP".to_string()])
+        );
+
+        let bad_warp = ScriptMapLoadRequest {
+            command: "warp".to_string(),
+            map_setup: Some("MAPSETUP_BADWARP".to_string()),
+            source_script: "PlayersHousePCScript".to_string(),
+            command_index: 1,
+        };
+        assert_eq!(
+            saved_map_load_command_payload(&bad_warp),
+            (
+                "warp",
+                vec!["NONE".to_string(), "0".to_string(), "0".to_string()]
+            )
         );
 
         let map_refresh = ScriptMapRefreshRequest {
@@ -13215,182 +13173,6 @@ mod tests {
         );
 
         runtime = ScriptRuntimeMemory::default();
-        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
-            target: "w ScriptVar".to_string(),
-            value: "7".to_string(),
-            source_script: "VarScript".to_string(),
-            command_index: 3,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("variable_writes[0].target has invalid token 'w ScriptVar'".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
-            target: "VAR_BLUECARDBALANCE".to_string(),
-            value: "7".to_string(),
-            source_script: "VarScript".to_string(),
-            command_index: 3,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "variable_writes[0].target VAR_BLUECARDBALANCE is missing from variables"
-                    .to_string()
-            )
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), "8".to_string());
-        runtime.variable_writes.push(ScriptRuntimeVariableWrite {
-            target: "VAR_BLUECARDBALANCE".to_string(),
-            value: "7".to_string(),
-            source_script: "VarScript".to_string(),
-            command_index: 3,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "variable_writes[0].value 7 does not match variables[VAR_BLUECARDBALANCE] 8"
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            saved_variable_write_command_payload(&runtime.variable_writes[0]),
-            ("writevar", vec!["VAR_BLUECARDBALANCE".to_string()])
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
-            command: "db".to_string(),
-            args: vec!["$00".to_string()],
-            source_script: "AsmScript".to_string(),
-            command_index: 4,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("asm_directives[0].command db is not a saved asm directive".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
-            command: "dw".to_string(),
-            args: vec![".MenuData".to_string(), ".OtherMenuData".to_string()],
-            source_script: "AsmScript".to_string(),
-            command_index: 4,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("asm_directives[0].args has 2 entries, expected 1 for dw".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.asm_directives.push(ScriptRuntimeAsmDirective {
-            command: "ld".to_string(),
-            args: vec!["a".to_string(), " [rWBK]".to_string()],
-            source_script: "AsmScript".to_string(),
-            command_index: 4,
-        });
-        assert_eq!(
-            runtime.validate(),
-            Err("asm_directives[0].args[1] has invalid arg ' [rWBK]'".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .numeric_buffer_writes
-            .push(ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING BUFFER 3".to_string(),
-                value: "12".to_string(),
-                width: 3,
-                source_script: "BufferScript".to_string(),
-                command_index: 4,
-            });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "numeric_buffer_writes[0].target_buffer has invalid token 'STRING BUFFER 3'"
-                    .to_string()
-            )
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .numeric_buffer_writes
-            .push(ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING_BUFFER_3".to_string(),
-                value: "00012".to_string(),
-                width: 3,
-                source_script: "BufferScript".to_string(),
-                command_index: 4,
-            });
-        assert_eq!(
-            runtime.validate(),
-            Err("numeric_buffer_writes[0].value 00012 is not canonical".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .numeric_buffer_writes
-            .push(ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING_BUFFER_3".to_string(),
-                value: "12".to_string(),
-                width: 4,
-                source_script: "BufferScript".to_string(),
-                command_index: 4,
-            });
-        assert_eq!(
-            runtime.validate(),
-            Err("numeric_buffer_writes[0].width 4 must be 3".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .numeric_buffer_writes
-            .push(ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING_BUFFER_3".to_string(),
-                value: "12".to_string(),
-                width: 3,
-                source_script: "BufferScript".to_string(),
-                command_index: 4,
-            });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "numeric_buffer_writes[0].target_buffer STRING_BUFFER_3 is missing from named_buffers"
-                    .to_string()
-            )
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime
-            .named_buffers
-            .insert("STRING_BUFFER_3".to_string(), "13".to_string());
-        runtime
-            .numeric_buffer_writes
-            .push(ScriptRuntimeNumericBufferWrite {
-                target_buffer: "STRING_BUFFER_3".to_string(),
-                value: "12".to_string(),
-                width: 3,
-                source_script: "BufferScript".to_string(),
-                command_index: 4,
-            });
-        assert_eq!(
-            runtime.validate(),
-            Err(
-                "numeric_buffer_writes[0].value 12 does not match named_buffers[STRING_BUFFER_3] 13"
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            saved_numeric_buffer_write_command_payload(&runtime.numeric_buffer_writes[0]),
-            ("getnum", vec!["STRING_BUFFER_3".to_string()])
-        );
-
-        runtime = ScriptRuntimeMemory::default();
         runtime
             .stone_table_entries
             .push(ScriptRuntimeStoneTableEntry {
@@ -13424,33 +13206,6 @@ mod tests {
                     "StoneScript".to_string(),
                 ],
             )
-        );
-        let floor = ScriptRuntimeElevatorFloor {
-            floor: "B1F".to_string(),
-            warp: 2,
-            target_map: "GoldenrodDeptStoreB1F".to_string(),
-            source_script: "ElevatorScript".to_string(),
-            command_index: 5,
-        };
-        assert_eq!(
-            saved_elevator_floor_command_payload(&floor),
-            (
-                "elevfloor",
-                vec![
-                    "B1F".to_string(),
-                    "2".to_string(),
-                    "GoldenrodDeptStoreB1F".to_string(),
-                ],
-            )
-        );
-        let description = ScriptRuntimeDecorationDescription {
-            decoration: "DECODESC_LEFT_DOLL".to_string(),
-            source_script: "DecorationScript".to_string(),
-            command_index: 5,
-        };
-        assert_eq!(
-            saved_decoration_description_command_payload(&description),
-            ("describedecoration", vec!["DECODESC_LEFT_DOLL".to_string()],)
         );
         let warp = ScriptWarpRequest {
             target_map: "Route29".to_string(),
@@ -13616,7 +13371,9 @@ mod tests {
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_delays.push(ScriptRuntimeDelay {
             command: "delay".to_string(),
-            frames: 16,
+            parameter: 16,
+            frames: 32,
+            release_all_objects: false,
             source_script: "DelayScript".to_string(),
             command_index: 7,
         });
@@ -13627,13 +13384,43 @@ mod tests {
 
         let delay = ScriptRuntimeDelay {
             command: "pause".to_string(),
-            frames: 15,
+            parameter: 15,
+            frames: 30,
+            release_all_objects: false,
             source_script: "DelayScript".to_string(),
             command_index: 7,
         };
         assert_eq!(
             saved_delay_command_payload(&delay),
             ("pause", vec!["15".to_string()])
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_delays.push(ScriptRuntimeDelay {
+            command: "wait".to_string(),
+            parameter: 0,
+            frames: 1536,
+            release_all_objects: false,
+            source_script: "DelayScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(runtime.validate(), Ok(()));
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_delays.push(ScriptRuntimeDelay {
+            command: "pause".to_string(),
+            parameter: 15,
+            frames: 15,
+            release_all_objects: false,
+            source_script: "DelayScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_delays[0].frames 15 must equal the 2-frame wrapping byte counter (30)"
+                    .to_string()
+            )
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -13676,7 +13463,33 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err(
-                "pending_earthquakes[0].sleep_frames 84 must equal parameter & 0x3f (20)"
+                "pending_earthquakes[0].sleep_frames 84 must equal the wrapping low-six-bit counter (20)"
+                    .to_string()
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
+            parameter: 0,
+            shake_frames: 0,
+            sleep_frames: 256,
+            source_script: "EarthquakeScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(runtime.validate(), Ok(()));
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
+            parameter: 256,
+            shake_frames: 256,
+            sleep_frames: 256,
+            source_script: "EarthquakeScript".to_string(),
+            command_index: 7,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_earthquakes[0].parameter 256 does not fit the earthquake script byte"
                     .to_string()
             )
         );
@@ -13697,6 +13510,7 @@ mod tests {
             emote: "EMOTE_SHOCK".to_string(),
             object: "RuntimeObject".to_string(),
             duration: 16,
+            frames: 32,
             source_script: "EmoteScript".to_string(),
             command_index: 9,
         };
@@ -13709,6 +13523,19 @@ mod tests {
                     "RuntimeObject".to_string(),
                     "16".to_string(),
                 ],
+            )
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.pending_emotes.push(ScriptRuntimeEmote {
+            frames: 16,
+            ..emote.clone()
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "pending_emotes[0].frames 16 must equal the two-frame wrapping duration counter (32)"
+                    .to_string()
             )
         );
         let music_fade = ScriptMusicFade {
@@ -14683,27 +14510,6 @@ mod tests {
             runtime.validate(),
             Err("pending_text_wait and pending_yes_no cannot both be saved".to_string())
         );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.menu_coords = Some([-1, 0, 5, 5]);
-        assert_eq!(
-            runtime.validate(),
-            Err("menu_coords [-1, 0, 5, 5] cannot contain negative coordinates".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.menu_coords = Some([5, 0, 4, 5]);
-        assert_eq!(
-            runtime.validate(),
-            Err("menu_coords right 4 cannot be less than left 5".to_string())
-        );
-
-        runtime = ScriptRuntimeMemory::default();
-        runtime.menu_coords = Some([0, 6, 4, 5]);
-        assert_eq!(
-            runtime.validate(),
-            Err("menu_coords bottom 5 cannot be less than top 6".to_string())
-        );
     }
 
     #[test]
@@ -14949,6 +14755,63 @@ mod tests {
             runtime_error.contains("unknown field `fallback_script`"),
             "{runtime_error}"
         );
+
+        let mut runtime_json =
+            serde_json::to_value(ScriptRuntimeMemory::default()).expect("runtime json");
+        runtime_json
+            .as_object_mut()
+            .expect("runtime object")
+            .insert(
+                "blackout_mod".to_string(),
+                serde_json::json!("CHERRYGROVE_CITY"),
+            );
+        let blackout_mod_error = serde_json::from_value::<ScriptRuntimeMemory>(runtime_json)
+            .expect_err("blackoutmod must not persist a duplicate pending marker")
+            .to_string();
+        assert!(
+            blackout_mod_error.contains("unknown field `blackout_mod`"),
+            "{blackout_mod_error}"
+        );
+
+        let mut runtime_json =
+            serde_json::to_value(ScriptRuntimeMemory::default()).expect("runtime json");
+        runtime_json
+            .as_object_mut()
+            .expect("runtime object")
+            .insert(
+                "catch_tutorials".to_string(),
+                serde_json::json!(["BATTLETYPE_TUTORIAL"]),
+            );
+        let catch_tutorial_error = serde_json::from_value::<ScriptRuntimeMemory>(runtime_json)
+            .expect_err("catchtutorial must not persist command history")
+            .to_string();
+        assert!(
+            catch_tutorial_error.contains("unknown field `catch_tutorials`"),
+            "{catch_tutorial_error}"
+        );
+
+        for (field, value) in [
+            ("effects", serde_json::json!([])),
+            ("variable_writes", serde_json::json!([])),
+            ("numeric_buffer_writes", serde_json::json!([])),
+            ("decoration_descriptions", serde_json::json!([])),
+            ("checked_mail_targets", serde_json::json!([])),
+            ("given_mail_targets", serde_json::json!([])),
+        ] {
+            let mut runtime_json =
+                serde_json::to_value(ScriptRuntimeMemory::default()).expect("runtime json");
+            runtime_json
+                .as_object_mut()
+                .expect("runtime object")
+                .insert(field.to_string(), value);
+            let error = serde_json::from_value::<ScriptRuntimeMemory>(runtime_json)
+                .expect_err("script command history must not be persisted")
+                .to_string();
+            assert!(
+                error.contains(&format!("unknown field `{field}`")),
+                "{error}"
+            );
+        }
 
         let link_status_error =
             serde_json::from_value::<LinkSerialConnectionStatus>(serde_json::json!({
@@ -15285,6 +15148,7 @@ mod tests {
         static_wild.battle = BattleMemory::StaticWild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
             battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            roaming_slot: None,
             origin_map_name: "ROUTE_36".to_string(),
             species: "SUDOWOODO".to_string(),
             level: 30,

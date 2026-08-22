@@ -7,7 +7,7 @@ use crate::models::{Item, PokemonStorage};
 use crate::state::{EventFlagError, GameState};
 use crate::world::collision::{
     MetatileCollision, Terrain, TilesetCollision, describe_collision, is_direction_blocked,
-    sample_collision,
+    is_direction_blocked_leaving, sample_collision,
 };
 use crate::world::map::{Direction, OverworldMapData, TilePosition};
 use crate::world::movement::{
@@ -37,6 +37,8 @@ pub struct FieldMoveCatalog {
     pub bicycle: FieldItemRule,
     pub itemfinder: FieldItemRule,
     pub squirtbottle: FieldItemRule,
+    pub card_key: FieldStoryKeyRule,
+    pub basement_key: FieldStoryKeyRule,
     pub coin_case: FieldItemRule,
     pub blue_card: FieldItemRule,
     pub town_map: FieldItemRule,
@@ -68,6 +70,8 @@ impl<'de> Deserialize<'de> for FieldMoveCatalog {
             bicycle: FieldItemRule,
             itemfinder: FieldItemRule,
             squirtbottle: FieldItemRule,
+            card_key: FieldStoryKeyRule,
+            basement_key: FieldStoryKeyRule,
             coin_case: FieldItemRule,
             blue_card: FieldItemRule,
             town_map: FieldItemRule,
@@ -93,6 +97,8 @@ impl<'de> Deserialize<'de> for FieldMoveCatalog {
             bicycle: raw.bicycle,
             itemfinder: raw.itemfinder,
             squirtbottle: raw.squirtbottle,
+            card_key: raw.card_key,
+            basement_key: raw.basement_key,
             coin_case: raw.coin_case,
             blue_card: raw.blue_card,
             town_map: raw.town_map,
@@ -219,6 +225,28 @@ pub struct FieldRepelItemRule {}
 #[serde(deny_unknown_fields)]
 pub struct FieldItemRule {
     pub item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldStoryKeyRule {
+    pub item_id: String,
+    pub map_name: String,
+    pub required_facing: Option<Direction>,
+    pub target_tile: TilePosition,
+    pub target_script: String,
+}
+
+impl Default for FieldStoryKeyRule {
+    fn default() -> Self {
+        Self {
+            item_id: String::new(),
+            map_name: String::new(),
+            required_facing: None,
+            target_tile: TilePosition::new(0, 0),
+            target_script: String::new(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for FieldItemRule {
@@ -505,6 +533,19 @@ pub fn field_move_catalog_issues(
         items,
         &mut issues,
     );
+    for (subject, rule) in [
+        ("field_moves:card_key", &catalog.card_key),
+        ("field_moves:basement_key", &catalog.basement_key),
+    ] {
+        collect_field_item_rule_issues(
+            subject,
+            &FieldItemRule {
+                item_id: rule.item_id.clone(),
+            },
+            items,
+            &mut issues,
+        );
+    }
     collect_field_item_rule_issues(
         "field_moves:coin_case",
         &catalog.coin_case,
@@ -556,6 +597,8 @@ fn validate_field_move_catalog_pack_tokens(catalog: &FieldMoveCatalog) -> Result
     validate_item_rule_pack_tokens("field_moves.bicycle", &catalog.bicycle)?;
     validate_item_rule_pack_tokens("field_moves.itemfinder", &catalog.itemfinder)?;
     validate_item_rule_pack_tokens("field_moves.squirtbottle", &catalog.squirtbottle)?;
+    validate_story_key_rule_pack_tokens("field_moves.card_key", &catalog.card_key)?;
+    validate_story_key_rule_pack_tokens("field_moves.basement_key", &catalog.basement_key)?;
     validate_item_rule_pack_tokens("field_moves.coin_case", &catalog.coin_case)?;
     validate_item_rule_pack_tokens("field_moves.blue_card", &catalog.blue_card)?;
     validate_item_rule_pack_tokens("field_moves.town_map", &catalog.town_map)?;
@@ -606,6 +649,15 @@ fn validate_move_only_rule_pack_tokens(
 
 fn validate_item_rule_pack_tokens(subject: &str, rule: &FieldItemRule) -> Result<(), String> {
     validate_exact_field_move_token(&format!("{subject}.item_id"), &rule.item_id)
+}
+
+fn validate_story_key_rule_pack_tokens(
+    subject: &str,
+    rule: &FieldStoryKeyRule,
+) -> Result<(), String> {
+    validate_exact_field_move_token(&format!("{subject}.item_id"), &rule.item_id)?;
+    validate_exact_field_move_token(&format!("{subject}.map_name"), &rule.map_name)?;
+    validate_exact_field_move_token(&format!("{subject}.target_script"), &rule.target_script)
 }
 
 fn validate_badge_pack_tokens(
@@ -1022,8 +1074,6 @@ pub enum FieldMoveError {
         item_id: String,
         expected_item_id: String,
     },
-    #[error("blue card balance VAR_BLUECARDBALANCE has invalid exact integer {value}")]
-    InvalidBlueCardBalance { value: String },
     #[error("blue card balance VAR_BLUECARDBALANCE is outside 0..=30: {balance}")]
     BlueCardBalanceOutOfRange { balance: u16 },
     #[error("saved blue_card_balance {balance} requires compiled Buena prize definitions")]
@@ -1057,6 +1107,8 @@ pub enum FieldMoveError {
     },
     #[error("field move {move_id} cannot be used while player movement mode is {mode:?}")]
     InvalidMovementMode { move_id: String, mode: MovementMode },
+    #[error("field move {move_id} cannot be used while ENGINE_ALWAYS_ON_BIKE is set")]
+    AlwaysOnBike { move_id: String },
     #[error("field move {move_id} requires facing {required:?}, got {actual:?}")]
     InvalidFacing {
         move_id: String,
@@ -1065,6 +1117,8 @@ pub enum FieldMoveError {
     },
     #[error("field move {move_id} target tile is outside map {map_name}")]
     TargetTileOutOfBounds { move_id: String, map_name: String },
+    #[error("field move {move_id} player tile is outside map {map_name}")]
+    PlayerTileOutOfBounds { move_id: String, map_name: String },
     #[error(
         "field move {move_id} runtime tile ({x}, {y}) is not aligned to metatile width {metatile_width}"
     )]
@@ -1326,6 +1380,11 @@ pub fn apply_surf_field_move(
     require_travel_rule_shape(rule, false)?;
     let actor = require_party_move(storage, party_index, &rule.move_id)?;
     require_badge(state, &rule.move_id, &rule.badge)?;
+    if state.flags.is_engine_flag_set("ENGINE_ALWAYS_ON_BIKE")? {
+        return Err(FieldMoveError::AlwaysOnBike {
+            move_id: rule.move_id.clone(),
+        });
+    }
     if matches!(player.mode, MovementMode::Surf | MovementMode::SurfPika) {
         return Err(FieldMoveError::InvalidMovementMode {
             move_id: rule.move_id.clone(),
@@ -1355,7 +1414,14 @@ pub fn apply_surf_field_move(
             move_id: rule.move_id.clone(),
         });
     }
-    if is_direction_blocked(sample.permission, player.facing)
+    let current = sample_collision(map, tileset, player.tile).ok_or_else(|| {
+        FieldMoveError::PlayerTileOutOfBounds {
+            move_id: rule.move_id.clone(),
+            map_name: map.name.clone(),
+        }
+    })?;
+    if is_direction_blocked_leaving(current.permission, player.facing)
+        || is_direction_blocked(sample.permission, player.facing)
         || rule.blocked_collisions.contains(&sample.permission)
     {
         return Err(FieldMoveError::BlockedTarget {
@@ -1637,29 +1703,18 @@ pub fn validate_pokegear_item(
 }
 
 pub fn blue_card_balance(state: &GameState) -> Result<u8, FieldMoveError> {
-    let Some(value) = state.script_runtime.variables.get("VAR_BLUECARDBALANCE") else {
-        return Ok(0);
-    };
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(FieldMoveError::InvalidBlueCardBalance {
-            value: value.clone(),
-        });
+    let balance = u16::from(state.blue_card_balance);
+    if balance > 30 {
+        return Err(FieldMoveError::BlueCardBalanceOutOfRange { balance });
     }
-    let parsed = value
-        .parse::<u16>()
-        .map_err(|_| FieldMoveError::InvalidBlueCardBalance {
-            value: value.clone(),
-        })?;
-    if parsed > 30 {
-        return Err(FieldMoveError::BlueCardBalanceOutOfRange { balance: parsed });
-    }
-    Ok(parsed as u8)
+    Ok(state.blue_card_balance)
 }
 
 pub fn validate_saved_blue_card_balance(
     state: &GameState,
     has_buena_prizes: bool,
 ) -> Result<(), FieldMoveError> {
+    blue_card_balance(state)?;
     if state.blue_card_balance > 0 && !has_buena_prizes {
         return Err(FieldMoveError::MissingBuenaPrizesForSavedBlueCardBalance {
             balance: state.blue_card_balance,
@@ -2210,6 +2265,22 @@ mod tests {
             squirtbottle: FieldItemRule {
                 item_id: "SQUIRTBOTTLE".to_string(),
             },
+            card_key: story_key_rule(
+                "CARD_KEY",
+                "RadioTower3F",
+                Some(Direction::Up),
+                14,
+                2,
+                "CardKeySlotScript",
+            ),
+            basement_key: story_key_rule(
+                "BASEMENT_KEY",
+                "GoldenrodUnderground",
+                None,
+                18,
+                6,
+                "BasementDoorScript",
+            ),
             coin_case: FieldItemRule {
                 item_id: "COIN_CASE".to_string(),
             },
@@ -2222,6 +2293,23 @@ mod tests {
             pokegear: FieldItemRule {
                 item_id: "POKEGEAR".to_string(),
             },
+        }
+    }
+
+    fn story_key_rule(
+        item_id: &str,
+        map_name: &str,
+        required_facing: Option<Direction>,
+        x: i16,
+        y: i16,
+        target_script: &str,
+    ) -> FieldStoryKeyRule {
+        FieldStoryKeyRule {
+            item_id: item_id.to_string(),
+            map_name: map_name.to_string(),
+            required_facing,
+            target_tile: TilePosition::new(x, y),
+            target_script: target_script.to_string(),
         }
     }
 
@@ -2740,6 +2828,73 @@ mod tests {
     }
 
     #[test]
+    fn surf_rejects_the_source_always_on_bike_flag_without_moving() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_FOG] = true;
+        state
+            .flags
+            .set_engine_flag("ENGINE_ALWAYS_ON_BIKE", true)
+            .expect("set exact bike flag");
+        let storage = storage_with(MOVE_SURF);
+        let map = map(vec![0x08, 0x08]);
+        let mut player = PlayerMovementState::new(TilePosition::new(0, 0));
+        player.mode = MovementMode::Bike;
+        player.facing = Direction::Right;
+
+        let error = apply_surf_field_move(
+            &catalog(),
+            &state,
+            &storage,
+            &map,
+            &tileset(),
+            &mut player,
+            0,
+        )
+        .expect_err("BIKEFLAGS_ALWAYS_ON_BIKE_F must reject Surf");
+
+        assert_eq!(
+            error,
+            FieldMoveError::AlwaysOnBike {
+                move_id: MOVE_SURF.to_string(),
+            }
+        );
+        assert_eq!(player.mode, MovementMode::Bike);
+        assert_eq!(player.tile, TilePosition::new(0, 0));
+    }
+
+    #[test]
+    fn surf_rejects_a_directional_permission_on_the_tile_being_left() {
+        let mut state = GameState::default();
+        state.badges.johto[BADGE_FOG] = true;
+        let storage = storage_with(MOVE_SURF);
+        let map = map(vec![0x0a, 0x00]);
+        let mut tileset = tileset();
+        tileset.metatiles[0x0a] = MetatileCollision {
+            collision: [
+                permissions::RIGHT_WALL,
+                permissions::WATER,
+                permissions::FLOOR,
+                permissions::FLOOR,
+            ],
+        };
+        let mut player = PlayerMovementState::new(TilePosition::new(0, 0));
+        player.facing = Direction::Right;
+
+        let error =
+            apply_surf_field_move(&catalog(), &state, &storage, &map, &tileset, &mut player, 0)
+                .expect_err("current-tile directional permission must reject Surf");
+
+        assert_eq!(
+            error,
+            FieldMoveError::BlockedTarget {
+                move_id: MOVE_SURF.to_string(),
+            }
+        );
+        assert_eq!(player.mode, MovementMode::Normal);
+        assert_eq!(player.tile, TilePosition::new(0, 0));
+    }
+
+    #[test]
     fn surf_accepts_odd_runtime_tile() {
         let mut state = GameState::default();
         state.badges.johto[BADGE_FOG] = true;
@@ -3006,45 +3161,21 @@ mod tests {
     }
 
     #[test]
-    fn blue_card_balance_reads_exact_script_variable_without_fallback() {
+    fn blue_card_balance_reads_the_authoritative_saved_wram_field() {
         let mut state = GameState::default();
         assert_eq!(blue_card_balance(&state), Ok(0));
 
+        state.blue_card_balance = 30;
         state
             .script_runtime
             .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), "30".to_string());
+            .insert("VAR_BLUECARDBALANCE".to_string(), "3".to_string());
         assert_eq!(blue_card_balance(&state), Ok(30));
 
-        state
-            .script_runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), " 3".to_string());
-        assert_eq!(
-            blue_card_balance(&state),
-            Err(FieldMoveError::InvalidBlueCardBalance {
-                value: " 3".to_string(),
-            })
-        );
-
-        state
-            .script_runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), "31".to_string());
+        state.blue_card_balance = 31;
         assert_eq!(
             blue_card_balance(&state),
             Err(FieldMoveError::BlueCardBalanceOutOfRange { balance: 31 })
-        );
-
-        state.script_runtime.variables.insert(
-            "VAR_BLUECARDBALANCE".to_string(),
-            "999999999999".to_string(),
-        );
-        assert_eq!(
-            blue_card_balance(&state),
-            Err(FieldMoveError::InvalidBlueCardBalance {
-                value: "999999999999".to_string(),
-            })
         );
     }
 

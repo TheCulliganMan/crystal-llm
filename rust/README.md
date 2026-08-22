@@ -60,13 +60,19 @@ rustup target add wasm32-unknown-unknown
 cargo build -p crystal-bevy --target wasm32-unknown-unknown --release --features voxel-view
 wasm-bindgen --target web --out-dir web-dist --out-name crystal-bevy \
   target/wasm32-unknown-unknown/release/crystal-bevy.wasm
+cp ../content-packs/core-modular.browser.crystalpack web-dist/
+cp -R ../content-packs/audio web-dist/
 cargo run -p crystal-web-server -- --dir web-dist --port 8080
 ```
 
 Open `http://127.0.0.1:8080`, click the game canvas, and press `F3` to switch
-between the classic 2D renderer and the optional 2.5D renderer. Browser audio
-is not enabled yet. The canonical compiled game pack is embedded in the WASM
-binary, and browser saves are disabled until persistent web storage is wired.
+between the classic 2D renderer and the optional 2.5D renderer. Click or press
+a key in the game before expecting sound because browsers require a user gesture
+to unlock audio playback. Browser playback sends the pack's canonical PCM
+samples directly to WebAudio. The browser fetches and verifies the compact
+browser pack at startup, then fetches each gzip-compressed PCM sidecar only when
+that sound is first requested. Browser saves are disabled until persistent web
+storage is wired.
 
 ### Optional 2.5D overworld mod
 

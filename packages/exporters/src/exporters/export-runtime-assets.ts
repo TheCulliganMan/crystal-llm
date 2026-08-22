@@ -93,6 +93,11 @@ export type BattleTowerRules = {
   bannedSpecies: Record<string, Record<string, never>>;
   requiredPartyCount: number;
   challengeStreakLength: number;
+  rewardCandidates: string[];
+  excludedRewardItems: string[];
+  rewardQuantity: number;
+  rewardFailureSentinel: string;
+  rewardItemValues: Record<string, number>;
   minimumLevelGroup: number;
   maximumLevelGroup: number;
   levelGroupSize: number;
@@ -109,6 +114,7 @@ export type BattleTowerTrainerDefinition = {
   trainerClass: string;
   name: string;
   spriteConstant: string;
+  female: boolean;
 };
 
 export type BattleTowerMonDefinition = {
@@ -335,6 +341,7 @@ export type PermanentPhoneNumberDefinition = {
 };
 
 export type SpecialPhoneCallDefinition = {
+  value: number;
   condition: string;
   contactId: string;
   callerScript: string;
@@ -1035,8 +1042,9 @@ export const exportSpecialPhoneCalls = (): Record<
   string,
   SpecialPhoneCallDefinition
 > => {
-  const callIds: string[] = [];
+  const callIds: Array<{ id: string; value: number }> = [];
   let inSpecialCalls = false;
+  let specialCallValue = 0;
   for (const raw of readAsmLines(
     path.join("constants", "phone_constants.asm"),
   )) {
@@ -1045,24 +1053,28 @@ export const exportSpecialPhoneCalls = (): Record<
       inSpecialCalls = true;
       continue;
     }
-    if (
-      !inSpecialCalls ||
-      !line ||
-      line.startsWith(";") ||
-      line === "const_def"
-    ) {
+    if (!inSpecialCalls || !line || line.startsWith(";")) {
+      continue;
+    }
+    if (line === "const_def") {
+      specialCallValue = 0;
+      continue;
+    }
+    if (line.startsWith("const_skip")) {
+      specialCallValue += 1;
       continue;
     }
     if (line.startsWith("const ")) {
       const callId = line.split(/\s+/)[1];
-      if (callIds.includes(callId)) {
+      if (callIds.some((call) => call.id === callId)) {
         throw new Error(
           `Special phone call '${callId}' is exported more than once.`,
         );
       }
       if (callId !== "SPECIALCALL_NONE") {
-        callIds.push(callId);
+        callIds.push({ id: callId, value: specialCallValue });
       }
+      specialCallValue += 1;
       continue;
     }
     if (line.startsWith("DEF NUM_SPECIALCALLS")) {
@@ -1137,7 +1149,10 @@ export const exportSpecialPhoneCalls = (): Record<
   }
   const calls: Record<string, SpecialPhoneCallDefinition> = {};
   for (let index = 0; index < callIds.length; index += 1) {
-    calls[callIds[index]] = rows[index];
+    calls[callIds[index].id] = {
+      value: callIds[index].value,
+      ...rows[index],
+    };
   }
   writeJsonToTargets("special_phone_calls.json", calls, { indent: 2 });
   return calls;
@@ -2413,6 +2428,7 @@ const exportBattleTowerDefinitions = (): {
 } => {
   const requiredPaths = [
     path.join("constants", "trainer_constants.asm"),
+    path.join("data", "trainers", "genders.asm"),
     path.join("data", "trainers", "sprites.asm"),
     path.join("data", "battle_tower", "classes.asm"),
     path.join("data", "battle_tower", "parties.asm"),
@@ -2435,6 +2451,11 @@ const exportBattleTowerDefinitions = (): {
     const sprite = spriteLines[index];
     if (sprite) classToSprite.set(trainerClass, sprite);
   });
+  const classToFemale = new Map<string, boolean>();
+  for (const line of readAsmLines(path.join("data", "trainers", "genders.asm"))) {
+    const match = line.match(/^\s*db\s+(MALE|FEMALE)\s*;\s*([A-Z0-9_]+)/);
+    if (match) classToFemale.set(match[2], match[1] === "FEMALE");
+  }
   let trainerIndex = 0;
   const trainers = readAsmLines(path.join("data", "battle_tower", "classes.asm"))
     .map((line) => {
@@ -2445,7 +2466,11 @@ const exportBattleTowerDefinitions = (): {
       if (!spriteConstant) {
         throw new Error(`Battle Tower trainer class '${trainerClass}' has no sprite mapping`);
       }
-      return { index: trainerIndex++, trainerClass, name, spriteConstant };
+      const female = classToFemale.get(trainerClass);
+      if (female === undefined) {
+        throw new Error(`Battle Tower trainer class '${trainerClass}' has no gender mapping`);
+      }
+      return { index: trainerIndex++, trainerClass, name, spriteConstant, female };
     })
     .filter((value): value is BattleTowerTrainerDefinition => Boolean(value));
   if (!trainers.length) throw new Error("Battle Tower trainer roster is empty");
@@ -2603,6 +2628,114 @@ export const exportBattleTowerRules = (): BattleTowerRules => {
       `Battle Tower streak length ${challengeStreakLength} is outside byte count range.`,
     );
   }
+  const parseBattleTowerRewards = () => {
+    const parseBattleTowerTokenConstant = (name: string): string => {
+    const line = constantsLines.find((candidate) =>
+      candidate.startsWith(`DEF ${name} EQU `),
+    );
+    const match = line?.match(
+      new RegExp(`^DEF\\s+${name}\\s+EQU\\s+([A-Z0-9_]+)$`),
+    );
+    if (!match) {
+      throw new Error(
+        `Could not parse ${name} from battle_tower_constants.asm`,
+      );
+    }
+    return match[1];
+    };
+    const rewardQuantity = parseBattleTowerConstant(
+    "BATTLETOWER_REWARD_QUANTITY",
+  );
+  const minimumReward = parseBattleTowerTokenConstant(
+    "BATTLETOWER_MIN_REWARD",
+  );
+  const maximumReward = parseBattleTowerTokenConstant(
+    "BATTLETOWER_MAX_REWARD",
+  );
+  const itemOrder = readAsmLines(path.join("constants", "item_constants.asm"))
+    .map((raw) => stripAsmComment(raw).trim())
+    .map((line) => line.match(/^const\s+([A-Z0-9_]+)$/)?.[1] ?? null)
+    .filter((item): item is string => item !== null);
+  const minimumRewardIndex = itemOrder.indexOf(minimumReward);
+  const maximumRewardIndex = itemOrder.indexOf(maximumReward);
+  if (minimumRewardIndex < 0 || maximumRewardIndex < minimumRewardIndex) {
+    throw new Error(
+      `Battle Tower reward range ${minimumReward}..${maximumReward} is missing or unordered in item_constants.asm`,
+    );
+  }
+  const rewardCandidates = itemOrder.slice(
+    minimumRewardIndex,
+    maximumRewardIndex + 1,
+  );
+  const battleTowerRoutineLines = readAsmLines(
+    path.join("engine", "events", "battle_tower", "battle_tower.asm"),
+  ).map((raw) => stripAsmComment(raw).trim());
+  const chooseRewardStart = battleTowerRoutineLines.indexOf(
+    "BattleTower_RandomlyChooseReward:",
+  );
+  const chooseRewardEndOffset = battleTowerRoutineLines
+    .slice(chooseRewardStart + 1)
+    .findIndex((line) => /^[A-Za-z0-9_]+:$/.test(line));
+  if (chooseRewardStart < 0) {
+    throw new Error("Could not parse BattleTower_RandomlyChooseReward");
+  }
+  const chooseRewardBody = battleTowerRoutineLines.slice(
+    chooseRewardStart + 1,
+    chooseRewardEndOffset < 0
+      ? undefined
+      : chooseRewardStart + 1 + chooseRewardEndOffset,
+  );
+  const excludedRewardItems = chooseRewardBody.flatMap((line, index) => {
+    const match = line.match(/^cp\s+([A-Z0-9_]+)$/);
+    return match && chooseRewardBody[index + 1] === "jr z, .loop"
+      ? [match[1]]
+      : [];
+  });
+  if (
+    excludedRewardItems.length !== 1 ||
+    !rewardCandidates.includes(excludedRewardItems[0])
+  ) {
+    throw new Error(
+      "Battle Tower reward exclusion must name exactly one candidate item",
+    );
+  }
+  const giveRewardStart = battleTowerRoutineLines.indexOf(
+    "BattleTower_GiveReward:",
+  );
+  const wonStateStart = battleTowerRoutineLines.indexOf(
+    "BattleTowerAction_1C:",
+  );
+  if (giveRewardStart < 0 || wonStateStart <= giveRewardStart) {
+    throw new Error("Could not parse BattleTower_GiveReward");
+  }
+  const rewardFailureSentinel = battleTowerRoutineLines
+    .slice(giveRewardStart + 1, wonStateStart)
+    .flatMap((line) => line.match(/^ld\s+a,\s+([A-Z0-9_]+)$/)?.[1] ?? [])
+    .at(-1);
+    if (!rewardFailureSentinel) {
+      throw new Error("Could not parse Battle Tower reward failure sentinel");
+    }
+    const rewardFailureSentinelValue = itemOrder.indexOf(rewardFailureSentinel);
+    if (rewardFailureSentinelValue < 0) {
+      throw new Error(
+        `Battle Tower reward failure sentinel ${rewardFailureSentinel} is missing from item_constants.asm`,
+      );
+    }
+    const rewardItemValues = Object.fromEntries([
+      ...rewardCandidates.map((item, index) => [
+        item,
+        minimumRewardIndex + index,
+      ]),
+      [rewardFailureSentinel, rewardFailureSentinelValue],
+    ]);
+    return {
+      rewardCandidates,
+      excludedRewardItems,
+      rewardQuantity,
+      rewardFailureSentinel,
+      rewardItemValues,
+    };
+  };
   const directSpecies: string[] = [];
   let rangeStart: string | null = null;
   const routineLines = readAsmLines(path.join("mobile", "mobile_46.asm")).map(
@@ -2737,6 +2870,13 @@ export const exportBattleTowerRules = (): BattleTowerRules => {
       "Battle Tower level menu did not export exact integer level groups",
     );
   }
+  const {
+    rewardCandidates,
+    excludedRewardItems,
+    rewardQuantity,
+    rewardFailureSentinel,
+    rewardItemValues,
+  } = parseBattleTowerRewards();
   const textPointersStart = ruleLines.indexOf(".TextPointers:", checkStart);
   if (textPointersStart < 0) {
     throw new Error("Could not parse Battle Tower rule text pointer table");
@@ -2763,6 +2903,11 @@ export const exportBattleTowerRules = (): BattleTowerRules => {
     bannedSpecies,
     requiredPartyCount,
     challengeStreakLength,
+    rewardCandidates,
+    excludedRewardItems,
+    rewardQuantity,
+    rewardFailureSentinel,
+    rewardItemValues,
     minimumLevelGroup: Math.min(...levelGroups),
     maximumLevelGroup: Math.max(...levelGroups),
     levelGroupSize,

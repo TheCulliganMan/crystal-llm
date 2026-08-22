@@ -1,6 +1,13 @@
     #[test]
     fn execute_next_queued_script_command_enters_target_script_runtime() {
-        let data = GameDataSet::default();
+        let mut module = test_map_module("RuntimeQueueTestMap", "RUNTIME_QUEUE_TEST_MAP", None);
+        module
+            .scripts
+            .insert("RuntimeQueuedScript".to_string(), serde_json::json!([]));
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
         let mut state = GameState::default();
         state
             .script_runtime
@@ -64,6 +71,135 @@
         assert_eq!(event.target_script.as_deref(), Some("RuntimeQueuedScript"));
         assert_eq!(event.source_script, "RuntimePayloadScript");
         assert_eq!(event.command_index, 7);
+    }
+
+    #[test]
+    fn execute_next_queued_script_command_rejects_unresolved_target_atomically() {
+        let data = GameDataSet {
+            maps: map_payload(vec![test_map_module(
+                "RuntimeQueueTestMap",
+                "RUNTIME_QUEUE_TEST_MAP",
+                None,
+            )]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .command_queue
+            .push(ScriptRuntimeQueuedCommand {
+                origin_map_name: "RuntimeQueueTestMap".to_string(),
+                command: "writecmdqueue".to_string(),
+                target: "MissingQueuedScript".to_string(),
+                bank: None,
+                source_script: "RuntimePayloadScript".to_string(),
+                command_index: 7,
+            });
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeQueueTestMap".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let before = (state.clone(), session.clone());
+        let audio_ids = BTreeSet::new();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ExecuteNextQueuedScriptCommand,
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("unresolved queued script pointer must reject");
+
+        assert!(
+            error
+                .to_string()
+                .contains("queued script target MissingQueuedScript cannot resolve"),
+            "{error:#}"
+        );
+        assert_eq!((state, session), before);
+    }
+
+    #[test]
+    fn execute_next_queued_script_command_rejects_live_map_mismatch_atomically() {
+        let mut origin = test_map_module("RuntimeQueueOrigin", "RUNTIME_QUEUE_ORIGIN", None);
+        origin
+            .scripts
+            .insert("RuntimeQueuedScript".to_string(), serde_json::json!([]));
+        let data = GameDataSet {
+            maps: map_payload(vec![
+                origin,
+                test_map_module("RuntimeQueueDestination", "RUNTIME_QUEUE_DESTINATION", None),
+            ]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .command_queue
+            .push(ScriptRuntimeQueuedCommand {
+                origin_map_name: "RuntimeQueueOrigin".to_string(),
+                command: "writecmdqueue".to_string(),
+                target: "RuntimeQueuedScript".to_string(),
+                bank: None,
+                source_script: "RuntimePayloadScript".to_string(),
+                command_index: 7,
+            });
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: "RuntimeQueueDestination".to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let before = (state.clone(), session.clone());
+        let audio_ids = BTreeSet::new();
+
+        let error = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ExecuteNextQueuedScriptCommand,
+                &audio_ids,
+                &audio_ids,
+                &audio_ids,
+            )
+            .expect_err("queued script cannot cross the live map boundary");
+
+        assert!(
+            error.to_string().contains(
+                "script command map mismatch: session is on RuntimeQueueDestination, request was for RuntimeQueueOrigin"
+            ),
+            "{error:#}"
+        );
+        assert_eq!((state, session), before);
     }
 
     #[test]
@@ -144,6 +280,7 @@
                 nickname: None,
                 original_trainer_name: "PLAYER".to_string(),
                 original_trainer_id: 1234,
+                caught_data: None,
                 source_script: gift.source_script.clone(),
                 command_index: gift.command_index,
                 egg: gift.egg,
@@ -958,6 +1095,65 @@
         assert_eq!(session.snapshot().map_name, "NewBarkTown");
         assert_eq!(session.snapshot().tile, TilePosition::new(0, 4));
         assert_eq!(session.snapshot().frame, 1);
+    }
+
+    #[test]
+    fn route_connections_arrive_on_the_continuous_asm_boundary_tile() {
+        let root = repository_root_for_tests();
+        let asset_root = AssetRoot::new(root);
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load base game data");
+
+        for (source_map, direction, target_map, trigger_tile, expected_tile) in [
+            (
+                "NewBarkTown",
+                "west",
+                "Route29",
+                TilePosition::new(-1, 4),
+                TilePosition::new(59, 4),
+            ),
+            (
+                "Route26",
+                "west",
+                "Route27",
+                TilePosition::new(-1, 94),
+                TilePosition::new(79, 4),
+            ),
+            (
+                "Route29",
+                "north",
+                "Route46",
+                TilePosition::new(20, -1),
+                TilePosition::new(0, 35),
+            ),
+        ] {
+            let source = data
+                .map_module(source_map)
+                .unwrap_or_else(|error| panic!("load {source_map}: {error:#}"));
+            let connection = source
+                .attributes
+                .connections
+                .iter()
+                .find(|connection| {
+                    connection.direction == direction && connection.target_map == target_map
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing {source_map} {direction} connection to {target_map}")
+                });
+            let trigger = ConnectionTrigger {
+                map_name: source_map.to_string(),
+                tile: trigger_tile,
+                connection: connection.clone(),
+            };
+
+            let transition = data
+                .resolve_connection_transition(&trigger)
+                .unwrap_or_else(|error| panic!("resolve {source_map} -> {target_map}: {error:#}"));
+
+            assert_eq!(transition.destination.map_name, target_map);
+            assert_eq!(transition.destination.tile, expected_tile);
+        }
     }
 
     #[test]
@@ -1839,6 +2035,10 @@
                 author: None,
                 description: None,
             },
+            payload: ModpackPayload {
+                roaming_pokemon: roaming_catalog_for_tests("RAIKOU", "ENTEI"),
+                ..ModpackPayload::default()
+            },
             ..ModpackManifest::default()
         })
         .expect("serialize complete empty manifest");
@@ -1846,7 +2046,22 @@
             "max_level": 100,
             "wild_exp_divisor": 7,
             "trainer_exp_numerator": 3,
-            "trainer_exp_denominator": 2
+            "trainer_exp_denominator": 2,
+            "mom_money_increment": 2300,
+            "mom_random_items": [{
+                "trigger": 0,
+                "cost": 600,
+                "kind": "item",
+                "target": "SUPER_POTION",
+                "decoration_flag": null
+            }],
+            "mom_progression_items": [{
+                "trigger": 900,
+                "cost": 600,
+                "kind": "item",
+                "target": "SUPER_POTION",
+                "decoration_flag": null
+            }]
         });
         manifest["payload"]["battle_escape_rules"] = serde_json::json!({
             "player_speed_multiplier": 32,
@@ -2556,7 +2771,7 @@
     }
 
     #[test]
-    fn compiled_pack_executes_every_object_callback_on_map_entry() {
+    fn compiled_pack_executes_every_map_callback_on_map_entry() {
         let root = repository_root_for_tests();
         let pack =
             read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
@@ -2570,15 +2785,13 @@
                     .map(|module| {
                         module.map_script_section_commands.iter().any(|command| {
                             command.command == "callback"
-                                && command.args.first().map(String::as_str)
-                                    == Some("MAPCALLBACK_OBJECTS")
                         })
                     })
                     .unwrap_or(false)
             })
             .cloned()
             .collect();
-        assert_eq!(callback_maps.len(), 36);
+        assert_eq!(callback_maps.len(), 89);
 
         for map_name in callback_maps {
             let map = data
@@ -2603,6 +2816,8 @@
             let mut state = GameState::default();
             apply_initialize_events(&mut state, &data.initialize_events)
                 .unwrap_or_else(|error| panic!("initialize callback state: {error}"));
+            state.overworld =
+                crystal_core::state::OverworldMemory::from_snapshot(&session.snapshot());
             state
                 .script_runtime
                 .variables
@@ -2610,7 +2825,6 @@
             if let Some(module) = data.map_module(&map_name).ok() {
                 for callback in module.map_script_section_commands.iter().filter(|command| {
                     command.command == "callback"
-                        && command.args.first().map(String::as_str) == Some("MAPCALLBACK_OBJECTS")
                 }) {
                     if let Some(callback_name) = callback.args.get(1) {
                         if let Some(body) =
@@ -2635,9 +2849,144 @@
                     }
                 }
             }
-            data.apply_map_object_callbacks(&mut state, &mut session, &map_name)
-                .unwrap_or_else(|error| panic!("execute object callback on {map_name}: {error:#}"));
+            data.apply_map_setup_callbacks(
+                &mut state,
+                &mut session,
+                &map_name,
+                "MAPSETUP_WARP",
+            )
+                .unwrap_or_else(|error| panic!("execute map callbacks on {map_name}: {error:#}"));
         }
+    }
+
+    #[test]
+    fn map_setup_callbacks_reject_unsupported_opcodes_instead_of_skipping_them() {
+        let map_name = "StrictCallbackMap";
+        let callback_name = "StrictCallbackScript";
+        let mut module = test_map_module(map_name, "STRICT_CALLBACK_MAP", None);
+        module.map_script_section_commands.push(MapScriptSectionCommand {
+            command: "callback".to_string(),
+            args: vec!["MAPCALLBACK_NEWMAP".to_string(), callback_name.to_string()],
+            command_index: 0,
+        });
+        module.scripts.insert(
+            callback_name.to_string(),
+            serde_json::json!([{"command": "unsupportedcallbackop", "args": []}]),
+        );
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: map_name.to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let mut state = GameState::default();
+
+        let error = data
+            .apply_map_setup_callbacks(
+                &mut state,
+                &mut session,
+                map_name,
+                "MAPSETUP_WARP",
+            )
+            .expect_err("unsupported callback opcode must fail");
+
+        assert!(
+            error.to_string().contains("unsupportedcallbackop"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn endcallback_preserves_a_suspended_outer_script_call_frame() {
+        let map_name = "CallbackStackMap";
+        let callback_name = "CallbackStackScript";
+        let mut module = test_map_module(map_name, "CALLBACK_STACK_MAP", None);
+        module.map_script_section_commands.push(MapScriptSectionCommand {
+            command: "callback".to_string(),
+            args: vec!["MAPCALLBACK_NEWMAP".to_string(), callback_name.to_string()],
+            command_index: 0,
+        });
+        module.scripts.insert(
+            callback_name.to_string(),
+            serde_json::json!([{"command": "endcallback", "args": []}]),
+        );
+        module.script_control_commands.push(ScriptControlCommand {
+            command: "endcallback".to_string(),
+            compare_value: None,
+            target_label: None,
+            resolved_target_script: None,
+            source_script: callback_name.to_string(),
+            command_index: 0,
+        });
+        let data = GameDataSet {
+            maps: map_payload(vec![module]),
+            ..GameDataSet::default()
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            OverworldMapData {
+                name: map_name.to_string(),
+                width: 1,
+                height: 1,
+                border_block: 0,
+                connections: Vec::new(),
+                metatile_ids: vec![0],
+            },
+            MapEvents::default(),
+            Vec::new(),
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [permissions::FLOOR; 4],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+        let suspended = crystal_core::state::ScriptReturnFrame {
+            origin_map_name: map_name.to_string(),
+            source_script: "SuspendedOuterScript".to_string(),
+            next_command_index: 7,
+        };
+        let suspended_next = crystal_core::state::ScriptLocation {
+            origin_map_name: map_name.to_string(),
+            script: "SuspendedNextScript".to_string(),
+        };
+        let suspended_end = crystal_core::state::ScriptEndState {
+            callback: false,
+            just_battled_guard: false,
+            source_script: "PriorEndedScript".to_string(),
+            command_index: 3,
+        };
+        let mut state = GameState::default();
+        state.script_runtime.call_stack.push(suspended.clone());
+        state.script_runtime.next_script = Some(suspended_next.clone());
+        state.script_runtime.script_ended = Some(suspended_end.clone());
+
+        data.apply_map_setup_callbacks(
+            &mut state,
+            &mut session,
+            map_name,
+            "MAPSETUP_WARP",
+        )
+        .expect("callback must return without consuming its suspended caller");
+
+        assert_eq!(state.script_runtime.call_stack, vec![suspended]);
+        assert_eq!(state.script_runtime.next_script, Some(suspended_next));
+        assert_eq!(state.script_runtime.script_ended, Some(suspended_end));
     }
 
     #[test]
@@ -2663,7 +3012,7 @@
             .map
             .metatile_at(1, 1)
             .expect("read Kabuto chamber floor block");
-        data.apply_map_object_callbacks(&mut state, &mut session, map_name)
+        data.apply_map_setup_callbacks(&mut state, &mut session, map_name, "MAPSETUP_WARP")
             .expect("execute tile callback");
         assert_ne!(Some(before), session.map.metatile_at(1, 1));
         assert_eq!(session.map.metatile_at(1, 1), Some(0x01));
@@ -2675,6 +3024,121 @@
             Some(&0x01)
         );
         assert_eq!(map.metatile_at(1, 1), Some(before));
+    }
+
+    #[test]
+    fn reload_map_setup_does_not_run_the_maps_newmap_callback() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "GoldenrodUndergroundWarehouse";
+        let map = data.overworld_map(map_name).expect("assemble warehouse map");
+        let (width, height) = map.checked_tile_bounds().expect("warehouse map bounds");
+        let mut session = (0..height)
+            .flat_map(|y| (0..width).map(move |x| TilePosition::new(x as i16, y as i16)))
+            .find_map(|tile| data.overworld_session(map_name, tile, 0).ok())
+            .expect("find a walkable warehouse tile");
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_SWITCH_1", true)
+            .expect("set warehouse switch");
+
+        data.apply_map_setup_callbacks(
+            &mut state,
+            &mut session,
+            map_name,
+            "MAPSETUP_RELOADMAP",
+        )
+        .expect("execute reload setup callbacks");
+
+        assert!(
+            state
+                .flags
+                .is_event_flag_set("EVENT_SWITCH_1")
+                .expect("read warehouse switch")
+        );
+
+        data.apply_map_setup_callbacks(
+            &mut state,
+            &mut session,
+            map_name,
+            "MAPSETUP_WARP",
+        )
+        .expect("execute warp setup callbacks");
+
+        assert!(
+            !state
+                .flags
+                .is_event_flag_set("EVENT_SWITCH_1")
+                .expect("read reset warehouse switch")
+        );
+    }
+
+    #[test]
+    fn runtime_map_setup_callback_mutation_runs_the_exact_current_map_plan() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "GoldenrodUndergroundWarehouse";
+        let map = data.overworld_map(map_name).expect("assemble warehouse map");
+        let (width, height) = map.checked_tile_bounds().expect("warehouse map bounds");
+        let mut session = (0..height)
+            .flat_map(|y| (0..width).map(move |x| TilePosition::new(x as i16, y as i16)))
+            .find_map(|tile| data.overworld_session(map_name, tile, 0).ok())
+            .expect("find a walkable warehouse tile");
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_SWITCH_1", true)
+            .expect("set warehouse switch");
+        let audio = BTreeSet::new();
+
+        let reload = data
+            .apply_runtime_mutation_command(
+                &mut state,
+                &mut session,
+                RuntimeMutationCommand::ApplyMapSetupCallbacks {
+                    map_setup: "MAPSETUP_RELOADMAP".to_string(),
+                },
+                &audio,
+                &audio,
+                &audio,
+            )
+            .expect("apply reload callbacks");
+        assert!(matches!(
+            reload.result,
+            RuntimeMutationResult::MapSetupCallbacksApplied(ref setup)
+                if setup == "MAPSETUP_RELOADMAP"
+        ));
+        assert!(
+            state
+                .flags
+                .is_event_flag_set("EVENT_SWITCH_1")
+                .expect("read warehouse switch after reload")
+        );
+
+        data.apply_runtime_mutation_command(
+            &mut state,
+            &mut session,
+            RuntimeMutationCommand::ApplyMapSetupCallbacks {
+                map_setup: "MAPSETUP_WARP".to_string(),
+            },
+            &audio,
+            &audio,
+            &audio,
+        )
+        .expect("apply warp callbacks");
+        assert!(
+            !state
+                .flags
+                .is_event_flag_set("EVENT_SWITCH_1")
+                .expect("read reset warehouse switch")
+        );
     }
 
     #[test]
@@ -2691,9 +3155,11 @@
         assert_eq!(session.map.metatile_at(0, 2), Some(0x05));
         assert_eq!(session.map.metatile_at(3, 0), Some(0x02));
         let mut state = GameState::default();
+        apply_initialize_events(&mut state, &data.initialize_events)
+            .expect("initialize the default bedroom decorations");
         data.commit_overworld_snapshot(&mut state, &session, SpawnMemoryUpdate::Preserve);
 
-        data.apply_map_object_callbacks(&mut state, &mut session, map_name)
+        data.apply_map_setup_callbacks(&mut state, &mut session, map_name, "MAPSETUP_WARP")
             .expect("execute player-room callbacks");
 
         assert_eq!(session.map.metatile_at(0, 2), Some(0x1b));
@@ -2705,7 +3171,576 @@
     }
 
     #[test]
-    fn compiled_pack_queues_cmdqueue_callback_on_map_entry() {
+    fn player_decoration_actions_follow_owned_flags_slots_and_ornament_sides() {
+        let root = repository_root_for_tests();
+        let data = read_verified_compiled_game_pack(
+            root.join("content-packs/core-modular.crystalpack"),
+        )
+        .expect("load compiled core pack")
+        .data;
+        let mut state = GameState::default();
+        for flag in [
+            "EVENT_DECO_BED_1",
+            "EVENT_DECO_BED_2",
+            "EVENT_DECO_PIKACHU_DOLL",
+            "EVENT_DECO_CLEFAIRY_DOLL",
+        ] {
+            state.flags.set_event_flag(flag, true).expect("own decoration");
+        }
+
+        assert_eq!(
+            data.owned_decoration_categories(&state)
+                .expect("owned categories"),
+            vec![DecorationCategory::Bed, DecorationCategory::Ornament]
+        );
+        assert_eq!(
+            data.owned_decorations(&state, DecorationCategory::Bed)
+                .expect("owned beds")
+                .into_iter()
+                .map(|decoration| decoration.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DECO_FEATHERY_BED", "DECO_PINK_BED"]
+        );
+
+        assert_eq!(
+            data.set_up_decoration(&mut state, "DECO_FEATHERY_BED", None)
+                .expect("set up first bed"),
+            DecorationActionOutcome::SetUp {
+                decoration: "DECO_FEATHERY_BED".to_string()
+            }
+        );
+        assert_eq!(
+            data.set_up_decoration(&mut state, "DECO_PINK_BED", None)
+                .expect("replace bed"),
+            DecorationActionOutcome::Replaced {
+                decoration: "DECO_PINK_BED".to_string(),
+                previous: "DECO_FEATHERY_BED".to_string()
+            }
+        );
+        assert_eq!(
+            data.set_up_decoration(&mut state, "DECO_PINK_BED", None)
+                .expect("reject already-set bed"),
+            DecorationActionOutcome::AlreadySetUp {
+                decoration: "DECO_PINK_BED".to_string()
+            }
+        );
+        assert_eq!(
+            data.put_away_decoration(&mut state, DecorationCategory::Bed, None)
+                .expect("put away bed"),
+            DecorationActionOutcome::PutAway {
+                decoration: "DECO_PINK_BED".to_string()
+            }
+        );
+        assert_eq!(
+            data.put_away_decoration(&mut state, DecorationCategory::Bed, None)
+                .expect("empty bed slot"),
+            DecorationActionOutcome::NothingToPutAway
+        );
+
+        data.set_up_decoration(
+            &mut state,
+            "DECO_PIKACHU_DOLL",
+            Some(DecorationSide::Left),
+        )
+        .expect("set left ornament");
+        data.set_up_decoration(
+            &mut state,
+            "DECO_CLEFAIRY_DOLL",
+            Some(DecorationSide::Right),
+        )
+        .expect("set right ornament");
+        assert_eq!(
+            data.set_up_decoration(
+                &mut state,
+                "DECO_PIKACHU_DOLL",
+                Some(DecorationSide::Right),
+            )
+            .expect("move ornament to right"),
+            DecorationActionOutcome::Replaced {
+                decoration: "DECO_PIKACHU_DOLL".to_string(),
+                previous: "DECO_CLEFAIRY_DOLL".to_string()
+            }
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wDecoLeftOrnament"),
+            Some(&"0".to_string())
+        );
+        assert_eq!(
+            state.script_runtime.memory.get("wDecoRightOrnament"),
+            Some(&"DECO_PIKACHU_DOLL".to_string())
+        );
+
+        let before = state.clone();
+        let error = data
+            .set_up_decoration(&mut state, "DECO_N64", None)
+            .expect_err("unowned console must reject");
+        assert!(error.to_string().contains("decoration DECO_N64 is not owned"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn compiled_warpcheck_resolves_the_live_warp_under_the_player() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "RuinsOfAlphKabutoChamber";
+        let module = data.map_module(map_name).expect("assemble Kabuto chamber");
+        let command = module
+            .script_map_commands
+            .iter()
+            .find(|command| {
+                command.command == "warpcheck"
+                    && command.source_script == ".PuzzleComplete@RuinsOfAlphKabutoChamberPuzzle"
+            })
+            .expect("Kabuto puzzle warpcheck");
+        let mut sessionless_state = GameState::default();
+        let error = data
+            .apply_script_map_command(
+                &mut sessionless_state,
+                map_name,
+                map_name,
+                &command.source_script,
+                command.command_index,
+            )
+            .expect_err("warpcheck requires live collision and player state");
+        assert!(
+            format!("{error:#}").contains("requires a live overworld session"),
+            "{error:#}"
+        );
+        assert_eq!(sessionless_state, GameState::default());
+        let session = data
+            .overworld_session(map_name, TilePosition::new(3, 9), 0)
+            .expect("create session on live chamber exit warp");
+        let trigger = session
+            .check_warp_checked()
+            .expect("check chamber warp")
+            .expect("live chamber exit warp");
+        let expected = data
+            .resolve_warp_transition(&trigger)
+            .expect("resolve chamber exit warp");
+        let mut state = GameState::default();
+        data.commit_overworld_snapshot(&mut state, &session, SpawnMemoryUpdate::Preserve);
+
+        let action = data
+            .apply_script_map_command_in_session(
+                &mut state,
+                &session,
+                map_name,
+                &command.source_script,
+                command.command_index,
+            )
+            .expect("execute compiled warpcheck");
+
+        assert!(matches!(action, ScriptMapAction::WarpCheck { .. }));
+        assert_eq!(
+            state.script_runtime.pending_script_warp,
+            Some(ScriptWarpRequest {
+                target_map: expected.destination.map_name,
+                tile: expected.destination.tile,
+                facing: None,
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            })
+        );
+        let pending = state
+            .script_runtime
+            .pending_script_warp
+            .as_ref()
+            .expect("pending warpcheck transition");
+        data.validate_saved_warpcheck_pending_warp_reference(
+            &state,
+            "script_runtime.pending_script_warp.source_script",
+            pending,
+        )
+        .expect("validate source-exact saved warpcheck transition");
+
+        let mut forged = pending.clone();
+        forged.tile.x += 2;
+        let error = data
+            .validate_saved_warpcheck_pending_warp_reference(
+                &state,
+                "script_runtime.pending_script_warp.source_script",
+                &forged,
+            )
+            .expect_err("saved warpcheck destination must match the live warp");
+        assert!(
+            format!("{error:#}").contains("does not match live warp destination"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn compiled_warpcheck_does_nothing_without_a_live_warp_under_the_player() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "RuinsOfAlphKabutoChamber";
+        let module = data.map_module(map_name).expect("assemble Kabuto chamber");
+        let command = module
+            .script_map_commands
+            .iter()
+            .find(|command| {
+                command.command == "warpcheck"
+                    && command.source_script == ".PuzzleComplete@RuinsOfAlphKabutoChamberPuzzle"
+            })
+            .expect("Kabuto puzzle warpcheck");
+        let session = data
+            .overworld_session(map_name, TilePosition::new(3, 8), 0)
+            .expect("create session beside chamber exit warp");
+        assert_eq!(session.check_warp_checked().expect("check chamber warp"), None);
+        let mut state = GameState::default();
+        data.commit_overworld_snapshot(&mut state, &session, SpawnMemoryUpdate::Preserve);
+
+        let action = data
+            .apply_script_map_command_in_session(
+                &mut state,
+                &session,
+                map_name,
+                &command.source_script,
+                command.command_index,
+            )
+            .expect("execute compiled warpcheck");
+
+        assert!(matches!(action, ScriptMapAction::WarpCheck { .. }));
+        assert_eq!(state.script_runtime.pending_script_warp, None);
+    }
+
+    #[test]
+    fn compiled_warpcheck_is_atomic_when_the_live_warp_cannot_resolve() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "RuinsOfAlphKabutoChamber";
+        let module = data.map_module(map_name).expect("assemble Kabuto chamber");
+        let command = module
+            .script_map_commands
+            .iter()
+            .find(|command| {
+                command.command == "warpcheck"
+                    && command.source_script == ".PuzzleComplete@RuinsOfAlphKabutoChamberPuzzle"
+            })
+            .expect("Kabuto puzzle warpcheck");
+        let mut session = data
+            .overworld_session(map_name, TilePosition::new(3, 9), 0)
+            .expect("create session on live chamber exit warp");
+        let live_warp = session
+            .map_events
+            .warps
+            .iter_mut()
+            .find(|warp| warp.x == 3 && warp.y == 9)
+            .expect("chamber exit warp");
+        live_warp.target_map = "MISSING_MAP".to_string();
+        live_warp.target_map_constant = "MISSING_MAP".to_string();
+        let mut state = GameState::default();
+        data.commit_overworld_snapshot(&mut state, &session, SpawnMemoryUpdate::Preserve);
+        let before = state.clone();
+
+        let error = data
+            .apply_script_map_command_in_session(
+                &mut state,
+                &session,
+                map_name,
+                &command.source_script,
+                command.command_index,
+            )
+            .expect_err("unresolvable live warp must fail");
+
+        assert!(format!("{error:#}").contains("unknown target map constant 'MISSING_MAP'"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn reloadmapafterbattle_executes_exact_whiteout_mom_and_bill_branches() {
+        let root = repository_root_for_tests();
+        let data =
+            read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
+                .expect("load compiled core pack")
+                .data;
+        let map_name = "Route30";
+        let command = data
+            .map_module(map_name)
+            .expect("assemble Route30")
+            .script_map_commands
+            .iter()
+            .find(|command| command.command == "reloadmapafterbattle")
+            .expect("Route30 trainer reloadmapafterbattle")
+            .clone();
+        let session = data
+            .overworld_session(map_name, TilePosition::new(10, 10), 0)
+            .expect("create Route30 session");
+
+        let mut lost = GameState::default();
+        lost.battle_result = 1;
+        lost.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        let action = data
+            .apply_script_map_command_with_divider_in_session(
+                &mut lost,
+                &session,
+                map_name,
+                &command.source_script,
+                command.command_index,
+                &mut no_divider,
+            )
+            .expect("execute losing reloadmapafterbattle");
+        assert!(matches!(action, ScriptMapAction::BattleWhiteout { .. }));
+        assert_eq!(lost.script_runtime.pending_map_load, None);
+        assert_eq!(lost.script_runtime.memory.get("wBattleScriptFlags").map(String::as_str), Some("0"));
+
+        let mut ordinary_wild = GameState::default();
+        ordinary_wild.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "0".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut ordinary_wild,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute ordinary wild reloadmapafterbattle");
+        assert!(ordinary_wild.script_runtime.deferred_scripts.is_empty());
+        assert!(ordinary_wild.script_runtime.map_reentry_script.is_none());
+        assert!(ordinary_wild.pending_mom_purchase.is_none());
+        assert_eq!(
+            ordinary_wild
+                .script_runtime
+                .pending_map_load
+                .as_ref()
+                .map(|load| load.command.as_str()),
+            Some("reloadmapafterbattle")
+        );
+
+        let mut wild_box_full = GameState::default();
+        wild_box_full.battle_result = 0x80;
+        wild_box_full.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "0".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut wild_box_full,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute box-full wild reloadmapafterbattle");
+        assert_eq!(
+            wild_box_full
+                .script_runtime
+                .map_reentry_script
+                .as_ref()
+                .map(|script| script.script.as_str()),
+            Some("Script_SpecialBillCall")
+        );
+        assert!(wild_box_full.script_runtime.deferred_scripts.is_empty());
+        assert_eq!(
+            wild_box_full
+                .script_runtime
+                .pending_map_load
+                .as_ref()
+                .map(|load| load.command.as_str()),
+            Some("reloadmapafterbattle")
+        );
+
+        let existing_reentry = ScriptLocation {
+            origin_map_name: map_name.to_string(),
+            script: "Route30YoungsterJoeyScript".to_string(),
+        };
+        let mut occupied_reentry = GameState::default();
+        occupied_reentry.battle_result = 0x80;
+        occupied_reentry.script_runtime.map_reentry_script = Some(existing_reentry.clone());
+        occupied_reentry
+            .script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "0".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut occupied_reentry,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute box-full return with occupied map reentry queue");
+        assert_eq!(
+            occupied_reentry.script_runtime.map_reentry_script,
+            Some(existing_reentry),
+            "LoadMemScript preserves the first queued map reentry pointer"
+        );
+
+        let mut trainer = GameState::default();
+        trainer.moms_money = 900;
+        trainer.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut trainer,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute trainer Mom reloadmapafterbattle");
+        assert_eq!(trainer.bag.pc_items.get("SUPER_POTION"), Some(&1));
+        assert_eq!(trainer.moms_money, 900, "deduction waits for the memory script");
+        assert_eq!(
+            trainer.pending_mom_purchase.as_ref().map(|purchase| purchase.cost),
+            Some(600)
+        );
+        assert_eq!(
+            trainer
+                .script_runtime
+                .map_reentry_script
+                .as_ref()
+                .map(|script| script.script.as_str()),
+            Some(".ItemScript@Mom_GetScriptPointer")
+        );
+        data.validate_saved_mom_purchase_references(&trainer)
+            .expect("validate source-exact pending Mom transaction");
+        let mut forged_purchase = trainer.clone();
+        forged_purchase
+            .pending_mom_purchase
+            .as_mut()
+            .expect("pending Mom transaction")
+            .cost = 601;
+        let error = data
+            .validate_saved_mom_purchase_references(&forged_purchase)
+            .expect_err("forged Mom transaction must not load");
+        assert!(
+            format!("{error:#}").contains("does not match compiled source row"),
+            "{error:#}"
+        );
+        let mut reload_session = session.clone();
+        let empty_audio = BTreeSet::new();
+        data.apply_runtime_mutation_command(
+            &mut trainer,
+            &mut reload_session,
+            RuntimeMutationCommand::TakePendingScriptRequest(
+                RuntimePendingScriptRequestCommand {
+                    kind: RuntimePendingScriptRequestKind::MapLoad,
+                },
+            ),
+            &empty_audio,
+            &empty_audio,
+            &empty_audio,
+        )
+        .expect("run deferred Mom purchase memory script at map reload");
+        assert_eq!(trainer.moms_money, 900);
+        assert!(trainer.pending_mom_purchase.is_some());
+        assert!(trainer.script_runtime.next_script.is_none());
+        let reentry = data
+            .apply_runtime_mutation_command(
+                &mut trainer,
+                &mut reload_session,
+                RuntimeMutationCommand::DrainScriptRuntimeQueue(
+                    RuntimeScriptRuntimeQueueDrainCommand {
+                        queue: RuntimeScriptRuntimeQueue::MapReentryScript,
+                    },
+                ),
+                &empty_audio,
+                &empty_audio,
+                &empty_audio,
+            )
+            .expect("run Mom purchase map reentry script at player-event boundary");
+        assert!(matches!(
+            reentry.result,
+            RuntimeMutationResult::ScriptRuntimeQueueDrained(
+                RuntimeScriptRuntimeQueueDrainResult::MapReentryScript(_)
+            )
+        ));
+        assert_eq!(trainer.moms_money, 300);
+        assert_eq!(trainer.mom_item_index, 1);
+        assert_eq!(trainer.pending_mom_purchase, None);
+        assert!(trainer.script_runtime.map_reentry_script.is_none());
+
+        let mut full_pc = GameState::default();
+        full_pc.moms_money = 900;
+        full_pc.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        for item in data.items.values().take(crystal_core::models::PC_ITEM_CAPACITY) {
+            assert!(full_pc.bag.add_pc_item(item, 1).expect("fill PC item slot"));
+        }
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut full_pc,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute trainer return with full PC");
+        assert_eq!(full_pc.pending_mom_purchase, None);
+        assert_eq!(full_pc.moms_money, 900);
+
+        let mut no_purchase = GameState::default();
+        no_purchase.mom_item_index = 10;
+        no_purchase.mom_item_trigger_balance = 2_300;
+        no_purchase.moms_money = 1;
+        no_purchase.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut no_purchase,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute trainer return below Mom trigger");
+        assert_eq!(no_purchase.pending_mom_purchase, None);
+        assert!(no_purchase.bag.pc_items.is_empty());
+
+        let mut doll = GameState::default();
+        doll.mom_item_index = 3;
+        doll.moms_money = 10_000;
+        doll.script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "129".to_string());
+        let mut no_divider = ReplayDivider::new([]);
+        data.apply_script_map_command_with_divider_in_session(
+            &mut doll,
+            &session,
+            map_name,
+            &command.source_script,
+            command.command_index,
+            &mut no_divider,
+        )
+        .expect("execute trainer Mom doll purchase");
+        assert!(
+            doll.flags
+                .is_event_flag_set("EVENT_DECO_CHARMANDER_DOLL")
+                .expect("read Mom doll flag")
+        );
+        assert_eq!(
+            doll.pending_mom_purchase
+                .as_ref()
+                .and_then(|purchase| purchase.decoration_flag.as_deref()),
+            Some("EVENT_DECO_CHARMANDER_DOLL")
+        );
+    }
+
+
+    #[test]
+    fn compiled_pack_installs_stone_table_callback_on_map_entry() {
         let root = repository_root_for_tests();
         let data =
             read_verified_compiled_game_pack(root.join("content-packs/core-modular.crystalpack"))
@@ -2729,15 +3764,14 @@
         }
         let mut session = session.expect("reachable Blackthorn Gym tile");
         let mut state = GameState::default();
-        data.apply_map_object_callbacks(&mut state, &mut session, map_name)
+        data.apply_map_setup_callbacks(&mut state, &mut session, map_name, "MAPSETUP_WARP")
             .expect("execute command-queue callback");
-        assert!(
-            state
-                .script_runtime
-                .command_queue
-                .iter()
-                .any(|command| command.command == "writecmdqueue"),
-            "Blackthorn Gym callback must enqueue its stone-table command queue"
+        assert!(state.script_runtime.command_queue.is_empty());
+        assert_eq!(state.script_runtime.stone_table_entries.len(), 3);
+        assert_eq!(state.script_runtime.stone_table_entries[0].warp, 5);
+        assert_eq!(
+            state.script_runtime.stone_table_entries[0].object_event,
+            "BLACKTHORNGYM2F_BOULDER1"
         );
     }
 

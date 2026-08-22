@@ -62,7 +62,7 @@ fn integrated_title_launch_schedule_renders_menu_and_starts_music() {
     assert!(!rendered_art.title_screen_cache.is_empty());
     assert!(rendered_art.title_screen_errors.is_empty());
     assert_eq!(rendered_art.font_error, None);
-    assert_eq!(world.resource::<Assets<AudioSource>>().len(), 2);
+    assert_eq!(runtime_shell.audio_source_cache.len(), 2);
     assert!(
         !world.resource::<Assets<Image>>().is_empty(),
         "title launch should load the composed native title/menu image"
@@ -490,24 +490,44 @@ fn integrated_players_house_pc_opens_its_menu_from_the_live_compiled_pack() {
         app.update();
     }
     assert!(
-        app.world().resource::<BevyRuntimeShell>().pc_item_cursor.is_some()
-            || app.world().resource::<BevyRuntimeShell>().pc_notice.is_some(),
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .pc_item_cursor
+            .is_some()
+            || app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .pc_notice
+                .is_some(),
         "WITHDRAW must visibly enter the item list or display the canonical empty notice"
     );
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
     for _ in 0..8 {
         app.update();
     }
-    if app.world().resource::<BevyRuntimeShell>().pc_notice.is_some() {
+    if app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .pc_notice
+        .is_some()
+    {
         for _ in 0..256 {
             press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
-            if app.world().resource::<BevyRuntimeShell>().pc_notice.is_none() {
+            if app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .pc_notice
+                .is_none()
+            {
                 break;
             }
         }
     }
     assert!(
-        app.world().resource::<BevyRuntimeShell>().player_pc_action_cursor.is_some(),
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_pc_action_cursor
+            .is_some(),
         "B from a nested Player PC surface must return to the six-action menu"
     );
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
@@ -521,6 +541,155 @@ fn integrated_players_house_pc_opens_its_menu_from_the_live_compiled_pack() {
             .is_none(),
         "B must turn off the PC and close its action UI"
     );
+    assert_overworld_control_returns_and_player_moves(&mut app, "PlayersHousePCScript");
+}
+
+#[test]
+fn integrated_players_house_decoration_menu_sets_up_owned_bed_and_reloads_room() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier,
+            map_name: "PlayersHouse2F".to_string(),
+            tile_x: 2,
+            tile_y: 2,
+        },
+        BevyShellConfig {
+            smoke_player_name: Some("TEST".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("initialize player-bedroom shell");
+    runtime_shell
+        .shell
+        .set_script_flag_for_smoke("EVENT_DECO_BED_2")
+        .expect("own the Pink Bed");
+    runtime_shell.shell.session.overworld.player.facing = Direction::Up;
+
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+    app.update();
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    for _ in 0..256 {
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        if shell.field_notice.is_none() && shell.pc_notice.is_none() {
+            break;
+        }
+        let _ = shell;
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    }
+    assert!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_pc_action_cursor
+            .is_some(),
+        "bedroom PC must reach its action menu"
+    );
+
+    for _ in 0..4 {
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    assert!(
+        matches!(
+            shell.decoration_menu.as_ref().map(|menu| &menu.phase),
+            Some(VisibleDecorationMenuPhase::Categories { categories, .. })
+                if categories == &[DecorationCategory::Bed, DecorationCategory::Poster]
+        ),
+        "DECORATION must open only owned categories; action_cursor={:?} menu={:?} error={:?}",
+        shell.player_pc_action_cursor,
+        shell.decoration_menu,
+        shell.last_error
+    );
+    let _ = shell;
+    app.update();
+    {
+        let world = app.world_mut();
+        let background = world
+            .query_filtered::<&Sprite, With<SceneDialogTextBoxBackgroundMarker>>()
+            .iter(world)
+            .next()
+            .expect("decoration category menu window");
+        assert_eq!(
+            background.custom_size,
+            Some(Vec2::new(13.0 * TILE_SIZE, 16.0 * TILE_SIZE)),
+            "ASM decoration category menu must use its 15x18 window"
+        );
+    }
+
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    assert!(matches!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .decoration_menu
+            .as_ref()
+            .map(|menu| &menu.phase),
+        Some(VisibleDecorationMenuPhase::Decorations { decorations, .. })
+            if decorations.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                == vec!["DECO_FEATHERY_BED", "DECO_PINK_BED"]
+    ));
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .pc_notice
+            .as_deref(),
+        Some("Put away the\nFEATHERY BED.")
+    );
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .expect("snapshot after setup")
+            .script_events
+            .memory
+            .get("wDecoBed")
+            .map(String::as_str),
+        Some("DECO_PINK_BED")
+    );
+
+    for _ in 0..256 {
+        if app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .pc_notice
+            .is_none()
+        {
+            break;
+        }
+        press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+    assert!(matches!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .decoration_menu
+            .as_ref()
+            .map(|menu| &menu.phase),
+        Some(VisibleDecorationMenuPhase::Categories { .. })
+    ));
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+    for _ in 0..16 {
+        app.update();
+    }
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    assert!(shell.decoration_menu.is_none());
+    assert!(shell.player_pc_action_cursor.is_none());
+    assert_eq!(shell.last_error, None);
+    let _ = shell;
     assert_overworld_control_returns_and_player_moves(&mut app, "PlayersHousePCScript");
 }
 
@@ -605,7 +774,11 @@ fn integrated_players_house_bookshelf_renders_dialogue_from_the_live_compiled_pa
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         format!(
             "snapshot={:?} action={:?} cursor={:?} events={:?}",
-            runtime_shell.shell.snapshot().ok().map(|snapshot| snapshot.ui),
+            runtime_shell
+                .shell
+                .snapshot()
+                .ok()
+                .map(|snapshot| snapshot.ui),
             runtime_shell.last_runtime_action,
             runtime_shell.active_script_cursor,
             runtime_shell.last_audio_events
@@ -669,15 +842,18 @@ fn assert_overworld_control_returns_and_player_moves(app: &mut App, script: &str
         let snapshot = shell.shell.snapshot().expect("post-interaction snapshot");
         assert_eq!(shell.last_error, None, "{script} left a runtime error");
         assert_eq!(
-            shell.active_script_cursor,
-            None,
+            shell.active_script_cursor, None,
             "{script} left its script cursor armed; ui={:?} action={:?} events={:?}",
-            snapshot.ui,
-            shell.last_runtime_action,
-            shell.last_audio_events
+            snapshot.ui, shell.last_runtime_action, shell.last_audio_events
         );
-        assert!(!snapshot.ui.text_window_open, "{script} left its textbox open");
-        assert!(snapshot.ui.pending_text_wait.is_none(), "{script} left a text wait pending");
+        assert!(
+            !snapshot.ui.text_window_open,
+            "{script} left its textbox open"
+        );
+        assert!(
+            snapshot.ui.pending_text_wait.is_none(),
+            "{script} left a text wait pending"
+        );
     }
     let start = app
         .world()
@@ -687,7 +863,12 @@ fn assert_overworld_control_returns_and_player_moves(app: &mut App, script: &str
         .unwrap()
         .overworld
         .tile;
-    for key in [KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp] {
+    for key in [
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::ArrowUp,
+    ] {
         // Crystal turns toward a newly pressed direction first. A second
         // press performs the walk, exactly like the real joypad path.
         for _ in 0..2 {
@@ -697,7 +878,10 @@ fn assert_overworld_control_returns_and_player_moves(app: &mut App, script: &str
             }
         }
         let shell = app.world().resource::<BevyRuntimeShell>();
-        assert_eq!(shell.last_error, None, "{script} errored when movement resumed");
+        assert_eq!(
+            shell.last_error, None,
+            "{script} errored when movement resumed"
+        );
         if shell.shell.snapshot().unwrap().overworld.tile != start {
             return;
         }
@@ -727,24 +911,33 @@ fn find_live_standard_script_approach(
         for y in 0..height {
             for x in 0..width {
                 let tile = TilePosition::new(x, y);
-                let Ok(mut session) = runtime.data().overworld_session(map_name, tile, 0) else { continue };
-                for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+                let Ok(mut session) = runtime.data().overworld_session(map_name, tile, 0) else {
+                    continue;
+                };
+                for facing in [
+                    Direction::Up,
+                    Direction::Down,
+                    Direction::Left,
+                    Direction::Right,
+                ] {
                     session.player.facing = facing;
-                if let Some(interaction) = session
-                    .check_interaction_checked(1)
-                    .expect("scan live collision interaction")
-                {
-                    found_scripts.insert(interaction.script.clone());
-                    if interaction.script != expected_script {
-                        continue;
+                    if let Some(interaction) = session
+                        .check_interaction_checked(1)
+                        .expect("scan live collision interaction")
+                    {
+                        found_scripts.insert(interaction.script.clone());
+                        if interaction.script != expected_script {
+                            continue;
+                        }
+                        return (map_name.to_string(), tile, facing);
                     }
-                    return (map_name.to_string(), tile, facing);
                 }
             }
         }
     }
-    }
-    panic!("live pack has no walkable collision interaction for {expected_script}; found {found_scripts:?}");
+    panic!(
+        "live pack has no walkable collision interaction for {expected_script}; found {found_scripts:?}"
+    );
 }
 
 fn settled_keyboard_path_to_script(
@@ -753,9 +946,15 @@ fn settled_keyboard_path_to_script(
 ) -> (Vec<Direction>, TilePosition, Direction) {
     let start = runtime_shell.shell.session.overworld.clone();
     let mut queue = std::collections::VecDeque::from([(start.clone(), Vec::new())]);
-    let mut visited = std::collections::BTreeSet::from([(start.player.tile.x, start.player.tile.y)]);
+    let mut visited =
+        std::collections::BTreeSet::from([(start.player.tile.x, start.player.tile.y)]);
     while let Some((session, path)) = queue.pop_front() {
-        for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+        for facing in [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ] {
             let mut candidate = session.clone();
             candidate.player.facing = facing;
             if candidate
@@ -767,7 +966,12 @@ fn settled_keyboard_path_to_script(
                 return (path, session.player.tile, facing);
             }
         }
-        for direction in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+        for direction in [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ] {
             let mut next = session.clone();
             let Ok(mut step) = next.step_and_check_warp_checked(
                 direction,
@@ -775,7 +979,10 @@ fn settled_keyboard_path_to_script(
             ) else {
                 continue;
             };
-            if matches!(step.outcome, crate::core::world::movement::StepOutcome::Turned { .. }) {
+            if matches!(
+                step.outcome,
+                crate::core::world::movement::StepOutcome::Turned { .. }
+            ) {
                 let Ok(second) = next.step_and_check_warp_checked(
                     direction,
                     crate::core::world::movement::StepOptions::default(),
@@ -785,7 +992,10 @@ fn settled_keyboard_path_to_script(
                 step = second;
             }
             if step.warp.is_some()
-                || !matches!(step.outcome, crate::core::world::movement::StepOutcome::Moved { .. })
+                || !matches!(
+                    step.outcome,
+                    crate::core::world::movement::StepOutcome::Moved { .. }
+                )
             {
                 continue;
             }
@@ -801,7 +1011,12 @@ fn settled_keyboard_path_to_script(
     let mut found = Vec::new();
     for y in 0..height {
         for x in 0..width {
-            for facing in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            for facing in [
+                Direction::Up,
+                Direction::Down,
+                Direction::Left,
+                Direction::Right,
+            ] {
                 let mut candidate = start.clone();
                 candidate.player.tile = TilePosition::new(x, y);
                 candidate.player.facing = facing;
@@ -814,7 +1029,9 @@ fn settled_keyboard_path_to_script(
             }
         }
     }
-    panic!("settled collision has no reachable keyboard path to {expected_script}; all interactions={found:?}");
+    panic!(
+        "settled collision has no reachable keyboard path to {expected_script}; all interactions={found:?}"
+    );
 }
 
 #[test]
@@ -840,7 +1057,9 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             .expect("repository root");
         let asset_root = AssetRoot::new(repo_root);
         let runtime = workspace_desktop_runtime(&asset_root);
-        let spawn_identifier = runtime.title_new_game_spawn_identifier().expect("new-game spawn");
+        let spawn_identifier = runtime
+            .title_new_game_spawn_identifier()
+            .expect("new-game spawn");
         let (map_name, interaction_tile, interaction_facing) =
             find_live_standard_script_approach(&runtime, bootstrap_script);
         let runtime_shell = initialize_bevy_runtime_shell(
@@ -852,7 +1071,10 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 tile_x: interaction_tile.x,
                 tile_y: interaction_tile.y,
             },
-            BevyShellConfig { smoke_player_name: Some("TEST".to_string()), ..Default::default() },
+            BevyShellConfig {
+                smoke_player_name: Some("TEST".to_string()),
+                ..Default::default()
+            },
         )
         .expect("standard interaction must be reachable from a walkable live tile");
         let mut app = integrated_shell_test_app(runtime_shell);
@@ -877,13 +1099,25 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 Direction::Left => KeyCode::ArrowLeft,
                 Direction::Right => KeyCode::ArrowRight,
             };
-            let before = app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap();
+            let before = app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .shell
+                .snapshot()
+                .unwrap();
             for _ in 0..2 {
                 press_key_for_runtime_hotkey_app(&mut app, key);
                 for _ in 0..9 {
                     app.update();
                 }
-                if app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().overworld.tile
+                if app
+                    .world()
+                    .resource::<BevyRuntimeShell>()
+                    .shell
+                    .snapshot()
+                    .unwrap()
+                    .overworld
+                    .tile
                     != before.overworld.tile
                 {
                     break;
@@ -962,55 +1196,124 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
             let runtime_shell = app.world().resource::<BevyRuntimeShell>();
             assert_eq!(runtime_shell.last_error, None, "{script} failed");
             assert_eq!(
-                runtime_shell.shell.snapshot().unwrap().ui.text.as_ref().map(|text| text.label.as_str()),
+                runtime_shell
+                    .shell
+                    .snapshot()
+                    .unwrap()
+                    .ui
+                    .text
+                    .as_ref()
+                    .map(|text| text.label.as_str()),
                 Some(label),
                 "{script} must expose its canonical text; input={:?} action={:?} frame_interaction={:?} script_runtime={:?} cursor={:?} reveal={:?} notice={:?} special={:?} overrides={:?} blocks={:?} events={:?}",
                 runtime_shell.last_overworld_input,
                 runtime_shell.last_runtime_action,
-                runtime_shell.shell.last_frame().and_then(|frame| frame.interaction.as_ref()),
+                runtime_shell
+                    .shell
+                    .last_frame()
+                    .and_then(|frame| frame.interaction.as_ref()),
                 runtime_shell.shell.session.state.script_runtime,
                 runtime_shell.active_script_cursor,
                 runtime_shell.field_text_reveal,
                 runtime_shell.field_notice,
                 runtime_shell.special_boundary,
-                runtime_shell.shell.session.state.map_block_overrides.get("PlayersHouse2F"),
+                runtime_shell
+                    .shell
+                    .session
+                    .state
+                    .map_block_overrides
+                    .get("PlayersHouse2F"),
                 &runtime_shell.shell.session.overworld.map.metatile_ids[..4],
                 runtime_shell.last_audio_events,
             );
             let world = app.world_mut();
-            assert!(world.query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>().iter(world).next().is_some(), "{script} must render a textbox");
-            assert!(world.query_filtered::<Entity, With<DialogGlyphMarker>>().iter(world).next().is_some(), "{script} must render glyphs");
+            assert!(
+                world
+                    .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
+                    .iter(world)
+                    .next()
+                    .is_some(),
+                "{script} must render a textbox"
+            );
+            assert!(
+                world
+                    .query_filtered::<Entity, With<DialogGlyphMarker>>()
+                    .iter(world)
+                    .next()
+                    .is_some(),
+                "{script} must render glyphs"
+            );
             if script == "PlayersHouseRadioScript" {
                 let mut labels = Vec::new();
-                for _ in 0..2048 {
-                    let snapshot = app
-                        .world()
-                        .resource::<BevyRuntimeShell>()
-                        .shell
-                        .snapshot()
-                        .unwrap();
+                let mut previous_label = None;
+                let mut previous_label_completed = false;
+                for _ in 0..8192 {
+                    let shell = app.world().resource::<BevyRuntimeShell>();
+                    let snapshot = shell.shell.presentation_snapshot().unwrap();
                     if let Some(label) = snapshot.ui.text.as_ref().map(|text| text.label.clone())
                         && labels.last() != Some(&label)
                     {
+                        if let Some(previous) = previous_label.as_ref() {
+                            assert!(
+                                previous_label_completed,
+                                "radio replaced {previous} with {label} before its full text printed"
+                            );
+                        }
                         labels.push(label);
+                        previous_label = labels.last().cloned();
+                        previous_label_completed = false;
+                    }
+                    let current_page_revealed =
+                        visible_field_dialogue_is_fully_revealed(shell, &snapshot);
+                    let entirely_consumed =
+                        visible_field_dialogue_is_entirely_consumed(shell, &snapshot);
+                    previous_label_completed |= entirely_consumed;
+                    if snapshot.ui.text.is_some() && !entirely_consumed {
+                        assert_eq!(
+                            shell.visible_script_delay_frames, None,
+                            "radio pause began while {:?} was still printing; reveal={:?}",
+                            previous_label, shell.field_text_reveal
+                        );
+                        assert!(
+                            snapshot.script_events.pending_delays.is_empty(),
+                            "radio queued its pause while {:?} was still printing: {:?}",
+                            previous_label, snapshot.script_events.pending_delays
+                        );
                     }
                     if !snapshot.ui.text_window_open {
                         break;
                     }
                     // PlayersHouse2F.asm has no waitbutton between these
-                    // pages: writetext -> pause 45 -> writetext. After the
-                    // initial furniture interaction the broadcast must run
-                    // and close using rendered frames alone.
-                    app.update();
+                    // pages: each synchronous writetext finishes, its pause
+                    // runs for 45 frames, and the next segment then prints.
+                    if current_page_revealed && !entirely_consumed {
+                        press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+                    } else {
+                        app.update();
+                    }
                 }
                 assert_eq!(
                     labels,
-                    ["PlayersRadioText1", "PlayersRadioText2", "PlayersRadioText3", "PlayersRadioText4"],
+                    [
+                        "PlayersRadioText1",
+                        "PlayersRadioText2",
+                        "PlayersRadioText3",
+                        "PlayersRadioText4"
+                    ],
                     "the initial radio broadcast must display Oak, Mary, and the closing segment in canonical order; cursor={:?} delay={:?} reveal={:?} ui={:?} events={:?}",
-                    app.world().resource::<BevyRuntimeShell>().active_script_cursor,
-                    app.world().resource::<BevyRuntimeShell>().visible_script_delay_frames,
+                    app.world()
+                        .resource::<BevyRuntimeShell>()
+                        .active_script_cursor,
+                    app.world()
+                        .resource::<BevyRuntimeShell>()
+                        .visible_script_delay_frames,
                     app.world().resource::<BevyRuntimeShell>().field_text_reveal,
-                    app.world().resource::<BevyRuntimeShell>().shell.snapshot().unwrap().ui,
+                    app.world()
+                        .resource::<BevyRuntimeShell>()
+                        .shell
+                        .snapshot()
+                        .unwrap()
+                        .ui,
                     app.world().resource::<BevyRuntimeShell>().last_audio_events,
                 );
             } else {
@@ -1032,7 +1335,10 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
         }
 
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
-        assert_eq!(runtime_shell.last_error, None, "{script} progression failed");
+        assert_eq!(
+            runtime_shell.last_error, None,
+            "{script} progression failed"
+        );
         if let Some(page) = expected_page {
             assert!(
                 runtime_shell.pokegear_menu_open,
@@ -1041,7 +1347,10 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 runtime_shell.last_runtime_action,
                 runtime_shell.last_audio_events
             );
-            assert_eq!(runtime_shell.pokegear_page, page, "{script} opened the wrong UI page");
+            assert_eq!(
+                runtime_shell.pokegear_page, page,
+                "{script} opened the wrong UI page"
+            );
             let _ = runtime_shell;
             app.update();
             assert_eq!(
@@ -1050,16 +1359,48 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 "{script} modal render failed"
             );
             if page == PokegearPage::Map {
-                let rendered_map = {
-                    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-                    visible_overworld_town_map_frame(&asset_root, &mut images)
-                        .expect("render the same town-map frame used by the live modal")
+                for _ in 0..4 {
+                    let has_map_surface = {
+                        let world = app.world_mut();
+                        world
+                            .query::<(&Handle<Image>, &Transform)>()
+                            .iter(world)
+                            .any(|(_, transform)| {
+                                (transform.translation.z - 3.4).abs() < f32::EPSILON
+                            })
+                    };
+                    if has_map_surface {
+                        break;
+                    }
+                    app.update();
+                }
+                let presented_handle = {
+                    let world = app.world_mut();
+                    let handles = world
+                        .query::<(&Handle<Image>, &Transform)>()
+                        .iter(world)
+                        .filter(|(_, transform)| {
+                            (transform.translation.z - 3.4).abs() < f32::EPSILON
+                        })
+                        .map(|(handle, _)| handle.clone())
+                        .collect::<Vec<_>>();
+                    let images = world.resource::<Assets<Image>>();
+                    handles
+                        .into_iter()
+                        .filter(|handle| images.get(handle).is_some())
+                        .max_by_key(|handle| {
+                            images
+                                .get(handle)
+                                .map(|image| image.data.len())
+                                .unwrap_or_default()
+                        })
+                        .expect("TownMapScript must render a Town Map field surface")
                 };
                 let image = app
                     .world()
                     .resource::<Assets<Image>>()
-                    .get(&rendered_map.handle)
-                    .expect("town-map presented image");
+                    .get(&presented_handle)
+                    .expect("live town-map presenter image");
                 let distinct_colors = image
                     .data
                     .chunks_exact(4)
@@ -1068,6 +1409,21 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 assert!(
                     distinct_colors.len() >= 8,
                     "TownMapScript rendered a flat/blank substitute instead of the ASM/TypeScript tilemap; colors={distinct_colors:?}"
+                );
+                let native_map_duplicates = {
+                    let world = app.world_mut();
+                    world
+                        .query::<(&Sprite, &Transform)>()
+                        .iter(world)
+                        .filter(|(sprite, transform)| {
+                            sprite.custom_size == Some(Vec2::new(160.0, 144.0))
+                                && transform.translation.z > 3.4
+                        })
+                        .count()
+                };
+                assert_eq!(
+                    native_map_duplicates, 0,
+                    "TownMapScript must not layer a native-size duplicate over the full-screen Town Map"
                 );
             }
             let world = app.world_mut();
@@ -1078,14 +1434,20 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                     transform.translation.z >= 3.8 && sprite.custom_size.is_some()
                 })
                 .count();
-            assert!(glyph_sprites > 0, "{script} modal must render bitmap glyph sprites");
+            assert!(
+                glyph_sprites > 0,
+                "{script} modal must render bitmap glyph sprites"
+            );
             let _ = world;
             press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
             for _ in 0..3 {
                 app.update();
             }
         } else {
-            assert!(!runtime_shell.shell.snapshot().unwrap().ui.text_window_open, "{script} dialogue must close after acknowledgement");
+            assert!(
+                !runtime_shell.shell.snapshot().unwrap().ui.text_window_open,
+                "{script} dialogue must close after acknowledgement"
+            );
         }
         assert_overworld_control_returns_and_player_moves(&mut app, script);
     }
@@ -1295,13 +1657,16 @@ fn integrated_title_option_entry_opens_options_before_new_game() {
             .snapshot()
             .expect("title Options snapshot");
         assert_eq!(
-            visible_options_menu_entries(&snapshot, runtime_shell).first(),
+            visible_options_menu_entries(&snapshot, runtime_shell)
+                .expect("valid title Options entries")
+                .first(),
             Some(&format!(
                 ">TEXT SPEED: {}",
                 option_value_for_item(&snapshot.trainer.options, OptionsMenuItem::TextSpeed)
             ))
         );
-        let entries = visible_options_menu_entries(&snapshot, runtime_shell);
+        let entries = visible_options_menu_entries(&snapshot, runtime_shell)
+            .expect("valid title Options entries");
         assert!(
             !entries
                 .iter()
@@ -1364,14 +1729,13 @@ fn integrated_title_option_entry_opens_options_before_new_game() {
             .snapshot()
             .expect("snapshot after title Options change");
         assert_ne!(
-            snapshot.trainer.options.battle_scene,
-            before,
+            snapshot.trainer.options.battle_scene, before,
             "cursor={} events={:?}",
-            runtime_shell.options_cursor,
-            runtime_shell.last_audio_events
+            runtime_shell.options_cursor, runtime_shell.last_audio_events
         );
         assert!(
             visible_options_menu_entries(&snapshot, runtime_shell)
+                .expect("valid changed title Options entries")
                 .iter()
                 .any(|entry| entry
                     == &format!(
@@ -1453,7 +1817,8 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
         assert_eq!(runtime_shell.last_error, None);
         assert!(runtime_shell.party_menu_open);
         let snapshot = runtime_shell.shell.snapshot().expect("party snapshot");
-        let entries = visible_party_menu_entries(&snapshot, runtime_shell);
+        let entries = visible_party_menu_entries(&snapshot, runtime_shell)
+            .expect("valid Pokemon menu entries");
         assert!(
             entries
                 .first()
@@ -1464,6 +1829,32 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
             entries.get(1).map(String::as_str),
             Some(" CANCEL"),
             "Pokemon menu should render the trailing TypeScript CANCEL row"
+        );
+        let frame = app
+            .world()
+            .resource::<RenderedTilesetArt>()
+            .intro_presented_surface
+            .as_ref()
+            .expect("Pokemon menu must use the retained native LCD presenter")
+            .clone();
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&frame.handle)
+            .expect("Pokemon menu native frame image");
+        assert_eq!(image.texture_descriptor.size.width, 160);
+        assert_eq!(image.texture_descriptor.size.height, 144);
+        let full_screen_field_quads = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Sprite, With<FieldCommandMarker>>()
+                .iter(world)
+                .filter(|sprite| sprite.custom_size == Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)))
+                .count()
+        };
+        assert_eq!(
+            full_screen_field_quads, 0,
+            "Pokemon must not place a flat approximation over its native LCD frame"
         );
     }
 
@@ -1477,7 +1868,8 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
             .shell
             .snapshot()
             .expect("party action snapshot");
-        let entries = visible_party_menu_entries(&snapshot, runtime_shell);
+        let entries = visible_party_menu_entries(&snapshot, runtime_shell)
+            .expect("valid Pokemon submenu entries");
         assert!(
             entries
                 .first()
@@ -1502,6 +1894,67 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
         );
     }
 
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(runtime_shell.last_error, None);
+        assert!(runtime_shell.party_summary_open, "STATS must open the status screen");
+        assert_eq!(runtime_shell.party_summary_page, 1);
+        let frame = app
+            .world()
+            .resource::<RenderedTilesetArt>()
+            .intro_presented_surface
+            .as_ref()
+            .expect("status screen must use the retained native LCD presenter")
+            .clone();
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&frame.handle)
+            .expect("status-screen native frame image");
+        assert_eq!(image.texture_descriptor.size.width, 160);
+        assert_eq!(image.texture_descriptor.size.height, 144);
+        let has_scaled_front_sprite = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Sprite, With<FieldCommandMarker>>()
+                .iter(world)
+                .any(|sprite| sprite.custom_size.is_some_and(|size| size.x >= 160.0 && size.y >= 160.0))
+        };
+        assert!(
+            has_scaled_front_sprite,
+            "status screen must render the TypeScript/ASM front sprite at four-times LCD scale"
+        );
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
+    {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(runtime_shell.last_error, None);
+        assert_eq!(runtime_shell.party_summary_page, 2, "MOVES page must render");
+    }
+    app.world_mut()
+        .resource_mut::<BevyRuntimeShell>()
+        .party_summary_page = 3;
+    app.update();
+    {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(runtime_shell.last_error, None);
+        assert_eq!(runtime_shell.party_summary_page, 3, "STATS page must render");
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyX);
+    assert!(
+        !app.world().resource::<BevyRuntimeShell>().party_summary_open,
+        "B must return from status to Pokemon"
+    );
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    assert!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .party_action_cursor
+            .is_some(),
+        "reselecting the Pokemon after status must reopen its submenu"
+    );
+
     let submenu_action_count = {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         let snapshot = runtime_shell
@@ -1521,6 +1974,7 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
             .snapshot()
             .expect("party submenu traversal snapshot");
         reached_submenu_cancel = visible_party_menu_entries(&snapshot, runtime_shell)
+            .expect("valid Pokemon submenu traversal entries")
             .iter()
             .any(|entry| entry == ">CANCEL");
         if reached_submenu_cancel {
@@ -1538,6 +1992,7 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
             reached_submenu_cancel,
             "walking the live submenu should reach CANCEL: {:?}",
             visible_party_menu_entries(&snapshot, runtime_shell)
+                .expect("valid Pokemon submenu cancel entries")
         );
     }
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
@@ -1558,6 +2013,7 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
         let snapshot = runtime_shell.shell.snapshot().expect("cancel snapshot");
         assert!(
             visible_party_menu_entries(&snapshot, runtime_shell)
+                .expect("valid Pokemon CANCEL entries")
                 .iter()
                 .any(|entry| entry == ">CANCEL"),
             "ArrowDown should reach the live Pokemon CANCEL row"
@@ -1637,7 +2093,8 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
         assert!(runtime_shell.options_menu_open);
         assert_eq!(runtime_shell.last_action_status.as_deref(), Some("OPTIONS"));
         let snapshot = runtime_shell.shell.snapshot().expect("options snapshot");
-        let entries = visible_options_menu_entries(&snapshot, runtime_shell);
+        let entries = visible_options_menu_entries(&snapshot, runtime_shell)
+            .expect("valid overworld Options entries");
         assert_eq!(
             entries.first(),
             Some(&format!(
@@ -1715,6 +2172,7 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
             .expect("moved options snapshot");
         assert!(
             visible_options_menu_entries(&snapshot, runtime_shell)
+                .expect("valid moved Options entries")
                 .iter()
                 .any(|entry| entry
                     == &format!(
@@ -1751,6 +2209,7 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
         );
         assert!(
             visible_options_menu_entries(&snapshot, runtime_shell)
+                .expect("valid changed Options entries")
                 .iter()
                 .any(|entry| entry
                     == &format!(
@@ -1774,6 +2233,7 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
         let snapshot = runtime_shell.shell.snapshot().expect("cancel row snapshot");
         assert!(
             visible_options_menu_entries(&snapshot, runtime_shell)
+                .expect("valid Options CANCEL entries")
                 .iter()
                 .any(|entry| entry == ">CANCEL"),
             "ArrowDown should reach the live Options CANCEL row"

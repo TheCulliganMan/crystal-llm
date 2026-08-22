@@ -9,8 +9,8 @@ use crate::battle::start::{
 };
 use crate::models::pokemon::StatExperience;
 use crate::models::{LearnedMove, Move, Pokemon, PokemonSpecies, calculate_stats};
-use crate::random::DividerSource;
-use crate::state::{BattleMemory, GameState, PendingMoveLearn};
+use crate::random::{CrystalRandom, DividerSource};
+use crate::state::{BattleMemory, GameState, PendingMomPurchase, PendingMoveLearn};
 use crate::systems::evolution::{
     EvolutionError, EvolutionReport, EvolutionTable, check_and_evolve,
 };
@@ -25,6 +25,105 @@ pub struct BattleRewardRules {
     pub wild_exp_divisor: i32,
     pub trainer_exp_numerator: i32,
     pub trainer_exp_denominator: i32,
+    pub mom_money_increment: u32,
+    pub mom_random_items: Vec<MomPurchaseRule>,
+    pub mom_progression_items: Vec<MomPurchaseRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MomPurchaseKind {
+    Item,
+    Doll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MomPurchaseRule {
+    pub trigger: u32,
+    pub cost: u32,
+    pub kind: MomPurchaseKind,
+    pub target: String,
+    pub decoration_flag: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MomPurchaseSelection {
+    pub progression: bool,
+    pub selected_index: u8,
+    pub rule: MomPurchaseRule,
+}
+
+pub fn select_mom_purchase<S>(
+    state: &mut GameState,
+    rules: &BattleRewardRules,
+    divider: &mut S,
+) -> Result<Option<MomPurchaseSelection>, String>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
+    if state.pending_mom_purchase.is_some() {
+        return Err("cannot select a Mom purchase while one is pending".to_string());
+    }
+    rules.validate_shape()?;
+    if let Some(rule) = rules
+        .mom_progression_items
+        .get(usize::from(state.mom_item_index))
+        .filter(|rule| state.moms_money >= rule.trigger)
+    {
+        return Ok(Some(MomPurchaseSelection {
+            progression: true,
+            selected_index: state.mom_item_index,
+            rule: rule.clone(),
+        }));
+    }
+
+    loop {
+        if state.mom_item_trigger_balance > state.moms_money {
+            return Ok(None);
+        }
+        if state.mom_item_trigger_balance == state.moms_money {
+            state.mom_item_trigger_balance = state
+                .mom_item_trigger_balance
+                .checked_add(rules.mom_money_increment)
+                .ok_or_else(|| "Mom item trigger balance overflow".to_string())?;
+            let count = u8::try_from(rules.mom_random_items.len())
+                .map_err(|_| "Mom random item table exceeds one-byte range".to_string())?;
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let selected_index = rng
+                .random_range(count)
+                .map_err(|error| format!("Mom RandomRange divider source: {error}"))?;
+            state.random_state = rng.state();
+            return Ok(Some(MomPurchaseSelection {
+                progression: false,
+                selected_index,
+                rule: rules.mom_random_items[usize::from(selected_index)].clone(),
+            }));
+        }
+        state.mom_item_trigger_balance = state
+            .mom_item_trigger_balance
+            .checked_add(rules.mom_money_increment)
+            .ok_or_else(|| "Mom item trigger balance overflow".to_string())?;
+    }
+}
+
+pub fn settle_pending_mom_purchase(state: &mut GameState) -> Result<PendingMomPurchase, String> {
+    let purchase = state
+        .pending_mom_purchase
+        .take()
+        .ok_or_else(|| "cannot settle Mom purchase because none is pending".to_string())?;
+    state.moms_money = state
+        .moms_money
+        .checked_sub(purchase.cost)
+        .ok_or_else(|| "Mom purchase cost exceeds saved money".to_string())?;
+    if purchase.progression {
+        state.mom_item_index = state
+            .mom_item_index
+            .checked_add(1)
+            .ok_or_else(|| "Mom progression index overflow".to_string())?;
+    }
+    Ok(purchase)
 }
 
 impl<'de> Deserialize<'de> for BattleRewardRules {
@@ -39,6 +138,9 @@ impl<'de> Deserialize<'de> for BattleRewardRules {
             wild_exp_divisor: i32,
             trainer_exp_numerator: i32,
             trainer_exp_denominator: i32,
+            mom_money_increment: u32,
+            mom_random_items: Vec<MomPurchaseRule>,
+            mom_progression_items: Vec<MomPurchaseRule>,
         }
 
         let raw = RawBattleRewardRules::deserialize(deserializer)?;
@@ -47,6 +149,9 @@ impl<'de> Deserialize<'de> for BattleRewardRules {
             wild_exp_divisor: raw.wild_exp_divisor,
             trainer_exp_numerator: raw.trainer_exp_numerator,
             trainer_exp_denominator: raw.trainer_exp_denominator,
+            mom_money_increment: raw.mom_money_increment,
+            mom_random_items: raw.mom_random_items,
+            mom_progression_items: raw.mom_progression_items,
         };
         rules.validate_shape().map_err(D::Error::custom)?;
         Ok(rules)
@@ -60,6 +165,9 @@ impl Default for BattleRewardRules {
             wild_exp_divisor: 0,
             trainer_exp_numerator: 0,
             trainer_exp_denominator: 0,
+            mom_money_increment: 0,
+            mom_random_items: Vec::new(),
+            mom_progression_items: Vec::new(),
         }
     }
 }
@@ -80,6 +188,7 @@ pub enum BattleRewardRulesField {
     WildExpDivisor,
     TrainerExpNumerator,
     TrainerExpDenominator,
+    MomPurchaseRules,
 }
 
 impl BattleRewardRulesField {
@@ -89,6 +198,7 @@ impl BattleRewardRulesField {
             Self::WildExpDivisor => "battle_reward_rules:wild_exp_divisor",
             Self::TrainerExpNumerator => "battle_reward_rules:trainer_exp_numerator",
             Self::TrainerExpDenominator => "battle_reward_rules:trainer_exp_denominator",
+            Self::MomPurchaseRules => "battle_reward_rules:mom_purchase_rules",
         }
     }
 }
@@ -100,6 +210,7 @@ pub enum BattleRewardRulesIssue {
     InvalidWildExpDivisor { value: i32 },
     InvalidTrainerExpNumerator { value: i32 },
     InvalidTrainerExpDenominator { value: i32 },
+    InvalidMomPurchaseRules { reason: String },
 }
 
 impl BattleRewardRulesIssue {
@@ -111,6 +222,7 @@ impl BattleRewardRulesIssue {
             Self::InvalidTrainerExpDenominator { .. } => {
                 BattleRewardRulesField::TrainerExpDenominator
             }
+            Self::InvalidMomPurchaseRules { .. } => BattleRewardRulesField::MomPurchaseRules,
         }
     }
 }
@@ -135,7 +247,77 @@ pub fn battle_reward_rules_issues(rules: &BattleRewardRules) -> Vec<BattleReward
             value: rules.trainer_exp_denominator,
         });
     }
+    if let Err(reason) = validate_mom_purchase_rules(rules) {
+        issues.push(BattleRewardRulesIssue::InvalidMomPurchaseRules { reason });
+    }
     issues
+}
+
+fn validate_mom_purchase_rules(rules: &BattleRewardRules) -> Result<(), String> {
+    if rules.mom_money_increment == 0 {
+        return Err("mom_money_increment must be positive".to_string());
+    }
+    if rules.mom_random_items.is_empty() || rules.mom_progression_items.is_empty() {
+        return Err("both Mom item sets must be nonempty".to_string());
+    }
+    for (set_name, entries) in [
+        ("mom_random_items", &rules.mom_random_items),
+        ("mom_progression_items", &rules.mom_progression_items),
+    ] {
+        let mut previous_trigger = None;
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.cost == 0 {
+                return Err(format!("{set_name}[{index}] cost must be positive"));
+            }
+            if entry.target.is_empty()
+                || !entry
+                    .target
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err(format!(
+                    "{set_name}[{index}] target is not an exact ASM token"
+                ));
+            }
+            match entry.kind {
+                MomPurchaseKind::Item if entry.decoration_flag.is_some() => {
+                    return Err(format!("{set_name}[{index}] item has a decoration flag"));
+                }
+                MomPurchaseKind::Doll
+                    if entry.decoration_flag.as_deref().is_none_or(|flag| {
+                        flag.is_empty()
+                            || !flag.bytes().all(|byte| {
+                                byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                            })
+                    }) =>
+                {
+                    return Err(format!(
+                        "{set_name}[{index}] doll lacks an exact decoration flag"
+                    ));
+                }
+                MomPurchaseKind::Doll => {
+                    let expected = format!("EVENT_{}", entry.target);
+                    if entry.decoration_flag.as_deref() != Some(expected.as_str()) {
+                        return Err(format!(
+                            "{set_name}[{index}] doll decoration flag must be {expected}"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            if set_name == "mom_random_items" && entry.trigger != 0 {
+                return Err(format!("{set_name}[{index}] trigger must be zero"));
+            }
+            if let Some(previous) = previous_trigger
+                && entry.trigger <= previous
+                && set_name == "mom_progression_items"
+            {
+                return Err(format!("{set_name} triggers must be strictly increasing"));
+            }
+            previous_trigger = Some(entry.trigger);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1273,6 +1455,7 @@ mod tests {
 
     fn move_data(name: &str, pp: u8) -> Move {
         Move {
+            source_index: 1,
             name: name.to_string(),
             move_type: pokemon_type("NORMAL"),
             power: 40,
@@ -1291,7 +1474,85 @@ mod tests {
             wild_exp_divisor: 7,
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
+            mom_money_increment: 2_300,
+            mom_random_items: vec![MomPurchaseRule {
+                trigger: 0,
+                cost: 600,
+                kind: MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
+            mom_progression_items: vec![MomPurchaseRule {
+                trigger: 900,
+                cost: 600,
+                kind: MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
         }
+    }
+
+    #[test]
+    fn mom_progression_purchase_precedes_random_trigger_schedule() {
+        let mut state = GameState::default();
+        state.moms_money = 900;
+        let mut divider = ReplayDivider::new([]);
+
+        let selection = select_mom_purchase(&mut state, &reward_rules(), &mut divider)
+            .expect("select Mom purchase")
+            .expect("progression purchase");
+
+        assert!(selection.progression);
+        assert_eq!(selection.selected_index, 0);
+        assert_eq!(selection.rule.target, "SUPER_POTION");
+        assert_eq!(state.mom_item_trigger_balance, 0);
+        assert_eq!(divider.consumed(), 0);
+    }
+
+    #[test]
+    fn mom_random_purchase_advances_exact_trigger_and_uses_random_range() {
+        let mut rules = reward_rules();
+        rules.mom_random_items.push(MomPurchaseRule {
+            trigger: 0,
+            cost: 90,
+            kind: MomPurchaseKind::Item,
+            target: "ANTIDOTE".to_string(),
+            decoration_flag: None,
+        });
+        let mut state = GameState::default();
+        state.mom_item_index = 1;
+        state.moms_money = 0;
+        let mut divider = ReplayDivider::new([0, 0]);
+
+        let selection = select_mom_purchase(&mut state, &rules, &mut divider)
+            .expect("select random Mom purchase")
+            .expect("random purchase");
+
+        assert!(!selection.progression);
+        assert_eq!(selection.selected_index, 1);
+        assert_eq!(selection.rule.target, "ANTIDOTE");
+        assert_eq!(state.mom_item_trigger_balance, 2_300);
+        assert_eq!(divider.consumed(), 2);
+    }
+
+    #[test]
+    fn deferred_mom_settlement_deducts_and_only_advances_progression_set() {
+        let mut state = GameState::default();
+        state.moms_money = 900;
+        state.pending_mom_purchase = Some(PendingMomPurchase {
+            progression: true,
+            selected_index: 0,
+            cost: 600,
+            target: "SUPER_POTION".to_string(),
+            decoration_flag: None,
+        });
+
+        let settled = settle_pending_mom_purchase(&mut state).expect("settle Mom purchase");
+
+        assert_eq!(settled.cost, 600);
+        assert_eq!(state.moms_money, 300);
+        assert_eq!(state.mom_item_index, 1);
+        assert_eq!(state.pending_mom_purchase, None);
     }
 
     #[test]
@@ -1387,6 +1648,9 @@ mod tests {
                 BattleRewardRulesIssue::InvalidWildExpDivisor { value: 0 },
                 BattleRewardRulesIssue::InvalidTrainerExpNumerator { value: 0 },
                 BattleRewardRulesIssue::InvalidTrainerExpDenominator { value: 0 },
+                BattleRewardRulesIssue::InvalidMomPurchaseRules {
+                    reason: "mom_money_increment must be positive".to_string(),
+                },
             ]
         );
 
@@ -1395,6 +1659,7 @@ mod tests {
             wild_exp_divisor: 0,
             trainer_exp_numerator: -1,
             trainer_exp_denominator: 0,
+            ..reward_rules()
         };
         assert_eq!(
             battle_reward_rules_issues(&rules),
@@ -1509,6 +1774,7 @@ mod tests {
             wild_exp_divisor: 7,
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
+            ..reward_rules()
         };
 
         assert_eq!(

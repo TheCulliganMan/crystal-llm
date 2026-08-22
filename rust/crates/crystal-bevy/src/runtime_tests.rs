@@ -9,8 +9,17 @@ use crystal_core::world::encounters::FieldEncounterKind;
 use crystal_core::world::fishing::ROD_OLD;
 use crystal_core::world::session::OverworldFollowState;
 
+fn repository_root_for_tests() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("workspace is nested under rust/crates/crystal-bevy")
+        .to_path_buf()
+}
+
 include!("runtime_tests/runtime_basics.rs");
 include!("runtime_tests/overworld.rs");
+include!("runtime_tests/unown_puzzles.rs");
 include!("runtime_tests/battle_turns.rs");
 include!("runtime_tests/special_routines.rs");
 include!("runtime_tests/battle_items.rs");
@@ -52,15 +61,4 @@ fn static_wild_origin_from_state(state: &GameState) -> RuntimeStaticWildBattleOr
         species: species.clone(),
         level: *level,
     }
-}
-
-fn crystal_gift_inputs(seed: u32) -> (Dv, u32) {
-    let mut rng = Random::new_crystal(seed);
-    let dvs = Dv::from_non_hp(
-        rng.randrange(16) as u8,
-        rng.randrange(16) as u8,
-        rng.randrange(16) as u8,
-        rng.randrange(16) as u8,
-    );
-    (dvs, rng.seed())
 }

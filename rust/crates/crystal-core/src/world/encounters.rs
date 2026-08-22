@@ -874,6 +874,41 @@ pub struct FieldEncounterRoll {
     pub resolved: Option<ResolvedWildEncounter>,
 }
 
+/// The exact RNG-owned result of Crystal's `GetTreeMon` routine.
+///
+/// The range-100 entry roll only exists when the tree-score chance check
+/// succeeds. This matters for both the resulting random state and the number
+/// of DIV samples consumed by deterministic replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadbuttEncounterOutcome {
+    pub roll: FieldEncounterRoll,
+    pub random_state_after: CrystalRandomState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadbuttEncounterError<E> {
+    Encounter(EncounterError),
+    Divider(E),
+}
+
+impl<E> From<EncounterError> for HeadbuttEncounterError<E> {
+    fn from(error: EncounterError) -> Self {
+        Self::Encounter(error)
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for HeadbuttEncounterError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encounter(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "GetTreeMon divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for HeadbuttEncounterError<E> {}
+
 /// The memory-independent result of Crystal's `RockMonEncounter` routine.
 ///
 /// `chance_roll == None` means the current map had no valid rock encounter
@@ -1622,6 +1657,58 @@ pub fn roll_headbutt_encounter(
         chance_roll,
         entry_roll,
     )
+}
+
+/// Resolve `GetTreeMon` from `engine/events/treemons.asm` using the cartridge
+/// RNG. `SelectTreeMon` is reached only after the score-specific chance check,
+/// so a miss consumes no range-100 roll.
+pub fn resolve_headbutt_encounter<S>(
+    data: &FieldEncounterData,
+    target_tile_x: i16,
+    target_tile_y: i16,
+    player_id: u16,
+    random_state: CrystalRandomState,
+    divider: &mut S,
+) -> Result<HeadbuttEncounterOutcome, HeadbuttEncounterError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    data.table(FieldEncounterKind::Headbutt).ok_or_else(|| {
+        EncounterError::MissingFieldEncounterTable {
+            map_name: data.map_name.clone(),
+            kind: FieldEncounterKind::Headbutt,
+        }
+    })?;
+
+    let score = tree_score(target_tile_x, target_tile_y, player_id);
+    let mut rng = CrystalRandom::new(random_state, divider);
+    let chance_roll = rng
+        .random_range(10)
+        .map_err(HeadbuttEncounterError::Divider)?;
+    let encounter = match score {
+        0 => chance_roll < 8,
+        1..=4 => chance_roll < 5,
+        5..=9 => chance_roll == 0,
+        _ => unreachable!("tree_score always returns 0..=9"),
+    };
+    let entry_roll = if encounter {
+        rng.random_range(100)
+            .map_err(HeadbuttEncounterError::Divider)?
+    } else {
+        0
+    };
+    let roll = select_headbutt_encounter(
+        data,
+        target_tile_x,
+        target_tile_y,
+        player_id,
+        chance_roll,
+        entry_roll,
+    )?;
+    Ok(HeadbuttEncounterOutcome {
+        roll,
+        random_state_after: rng.state(),
+    })
 }
 
 pub fn select_rock_smash_encounter(
@@ -2587,7 +2674,7 @@ mod tests {
 
         assert_eq!(encounter.slot, 1);
         assert_eq!(encounter.encounter.species, "RATTATA");
-        assert_eq!(encounter.level, 7);
+        assert_eq!(encounter.level, 3);
     }
 
     #[test]
@@ -2876,19 +2963,44 @@ mod tests {
     }
 
     #[test]
-    fn headbutt_field_encounter_roll_helper_consumes_runtime_rng_in_core() {
+    fn headbutt_field_encounter_exact_rng_skips_entry_roll_on_a_miss() {
         let data = field_data();
-        let mut helper_rng = Random::new(1);
-        let mut explicit_rng = Random::new(1);
-        let chance_roll = explicit_rng.randrange(10) as u8;
-        let entry_roll = explicit_rng.randrange(100) as u8;
+        let mut miss_divider = crate::random::ReplayDivider::new([7, 0]);
+        let missed = resolve_headbutt_encounter(
+            &data,
+            0,
+            2,
+            0,
+            crate::random::CrystalRandomState::default(),
+            &mut miss_divider,
+        )
+        .expect("rare-tree chance roll 8 misses");
+        assert_eq!(missed.roll.chance_roll, 8);
+        assert_eq!(missed.roll.entry_roll, None);
+        assert_eq!(missed.roll.resolved, None);
+        assert_eq!(miss_divider.consumed(), 2);
 
-        let helper = roll_headbutt_encounter(&data, 0, 2, 0, &mut helper_rng).expect("helper roll");
-        let explicit =
-            select_headbutt_encounter(&data, 0, 2, 0, chance_roll, entry_roll).expect("explicit");
-
-        assert_eq!(helper, explicit);
-        assert_eq!(helper_rng.seed(), explicit_rng.seed());
+        let mut hit_divider = crate::random::ReplayDivider::new([255, 0, 53, 0]);
+        let hit = resolve_headbutt_encounter(
+            &data,
+            0,
+            2,
+            0,
+            crate::random::CrystalRandomState::default(),
+            &mut hit_divider,
+        )
+        .expect("rare-tree chance roll 0 hits");
+        assert_eq!(hit.roll.chance_roll, 0);
+        assert_eq!(hit.roll.entry_roll, Some(54));
+        assert_eq!(
+            hit.roll
+                .resolved
+                .expect("headbutt encounter")
+                .encounter
+                .species,
+            "PINECO"
+        );
+        assert_eq!(hit_divider.consumed(), 4);
     }
 
     #[test]

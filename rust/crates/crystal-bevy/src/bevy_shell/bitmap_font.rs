@@ -255,6 +255,13 @@ fn bitmap_font_char_map() -> HashMap<char, u16> {
         ('\u{e109}', 0x71), // <KE>
         ('\u{e10a}', 0x6e), // <LV>
         ('\u{e10b}', 0x73), // <ID>
+        ('\u{e120}', 0xd0), // 'd
+        ('\u{e121}', 0xd1), // 'l
+        ('\u{e122}', 0xd2), // 'm
+        ('\u{e123}', 0xd3), // 'r
+        ('\u{e124}', 0xd4), // 's
+        ('\u{e125}', 0xd5), // 't
+        ('\u{e126}', 0xd6), // 'v
     ] {
         map.insert(ch, tile_id);
     }
@@ -295,12 +302,28 @@ fn compose_viewport_tiles(
     existing: Option<Handle<Image>>,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
+    compose_tile_grid(
+        tile_handles,
+        VIEWPORT_TILES_X as usize,
+        VIEWPORT_TILES_Y as usize,
+        existing,
+        images,
+    )
+}
+
+fn compose_tile_grid(
+    tile_handles: &[Handle<Image>],
+    grid_width: usize,
+    grid_height: usize,
+    existing: Option<Handle<Image>>,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
     // Keep the retained LCD at its native 160x144 resolution. The sprite is
     // displayed at PLAYFIELD_WIDTH x PLAYFIELD_HEIGHT with nearest sampling,
     // so expanding every source texel 4x4 on the CPU only creates sixteen
     // times more composition and upload work without changing a visible pixel.
-    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE;
-    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE;
+    let width = grid_width * SOURCE_TILE_SIZE;
+    let height = grid_height * SOURCE_TILE_SIZE;
     let data_len = width * height * 4;
     let mut data = existing
         .as_ref()
@@ -313,8 +336,8 @@ fn compose_viewport_tiles(
         let Some(tile) = images.get(handle) else {
             continue;
         };
-        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
-        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
+        let tile_x = (tile_index % grid_width) * SOURCE_TILE_SIZE;
+        let tile_y = (tile_index / grid_width) * SOURCE_TILE_SIZE;
         for source_y in 0..SOURCE_TILE_SIZE {
             let source_row_start = source_y * SOURCE_TILE_SIZE * 4;
             let source_row_end = source_row_start + SOURCE_TILE_SIZE * 4;
@@ -418,8 +441,24 @@ fn compose_priority_viewport_tiles(
     existing: Option<Handle<Image>>,
     images: &mut Assets<Image>,
 ) -> Handle<Image> {
-    let width = VIEWPORT_TILES_X as usize * SOURCE_TILE_SIZE;
-    let height = VIEWPORT_TILES_Y as usize * SOURCE_TILE_SIZE;
+    compose_priority_tile_grid(
+        tile_specs,
+        VIEWPORT_TILES_X as usize,
+        VIEWPORT_TILES_Y as usize,
+        existing,
+        images,
+    )
+}
+
+fn compose_priority_tile_grid(
+    tile_specs: &[Option<(Handle<Image>, usize)>],
+    grid_width: usize,
+    grid_height: usize,
+    existing: Option<Handle<Image>>,
+    images: &mut Assets<Image>,
+) -> Handle<Image> {
+    let width = grid_width * SOURCE_TILE_SIZE;
+    let height = grid_height * SOURCE_TILE_SIZE;
     let data_len = width * height * 4;
     let mut data = existing
         .as_ref()
@@ -435,8 +474,8 @@ fn compose_priority_viewport_tiles(
         let Some(tile) = images.get(handle) else {
             continue;
         };
-        let tile_x = (tile_index % VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
-        let tile_y = (tile_index / VIEWPORT_TILES_X as usize) * SOURCE_TILE_SIZE;
+        let tile_x = (tile_index % grid_width) * SOURCE_TILE_SIZE;
+        let tile_y = (tile_index / grid_width) * SOURCE_TILE_SIZE;
         for source_y in (*clip_top).min(SOURCE_TILE_SIZE)..SOURCE_TILE_SIZE {
             let source_row_start = source_y * SOURCE_TILE_SIZE * 4;
             let source_row_end = source_row_start + SOURCE_TILE_SIZE * 4;
@@ -2657,6 +2696,8 @@ fn load_oak_intro_frame(
     asset_id: &str,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
+    let battle_sprite = asset_id.starts_with("battle-trainer:")
+        || asset_id.starts_with("battle-player:");
     let (image_path, palette_path, player_palette) = oak_intro_asset_paths(asset_root, asset_id)?;
     let source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode Oak intro PNG {}", image_path.display()))?
@@ -2682,7 +2723,7 @@ fn load_oak_intro_frame(
         frame_width,
         frame_height,
         &palette,
-        false,
+        battle_sprite,
         &mut data,
     );
     let mut image = Image::new(
@@ -2812,13 +2853,23 @@ fn load_pokemon_animation_frame(
             height as usize / frame_height
         );
     }
-    let palette = load_pokemon_palette(asset_root, &species_id, side, shiny)?;
+    // Exported Pokemon PNGs are already colourized with the normal species
+    // palette. Resolve their pixels against that palette before applying the
+    // requested normal/shiny palette; inferring indices from only the red
+    // channel turns colours such as Chikorita's dark green into black.
+    let source_palette = load_pokemon_palette(asset_root, &species_id, side, false)?;
+    let palette = if shiny {
+        load_pokemon_palette(asset_root, &species_id, side, true)?
+    } else {
+        source_palette
+    };
     let mut data = vec![0_u8; frame_width * frame_height * 4];
     copy_pokemon_frame_rgba_at(
         &source,
         frame_width,
         frame_height,
         source_y,
+        &source_palette,
         &palette,
         &mut data,
     );
@@ -2928,10 +2979,19 @@ fn copy_pokemon_frame_rgba(
     source: &image::RgbaImage,
     frame_width: usize,
     frame_height: usize,
+    source_palette: &Palette,
     palette: &Palette,
     target: &mut [u8],
 ) {
-    copy_pokemon_frame_rgba_at(source, frame_width, frame_height, 0, palette, target);
+    copy_pokemon_frame_rgba_at(
+        source,
+        frame_width,
+        frame_height,
+        0,
+        source_palette,
+        palette,
+        target,
+    );
 }
 
 fn copy_pokemon_frame_rgba_at(
@@ -2939,6 +2999,7 @@ fn copy_pokemon_frame_rgba_at(
     frame_width: usize,
     frame_height: usize,
     source_y: usize,
+    source_palette: &Palette,
     palette: &Palette,
     target: &mut [u8],
 ) {
@@ -2949,7 +3010,7 @@ fn copy_pokemon_frame_rgba_at(
             let source_pixel = source.get_pixel(col as u32, (source_y + row) as u32);
             let index = row * frame_width + col;
             source_opaque[index] = source_pixel[3] != 0;
-            palette_indices[index] = pokemon_palette_index(source_pixel);
+            palette_indices[index] = pokemon_palette_index(source_pixel, source_palette);
         }
     }
 
@@ -3011,7 +3072,11 @@ fn copy_pokemon_frame_rgba_at(
     }
 }
 
-fn pokemon_palette_index(pixel: &image::Rgba<u8>) -> usize {
+fn pokemon_palette_index(pixel: &image::Rgba<u8>, source_palette: &Palette) -> usize {
+    let rgb = [pixel[0], pixel[1], pixel[2]];
+    if let Some(index) = source_palette.iter().position(|colour| *colour == rgb) {
+        return index;
+    }
     match pixel[0] {
         0xff => 0,
         0xaa => 1,

@@ -70,10 +70,6 @@ impl<'de> Deserialize<'de> for ScriptMapCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScriptMapAction {
-    NoWarp {
-        source_script: String,
-        command_index: usize,
-    },
     Warp {
         target_map: String,
         tile: TilePosition,
@@ -82,6 +78,10 @@ pub enum ScriptMapAction {
         command_index: usize,
     },
     WarpCheck {
+        source_script: String,
+        command_index: usize,
+    },
+    BattleWhiteout {
         source_script: String,
         command_index: usize,
     },
@@ -114,8 +114,8 @@ pub enum ScriptMapCommandError {
     InvalidTargetMap { command: String, target_map: String },
     #[error("script map command '{command}' references unknown map '{target_map}'")]
     UnknownTargetMap { command: String, target_map: String },
-    #[error("script map command '{command}' has malformed no-warp sentinel")]
-    MalformedNoWarpSentinel { command: String },
+    #[error("script map command '{command}' has malformed bad-warp sentinel")]
+    MalformedBadWarpSentinel { command: String },
     #[error("script map command '{command}' is missing warp coordinates")]
     MissingCoordinates { command: String },
     #[error("script map command '{command}' has out-of-range warp coordinates")]
@@ -146,24 +146,64 @@ pub const SCRIPT_MAP_WARP_COMMANDS: &[&str] = &["warp"];
 pub const SCRIPT_MAP_FACING_WARP_COMMANDS: &[&str] = &["warpfacing"];
 pub const SCRIPT_MAP_WARP_CHECK_COMMANDS: &[&str] = &["warpcheck"];
 pub const SCRIPT_MAP_NEW_LOAD_COMMANDS: &[&str] = &["newloadmap"];
-pub const SCRIPT_MAP_RELOAD_COMMANDS: &[&str] =
-    &["reloadmap", "reloadmappart", "reloadmapafterbattle"];
-pub const SCRIPT_MAP_LOAD_COMMANDS: &[&str] = &[
-    "newloadmap",
-    "reloadmap",
-    "reloadmappart",
-    "reloadmapafterbattle",
-];
+pub const SCRIPT_MAP_RELOAD_COMMANDS: &[&str] = &["reloadmap", "reloadmapafterbattle"];
+pub const SCRIPT_MAP_LOAD_COMMANDS: &[&str] = &["newloadmap", "reloadmap", "reloadmapafterbattle"];
 pub const SCRIPT_MAP_SIMPLE_REFRESH_COMMANDS: &[&str] = &["refreshmap"];
 pub const SCRIPT_MAP_REANCHOR_COMMANDS: &[&str] = &["reanchormap"];
 pub const SCRIPT_MAP_REFRESH_COMMANDS: &[&str] = &["refreshmap", "reanchormap"];
 pub const SCRIPT_MAP_NO_PAYLOAD_COMMANDS: &[&str] = &[
     "warpcheck",
     "reloadmap",
-    "reloadmappart",
     "reloadmapafterbattle",
     "refreshmap",
 ];
+
+pub const MAP_CALLBACK_NEWMAP: &str = "MAPCALLBACK_NEWMAP";
+pub const MAP_CALLBACK_TILES: &str = "MAPCALLBACK_TILES";
+pub const MAP_CALLBACK_OBJECTS: &str = "MAPCALLBACK_OBJECTS";
+pub const MAP_CALLBACK_CMDQUEUE: &str = "MAPCALLBACK_CMDQUEUE";
+pub const MAP_CALLBACK_SPRITES: &str = "MAPCALLBACK_SPRITES";
+
+const MAP_SETUP_WARP_CALLBACKS: &[&str] = &[
+    MAP_CALLBACK_NEWMAP,
+    MAP_CALLBACK_CMDQUEUE,
+    MAP_CALLBACK_TILES,
+    MAP_CALLBACK_SPRITES,
+    MAP_CALLBACK_OBJECTS,
+];
+const MAP_SETUP_CONNECTION_CALLBACKS: &[&str] = &[
+    MAP_CALLBACK_NEWMAP,
+    MAP_CALLBACK_CMDQUEUE,
+    MAP_CALLBACK_TILES,
+    MAP_CALLBACK_OBJECTS,
+];
+const MAP_SETUP_RELOAD_CALLBACKS: &[&str] = &[MAP_CALLBACK_TILES, MAP_CALLBACK_SPRITES];
+const MAP_SETUP_LINK_RETURN_CALLBACKS: &[&str] = &[
+    MAP_CALLBACK_NEWMAP,
+    MAP_CALLBACK_CMDQUEUE,
+    MAP_CALLBACK_TILES,
+    MAP_CALLBACK_SPRITES,
+];
+const MAP_SETUP_CONTINUE_CALLBACKS: &[&str] = &[
+    MAP_CALLBACK_CMDQUEUE,
+    MAP_CALLBACK_TILES,
+    MAP_CALLBACK_SPRITES,
+];
+const MAP_SETUP_SUBMENU_CALLBACKS: &[&str] = &[MAP_CALLBACK_TILES];
+
+/// Map callbacks reached by each exact `MapSetupScript_*`, in execution order.
+pub fn map_setup_callback_kinds(map_setup: &str) -> Option<&'static [&'static str]> {
+    match map_setup {
+        "MAPSETUP_WARP" | "MAPSETUP_TELEPORT" | "MAPSETUP_DOOR" | "MAPSETUP_FALL"
+        | "MAPSETUP_TRAIN" | "MAPSETUP_BADWARP" | "MAPSETUP_FLY" => Some(MAP_SETUP_WARP_CALLBACKS),
+        "MAPSETUP_CONNECTION" => Some(MAP_SETUP_CONNECTION_CALLBACKS),
+        "MAPSETUP_RELOADMAP" => Some(MAP_SETUP_RELOAD_CALLBACKS),
+        "MAPSETUP_LINKRETURN" => Some(MAP_SETUP_LINK_RETURN_CALLBACKS),
+        "MAPSETUP_CONTINUE" => Some(MAP_SETUP_CONTINUE_CALLBACKS),
+        "MAPSETUP_SUBMENU" => Some(MAP_SETUP_SUBMENU_CALLBACKS),
+        _ => None,
+    }
+}
 
 pub fn is_known_script_map_command(command: &str) -> bool {
     SCRIPT_MAP_WARP_COMMANDS.contains(&command)
@@ -179,7 +219,7 @@ fn validate_script_map_command_shape(command: &ScriptMapCommand) -> Result<(), S
     }
     match command.command.as_str() {
         "warp" => {
-            if is_no_warp_sentinel(command) {
+            if is_bad_warp_sentinel(command) {
                 reject_facing(command).map_err(|error| error.to_string())?;
                 reject_map_setup(command).map_err(|error| error.to_string())?;
                 return Ok(());
@@ -199,7 +239,7 @@ fn validate_script_map_command_shape(command: &ScriptMapCommand) -> Result<(), S
             parse_script_warp_facing(facing).map_err(|error| error.to_string())?;
             reject_map_setup(command).map_err(|error| error.to_string())?;
         }
-        "warpcheck" | "reloadmap" | "reloadmappart" | "reloadmapafterbattle" | "refreshmap" => {
+        "warpcheck" | "reloadmap" | "reloadmapafterbattle" | "refreshmap" => {
             reject_warp_destination(command).map_err(|error| error.to_string())?;
             reject_facing(command).map_err(|error| error.to_string())?;
             reject_map_setup(command).map_err(|error| error.to_string())?;
@@ -235,7 +275,7 @@ fn require_warp_destination_shape(command: &ScriptMapCommand) -> Result<(), Stri
         .to_string());
     };
     if target_map == "NONE" {
-        return Err(ScriptMapCommandError::MalformedNoWarpSentinel {
+        return Err(ScriptMapCommandError::MalformedBadWarpSentinel {
             command: command.command.clone(),
         }
         .to_string());
@@ -334,8 +374,10 @@ pub fn resolve_script_map_command(
         "warp" => {
             reject_facing(&command)?;
             reject_map_setup(&command)?;
-            if is_no_warp_sentinel(&command) {
-                return Ok(ScriptMapAction::NoWarp {
+            if is_bad_warp_sentinel(&command) {
+                return Ok(ScriptMapAction::LoadMap {
+                    command: command.command,
+                    map_setup: Some("MAPSETUP_BADWARP".to_string()),
                     source_script: command.source_script,
                     command_index: command.command_index,
                 });
@@ -387,7 +429,7 @@ pub fn resolve_script_map_command(
                 command_index: command.command_index,
             })
         }
-        "reloadmap" | "reloadmappart" | "reloadmapafterbattle" => {
+        "reloadmap" | "reloadmapafterbattle" => {
             reject_warp_destination(&command)?;
             reject_facing(&command)?;
             reject_map_setup(&command)?;
@@ -475,18 +517,28 @@ pub fn apply_script_warp_arrival_facing(
 
 pub fn apply_script_map_action_to_state(state: &mut GameState, action: &ScriptMapAction) {
     match action {
-        ScriptMapAction::NoWarp {
+        ScriptMapAction::LoadMap {
+            command,
+            map_setup,
             source_script,
             command_index,
         } => {
-            state.script_runtime.pending_script_warp = None;
+            if command != "newloadmap" {
+                state.script_runtime.pending_script_warp = None;
+            }
+            state.script_runtime.pending_map_load = Some(ScriptMapLoadRequest {
+                command: command.clone(),
+                map_setup: map_setup.clone(),
+                source_script: source_script.clone(),
+                command_index: *command_index,
+            });
             state.script_runtime.map_events.push(ScriptMapRuntimeEvent {
-                command: "warp".to_string(),
-                kind: ScriptMapRuntimeKind::NoWarp,
+                command: command.clone(),
+                kind: ScriptMapRuntimeKind::LoadMap,
                 target_map: None,
                 tile: None,
                 facing: None,
-                map_setup: None,
+                map_setup: map_setup.clone(),
                 source_script: source_script.clone(),
                 command_index: *command_index,
             });
@@ -524,7 +576,6 @@ pub fn apply_script_map_action_to_state(state: &mut GameState, action: &ScriptMa
             source_script,
             command_index,
         } => {
-            state.script_runtime.warp_check_requested = true;
             state.script_runtime.map_events.push(ScriptMapRuntimeEvent {
                 command: "warpcheck".to_string(),
                 kind: ScriptMapRuntimeKind::WarpCheck,
@@ -536,29 +587,7 @@ pub fn apply_script_map_action_to_state(state: &mut GameState, action: &ScriptMa
                 command_index: *command_index,
             });
         }
-        ScriptMapAction::LoadMap {
-            command,
-            map_setup,
-            source_script,
-            command_index,
-        } => {
-            state.script_runtime.pending_map_load = Some(ScriptMapLoadRequest {
-                command: command.clone(),
-                map_setup: map_setup.clone(),
-                source_script: source_script.clone(),
-                command_index: *command_index,
-            });
-            state.script_runtime.map_events.push(ScriptMapRuntimeEvent {
-                command: command.clone(),
-                kind: ScriptMapRuntimeKind::LoadMap,
-                target_map: None,
-                tile: None,
-                facing: None,
-                map_setup: map_setup.clone(),
-                source_script: source_script.clone(),
-                command_index: *command_index,
-            });
-        }
+        ScriptMapAction::BattleWhiteout { .. } => {}
         ScriptMapAction::RefreshMap {
             command,
             map_setup,
@@ -620,7 +649,7 @@ fn require_known_target_map<'a>(
         });
     }
     if target_map == "NONE" {
-        return Err(ScriptMapCommandError::MalformedNoWarpSentinel {
+        return Err(ScriptMapCommandError::MalformedBadWarpSentinel {
             command: command.command.clone(),
         });
     }
@@ -633,7 +662,7 @@ fn require_known_target_map<'a>(
     Ok(target_map)
 }
 
-fn is_no_warp_sentinel(command: &ScriptMapCommand) -> bool {
+fn is_bad_warp_sentinel(command: &ScriptMapCommand) -> bool {
     command.target_map.as_deref() == Some("NONE") && command.x == Some(0) && command.y == Some(0)
 }
 
@@ -690,8 +719,8 @@ fn push_warp_destination_issues(
     issues: &mut Vec<ScriptMapCommandError>,
 ) {
     match command.target_map.as_deref() {
-        Some("NONE") if is_no_warp_sentinel(command) => {}
-        Some("NONE") => issues.push(ScriptMapCommandError::MalformedNoWarpSentinel {
+        Some("NONE") if is_bad_warp_sentinel(command) => {}
+        Some("NONE") => issues.push(ScriptMapCommandError::MalformedBadWarpSentinel {
             command: command.command.clone(),
         }),
         Some(target_map) if !is_exact_nonempty_token(target_map) => {
@@ -851,6 +880,67 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn map_setup_callbacks_follow_the_asm_command_paths() {
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_WARP"),
+            Some(
+                [
+                    MAP_CALLBACK_NEWMAP,
+                    MAP_CALLBACK_CMDQUEUE,
+                    MAP_CALLBACK_TILES,
+                    MAP_CALLBACK_SPRITES,
+                    MAP_CALLBACK_OBJECTS,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_CONNECTION"),
+            Some(
+                [
+                    MAP_CALLBACK_NEWMAP,
+                    MAP_CALLBACK_CMDQUEUE,
+                    MAP_CALLBACK_TILES,
+                    MAP_CALLBACK_OBJECTS,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_RELOADMAP"),
+            Some([MAP_CALLBACK_TILES, MAP_CALLBACK_SPRITES].as_slice())
+        );
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_LINKRETURN"),
+            Some(
+                [
+                    MAP_CALLBACK_NEWMAP,
+                    MAP_CALLBACK_CMDQUEUE,
+                    MAP_CALLBACK_TILES,
+                    MAP_CALLBACK_SPRITES,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_CONTINUE"),
+            Some(
+                [
+                    MAP_CALLBACK_CMDQUEUE,
+                    MAP_CALLBACK_TILES,
+                    MAP_CALLBACK_SPRITES,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            map_setup_callback_kinds("MAPSETUP_SUBMENU"),
+            Some([MAP_CALLBACK_TILES].as_slice())
+        );
+        assert_eq!(map_setup_callback_kinds("MAPSETUP_NOT_SOURCE"), None);
+    }
+
     fn maps() -> BTreeSet<String> {
         BTreeSet::from(["BattleTower1F".to_string(), "EcruteakCity".to_string()])
     }
@@ -881,10 +971,20 @@ mod tests {
         assert!(SCRIPT_MAP_REANCHOR_COMMANDS.contains(&"reanchormap"));
         assert!(SCRIPT_MAP_REFRESH_COMMANDS.contains(&"refreshmap"));
         assert!(SCRIPT_MAP_REFRESH_COMMANDS.contains(&"reanchormap"));
-        assert!(SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&"reloadmappart"));
+        assert!(!SCRIPT_MAP_NO_PAYLOAD_COMMANDS.contains(&"reloadmappart"));
+        assert!(!is_known_script_map_command("reloadmappart"));
         assert!(is_known_script_map_command("warpfacing"));
         assert!(!is_known_script_map_command("Warp"));
         assert!(!is_known_script_map_command("loadmap"));
+    }
+
+    #[test]
+    fn rejects_legacy_reloadmappart_alias_in_favor_of_source_refreshmap() {
+        assert!(matches!(
+            resolve_script_map_command(command("reloadmappart"), &maps()),
+            Err(ScriptMapCommandError::UnknownCommand { command })
+                if command == "reloadmappart"
+        ));
     }
 
     #[test]
@@ -934,7 +1034,7 @@ mod tests {
         assert_eq!(
             script_map_command_issues(&warp, &maps),
             vec![
-                ScriptMapCommandError::MalformedNoWarpSentinel {
+                ScriptMapCommandError::MalformedBadWarpSentinel {
                     command: "warp".to_string(),
                 },
                 ScriptMapCommandError::UnexpectedFacing {
@@ -1283,14 +1383,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_only_exact_no_warp_sentinel() {
+    fn warp_none_uses_the_source_bad_warp_map_setup() {
         let mut sentinel = command("warp");
         sentinel.target_map = Some("NONE".to_string());
         sentinel.x = Some(0);
         sentinel.y = Some(0);
         assert_eq!(
-            resolve_script_map_command(sentinel, &maps()).expect("sentinel"),
-            ScriptMapAction::NoWarp {
+            resolve_script_map_command(sentinel, &maps()).expect("bad warp"),
+            ScriptMapAction::LoadMap {
+                command: "warp".to_string(),
+                map_setup: Some("MAPSETUP_BADWARP".to_string()),
                 source_script: "WarpScript".to_string(),
                 command_index: 4,
             }
@@ -1302,7 +1404,7 @@ mod tests {
         malformed.y = Some(0);
         assert!(matches!(
             resolve_script_map_command(malformed, &maps()),
-            Err(ScriptMapCommandError::MalformedNoWarpSentinel { .. })
+            Err(ScriptMapCommandError::MalformedBadWarpSentinel { .. })
         ));
     }
 
@@ -1376,7 +1478,30 @@ mod tests {
     }
 
     #[test]
-    fn no_warp_sentinel_clears_pending_script_warp() {
+    fn newloadmap_preserves_the_destination_staged_by_the_preceding_command() {
+        let mut state = GameState::default();
+        let staged_warp = ScriptWarpRequest {
+            target_map: "EcruteakCity".to_string(),
+            tile: TilePosition::new(12, 54),
+            facing: None,
+            source_script: "WarpScript".to_string(),
+            command_index: 3,
+        };
+        state.script_runtime.pending_script_warp = Some(staged_warp.clone());
+        let mut newloadmap = command("newloadmap");
+        newloadmap.map_setup = Some("MAPSETUP_WARP".to_string());
+
+        apply_script_map_command(&mut state, newloadmap, &maps()).expect("newloadmap");
+
+        assert_eq!(state.script_runtime.pending_script_warp, Some(staged_warp));
+        assert!(matches!(
+            state.script_runtime.pending_map_load,
+            Some(ScriptMapLoadRequest { ref command, .. }) if command == "newloadmap"
+        ));
+    }
+
+    #[test]
+    fn bad_warp_replaces_a_pending_warp_with_a_map_load() {
         let mut state = GameState::default();
         state.script_runtime.pending_script_warp = Some(ScriptWarpRequest {
             target_map: "EcruteakCity".to_string(),
@@ -1390,12 +1515,22 @@ mod tests {
         sentinel.x = Some(0);
         sentinel.y = Some(0);
 
-        apply_script_map_command(&mut state, sentinel, &maps()).expect("no warp");
+        apply_script_map_command(&mut state, sentinel, &maps()).expect("bad warp");
         assert_eq!(state.script_runtime.pending_script_warp, None);
         assert_eq!(
-            state.script_runtime.map_events[0].kind,
-            ScriptMapRuntimeKind::NoWarp
+            state.script_runtime.pending_map_load,
+            Some(ScriptMapLoadRequest {
+                command: "warp".to_string(),
+                map_setup: Some("MAPSETUP_BADWARP".to_string()),
+                source_script: "WarpScript".to_string(),
+                command_index: 4,
+            })
         );
+        assert_eq!(
+            state.script_runtime.map_events[0].kind,
+            ScriptMapRuntimeKind::LoadMap
+        );
+        assert_eq!(state.script_runtime.validate(), Ok(()));
     }
 
     #[test]

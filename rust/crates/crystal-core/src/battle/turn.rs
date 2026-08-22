@@ -16,7 +16,7 @@ use crate::battle::start::{
 use crate::battle::stats::{BattleStatMultiplierTables, accuracy_stage_multiplier, apply_stage};
 use crate::models::pokemon::default_stat_boosts;
 use crate::models::{Dv, Item, LearnedMove, Move, Pokemon, PokemonSpecies, PokemonType, Stat};
-use crate::random::Random;
+use crate::random::BattleRandomSource;
 use crate::state::{BattleMemory, GameState, LINK_MODE_COLOSSEUM, LinkSerialConnectionStatus};
 use crate::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeError, BattleEscapeRules, attempt_wild_battle_escape,
@@ -769,6 +769,14 @@ pub enum BattleTurnError {
     MissingMoveData {
         side: BattleSide,
         move_name: String,
+    },
+    MissingMoveSourceIndex {
+        source_index: u8,
+    },
+    DuplicateMoveSourceIndex {
+        source_index: u8,
+        first_move: String,
+        second_move: String,
     },
     InvalidMoveName {
         side: BattleSide,
@@ -2334,7 +2342,6 @@ fn apply_party_heal_bell_commit(state: &mut GameState, active_party_index: usize
 }
 
 pub fn commit_wild_battle_escape_attempt(state: &mut GameState, outcome: &BattleEscapeAttempt) {
-    state.rng_seed = outcome.rng_seed_after;
     state.battle_escape_attempts = outcome.attempts_after;
     if outcome.escaped {
         deactivate_battle_after_draw(state);
@@ -2350,7 +2357,7 @@ pub fn resolve_battle_turn(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     resolve_battle_turn_with_items(
         state,
@@ -2376,7 +2383,7 @@ pub fn resolve_battle_turn_with_items(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     resolve_battle_turn_with_items_for_context(
         state,
@@ -2403,7 +2410,7 @@ fn resolve_battle_turn_with_items_for_context(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     force_switch_ends_battle: bool,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     let mut events = Vec::new();
@@ -2497,7 +2504,7 @@ fn resolve_battle_turn_with_items_for_context(
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
     state.turn = state.turn.saturating_add(1);
-    state.rng_seed_after = rng.seed();
+    state.rng_seed_after = rng.legacy_seed();
     sync_active_combat_pokemon_into_parties(&mut state)?;
     Ok(BattleTurnOutcome {
         state,
@@ -2511,7 +2518,7 @@ pub fn resolve_wild_battle_run(
     rules: &BattleEscapeRules,
     attempts_before: u8,
     stat_multipliers: &BattleStatMultiplierTables,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleEscapeAttempt, BattleTurnError> {
     attempt_wild_battle_escape(
         &state.player,
@@ -2536,13 +2543,13 @@ pub fn resolve_wild_battle_turn_with_items(
     weather_modifiers: &WeatherModifiers,
     escape_rules: &BattleEscapeRules,
     attempts_before: u8,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     validate_active_battle_turn_input(&state, &input, true, true)?;
     clear_turn_last_damage(&mut state);
     if matches!(input.enemy, BattleAction::Run) {
         state.turn = state.turn.saturating_add(1);
-        state.rng_seed_after = rng.seed();
+        state.rng_seed_after = rng.legacy_seed();
         sync_active_combat_pokemon_into_parties(&mut state)?;
         return Ok(BattleTurnOutcome {
             state,
@@ -2606,7 +2613,6 @@ pub fn resolve_wild_battle_turn_with_items(
             roll: None,
             attempts_before,
             attempts_after: attempts_before,
-            rng_seed_after: rng.seed(),
         };
         events.push(BattleEvent::HeldItemEscape {
             side: BattleSide::Player,
@@ -2671,7 +2677,7 @@ pub fn resolve_wild_battle_turn_with_items(
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
     state.turn = state.turn.saturating_add(1);
-    state.rng_seed_after = rng.seed();
+    state.rng_seed_after = rng.legacy_seed();
     sync_active_combat_pokemon_into_parties(&mut state)?;
     Ok(BattleTurnOutcome {
         state,
@@ -2763,7 +2769,7 @@ pub fn resolve_battle_enemy_action_with_items(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleTurnOutcome, BattleTurnError> {
     let mut events = Vec::new();
     let acted_before = [BattleSide::Player];
@@ -2807,7 +2813,7 @@ pub fn resolve_battle_enemy_action_with_items(
     clear_end_turn_flinching(&mut state);
     clear_turn_last_damage(&mut state);
     state.turn = state.turn.saturating_add(1);
-    state.rng_seed_after = rng.seed();
+    state.rng_seed_after = rng.legacy_seed();
     sync_active_combat_pokemon_into_parties(&mut state)?;
     Ok(BattleTurnOutcome {
         state,
@@ -2823,7 +2829,7 @@ pub fn determine_turn_order(
     items: &BTreeMap<String, Item>,
     move_priorities: &MovePriorityTable,
     stat_multipliers: &BattleStatMultiplierTables,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<Vec<BattleSide>, BattleTurnError> {
     let player_priority = action_priority(
         state,
@@ -2952,7 +2958,7 @@ fn execute_action(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
@@ -3132,7 +3138,7 @@ fn apply_player_obedience(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<ObedienceAction, BattleTurnError> {
     let result = obedience_result(state, selected_slot, rng);
@@ -3224,7 +3230,7 @@ fn apply_player_obedience(
 #[cfg(test)]
 fn player_disobeys(
     state: &BattleCombatState,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> bool {
     let disobeyed = obedience_result(state, 0, rng) != ObedienceResult::Obey;
@@ -3239,7 +3245,7 @@ fn player_disobeys(
 fn obedience_result(
     state: &BattleCombatState,
     selected_slot: usize,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> ObedienceResult {
     let Some(player_id) = state.obedience_trainer_id else {
         return ObedienceResult::Obey;
@@ -3789,7 +3795,7 @@ fn execute_move_slot(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
@@ -3982,7 +3988,7 @@ fn execute_move_effect(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
@@ -4755,7 +4761,7 @@ fn apply_damage_hit(
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<DamageHitResult, BattleTurnError> {
     let mut prepared_move_data = if move_data.effect == "PRESENT" {
@@ -5164,7 +5170,7 @@ fn apply_kings_rock_flinch(
     move_data: &Move,
     damage: u16,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     // Crystal uses a separate 8-bit BattleRandom roll against the held
@@ -5278,7 +5284,7 @@ fn apply_beat_up_effect(
     _type_effectiveness: &TypeEffectivenessTable,
     _weather_modifiers: &WeatherModifiers,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let participants = beat_up_participants(state, side);
@@ -5583,7 +5589,7 @@ fn apply_present_effect(
     move_name: &str,
     move_data: &Move,
     type_effectiveness: &TypeEffectivenessTable,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<PresentEffectOutcome, BattleTurnError> {
     let multiplier = calculate_type_effectiveness_multiplier_with_foresight(
@@ -5692,7 +5698,7 @@ fn apply_ohko_effect(
     stat_multipliers: &BattleStatMultiplierTables,
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let attacker = state.pokemon(side).clone();
@@ -5965,7 +5971,7 @@ fn move_blocked_by_status_or_confusion(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     let pokemon = state.pokemon_mut(side);
@@ -6072,7 +6078,7 @@ fn move_blocked_by_paralysis(
     state: &BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> bool {
     if state.pokemon(side).status.as_deref() != Some("PARALYSIS") {
@@ -6112,7 +6118,7 @@ fn move_blocked_by_attract(
     state: &BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> bool {
     let Some(source) = attracted_by_state(state, side) else {
@@ -6147,7 +6153,7 @@ fn move_blocked_by_confusion(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     let confusion_turns = state.pokemon(side).confusion_turns;
@@ -6201,7 +6207,7 @@ fn apply_confusion_self_damage(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let damage_roll = crystal_damage_variation_roll(rng);
@@ -6461,7 +6467,7 @@ fn apply_end_turn_mystery_berry(
 
 fn apply_end_turn_defrost(
     state: &mut BattleCombatState,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     for side in between_turn_side_order(state.serial_connection_status) {
@@ -6539,7 +6545,7 @@ fn focus_band_survives(
     state: &BattleCombatState,
     side: BattleSide,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<bool, BattleTurnError> {
     let Some(item_id) = state.pokemon(side).item.as_deref() else {
         return Ok(false);
@@ -6680,7 +6686,7 @@ fn apply_end_turn_effects(
     state: &mut BattleCombatState,
     moves: &BTreeMap<String, Move>,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     apply_end_turn_future_sight(state, items, rng, events)?;
@@ -6919,7 +6925,7 @@ fn apply_end_turn_perish_song(state: &mut BattleCombatState, events: &mut Vec<Ba
 fn apply_end_turn_future_sight(
     state: &mut BattleCombatState,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     for side in between_turn_side_order(state.serial_connection_status) {
@@ -7704,7 +7710,7 @@ fn roll_critical_hit(
     move_name: &str,
     attacker: &Pokemon,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<(bool, u8, u8), BattleTurnError> {
     // Crystal tallies critical-hit stages from the move table, Focus Energy,
     // species-specific items, and Scope Lens, then indexes the ROM's chance
@@ -7756,7 +7762,7 @@ fn roll_critical_hit(
     Ok((roll < threshold, roll, threshold))
 }
 
-fn sample_multi_hit_count(rng: &mut Random) -> (u8, u8) {
+fn sample_multi_hit_count(rng: &mut dyn BattleRandomSource) -> (u8, u8) {
     let first = rng.battle_random_byte() & 0x03;
     if first < 2 {
         return (first + 2, first);
@@ -7770,7 +7776,7 @@ fn damage_move_data(
     move_name: &str,
     attacker: &Pokemon,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Move {
     let mut damage_move_data = move_data.clone();
@@ -7856,7 +7862,7 @@ fn dynamic_move_power(
     move_name: &str,
     attacker: &Pokemon,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> u16 {
     match move_data.effect.as_str() {
@@ -7952,7 +7958,7 @@ fn fixed_damage_amount(
     attacker: &Pokemon,
     defender: &Pokemon,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Option<u16> {
     match move_data.effect.as_str() {
         "STATIC_DAMAGE" => Some(move_data.power.max(1)),
@@ -7988,7 +7994,7 @@ fn apply_counter_effect(
     moves: &BTreeMap<String, Move>,
     type_effectiveness: &TypeEffectivenessTable,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let Some(required_category) = counter_effect(move_data) else {
@@ -8240,7 +8246,7 @@ fn apply_post_damage_stat_effect(
     move_data: &Move,
     damage: u16,
     pre_damage_effect_chance: Option<EffectChanceResult>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     if damage == 0 {
@@ -8300,7 +8306,10 @@ fn apply_post_damage_stat_effect(
     }
 }
 
-fn secondary_effect_roll(chance_percent: u8, rng: &mut Random) -> (bool, Option<u8>) {
+fn secondary_effect_roll(
+    chance_percent: u8,
+    rng: &mut dyn BattleRandomSource,
+) -> (bool, Option<u8>) {
     let threshold = (u16::from(chance_percent.min(100)) * 255 / 100) as u8;
     let roll = rng.battle_random_byte();
     (roll < threshold, Some(roll))
@@ -8310,7 +8319,7 @@ fn sample_effect_chance_against_target(
     state: &BattleCombatState,
     side: BattleSide,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> EffectChanceResult {
     let chance_percent = move_data.effect_chance.min(100);
     if substitute_hp(state, side.other()) != 0 {
@@ -8332,13 +8341,13 @@ fn sample_pre_damage_effect_chance(
     state: &BattleCombatState,
     side: BattleSide,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Option<EffectChanceResult> {
     damaging_effect_script_has_pre_damage_effect_chance(move_data)
         .then(|| sample_effect_chance_against_target(state, side, move_data, rng))
 }
 
-fn crystal_damage_variation_roll(rng: &mut Random) -> u8 {
+fn crystal_damage_variation_roll(rng: &mut dyn BattleRandomSource) -> u8 {
     loop {
         let roll = rng.battle_random_byte().rotate_right(1);
         if roll >= 217 {
@@ -8502,7 +8511,7 @@ fn apply_rampage_progress(
     move_name: &str,
     move_data: &Move,
     rampage_forced: bool,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     if move_data.effect != "RAMPAGE" {
@@ -8662,6 +8671,7 @@ fn apply_selfdestruct_effect(
 
 fn confusion_damage_move() -> Move {
     Move {
+        source_index: 1,
         name: "CONFUSION_DAMAGE".to_string(),
         move_type: "NORMAL".to_string(),
         power: 40,
@@ -8679,7 +8689,7 @@ fn apply_stat_stage_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     let (Some(stat), Some(amount)) = (move_data.stat, move_data.amount) else {
@@ -9385,7 +9395,7 @@ fn apply_secondary_stat_stage_effect(
     move_name: &str,
     move_data: &Move,
     effect_chance: EffectChanceResult,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<bool, BattleTurnError> {
     let (Some(stat), Some(amount)) = (move_data.stat, move_data.amount) else {
@@ -9462,7 +9472,7 @@ fn apply_secondary_status_effect(
     move_name: &str,
     status: &str,
     effect_chance: EffectChanceResult,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -9488,7 +9498,7 @@ fn apply_tri_attack_effect(
     side: BattleSide,
     move_name: &str,
     move_data: &Move,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let chance_percent = move_data.effect_chance.min(100);
@@ -9527,7 +9537,7 @@ fn apply_secondary_status_after_success(
     move_name: &str,
     target: BattleSide,
     status: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     if status == "BURN" && state.pokemon(target).status.as_deref() == Some("FREEZE") {
@@ -9642,7 +9652,7 @@ fn apply_confusion_to_target(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -9675,7 +9685,7 @@ fn apply_confusion_to_side(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let pokemon = state.pokemon_mut(side);
@@ -9701,7 +9711,7 @@ fn apply_swagger_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let target = side.other();
@@ -9737,7 +9747,7 @@ fn apply_secondary_confusion_effect(
     side: BattleSide,
     move_name: &str,
     effect_chance: EffectChanceResult,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -10240,7 +10250,7 @@ fn apply_sleep_talk_effect(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
@@ -10336,7 +10346,7 @@ fn apply_mirror_move_effect(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
@@ -10401,45 +10411,12 @@ fn apply_metronome_effect(
     type_categories: &TypeCategories,
     type_effectiveness: &TypeEffectivenessTable,
     weather_modifiers: &WeatherModifiers,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     force_switch_ends_battle: bool,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
-    const METRONOME_EXCEPTIONS: [&str; 12] = [
-        "METRONOME",
-        "STRUGGLE",
-        "SKETCH",
-        "MIMIC",
-        "COUNTER",
-        "MIRROR_COAT",
-        "PROTECT",
-        "DETECT",
-        "ENDURE",
-        "DESTINY_BOND",
-        "SLEEP_TALK",
-        "THIEF",
-    ];
-    let user_moves: std::collections::BTreeSet<&str> = battle_moves(state, side)
-        .iter()
-        .map(|learned| learned.name.as_str())
-        .collect();
-    let candidates: Vec<&str> = moves
-        .keys()
-        .map(String::as_str)
-        .filter(|candidate| {
-            !METRONOME_EXCEPTIONS.contains(candidate) && !user_moves.contains(candidate)
-        })
-        .collect();
-    if candidates.is_empty() {
-        events.push(BattleEvent::MetronomeFailed {
-            side,
-            move_name: move_name.to_string(),
-        });
-        return Ok(());
-    }
-    let roll = rng.randrange(candidates.len() as u32) as u8;
-    let selected_move = candidates[usize::from(roll)];
+    let (roll, selected_move) = select_metronome_move(state, side, moves, rng)?;
     let selected_data =
         moves
             .get(selected_move)
@@ -10472,6 +10449,56 @@ fn apply_metronome_effect(
         force_switch_ends_battle,
         events,
     )
+}
+
+fn select_metronome_move<'a>(
+    state: &BattleCombatState,
+    side: BattleSide,
+    moves: &'a BTreeMap<String, Move>,
+    rng: &mut dyn BattleRandomSource,
+) -> Result<(u8, &'a str), BattleTurnError> {
+    const METRONOME_EXCEPTIONS: [&str; 12] = [
+        "METRONOME",
+        "STRUGGLE",
+        "SKETCH",
+        "MIMIC",
+        "COUNTER",
+        "MIRROR_COAT",
+        "PROTECT",
+        "DETECT",
+        "ENDURE",
+        "DESTINY_BOND",
+        "SLEEP_TALK",
+        "THIEF",
+    ];
+    let user_moves: std::collections::BTreeSet<&str> = battle_moves(state, side)
+        .iter()
+        .map(|learned| learned.name.as_str())
+        .collect();
+    let mut moves_by_source_index = BTreeMap::new();
+    for (move_id, move_data) in moves {
+        if let Some(first_move) = moves_by_source_index.insert(move_data.source_index, move_id) {
+            return Err(BattleTurnError::DuplicateMoveSourceIndex {
+                source_index: move_data.source_index,
+                first_move: first_move.clone(),
+                second_move: move_id.clone(),
+            });
+        }
+    }
+    loop {
+        let roll = rng.battle_random_byte();
+        if roll == 0 || roll > 251 {
+            continue;
+        }
+        let selected_move = moves_by_source_index
+            .get(&roll)
+            .ok_or(BattleTurnError::MissingMoveSourceIndex { source_index: roll })?
+            .as_str();
+        if METRONOME_EXCEPTIONS.contains(&selected_move) || user_moves.contains(selected_move) {
+            continue;
+        }
+        break Ok((roll, selected_move));
+    }
 }
 
 fn apply_mimic_effect(
@@ -10598,7 +10625,7 @@ fn apply_conversion_effect(
     side: BattleSide,
     move_name: &str,
     moves: &BTreeMap<String, Move>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let current_types = effective_pokemon_types(state, side);
@@ -10656,7 +10683,7 @@ fn apply_conversion2_effect(
     move_name: &str,
     moves: &BTreeMap<String, Move>,
     type_effectiveness: &TypeEffectivenessTable,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let Some(last_damage) = last_damage_state(state, side).cloned() else {
@@ -10779,7 +10806,7 @@ fn advance_bide_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> BideAdvance {
     let turns_remaining = bide_turns(state, side);
@@ -10827,7 +10854,7 @@ fn apply_bide_release_effect(
     stored_damage: u16,
     type_categories: &TypeCategories,
     items: &BTreeMap<String, Item>,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     if stored_damage == 0 {
@@ -10925,7 +10952,7 @@ fn apply_encore_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -11060,7 +11087,7 @@ fn apply_force_switch_effect(
     side: BattleSide,
     move_name: &str,
     force_switch_ends_battle: bool,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     acted_before: &[BattleSide],
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
@@ -11158,7 +11185,7 @@ fn apply_teleport_effect(
     side: BattleSide,
     move_name: &str,
     force_switch_ends_battle: bool,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     // BattleCommand_Teleport checks the opponent's CANT_RUN substatus, not
@@ -11322,7 +11349,7 @@ fn apply_trap_target_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -11413,7 +11440,7 @@ fn apply_disable_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -11463,7 +11490,7 @@ fn roll_protect_success(
     state: &mut BattleCombatState,
     side: BattleSide,
     acted_before: &[BattleSide],
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> (bool, u8, Option<u8>) {
     let counter_before = protect_counter(state, side);
     if acted_before.contains(&side.other()) || substitute_hp(state, side) > 0 {
@@ -11492,7 +11519,7 @@ fn apply_protect_effect(
     side: BattleSide,
     move_name: &str,
     acted_before: &[BattleSide],
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let (success, counter_before, roll) = roll_protect_success(state, side, acted_before, rng);
@@ -11519,7 +11546,7 @@ fn apply_endure_effect(
     side: BattleSide,
     move_name: &str,
     acted_before: &[BattleSide],
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let (success, counter_before, roll) = roll_protect_success(state, side, acted_before, rng);
@@ -11545,7 +11572,7 @@ fn apply_spite_effect(
     state: &mut BattleCombatState,
     side: BattleSide,
     move_name: &str,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) {
     let target = side.other();
@@ -11756,7 +11783,7 @@ fn apply_baton_pass_effect(
     move_name: &str,
     party_index: Option<usize>,
     _items: &BTreeMap<String, Item>,
-    _rng: &mut Random,
+    _rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> Result<(), BattleTurnError> {
     let party_index = party_index.ok_or_else(|| BattleTurnError::MissingMoveSwitchTarget {
@@ -11944,7 +11971,7 @@ fn apply_status_to_target(
     target: BattleSide,
     status: &str,
     sleep_turn_mask: u8,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
     events: &mut Vec<BattleEvent>,
 ) -> bool {
     if pokemon_is_status_immune(target_types, status) {

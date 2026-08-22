@@ -250,6 +250,9 @@ pub fn sync_state_object_overrides(
         let Some(object_id) = object.object_identifier.as_ref() else {
             continue;
         };
+        if overworld.hidden_object_identifiers.contains(object_id) {
+            continue;
+        }
         let raw_tile = saved_object_raw_tile_to_runtime_tile(
             &overworld.map.name,
             object_id,
@@ -278,13 +281,26 @@ pub fn sync_state_object_overrides(
         OverworldObjectMapMemory {
             objects,
             hidden_object_identifiers: overworld.hidden_object_identifiers.clone(),
-            following: overworld
-                .following
-                .as_ref()
-                .map(|following| OverworldFollowMemory {
+            following: overworld.following.as_ref().and_then(|following| {
+                let leader_hidden = if following.leader_object_id == "PLAYER" {
+                    overworld.player_hidden
+                } else {
+                    overworld
+                        .hidden_object_identifiers
+                        .contains(&following.leader_object_id)
+                };
+                let follower_hidden = if following.follower_object_id == "PLAYER" {
+                    overworld.player_hidden
+                } else {
+                    overworld
+                        .hidden_object_identifiers
+                        .contains(&following.follower_object_id)
+                };
+                (!leader_hidden && !follower_hidden).then(|| OverworldFollowMemory {
                     leader_object_id: following.leader_object_id.clone(),
                     follower_object_id: following.follower_object_id.clone(),
-                }),
+                })
+            }),
             last_talked_object_identifier: overworld.last_talked_object_identifier.clone(),
             player_hidden: overworld.player_hidden,
         },
@@ -744,7 +760,7 @@ mod tests {
         let mut overworld = OverworldSession::with_events_and_objects(
             test_map(),
             Default::default(),
-            vec![test_object("YOUNGSTER", 1, 1)],
+            vec![test_object("YOUNGSTER", 1, 1), test_object("ESCORT", 3, 1)],
             test_tileset(),
             TilePosition::new(2, 0),
         );
@@ -755,7 +771,11 @@ mod tests {
             .insert("YOUNGSTER".to_string(), Direction::Right);
         overworld
             .hidden_object_identifiers
-            .insert("CUT_TREE".to_string());
+            .insert("ESCORT".to_string());
+        overworld.following = Some(OverworldFollowState {
+            leader_object_id: "ESCORT".to_string(),
+            follower_object_id: "PLAYER".to_string(),
+        });
         overworld.last_talked_object_identifier = Some("YOUNGSTER".to_string());
         overworld.player_hidden = true;
 
@@ -778,7 +798,9 @@ mod tests {
                 facing: Some(Direction::Right),
             })
         );
-        assert!(memory.hidden_object_identifiers.contains("CUT_TREE"));
+        assert!(memory.hidden_object_identifiers.contains("ESCORT"));
+        assert!(!memory.objects.contains_key("ESCORT"));
+        assert_eq!(memory.following, None);
         assert_eq!(
             memory.last_talked_object_identifier.as_deref(),
             Some("YOUNGSTER")

@@ -13,6 +13,15 @@ pub trait DividerSource {
     fn next_divider(&mut self) -> Result<u8, Self::Error>;
 }
 
+/// Random operations used by the battle engine. Production battle execution
+/// supplies [`ExactBattleRandom`]; the seed-packed implementation remains
+/// available only while callers outside the migrated runtime boundary are
+/// being removed.
+pub trait BattleRandomSource {
+    fn battle_random_byte(&mut self) -> u8;
+    fn legacy_seed(&self) -> u32;
+}
+
 impl<S> DividerSource for &mut S
 where
     S: DividerSource + ?Sized,
@@ -214,6 +223,71 @@ pub struct CrystalRandom<S> {
     rejected_ranges: usize,
 }
 
+/// Adapts the cartridge RNG to the battle engine while retaining divider
+/// failures until the outer transactional boundary can reject the operation.
+/// A terminal byte is returned after the first failure so rejection loops
+/// finish; the computed state is never committed when `divider_error` is set.
+pub struct ExactBattleRandom<'a, S>
+where
+    S: DividerSource + ?Sized,
+{
+    rng: CrystalRandom<&'a mut S>,
+    divider_error: Option<String>,
+    legacy_seed: u32,
+}
+
+impl<'a, S> ExactBattleRandom<'a, S>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
+    pub fn new(state: CrystalRandomState, legacy_seed: u32, source: &'a mut S) -> Self {
+        Self {
+            rng: CrystalRandom::new(state, source),
+            divider_error: None,
+            legacy_seed,
+        }
+    }
+
+    pub fn state(&self) -> CrystalRandomState {
+        self.rng.state()
+    }
+
+    pub fn divider_error(&self) -> Option<&str> {
+        self.divider_error.as_deref()
+    }
+
+    fn remember<T>(&mut self, result: Result<T, S::Error>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                if self.divider_error.is_none() {
+                    self.divider_error = Some(error.to_string());
+                }
+                None
+            }
+        }
+    }
+}
+
+impl<S> BattleRandomSource for ExactBattleRandom<'_, S>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
+    fn battle_random_byte(&mut self) -> u8 {
+        if self.divider_error.is_some() {
+            return u8::MAX;
+        }
+        let result = self.rng.battle_random();
+        self.remember(result).unwrap_or(u8::MAX)
+    }
+
+    fn legacy_seed(&self) -> u32 {
+        self.legacy_seed
+    }
+}
+
 impl<S> CrystalRandom<S>
 where
     S: DividerSource,
@@ -298,6 +372,26 @@ where
             // returns `random % max`, not the quotient (the latter produces
             // values far outside the requested range for every max < 16).
             return Ok(value % max);
+        }
+    }
+
+    /// Implements the script interpreter's distinct `Script_random` loop.
+    ///
+    /// Its first call inherits carry from the 256/modulus setup. A rejected
+    /// hRandomAdd byte reaches the loop through `cp threshold; jr nc`, so the
+    /// retry enters `Random` with carry clear rather than set like RandomRange.
+    pub fn script_random_range(&mut self, max: u8) -> Result<u8, S::Error> {
+        assert!(max != 0, "Crystal Script_random does not accept zero here");
+        let threshold = 256u16 - (256u16 % u16::from(max));
+        let mut carry_in = true;
+        loop {
+            self.random(carry_in)?;
+            let value = self.state.add;
+            if u16::from(value) < threshold {
+                return Ok(value % max);
+            }
+            self.rejected_ranges += 1;
+            carry_in = false;
         }
     }
 }
@@ -404,17 +498,11 @@ impl LinkBattleRandom {
     }
 }
 
-/// Legacy seed-packed RNG facade retained while production call boundaries
-/// are migrated to [`CrystalRandom`] and [`LinkBattleRandom`].
-///
-/// This type is not a cartridge-faithful divider source. Production callers
-/// must not infer timing samples from its packed seed or add new uses; the
-/// migration inventory in this module freezes the existing boundaries.
+/// Deterministic LCG retained only for legacy test fixtures.
+/// Production code uses [`CrystalRandom`] and [`LinkBattleRandom`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Random {
     seed: u32,
-    crystal: Option<CrystalRandomState>,
-    divider: u16,
 }
 
 impl Random {
@@ -424,44 +512,16 @@ impl Random {
     /// missing divider source cannot silently fall back to the LCG.
     #[cfg(any(test, feature = "test-fixtures"))]
     pub const fn new(seed: u32) -> Self {
-        Self {
-            seed,
-            crystal: None,
-            divider: 0,
-        }
-    }
-
-    /// Construct the legacy seed-packed runtime approximation.
-    ///
-    /// This cannot represent two independently timed `rDIV` reads and must be
-    /// removed from each production boundary as an authoritative divider
-    /// source becomes available there.
-    pub const fn new_crystal(seed: u32) -> Self {
-        Self {
-            seed,
-            crystal: Some(CrystalRandomState {
-                add: seed as u8,
-                sub: (seed >> 8) as u8,
-            }),
-            divider: (seed >> 16) as u16,
-        }
+        Self { seed }
     }
 
     pub const fn seed(self) -> u32 {
-        match self.crystal {
-            Some(state) => {
-                (state.add as u32) | ((state.sub as u32) << 8) | ((self.divider as u32) << 16)
-            }
-            None => self.seed,
-        }
+        self.seed
     }
 
     pub fn randrange(&mut self, max: u32) -> u32 {
         if max == 0 {
             return 0;
-        }
-        if self.crystal.is_some() {
-            return self.crystal_randrange(max);
         }
         self.fixture_lcg_randrange(max)
     }
@@ -474,80 +534,80 @@ impl Random {
 
     #[cfg(not(any(test, feature = "test-fixtures")))]
     fn fixture_lcg_randrange(&mut self, _max: u32) -> u32 {
-        unreachable!("production Random values can only use the legacy seed-packed backend")
+        unreachable!("production code cannot construct the fixture LCG")
     }
 
-    /// Return the legacy facade's approximation of `BattleRandom`.
-    /// Exact replay code must use [`CrystalRandom::battle_random`] or
-    /// [`LinkBattleRandom::battle_random`].
+    /// Return a fixture byte. Exact replay code uses
+    /// [`CrystalRandom::battle_random`] or [`LinkBattleRandom::battle_random`].
     pub fn battle_random_byte(&mut self) -> u8 {
-        if self.crystal.is_some() {
-            return self.crystal_random();
-        }
         self.randrange(256) as u8
     }
 
-    /// Return the legacy facade's packed add/sub approximation.
+    /// Return the same fixture byte in both accumulator positions.
     pub fn crystal_random_add_sub(&mut self) -> (u8, u8) {
-        if self.crystal.is_some() {
-            let sub = self.crystal_random();
-            let add = self.crystal.expect("crystal RNG state remains present").add;
-            (add, sub)
-        } else {
-            let sub = self.randrange(256) as u8;
-            (sub, sub)
-        }
+        let value = self.randrange(256) as u8;
+        (value, value)
+    }
+}
+
+impl BattleRandomSource for Random {
+    fn battle_random_byte(&mut self) -> u8 {
+        Random::battle_random_byte(self)
     }
 
-    fn crystal_random(&mut self) -> u8 {
-        let Some(mut state) = self.crystal else {
-            unreachable!("crystal_random called for legacy RNG");
-        };
-        let divider_add = self.next_divider();
-        state.add = state.add.wrapping_add(divider_add);
-        state.sub = state.sub.wrapping_sub(divider_add);
-        self.crystal = Some(state);
-        state.sub
-    }
-
-    fn next_divider(&mut self) -> u8 {
-        if self.divider == 0 {
-            self.divider = 0xace1;
-        }
-        let feedback = self.divider & 1;
-        self.divider >>= 1;
-        if feedback != 0 {
-            self.divider ^= 0xb400;
-        }
-        self.divider as u8
-    }
-
-    fn crystal_randrange(&mut self, max: u32) -> u32 {
-        let mut mask = 1u32;
-        while mask < max {
-            mask = (mask << 1) | 1;
-        }
-        let bit_length = 32 - mask.leading_zeros();
-        let byte_count = bit_length.div_ceil(8).max(1);
-        loop {
-            let mut value = 0u32;
-            for _ in 0..byte_count {
-                value = (value << 8) | u32::from(self.crystal_random());
-            }
-            value &= mask;
-            if value < max {
-                return value;
-            }
-        }
+    fn legacy_seed(&self) -> u32 {
+        self.seed()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CrystalRandom, CrystalRandomOutput, CrystalRandomState, LinkBattleRandom, Random,
-        RecordingDivider, ReplayDivider, ReplayDividerExhausted,
+        BattleRandomSource, CrystalRandom, CrystalRandomOutput, CrystalRandomState,
+        ExactBattleRandom, LinkBattleRandom, Random, RecordingDivider, ReplayDivider,
+        ReplayDividerExhausted,
     };
+
+    #[test]
+    fn exact_battle_random_reads_the_divider_and_preserves_legacy_seed() {
+        let mut divider = ReplayDivider::new([0x20, 0x10]);
+        let mut rng = ExactBattleRandom::new(
+            CrystalRandomState {
+                add: 0x10,
+                sub: 0x80,
+            },
+            0x1234_5678,
+            &mut divider,
+        );
+
+        assert_eq!(rng.battle_random_byte(), 0x70);
+        assert_eq!(
+            rng.state(),
+            CrystalRandomState {
+                add: 0x30,
+                sub: 0x70
+            }
+        );
+        assert_eq!(rng.legacy_seed(), 0x1234_5678);
+        assert_eq!(rng.divider_error(), None);
+        drop(rng);
+        assert_eq!(divider.consumed(), 2);
+    }
+
+    #[test]
+    fn exact_battle_random_latches_exhaustion_without_reading_again() {
+        let mut divider = ReplayDivider::new([0x20]);
+        let mut rng = ExactBattleRandom::new(CrystalRandomState::default(), 7, &mut divider);
+
+        assert_eq!(rng.battle_random_byte(), u8::MAX);
+        assert_eq!(rng.battle_random_byte(), u8::MAX);
+        assert_eq!(
+            rng.divider_error(),
+            Some("divider replay exhausted after 1 samples")
+        );
+        drop(rng);
+        assert_eq!(divider.consumed(), 1);
+    }
 
     #[test]
     fn crystal_random_updates_add_sub_and_carry_from_divider_samples() {
@@ -719,6 +779,24 @@ mod tests {
     }
 
     #[test]
+    fn script_random_retries_with_carry_cleared_by_threshold_compare() {
+        let mut rng = CrystalRandom::new(
+            CrystalRandomState::default(),
+            ReplayDivider::new([249, 0, 5, 0, 1, 0]),
+        );
+
+        // Script_random enters its first Random with carry set. hRandomAdd=250
+        // is rejected for bound 10; `cp 250` clears carry, so the retry reaches
+        // 255 rather than wrapping to zero. The third sample then wraps and is
+        // accepted.
+        assert_eq!(rng.script_random_range(10).expect("complete trace"), 0);
+        assert_eq!(rng.random_calls(), 3);
+        assert_eq!(rng.rejected_ranges(), 2);
+        assert_eq!(rng.source().consumed(), 6);
+        assert_eq!(rng.state().add, 0);
+    }
+
+    #[test]
     fn link_battle_random_emits_nine_values_then_advances_all_ten_seeds() {
         let mut rng =
             LinkBattleRandom::new([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 0).expect("fresh link stream");
@@ -738,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_seed_packed_production_rng_boundaries_are_frozen_for_migration() {
+    fn production_rng_boundaries_have_no_seed_packed_or_fixture_constructors() {
         fn standalone_occurrences(source: &str, needle: &str) -> usize {
             source
                 .match_indices(needle)
@@ -755,38 +833,38 @@ mod tests {
             (
                 "crystal-assets/game_data",
                 include_str!("../../crystal-assets/src/game_data.rs"),
-                15,
+                0,
             ),
             (
                 "crystal-bevy/lib",
                 include_str!("../../crystal-bevy/src/lib.rs"),
-                2,
+                0,
             ),
             (
                 "crystal-bevy/battle_entry",
                 include_str!("../../crystal-bevy/src/bevy_shell/battle_entry.rs"),
-                1,
+                0,
             ),
             (
                 "crystal-bevy/credits",
                 include_str!("../../crystal-bevy/src/bevy_shell/credits.rs"),
-                1,
+                0,
             ),
             (
                 "crystal-bevy/economy",
                 include_str!("../../crystal-bevy/src/bevy_shell/economy.rs"),
-                6,
+                0,
             ),
             (
                 "crystal-bevy/script_callbacks",
                 include_str!("../../crystal-bevy/src/bevy_shell/script_callbacks.rs"),
-                1,
+                0,
             ),
             ("crystal-core/state", include_str!("state.rs"), 0),
             (
                 "crystal-core/special_routines",
                 include_str!("systems/special_routines.rs"),
-                5,
+                0,
             ),
         ];
 
@@ -805,18 +883,9 @@ mod tests {
             total += seed_packed_calls;
         }
         assert_eq!(
-            total, 31,
+            total, 0,
             "all seed-packed production boundaries are inventoried"
         );
-    }
-
-    #[test]
-    fn battle_random_byte_exposes_the_subtraction_register() {
-        let mut rng = Random::new_crystal(0x0000_8010);
-        // The TypeScript runtime advances its divider once and applies the
-        // same byte to both accumulators.  0xace1 steps to 0xe270, so hRandomSub
-        // becomes 0x80 - 0x70 = 0x10.
-        assert_eq!(rng.battle_random_byte(), 0x10);
     }
 
     #[test]
@@ -825,19 +894,6 @@ mod tests {
         let values: Vec<u32> = (0..8).map(|_| rng.randrange(100)).collect();
         assert_eq!(values, vec![25, 54, 34, 95, 76, 12, 90, 70]);
         assert_eq!(rng.seed(), 164_697);
-    }
-
-    #[test]
-    fn runtime_crystal_rng_uses_byte_width_state_and_roundtrips_seed() {
-        let mut rng = Random::new_crystal(0x1234_5678);
-        let before = rng.seed();
-        let first = rng.randrange(100);
-        let after = rng.seed();
-        assert_ne!(before, after);
-        assert!(first < 100);
-
-        let mut resumed = Random::new_crystal(after);
-        assert_eq!(resumed.randrange(100), rng.randrange(100));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
 pub const COMPILED_GAME_PACK_EXTENSION: &str = "crystalpack";
-pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 6;
+pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 7;
 const COMPILED_GAME_PACK_VERSION_OFFSET: usize = COMPILED_GAME_PACK_MAGIC.len();
 const COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET: usize = COMPILED_GAME_PACK_VERSION_OFFSET + 2;
 const COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET: usize = COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 4;
@@ -271,6 +271,7 @@ pub enum ContentPackCategory {
     FruitTrees,
     FieldMoves,
     FieldBoxItems,
+    Decorations,
     RuntimeTitleScreen,
     FlyDestinations,
     Npcs,
@@ -356,6 +357,7 @@ pub struct ContentPackFiles {
     pub fruit_trees: Vec<String>,
     pub field_moves: Vec<String>,
     pub field_box_items: Vec<String>,
+    pub decorations: Vec<String>,
     pub runtime_title_screen: Vec<String>,
     pub fly_destinations: Vec<String>,
     pub npcs: Vec<String>,
@@ -441,6 +443,7 @@ impl ContentPackFiles {
             ContentPackCategory::FruitTrees => &self.fruit_trees,
             ContentPackCategory::FieldMoves => &self.field_moves,
             ContentPackCategory::FieldBoxItems => &self.field_box_items,
+            ContentPackCategory::Decorations => &self.decorations,
             ContentPackCategory::RuntimeTitleScreen => &self.runtime_title_screen,
             ContentPackCategory::FlyDestinations => &self.fly_destinations,
             ContentPackCategory::Npcs => &self.npcs,
@@ -526,6 +529,7 @@ const CONTENT_PACK_CATEGORIES: &[ContentPackCategory] = &[
     ContentPackCategory::FruitTrees,
     ContentPackCategory::FieldMoves,
     ContentPackCategory::FieldBoxItems,
+    ContentPackCategory::Decorations,
     ContentPackCategory::RuntimeTitleScreen,
     ContentPackCategory::FlyDestinations,
     ContentPackCategory::Npcs,
@@ -611,6 +615,7 @@ impl ContentPackCategory {
             ContentPackCategory::FruitTrees => "fruit_trees",
             ContentPackCategory::FieldMoves => "field_moves",
             ContentPackCategory::FieldBoxItems => "field_box_items",
+            ContentPackCategory::Decorations => "decorations",
             ContentPackCategory::RuntimeTitleScreen => "runtime_title_screen",
             ContentPackCategory::FlyDestinations => "fly_destinations",
             ContentPackCategory::Npcs => "npcs",
@@ -885,6 +890,7 @@ pub struct ModpackMetadata {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpecialPhoneCallRule {
+    pub value: u8,
     pub condition: String,
     pub contact_id: String,
     pub caller_script: String,
@@ -925,6 +931,37 @@ pub struct FieldBoxItemRule {
     pub decoration_flag: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DecorationCategory {
+    Bed,
+    Carpet,
+    Plant,
+    Poster,
+    GameConsole,
+    Ornament,
+    BigDoll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecorationDefinition {
+    pub index: u8,
+    pub id: String,
+    pub category: DecorationCategory,
+    pub display_name: String,
+    pub action: String,
+    pub event_flag: String,
+    pub sprite: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecorationCatalog {
+    pub category_order: Vec<DecorationCategory>,
+    pub decorations: Vec<DecorationDefinition>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackPayload {
@@ -942,6 +979,7 @@ pub struct ModpackPayload {
     pub fruit_trees: FruitTreeCatalog,
     pub field_moves: FieldMoveCatalog,
     pub field_box_items: BTreeMap<String, FieldBoxItemRule>,
+    pub decorations: DecorationCatalog,
     pub runtime_title_screen: RuntimeTitleScreen,
     pub runtime_spawn_points: BTreeMap<String, RuntimeSpawnPoint>,
     pub runtime_map_metadata: BTreeMap<String, RuntimeMapMetadata>,
@@ -1015,8 +1053,6 @@ pub struct PokemonCryMetadata {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTitleScreen {
-    #[serde(deserialize_with = "required_nullable_u16")]
-    pub new_game_spawn_identifier: Option<u16>,
     #[serde(deserialize_with = "required_nullable_audio_reference_token")]
     pub title_music: Option<String>,
 }
@@ -1056,34 +1092,12 @@ where
     Ok(Some(value))
 }
 
-fn required_nullable_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<u16>::deserialize(deserializer)
-}
-
 fn required_nullable_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
-}
-
-#[cfg(test)]
-fn required_crystal_byte_i16<'de, D>(deserializer: D) -> Result<i16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = i16::deserialize(deserializer)?;
-    if (0..=255).contains(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format!(
-            "Crystal byte value must be in 0..=255, found {value}"
-        )))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1093,15 +1107,7 @@ pub struct TilesetDefinition {
     pub palette_map: Vec<u8>,
 }
 
-#[cfg(test)]
-fn is_default<T>(value: &T) -> bool
-where
-    T: Default + PartialEq,
-{
-    value == &T::default()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModpackAudioKind {
     Music,

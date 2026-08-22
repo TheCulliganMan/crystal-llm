@@ -4,6 +4,7 @@ import { Stat } from "@pokecrystal/core/core/enums/pokemon";
 import { loadMergedMovesDataSync } from "@pokecrystal/core/core/content-packs";
 
 export interface Move {
+  source_index: number;
   name: MoveName;
   type: PokemonType;
   power: number;

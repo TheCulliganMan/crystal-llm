@@ -9,6 +9,8 @@ use crystal_bevy::{
 };
 
 const DEFAULT_PACK_FILENAME: &str = "core-modular.crystalpack";
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_BROWSER_PACK_FILENAME: &str = "core-modular.browser.crystalpack";
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
@@ -58,11 +60,20 @@ fn main() -> Result<()> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn main() -> Result<()> {
-    const PACK: &[u8] = include_bytes!("../../../../content-packs/core-modular.crystalpack");
+fn main() {
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = run_browser().await {
+            panic!("start crystal-bevy browser runtime: {error:#}");
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_browser() -> Result<()> {
+    let pack_bytes = fetch_browser_pack().await?;
     let loaded = crystal_assets::load_verified_compiled_game_pack_bytes(
-        DEFAULT_PACK_FILENAME,
-        PACK.to_vec(),
+        DEFAULT_BROWSER_PACK_FILENAME,
+        pack_bytes,
     )?;
     let asset_root = AssetRoot::new(".");
     let runtime = CrystalRuntime::from_loaded_compiled_pack(&asset_root, loaded)?;
@@ -79,6 +90,38 @@ fn main() -> Result<()> {
             ..Default::default()
         },
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_browser_pack() -> Result<Vec<u8>> {
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = web_sys::window().context("browser window is unavailable")?;
+    let response = JsFuture::from(window.fetch_with_str(DEFAULT_BROWSER_PACK_FILENAME))
+        .await
+        .map_err(|error| anyhow::anyhow!("fetch {DEFAULT_BROWSER_PACK_FILENAME}: {error:?}"))?
+        .dyn_into::<web_sys::Response>()
+        .map_err(|error| {
+            anyhow::anyhow!("decode {DEFAULT_BROWSER_PACK_FILENAME} response: {error:?}")
+        })?;
+    if !response.ok() {
+        bail!(
+            "fetch {DEFAULT_BROWSER_PACK_FILENAME}: HTTP {} {}",
+            response.status(),
+            response.status_text()
+        );
+    }
+    let buffer = response.array_buffer().map_err(|error| {
+        anyhow::anyhow!("read {DEFAULT_BROWSER_PACK_FILENAME} response: {error:?}")
+    })?;
+    let buffer = JsFuture::from(buffer).await.map_err(|error| {
+        anyhow::anyhow!("read {DEFAULT_BROWSER_PACK_FILENAME} bytes: {error:?}")
+    })?;
+    let bytes = js_sys::Uint8Array::new(&buffer);
+    let mut pack = vec![0; bytes.length() as usize];
+    bytes.copy_to(&mut pack);
+    Ok(pack)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -213,6 +256,18 @@ mod tests {
     }
 
     #[test]
+    fn wasm_loads_the_pack_at_runtime_instead_of_embedding_it() {
+        let source = include_str!("main.rs");
+        let embedded_bytes_macro = ["include", "_bytes!"].concat();
+        assert!(
+            !source.contains(&embedded_bytes_macro),
+            "the compiled pack must not be copied into the WASM binary"
+        );
+        assert!(source.contains("fetch_browser_pack().await"));
+        assert!(source.contains("window.fetch_with_str(DEFAULT_BROWSER_PACK_FILENAME)"));
+    }
+
+    #[test]
     fn default_pack_is_adjacent_to_the_executable() {
         assert_eq!(
             resolve_pack_path_from(None, Path::new("/opt/crystal/crystal-bevy"))
@@ -263,11 +318,24 @@ mod tests {
         assert!(core_state_source.contains(
             "#[cfg(any(test, feature = \"test-fixtures\"))]\nimpl Default for GameState"
         ));
-        let production_asset_source = asset_source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production asset source");
-        assert!(!production_asset_source.contains("GameState::default()"));
-        assert!(production_asset_source.contains("GameState::reset_wram_for_new_game()"));
+        for source in [
+            include_str!("../../crystal-assets/src/lib.rs"),
+            include_str!("../../crystal-assets/src/content_pack.rs"),
+            include_str!("../../crystal-assets/src/map_modules.rs"),
+            include_str!("../../crystal-assets/src/runtime_pack.rs"),
+            include_str!("../../crystal-assets/src/verification.rs"),
+            include_str!("../../crystal-assets/src/runtime_commands.rs"),
+            include_str!("../../crystal-assets/src/game_data.rs"),
+            include_str!("../../crystal-assets/src/mutation_protocol.rs"),
+            include_str!("../../crystal-assets/src/merge.rs"),
+            include_str!("../../crystal-assets/src/script_parsing.rs"),
+        ] {
+            let production_source = source
+                .split("\n#[cfg(test)]\nmod ")
+                .next()
+                .expect("production asset source");
+            assert!(!production_source.contains("GameState::default()"));
+        }
+        assert!(asset_source.contains("GameState::reset_wram_for_new_game()"));
     }
 }

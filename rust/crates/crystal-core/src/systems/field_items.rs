@@ -767,7 +767,7 @@ fn validate_field_item_token(value: &str) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ItemPocket, MAX_ITEM_STACK, item_pocket};
+    use crate::models::{ITEM_POCKET_CAPACITY, ItemPocket, MAX_ITEM_STACK, item_pocket};
 
     fn item(id: &str, pocket: ItemPocket) -> Item {
         Item {
@@ -1150,6 +1150,9 @@ mod tests {
             .bag
             .add_item(&antidote, MAX_ITEM_STACK)
             .expect("fill stack");
+        for index in 1..ITEM_POCKET_CAPACITY {
+            state.bag.items.insert(format!("FILLER_{index}"), 1);
+        }
         let items = catalog(vec![antidote]);
 
         let outcome = pickup_field_item(

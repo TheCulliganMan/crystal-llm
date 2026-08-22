@@ -18,18 +18,32 @@
         )]);
 
         let commands = parse_script_runtime_commands("GlobalPhoneScripts", &scripts)
-            .expect("compile canonical conditional CPU returns");
+            .expect("exclude CPU instructions from event runtime commands");
+        assert!(commands.is_empty());
         assert_eq!(
-            commands
+            scripts["CheckCanDeletePhoneNumber"]
+                .as_array()
+                .expect("CPU routine body")
                 .iter()
-                .filter(|command| command.command == "ret")
-                .map(|command| command.args.clone())
+                .filter(|entry| entry["command"] == "ret")
+                .map(|entry| {
+                    let args = entry["args"]
+                        .as_array()
+                        .expect("ret args")
+                        .iter()
+                        .map(|arg| arg.as_str().expect("ret arg"))
+                        .collect::<Vec<_>>();
+                    match classify_accumulator_callasm_instruction("ret", &args) {
+                        Some(AccumulatorCallasmInstruction::Return { condition }) => condition,
+                        other => panic!("ret was not classified as a CPU return: {other:?}"),
+                    }
+                })
                 .collect::<Vec<_>>(),
             vec![
-                vec!["nz".to_string()],
-                vec!["z".to_string()],
-                vec!["z".to_string()],
-                Vec::new(),
+                Some(ScriptRuntimeCpuCondition::Nz),
+                Some(ScriptRuntimeCpuCondition::Z),
+                Some(ScriptRuntimeCpuCondition::Z),
+                None,
             ]
         );
     }
@@ -67,6 +81,98 @@
                 },
             ]
         );
+    }
+
+    #[test]
+    fn scripted_wild_battle_setup_opcode_materializes_as_a_runtime_command() {
+        let scripts = BTreeMap::from([(
+            "WateredWeirdTreeScript".to_string(),
+            serde_json::json!([
+                {"command": "loadwildmon", "args": ["SUDOWOODO", "20"]},
+                {"command": "startbattle", "args": []}
+            ]),
+        )]);
+
+        let commands = parse_script_runtime_commands("Route36", &scripts)
+            .expect("materialize canonical scripted wild battle setup opcode");
+        assert_eq!(
+            commands,
+            vec![ScriptRuntimeCommand {
+                command: "loadwildmon".to_string(),
+                args: vec!["SUDOWOODO".to_string(), "20".to_string()],
+                source_script: "WateredWeirdTreeScript".to_string(),
+                command_index: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn both_source_memcall_pointer_forms_materialize_as_runtime_commands() {
+        let scripts = BTreeMap::from([
+            (
+                "LoadPhoneScriptBank".to_string(),
+                serde_json::json!([
+                    {"command": "memcall", "args": ["wPhoneScriptBank"]},
+                    {"command": "endcallback", "args": []}
+                ]),
+            ),
+            (
+                "Script_ReceivePhoneCall".to_string(),
+                serde_json::json!([
+                    {"command": "memcall", "args": ["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+        ]);
+
+        let commands = parse_script_runtime_commands("GlobalScripts", &scripts)
+            .expect("materialize both canonical memcall pointer forms");
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().any(|command| {
+            command.source_script == "LoadPhoneScriptBank"
+                && command.args == ["wPhoneScriptBank"]
+        }));
+        assert!(commands.iter().any(|command| {
+            command.source_script == "Script_ReceivePhoneCall"
+                && command.args
+                    == [
+                        "wCallerContact",
+                        "+",
+                        "PHONE_CONTACT_SCRIPT2_BANK",
+                    ]
+        }));
+    }
+
+    #[test]
+    fn every_source_loadwildmon_is_an_executable_runtime_mutation() {
+        let data = AssetRoot::new(repository_root_for_tests())
+            .load_base_game_data()
+            .expect("load base game data");
+        let mut source_count = 0;
+
+        for (map_name, module) in &data.maps {
+            for (source_script, body) in &module.scripts {
+                let commands = body.as_array().expect("compiled script command array");
+                for (command_index, command) in commands.iter().enumerate() {
+                    if command.get("command").and_then(serde_json::Value::as_str)
+                        != Some("loadwildmon")
+                    {
+                        continue;
+                    }
+                    source_count += 1;
+                    assert!(
+                        module.script_runtime_commands.iter().any(|runtime| {
+                            runtime.command == "loadwildmon"
+                                && runtime.source_script == *source_script
+                                && runtime.command_index == command_index
+                        }),
+                        "{map_name}/{source_script}:{command_index} must classify loadwildmon as an executable mutation"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(source_count, 18, "compiled loadwildmon corpus changed");
     }
 
     #[test]
@@ -167,6 +273,34 @@
             "AzaleaTownRivalBattleExitMovement".to_string(),
             Some("AzaleaTownRivalBattleScript".to_string()),
         )));
+    }
+
+    #[test]
+    fn surf_start_step_materializes_the_exact_dynamic_movement_buffer() {
+        let scripts = BTreeMap::from([(
+            "UsedSurfScript".to_string(),
+            serde_json::json!([
+                {"command": "special", "args": ["SurfStartStep"]},
+                {"command": "applymovement", "args": ["PLAYER", "wMovementBuffer"]},
+                {"command": "end", "args": []}
+            ]),
+        )]);
+        let object_commands = parse_script_object_commands("GlobalScripts", &scripts)
+            .expect("parse exact Surf movement command");
+        let movements = parse_script_movements("GlobalScripts", &scripts, &object_commands)
+            .expect("materialize SurfStartStep's dynamic movement buffer");
+
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].label, "wMovementBuffer");
+        assert_eq!(movements[0].source_script.as_deref(), Some("UsedSurfScript"));
+        assert_eq!(
+            movements[0]
+                .steps
+                .iter()
+                .map(|step| (step.command.as_str(), step.direction.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("slow_step", Some("PLAYER_FACING")), ("step_end", None)]
+        );
     }
 
     #[test]
@@ -297,6 +431,57 @@
     }
 
     #[test]
+    fn callasm_targets_remain_definitions_without_becoming_script_cursor_bodies() {
+        let definitions = BTreeMap::from([
+            (
+                "FlyScript".to_string(),
+                serde_json::json!([
+                    {"command": "callasm", "args": ["FlyFromAnim"]},
+                    {"command": "end", "args": []}
+                ]),
+            ),
+            (
+                "FlyFromAnim".to_string(),
+                serde_json::json!([
+                    {"command": "ld", "args": ["a", "[wStateFlags]"]},
+                    {"command": "ret", "args": []}
+                ]),
+            ),
+        ]);
+
+        let scripts = runtime_module_script_subset(&definitions, ["FlyScript"], false);
+
+        assert_eq!(scripts.keys().cloned().collect::<Vec<_>>(), ["FlyScript"]);
+        assert!(definitions.contains_key("FlyFromAnim"));
+    }
+
+    #[test]
+    fn runtime_script_subset_follows_scoped_local_over_bare_collision() {
+        let definitions = BTreeMap::from([
+            (
+                "ParentScript".to_string(),
+                serde_json::json!([
+                    {"command": "sjump", "args": [".Done"]}
+                ]),
+            ),
+            (
+                ".Done".to_string(),
+                serde_json::json!([{"command": "end", "args": []}]),
+            ),
+            (
+                ".Done@ParentScript".to_string(),
+                serde_json::json!([{"command": "end", "args": []}]),
+            ),
+        ]);
+
+        let scripts = runtime_module_script_subset(&definitions, ["ParentScript"], true);
+
+        assert!(scripts.contains_key("ParentScript"));
+        assert!(scripts.contains_key(".Done@ParentScript"));
+        assert!(!scripts.contains_key(".Done"));
+    }
+
+    #[test]
     fn exported_rock_smash_randomwildmon_materializes_as_exact_runtime_command() {
         let path = repository_root_for_tests()
             .join("apps/web/assets/data/story_events/StandardScripts.json");
@@ -327,6 +512,7 @@
             "StdScripts".to_string(),
             Value::Array(vec![smash_rock_pointer]),
         );
+        catalog.insert("GlobalScriptRoots".to_string(), Value::Array(Vec::new()));
         let mut data = GameDataSet {
             story_events: vec![payload],
             ..GameDataSet::default()
@@ -371,6 +557,10 @@
                 ".CoolTrainerM@LizGossip": [
                     {"command": "gettrainerclassname", "args": ["STRING_BUFFER_4", "COOLTRAINERM"]},
                     {"command": "end", "args": []}
+                ],
+                ".CurrentMap@MomPhoneCalleeScript": [
+                    {"command": "getcurlandmarkname", "args": ["STRING_BUFFER_5"]},
+                    {"command": "end", "args": []}
                 ]
             })],
             trainer_class_names: BTreeMap::from([(
@@ -378,16 +568,30 @@
                 "COOLTRAINER".to_string(),
             )]),
             pokegear_landmarks: crystal_core::models::display_metadata::PokegearLandmarksPayload {
-                landmarks: vec![crystal_core::models::display_metadata::PokegearLandmark {
-                    id: 8,
-                    constant: "LANDMARK_ROUTE_32".to_string(),
-                    label: "ROUTE_32".to_string(),
-                    name: "ROUTE 32".to_string(),
-                    x: 92,
-                    y: 76,
-                    region: "JOHTO".to_string(),
-                }],
-                map_to_landmark: BTreeMap::new(),
+                landmarks: vec![
+                    crystal_core::models::display_metadata::PokegearLandmark {
+                        id: 8,
+                        constant: "LANDMARK_ROUTE_32".to_string(),
+                        label: "ROUTE_32".to_string(),
+                        name: "ROUTE 32".to_string(),
+                        x: 92,
+                        y: 76,
+                        region: "JOHTO".to_string(),
+                    },
+                    crystal_core::models::display_metadata::PokegearLandmark {
+                        id: 1,
+                        constant: "LANDMARK_NEW_BARK_TOWN".to_string(),
+                        label: "NEW_BARK_TOWN".to_string(),
+                        name: "NEW BARK TOWN".to_string(),
+                        x: 100,
+                        y: 76,
+                        region: "JOHTO".to_string(),
+                    },
+                ],
+                map_to_landmark: BTreeMap::from([(
+                    "RuntimePhoneMap".to_string(),
+                    "LANDMARK_NEW_BARK_TOWN".to_string(),
+                )]),
             },
             ..GameDataSet::default()
         };
@@ -444,6 +648,20 @@
             state.script_runtime.named_buffers.get("STRING_BUFFER_4"),
             Some(&"COOLTRAINER".to_string())
         );
+
+        data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "RuntimePhoneMap",
+            ".CurrentMap@MomPhoneCalleeScript",
+            0,
+            ScriptRuntimeInputs::default(),
+        )
+        .expect("execute exact current-map landmark buffer command");
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_5"),
+            Some(&"NEW BARK TOWN".to_string())
+        );
     }
 
     #[test]
@@ -489,8 +707,14 @@
         assert!(!module
             .scripts
             .contains_key(".LoadBillScript@Script_SpecialBillCall"));
-        assert_eq!(module.script_runtime_commands.len(), 1);
-        assert_eq!(module.script_runtime_commands[0].command, "callasm");
+        assert!(module.script_runtime_commands.iter().any(|command| {
+            command.source_script == "Script_SpecialBillCall" && command.command == "callasm"
+        }));
+        assert!(module.script_runtime_commands.iter().any(|command| {
+            command.source_script == "DecorationDesc_TownMapPoster"
+                && command.command == "special"
+                && command.args == ["OverworldTownMap"]
+        }));
         assert!(module.script_text_bodies.contains_key("PhoneCallerText"));
     }
 
@@ -528,7 +752,7 @@
             },
         ];
         module.script_control_commands = vec![ScriptControlCommand {
-            command: "jump".to_string(),
+            command: "sjump".to_string(),
             compare_value: None,
             target_label: Some("Route29Script".to_string()),
             resolved_target_script: Some("Route29Script".to_string()),
@@ -618,7 +842,7 @@
 
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.script_control_commands = vec![ScriptControlCommand {
-            command: "jump".to_string(),
+            command: "sjump".to_string(),
             compare_value: Some("TRUE".to_string()),
             target_label: Some("Route29Script".to_string()),
             resolved_target_script: Some("Route29Script".to_string()),
@@ -635,7 +859,7 @@
             .expect_err("jump commands must not include compare values")
             .to_string();
         assert!(
-            error.contains("script control command 'jump' has unexpected compare value"),
+            error.contains("script control command 'sjump' has unexpected compare value"),
             "{error}"
         );
 
@@ -1664,8 +1888,7 @@
         );
 
         let mut data = GameDataSet::default();
-        let error = data
-            .apply_content_pack_payload(
+        data.apply_content_pack_payload(
                 ContentPackCategory::Trainers,
                 serde_json::json!({
                     "YOUNGSTER_JOEY": test_trainer("YOUNGSTER_JOEY", "MUSIC_HIKER_ENCOUNTER")
@@ -2401,6 +2624,11 @@
             ]),
             required_party_count: 3,
             challenge_streak_length: 7,
+            reward_candidates: vec!["HP_UP".to_string(), "LUCKY_PUNCH".to_string()],
+            excluded_reward_items: vec!["LUCKY_PUNCH".to_string()],
+            reward_quantity: 5,
+            reward_failure_sentinel: "POTION".to_string(),
+            reward_item_values: [("POTION".to_string(), 0x12), ("HP_UP".to_string(), 0x1a), ("LUCKY_PUNCH".to_string(), 0x1e)].into_iter().collect(),
             minimum_level_group: 1,
             maximum_level_group: 10,
             level_group_size: 10,
@@ -2850,6 +3078,21 @@
             wild_exp_divisor: 7,
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
+            mom_money_increment: 2_300,
+            mom_random_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                trigger: 0,
+                cost: 600,
+                kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
+            mom_progression_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                trigger: 900,
+                cost: 600,
+                kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
         };
         let mut data = GameDataSet {
             battle_reward_rules: rules.clone(),

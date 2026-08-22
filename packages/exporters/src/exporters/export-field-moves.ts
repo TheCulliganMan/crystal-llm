@@ -29,6 +29,14 @@ export type ExportedFieldItemRule = {
   item_id: string;
 };
 
+export type ExportedFieldStoryKeyRule = {
+  item_id: string;
+  map_name: string;
+  required_facing: "up" | "down" | "left" | "right" | null;
+  target_tile: { x: number; y: number };
+  target_script: string;
+};
+
 export type ExportedFieldMoveReplacement = {
   replacement_block_id: number;
   variant: string;
@@ -72,6 +80,8 @@ export type ExportedFieldMoveCatalog = {
   bicycle: ExportedFieldItemRule;
   itemfinder: ExportedFieldItemRule;
   squirtbottle: ExportedFieldItemRule;
+  card_key: ExportedFieldStoryKeyRule;
+  basement_key: ExportedFieldStoryKeyRule;
   coin_case: ExportedFieldItemRule;
   blue_card: ExportedFieldItemRule;
   town_map: ExportedFieldItemRule;
@@ -289,12 +299,62 @@ const requireTextboxItemEffectRule = (
   return { item_id: itemId };
 };
 
+const pascalCaseAsmToken = (value: string): string =>
+  value
+    .toLowerCase()
+    .split("_")
+    .map((part) => (/^\d+[a-z]$/.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join("");
+
+const requireStoryKeyRule = (
+  itemEffectsContent: string,
+  routineContent: string,
+  effectLabel: string,
+  routineLabel: string,
+  itemId: string
+): ExportedFieldStoryKeyRule => {
+  requireItemEffectOwner(itemEffectsContent, effectLabel, itemId);
+  const effectBlock = labelBlock(itemEffectsContent, effectLabel);
+  if (!new RegExp(`^\\s*farcall\\s+${routineLabel}\\b`, "m").test(effectBlock)) {
+    throw new Error(`missing authored ${itemId} farcall`);
+  }
+  const routine = labelBlock(routineContent, routineLabel);
+  const group = routine.match(/^\s*cp\s+GROUP_([A-Z0-9_]+)$/m)?.[1];
+  const map = routine.match(/^\s*cp\s+MAP_([A-Z0-9_]+)$/m)?.[1];
+  const coordinates = [...routine.matchAll(/^\s*cp\s+([0-9]+)$/gm)].map((match) => Number(match[1]));
+  const queuedLocal = routine.match(/^\s*ld\s+hl,\s*(\.[A-Za-z0-9_]+)$/m)?.[1];
+  if (!group || !map || group !== map || coordinates.length < 2 || !queuedLocal) {
+    throw new Error(`unsupported authored ${itemId} location or queue shape`);
+  }
+  const facingToken = routine.match(/^\s*cp\s+OW_([A-Z]+)$/m)?.[1];
+  let requiredFacing: ExportedFieldStoryKeyRule["required_facing"] = null;
+  if (facingToken) {
+    const normalized = facingToken.toLowerCase();
+    if (normalized !== "up" && normalized !== "down" && normalized !== "left" && normalized !== "right") {
+      throw new Error(`unsupported authored ${itemId} facing ${facingToken}`);
+    }
+    requiredFacing = normalized;
+  }
+  const queued = labelBlock(routineContent, queuedLocal);
+  const targetScript = queued.match(/^\s*farsjump\s+([A-Za-z0-9_]+)$/m)?.[1];
+  if (!targetScript) throw new Error(`missing authored ${itemId} target script`);
+  return {
+    item_id: itemId,
+    map_name: pascalCaseAsmToken(map),
+    required_facing: requiredFacing,
+    target_tile: { x: coordinates[0] - 4, y: coordinates[1] - 4 },
+    target_script: targetScript,
+  };
+};
+
 export function exportFieldMoves(): ExportedFieldMoveCatalog {
   const root = getDisassemblyRoot();
   const ramConstants = fs.readFileSync(path.join(root, "constants", "ram_constants.asm"), "utf8");
   const moveConstants = fs.readFileSync(path.join(root, "constants", "move_constants.asm"), "utf8");
   const itemEffects = fs.readFileSync(path.join(root, "engine", "items", "item_effects.asm"), "utf8");
   const overworld = fs.readFileSync(path.join(root, "engine", "events", "overworld.asm"), "utf8");
+  const cardKey = fs.readFileSync(path.join(root, "engine", "events", "card_key.asm"), "utf8");
+  const basementKey = fs.readFileSync(path.join(root, "engine", "events", "basement_key.asm"), "utf8");
   const collisionConstants = parseDefEquConstants(
     fs.readFileSync(path.join(root, "constants", "collision_constants.asm"), "utf8"),
     "COLL_"
@@ -389,6 +449,14 @@ export function exportFieldMoves(): ExportedFieldMoveCatalog {
     bicycle: requireBicycleRule(itemEffects),
     itemfinder: requireFarcallItemEffectRule(itemEffects, "ItemfinderEffect", "ITEMFINDER", "ItemFinder"),
     squirtbottle: requireFarcallItemEffectRule(itemEffects, "SquirtbottleEffect", "SQUIRTBOTTLE", "_Squirtbottle"),
+    card_key: requireStoryKeyRule(itemEffects, cardKey, "CardKeyEffect", "_CardKey", "CARD_KEY"),
+    basement_key: requireStoryKeyRule(
+      itemEffects,
+      basementKey,
+      "BasementKeyEffect",
+      "_BasementKey",
+      "BASEMENT_KEY"
+    ),
     coin_case: requireTextboxItemEffectRule(itemEffects, "CoinCaseEffect", "COIN_CASE", "CoinCaseCountText"),
     blue_card: requireTextboxItemEffectRule(itemEffects, "BlueCardEffect", "BLUE_CARD", "BlueCardBalanceText"),
     town_map: requireFarcallItemEffectRule(itemEffects, "TownMapEffect", "TOWN_MAP", "PokegearMap"),

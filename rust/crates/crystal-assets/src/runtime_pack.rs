@@ -42,6 +42,15 @@ pub struct FieldSquirtBottleUseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldStoryKeyUseOutcome {
+    pub item_use: ItemUseOutcome,
+    pub map_name: String,
+    pub player_tile: TilePosition,
+    pub target_tile: TilePosition,
+    pub target_script: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldKeyItemBalanceUseOutcome {
     pub item_use: ItemUseOutcome,
     pub balance_label: String,
@@ -76,19 +85,8 @@ pub struct FieldBoxItemUseOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectFieldEncounterMoveOutcome {
-    pub field_encounter: crystal_core::world::encounters::FieldEncounterRoll,
-    pub wild_battle: Option<WildBattleStart>,
-    pub removed_object_identifier: Option<String>,
-    pub removed_event_flag: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SweetScentFieldMoveOutcome {
-    pub actor_party_index: usize,
-    pub actor_species: String,
+pub struct SweetScentEncounterOutcome {
     pub wild_encounter: Option<WildEncounterRoll>,
-    pub wild_battle: Option<WildBattleStart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +223,7 @@ impl ModpackCompileReport {
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
+#[cfg_attr(not(test), allow(dead_code))]
 fn canonical_test_compile_report(data: &GameDataSet, manifest_id: &str) -> ModpackCompileReport {
     let reachable_maps = data.maps.keys().cloned().collect::<Vec<_>>();
     let solvable_maps = data.maps.keys().cloned().collect::<Vec<_>>();
@@ -495,6 +494,7 @@ pub const REQUIRED_VENDOR_RUNTIME_FILE_KEYS: &[&str] = &[
     "vendor/pokecrystal/gfx/card_flip/card_flip.tilemap",
     "vendor/pokecrystal/gfx/card_flip/card_flip_1.png",
     "vendor/pokecrystal/gfx/card_flip/card_flip_2.png",
+    "vendor/pokecrystal/gfx/card_flip/card_flip_3.png",
     "vendor/pokecrystal/gfx/card_flip/off.png",
     "vendor/pokecrystal/gfx/card_flip/on.png",
     "vendor/pokecrystal/gfx/diploma/diploma.pal",
@@ -504,10 +504,13 @@ pub const REQUIRED_VENDOR_RUNTIME_FILE_KEYS: &[&str] = &[
     "vendor/pokecrystal/gfx/overworld/heal_machine.png",
     "vendor/pokecrystal/gfx/overworld/magnet_train_bg.tilemap",
     "vendor/pokecrystal/gfx/overworld/magnet_train_fg.tilemap",
+    "vendor/pokecrystal/gfx/printer/bold_a.png",
+    "vendor/pokecrystal/gfx/printer/bold_b.png",
     "vendor/pokecrystal/gfx/slots/slots.pal",
     "vendor/pokecrystal/gfx/slots/slots.tilemap",
     "vendor/pokecrystal/gfx/slots/slots_1.png",
     "vendor/pokecrystal/gfx/slots/slots_2.png",
+    "vendor/pokecrystal/gfx/slots/slots_3.png",
     "vendor/pokecrystal/gfx/tilesets/train_station.png",
     "vendor/pokecrystal/gfx/unown_puzzle/aerodactyl.png",
     "vendor/pokecrystal/gfx/unown_puzzle/cursor.png",

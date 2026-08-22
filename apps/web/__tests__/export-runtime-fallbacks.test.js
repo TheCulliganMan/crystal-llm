@@ -9,6 +9,7 @@ const writeFakeDisassembly = (root) => {
   makeDir(path.join(root, "data", "maps"));
   makeDir(path.join(root, "data", "moves"));
   makeDir(path.join(root, "data", "battle_anims"));
+  makeDir(path.join(root, "data", "battle_tower"));
   makeDir(path.join(root, "data", "sprite_anims"));
   makeDir(path.join(root, "data", "text"));
   makeDir(path.join(root, "data", "phone", "text"));
@@ -18,6 +19,8 @@ const writeFakeDisassembly = (root) => {
   makeDir(path.join(root, "data", "collision"));
   makeDir(path.join(root, "data", "sprites"));
   makeDir(path.join(root, "engine", "events"));
+  makeDir(path.join(root, "engine", "menus"));
+  makeDir(path.join(root, "engine", "pokemon"));
   makeDir(path.join(root, "gfx", "battle_anims"));
   makeDir(path.join(root, "gfx", "tilesets"));
   makeDir(path.join(root, "maps"));
@@ -58,11 +61,16 @@ const writeFakeDisassembly = (root) => {
   fs.writeFileSync(path.join(root, "data", "phone", "phone_contacts.asm"), "phone TRAINER_NONE, PHONECONTACT_MOM, N_A, ANYTIME, 0, ANYTIME, 0\n");
   fs.writeFileSync(path.join(root, "data", "phone", "non_trainer_names.asm"), '.MOM: db "MOM@"\n');
   fs.writeFileSync(path.join(root, "data", "phone", "permanent_numbers.asm"), "db PHONE_MOM\n\tdb -1\n");
-  fs.writeFileSync(path.join(root, "data", "text", "battle.asm"), "JoeyAskNumber1Text:\n\ttext \"Battle text@\"\n\tline \"from asm@\"\n\tprompt\n");
+  fs.writeFileSync(path.join(root, "data", "text", "battle.asm"), "JoeyAskNumber1Text:\n\ttext \"Battle text@\"\n\tline \"from asm@\"\n\tprompt\nSeerNameLocationText:\n\ttext \"Met @\"\n\ttext_ram wSeerNickname\n\ttext_start\n\tline \"here at level @\"\n\ttext_decimal wStringBuffer2 + 1, 1, 3\n\tdone\n");
   fs.writeFileSync(path.join(root, "data", "phone", "text", "extra.asm"), "JackNumberAcceptedText:\n\ttext \"Phone text@\"\n\tdone\n");
+  fs.writeFileSync(path.join(root, "data", "battle_tower", "trainer_text.asm"), "_BTGreetingM1Text:\n\ttext \"Tower text@\"\n\tdone\n");
   makeDir(path.join(root, "data", "moves"));
   fs.writeFileSync(path.join(root, "data", "moves", "names.asm"), "MoveNames::\n\tlist_start\n\tli \"POUND\"\n");
   fs.writeFileSync(path.join(root, "engine", "events", "std_scripts.asm"), "InitializeEventsScript:\n\tsetevent EVENT_TEST\n\tsetflag ENGINE_TEST\n\tvariablesprite SPRITE_FUCHSIA_GYM_1, SPRITE_ROCKER\n\tendcallback\n");
+  fs.writeFileSync(
+    path.join(root, "engine", "menus", "intro_menu.asm"),
+    ".done\n; Play the title screen music.\n\tld de, MUSIC_TITLE\n\tcall PlayMusic\n"
+  );
   fs.writeFileSync(path.join(root, "constants", "misc_constants.asm"), "DEF MAX_COINS EQU 9999\nDEF COIN_CHUNK EQU 50\n");
   fs.writeFileSync(
     path.join(root, "constants", "pokemon_constants.asm"),
@@ -109,10 +117,37 @@ const writeFakeDisassembly = (root) => {
       "const BOULDERBADGE",
       "DEF NUM_KANTO_BADGES EQU const_value",
       "DEF NUM_BADGES EQU NUM_JOHTO_BADGES + NUM_KANTO_BADGES",
+      "DEF SPAWN_LANCE EQU 1",
+      "DEF SPAWN_RED EQU 2",
+      "",
+    ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(root, "constants", "map_data_constants.asm"),
+    [
+      "const_def",
+      "const SPAWN_HOME",
+      "const SPAWN_DEBUG",
+      "const_skip 12",
+      "const SPAWN_NEW_BARK",
+      "const_skip 11",
+      "const SPAWN_MT_SILVER",
       "",
     ].join("\n")
   );
   fs.writeFileSync(path.join(root, "constants", "battle_constants.asm"), "DEF EGG_LEVEL EQU 5\n");
+  fs.writeFileSync(
+    path.join(root, "constants", "pokemon_data_constants.asm"),
+    "DEF CAUGHT_EGG_LEVEL EQU 1\n"
+  );
+  fs.writeFileSync(
+    path.join(root, "constants", "landmark_constants.asm"),
+    "const_def $7f, -1\nconst LANDMARK_EVENT\nconst LANDMARK_GIFT\n"
+  );
+  fs.writeFileSync(
+    path.join(root, "engine", "pokemon", "move_mon.asm"),
+    "DEF RANDY_OT_ID EQU 01001\n"
+  );
   fs.writeFileSync(path.join(root, "maps", "TestMap.asm"), "DEF MAP_COIN_GIFT EQU COIN_CHUNK * 2\n");
   fs.writeFileSync(path.join(root, "constants", "trainer_constants.asm"), "");
   fs.writeFileSync(path.join(root, "data", "trainers", "class_names.asm"), "");
@@ -226,6 +261,18 @@ describe("export-runtime-fallbacks", () => {
       const outDir = path.join(tempRoot, "assets", "data");
       const disassemblyRoot = path.join(tempRoot, "pokecrystal_disassembly");
       writeFakeDisassembly(disassemblyRoot);
+      const titlePath = path.join(
+        outDir,
+        "content-packs",
+        "core-modular",
+        "runtime_title_screen",
+        "title.json"
+      );
+      makeDir(path.dirname(titlePath));
+      fs.writeFileSync(
+        titlePath,
+        '{"new_game_spawn_identifier":0,"title_music":"LEGACY"}\n'
+      );
 
       exportRuntimeAssets({
         projectRoot: tempRoot,
@@ -247,6 +294,8 @@ describe("export-runtime-fallbacks", () => {
         global: {
           MAX_COINS: 9999,
           COIN_CHUNK: 50,
+          PHONE_MOM: 0,
+          NUM_PHONE_CONTACTS: 1,
           UNOWN_A: 1,
           UNOWN_B: 2,
           UNOWN_C: 3,
@@ -275,12 +324,21 @@ describe("export-runtime-fallbacks", () => {
           UNOWN_Z: 26,
           NUM_UNOWN: 26,
           EGG_LEVEL: 5,
+          CAUGHT_EGG_LEVEL: 1,
+          LANDMARK_EVENT: 127,
+          LANDMARK_GIFT: 126,
+          RANDY_OT_ID: 1001,
           ZEPHYRBADGE: 0,
           HIVEBADGE: 1,
           NUM_JOHTO_BADGES: 2,
           BOULDERBADGE: 0,
           NUM_KANTO_BADGES: 1,
           NUM_BADGES: 3,
+          SPAWN_LANCE: 1,
+          SPAWN_RED: 2,
+          SPAWN_HOME: 0,
+          SPAWN_NEW_BARK: 14,
+          SPAWN_MT_SILVER: 26,
         },
         maps: {
           TestMap: {
@@ -288,12 +346,23 @@ describe("export-runtime-fallbacks", () => {
           },
         },
       });
+      expect(JSON.parse(fs.readFileSync(titlePath, "utf8"))).toEqual({
+        title_music: "MUSIC_TITLE",
+      });
       expect(JSON.parse(fs.readFileSync(path.join(outDir, "collision", "collision_stdscripts.json"), "utf8"))).toEqual({
         DEFAULT: "Default",
       });
       expect(JSON.parse(fs.readFileSync(path.join(outDir, "asm_text.json"), "utf8"))).toMatchObject({
         JoeyAskNumber1Text: "Battle text\nfrom asm",
+        SeerNameLocationText: "Met <RAM:wSeerNickname>\nhere at level <DECIMAL:wStringBuffer2 + 1, 1, 3>",
         JackNumberAcceptedText: "Phone text",
+        _BTGreetingM1Text: "Tower text",
+      });
+      expect(JSON.parse(fs.readFileSync(
+        path.join(outDir, "content-packs", "core-modular", "asm_text", "texts.json"),
+        "utf8"
+      ))).toMatchObject({
+        SeerNameLocationText: "Met <RAM:wSeerNickname>\nhere at level <DECIMAL:wStringBuffer2 + 1, 1, 3>",
       });
       expect(JSON.parse(fs.readFileSync(path.join(outDir, "move_names.json"), "utf8"))).toEqual(["POUND"]);
     } finally {

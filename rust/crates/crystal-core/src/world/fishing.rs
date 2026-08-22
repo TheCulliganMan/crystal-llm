@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::map::MapAttributes;
 use crate::models::Item;
-use crate::random::Random;
+use crate::random::{CrystalRandom, DividerSource};
 use crate::state::{FishingMemory, FishingRodState, GameState};
 use crate::world::encounters::{TimeOfDay, WildEncounter};
 
@@ -57,6 +57,7 @@ impl<'de> Deserialize<'de> for FishingCatalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FishingGroup {
+    pub source_index: u8,
     pub bite_threshold: u8,
     #[serde(deserialize_with = "required_fishing_rod_tables")]
     pub rod_tables: BTreeMap<String, RodTable>,
@@ -210,6 +211,13 @@ pub enum FishingCatalogIssue {
     },
     InvalidFishingGroupId {
         group_id: String,
+    },
+    InvalidFishingGroupSourceIndex {
+        group_id: String,
+    },
+    DuplicateFishingGroupSourceIndex {
+        group_id: String,
+        source_index: u8,
     },
     InvalidFishingRod {
         group_id: String,
@@ -367,10 +375,21 @@ pub fn fishing_catalog_issues(
         }
     }
 
+    let mut source_indices = BTreeSet::new();
     for (group_id, group) in &catalog.groups {
         if !is_exact_nonempty_fishing_token(group_id) {
             issues.push(FishingCatalogIssue::InvalidFishingGroupId {
                 group_id: group_id.clone(),
+            });
+        }
+        if group.source_index == 0 {
+            issues.push(FishingCatalogIssue::InvalidFishingGroupSourceIndex {
+                group_id: group_id.clone(),
+            });
+        } else if !source_indices.insert(group.source_index) {
+            issues.push(FishingCatalogIssue::DuplicateFishingGroupSourceIndex {
+                group_id: group_id.clone(),
+                source_index: group.source_index,
             });
         }
         for (rod, table) in &group.rod_tables {
@@ -575,13 +594,11 @@ pub struct FishingSession {
     pub resolution: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FishingRolledSession {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactFishingSession {
     pub session: FishingSession,
     pub bite_roll: u8,
-    pub slot_roll: u8,
-    pub rng_seed_after: u32,
+    pub slot_roll: Option<u8>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -634,6 +651,29 @@ pub enum FishingError {
     UnknownRodItemId { item_id: String },
     #[error("item id '{item_id}' is not an exact fishing rod item id")]
     InvalidRodItemId { item_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactFishingError<E> {
+    Fishing(FishingError),
+    Divider(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ExactFishingError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fishing(error) => error.fmt(formatter),
+            Self::Divider(error) => write!(formatter, "fishing divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for ExactFishingError<E> {}
+
+impl<E> From<FishingError> for ExactFishingError<E> {
+    fn from(error: FishingError) -> Self {
+        Self::Fishing(error)
+    }
 }
 
 pub fn percent_to_byte(percent: u8) -> u8 {
@@ -766,27 +806,6 @@ pub fn roll_fishing_encounter(
     })
 }
 
-pub fn roll_fishing_encounter_from_rng(
-    state: &GameState,
-    catalog: &FishingCatalog,
-    group: Option<&str>,
-    rod: &str,
-    time_of_day: TimeOfDay,
-    rng: &mut Random,
-) -> Result<FishingOutcome, FishingError> {
-    let bite_roll = rng.randrange(256) as u8;
-    let slot_roll = rng.randrange(256) as u8;
-    roll_fishing_encounter(
-        state,
-        catalog,
-        group,
-        rod,
-        time_of_day,
-        bite_roll,
-        slot_roll,
-    )
-}
-
 pub fn do_fishing(
     state: &mut GameState,
     catalog: &FishingCatalog,
@@ -823,16 +842,54 @@ pub fn do_fishing(
     Ok(session)
 }
 
-pub fn do_fishing_from_rng(
+pub fn do_fishing_exact<S>(
     state: &mut GameState,
     catalog: &FishingCatalog,
     group: Option<&str>,
     rod: &str,
     time_of_day: TimeOfDay,
-    rng: &mut Random,
-) -> Result<FishingRolledSession, FishingError> {
-    let bite_roll = rng.randrange(256) as u8;
-    let slot_roll = rng.randrange(256) as u8;
+    rng: &mut CrystalRandom<&mut S>,
+) -> Result<ExactFishingSession, ExactFishingError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    validate_rod(rod)?;
+    let Some(original_group) = group.filter(|group| !group.is_empty() && *group != FISHGROUP_NONE)
+    else {
+        let session = do_fishing(state, catalog, group, rod, time_of_day, 0, 0)?;
+        return Ok(ExactFishingSession {
+            session,
+            bite_roll: 0,
+            slot_roll: None,
+        });
+    };
+    let first_carry = fishing_group_index_carry(state, catalog, original_group)?;
+    let bite_roll = rng
+        .random(first_carry)
+        .map_err(ExactFishingError::Divider)?
+        .value;
+    let resolved_group = resolve_group_token(Some(original_group), Some(state), Some(catalog))
+        .ok_or_else(|| FishingError::InvalidGroup {
+            group: original_group.to_string(),
+        })?;
+    let fishing_group =
+        catalog
+            .groups
+            .get(&resolved_group)
+            .ok_or_else(|| FishingError::UnknownGroup {
+                group: resolved_group.clone(),
+            })?;
+    if bite_roll >= fishing_group.bite_threshold {
+        let session = do_fishing(state, catalog, group, rod, time_of_day, bite_roll, 0)?;
+        return Ok(ExactFishingSession {
+            session,
+            bite_roll,
+            slot_roll: None,
+        });
+    }
+    // The two `add hl, de` instructions selecting the rod pointer cannot
+    // overflow the ROM bank address, so the second Random enters carry-clear.
+    let slot_roll = rng.random(false).map_err(ExactFishingError::Divider)?.value;
     let session = do_fishing(
         state,
         catalog,
@@ -842,12 +899,65 @@ pub fn do_fishing_from_rng(
         bite_roll,
         slot_roll,
     )?;
-    Ok(FishingRolledSession {
+    Ok(ExactFishingSession {
         session,
         bite_roll,
-        slot_roll,
-        rng_seed_after: rng.seed(),
+        slot_roll: Some(slot_roll),
     })
+}
+
+fn fishing_group_index_carry(
+    state: &GameState,
+    catalog: &FishingCatalog,
+    group: &str,
+) -> Result<bool, FishingError> {
+    let group_index = catalog
+        .groups
+        .get(group)
+        .ok_or_else(|| FishingError::UnknownGroup {
+            group: group.to_string(),
+        })?
+        .source_index;
+    let mut swarm_rules = catalog.swarm_rules.values().collect::<Vec<_>>();
+    swarm_rules.sort_by_key(|rule| {
+        catalog
+            .groups
+            .get(&rule.base_group)
+            .map(|group| group.source_index)
+            .unwrap_or(u8::MAX)
+    });
+    let Some(first_rule) = swarm_rules.first() else {
+        return Ok(false);
+    };
+    if first_rule.daily_flag_bit >= u8::BITS as u8
+        || state.fishing.daily_flags1 & (1 << first_rule.daily_flag_bit) == 0
+    {
+        return Ok(false);
+    }
+    for rule in &swarm_rules {
+        let base_index = catalog
+            .groups
+            .get(&rule.base_group)
+            .ok_or_else(|| FishingError::UnknownGroup {
+                group: rule.base_group.clone(),
+            })?
+            .source_index;
+        if group_index == base_index {
+            return Ok(state.fishing.swarm_flag < rule.swarm);
+        }
+    }
+    let last_base_index = catalog
+        .groups
+        .get(&swarm_rules.last().expect("nonempty swarm rules").base_group)
+        .ok_or_else(|| FishingError::UnknownGroup {
+            group: swarm_rules
+                .last()
+                .expect("nonempty swarm rules")
+                .base_group
+                .clone(),
+        })?
+        .source_index;
+    Ok(group_index < last_base_index)
 }
 
 pub fn fishing_rod_for_item_id<'a>(
@@ -1021,12 +1131,14 @@ fn rod_index(rod: &str) -> Result<u8, FishingError> {
 mod tests {
     use super::*;
     use crate::models::{ITEM_POCKET_KEY_ITEM, item_pocket};
+    use crate::random::{CrystalRandomState, ReplayDivider, ReplayDividerExhausted};
 
     fn catalog() -> FishingCatalog {
         FishingCatalog {
             groups: [(
                 "FISHGROUP_LAKE".to_string(),
                 FishingGroup {
+                    source_index: 1,
                     bite_threshold: threshold(50, true),
                     rod_tables: [(
                         ROD_GOOD.to_string(),
@@ -1228,6 +1340,7 @@ mod tests {
         catalog.groups.insert(
             "FISHGROUP_BAD".to_string(),
             FishingGroup {
+                source_index: 2,
                 bite_threshold: threshold(50, true),
                 rod_tables: [(
                     "BAD_ROD".to_string(),
@@ -1378,12 +1491,55 @@ mod tests {
     }
 
     #[test]
+    fn fishing_catalog_issues_require_unique_nonzero_source_indices() {
+        let mut catalog = catalog();
+        catalog.swarm_rules.clear();
+        catalog
+            .groups
+            .get_mut("FISHGROUP_LAKE")
+            .expect("lake")
+            .source_index = 0;
+        let mut duplicate = catalog.groups["FISHGROUP_LAKE"].clone();
+        duplicate.source_index = 1;
+        catalog
+            .groups
+            .insert("FISHGROUP_POND".to_string(), duplicate.clone());
+        catalog
+            .groups
+            .insert("FISHGROUP_SHORE".to_string(), duplicate);
+        let items = BTreeMap::from([(
+            "MOD_GOOD_ROD_ITEM".to_string(),
+            test_item("MOD_GOOD_ROD_ITEM", true),
+        )]);
+        let species_ids = BTreeSet::from([
+            "MAGIKARP".to_string(),
+            "CORSOLA".to_string(),
+            "STARYU".to_string(),
+        ]);
+
+        let issues = fishing_catalog_issues(&catalog, &[], &items, &species_ids);
+
+        assert!(
+            issues.contains(&FishingCatalogIssue::InvalidFishingGroupSourceIndex {
+                group_id: "FISHGROUP_LAKE".to_string(),
+            })
+        );
+        assert!(
+            issues.contains(&FishingCatalogIssue::DuplicateFishingGroupSourceIndex {
+                group_id: "FISHGROUP_SHORE".to_string(),
+                source_index: 1,
+            })
+        );
+    }
+
+    #[test]
     fn fishing_catalog_issues_reject_malformed_tokens_and_unusable_tables() {
         let catalog = FishingCatalog {
             groups: [
                 (
                     " BAD".to_string(),
                     FishingGroup {
+                        source_index: 1,
                         bite_threshold: threshold(50, true),
                         rod_tables: [(ROD_OLD.to_string(), RodTable { slots: Vec::new() })]
                             .into_iter()
@@ -1393,6 +1549,7 @@ mod tests {
                 (
                     "BAD GROUP".to_string(),
                     FishingGroup {
+                        source_index: 2,
                         bite_threshold: threshold(50, true),
                         rod_tables: [(ROD_OLD.to_string(), RodTable { slots: Vec::new() })]
                             .into_iter()
@@ -1402,6 +1559,7 @@ mod tests {
                 (
                     "FISHGROUP_BAD".to_string(),
                     FishingGroup {
+                        source_index: 3,
                         bite_threshold: threshold(50, true),
                         rod_tables: [(
                             " OLD_ROD".to_string(),
@@ -1584,6 +1742,7 @@ mod tests {
             groups: [(
                 "fallback_group".to_string(),
                 FishingGroup {
+                    source_index: 1,
                     bite_threshold: threshold(50, true),
                     rod_tables: [(
                         "legacy_rod".to_string(),
@@ -1707,6 +1866,146 @@ mod tests {
     }
 
     #[test]
+    fn exact_fishing_without_a_group_consumes_no_divider_samples() {
+        let mut state = GameState::default();
+        let mut divider = ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        let session = do_fishing_exact(
+            &mut state,
+            &FishingCatalog::default(),
+            Some(FISHGROUP_NONE),
+            ROD_GOOD,
+            TimeOfDay::Day,
+            &mut rng,
+        )
+        .expect("no fishing group");
+
+        assert!(!session.session.outcome.bite);
+        assert_eq!(session.slot_roll, None);
+        assert_eq!(rng.random_calls(), 0);
+        drop(rng);
+        assert_eq!(divider.consumed(), 0);
+    }
+
+    #[test]
+    fn exact_fishing_no_bite_consumes_one_random_call() {
+        let mut state = GameState::default();
+        let mut catalog = catalog();
+        catalog
+            .groups
+            .get_mut("FISHGROUP_LAKE")
+            .expect("lake")
+            .bite_threshold = 1;
+        let mut divider = ReplayDivider::new([0, 255]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        let session = do_fishing_exact(
+            &mut state,
+            &catalog,
+            Some("FISHGROUP_LAKE"),
+            ROD_GOOD,
+            TimeOfDay::Day,
+            &mut rng,
+        )
+        .expect("no bite");
+
+        assert!(!session.session.outcome.bite);
+        assert_eq!(session.bite_roll, 1);
+        assert_eq!(session.slot_roll, None);
+        assert_eq!(rng.random_calls(), 1);
+        drop(rng);
+        assert_eq!(divider.consumed(), 2);
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn exact_fishing_bite_consumes_bite_and_slot_random_calls() {
+        let mut state = GameState::default();
+        let mut divider = ReplayDivider::new([0, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        let session = do_fishing_exact(
+            &mut state,
+            &catalog(),
+            Some("FISHGROUP_LAKE"),
+            ROD_GOOD,
+            TimeOfDay::Day,
+            &mut rng,
+        )
+        .expect("bite");
+
+        assert!(session.session.outcome.bite);
+        assert_eq!(session.slot_roll, Some(0));
+        assert_eq!(rng.random_calls(), 2);
+        drop(rng);
+        assert_eq!(divider.consumed(), 4);
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn exact_fishing_reports_a_truncated_divider_trace() {
+        let mut state = GameState::default();
+        let mut divider = ReplayDivider::new([0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        assert_eq!(
+            do_fishing_exact(
+                &mut state,
+                &catalog(),
+                Some("FISHGROUP_LAKE"),
+                ROD_GOOD,
+                TimeOfDay::Day,
+                &mut rng,
+            ),
+            Err(ExactFishingError::Divider(ReplayDividerExhausted {
+                consumed: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn exact_fishing_preserves_swarm_comparison_carry_for_first_random() {
+        let mut catalog = catalog();
+        catalog
+            .groups
+            .get_mut("FISHGROUP_LAKE")
+            .expect("lake")
+            .bite_threshold = 0;
+        catalog.swarm_rules = [(
+            "SWARM_RULE_0".to_string(),
+            FishingSwarmRule {
+                daily_flag_bit: 2,
+                swarm: 1,
+                base_group: "FISHGROUP_LAKE".to_string(),
+                swarm_group: "FISHGROUP_LAKE".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let roll = |daily_flags1| {
+            let mut state = GameState::default();
+            state.fishing.daily_flags1 = daily_flags1;
+            let mut divider = ReplayDivider::new([0, 0]);
+            let mut rng = CrystalRandom::new(CrystalRandomState { add: 255, sub: 0 }, &mut divider);
+            do_fishing_exact(
+                &mut state,
+                &catalog,
+                Some("FISHGROUP_LAKE"),
+                ROD_GOOD,
+                TimeOfDay::Day,
+                &mut rng,
+            )
+            .expect("no bite")
+            .bite_roll
+        };
+
+        assert_eq!(roll(0), 0);
+        assert_eq!(roll(1 << 2), 255);
+    }
+
+    #[test]
     fn bite_roll_and_slot_roll_resolve_pack_owned_encounter() {
         let outcome = roll_fishing_encounter(
             &GameState::default(),
@@ -1726,46 +2025,6 @@ mod tests {
                 level: 20,
             })
         );
-    }
-
-    #[test]
-    fn fishing_rng_helper_consumes_bite_and_slot_rolls_in_core() {
-        let mut helper_state = GameState {
-            frame_counter: 11,
-            ..GameState::default()
-        };
-        let mut explicit_state = helper_state.clone();
-        let catalog = catalog();
-        let mut helper_rng = Random::new(1);
-        let mut explicit_rng = Random::new(1);
-        let bite_roll = explicit_rng.randrange(256) as u8;
-        let slot_roll = explicit_rng.randrange(256) as u8;
-
-        let helper = do_fishing_from_rng(
-            &mut helper_state,
-            &catalog,
-            Some("FISHGROUP_LAKE"),
-            ROD_GOOD,
-            TimeOfDay::Day,
-            &mut helper_rng,
-        )
-        .expect("helper session");
-        let explicit = do_fishing(
-            &mut explicit_state,
-            &catalog,
-            Some("FISHGROUP_LAKE"),
-            ROD_GOOD,
-            TimeOfDay::Day,
-            bite_roll,
-            slot_roll,
-        )
-        .expect("explicit session");
-
-        assert_eq!(helper.session, explicit);
-        assert_eq!(helper.bite_roll, bite_roll);
-        assert_eq!(helper.slot_roll, slot_roll);
-        assert_eq!(helper.rng_seed_after, explicit_rng.seed());
-        assert_eq!(helper_rng.seed(), explicit_rng.seed());
     }
 
     #[test]
@@ -1805,6 +2064,7 @@ mod tests {
             r#"{
               "groups":{
                 "FISHGROUP_LAKE":{
+                  "source_index":1,
                   "bite_threshold":128,
                   "rod_tables":{
                     "GOOD_ROD":{
@@ -1870,6 +2130,7 @@ mod tests {
                 serde_json::json!({
                     "groups": {
                         "FISH GROUP_LAKE": {
+                            "source_index": 1,
                             "bite_threshold": 128,
                             "rod_tables": {}
                         }
@@ -1884,6 +2145,7 @@ mod tests {
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_LAKE": {
+                            "source_index": 1,
                             "bite_threshold": 128,
                             "rod_tables": {
                                 "GOOD ROD": {"slots": []}
@@ -1900,6 +2162,7 @@ mod tests {
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_LAKE": {
+                            "source_index": 1,
                             "bite_threshold": 128,
                             "rod_tables": {
                                 "GOOD_ROD": {
@@ -1918,6 +2181,7 @@ mod tests {
                 serde_json::json!({
                     "groups": {
                         "FISHGROUP_LAKE": {
+                            "source_index": 1,
                             "bite_threshold": 128,
                             "rod_tables": {
                                 "GOOD_ROD": {

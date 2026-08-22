@@ -27,6 +27,24 @@ export const PHONE_CALLASM_ENTRYPOINTS = [
   "RingTwice_StartCall",
 ] as const;
 
+const MOM_PURCHASE_SCRIPT_LABELS = [
+  ".ItemScript@Mom_GetScriptPointer",
+  ".DollScript@Mom_GetScriptPointer",
+] as const;
+
+const scriptTextTargets = (commands: readonly StoryCommand[]): string[] =>
+  commands.flatMap((command) => {
+    if (command.command !== "writetext" || !Array.isArray(command.args)) {
+      return [];
+    }
+    if (command.args.length !== 1) {
+      throw new Error(
+        `writetext has ${command.args.length} targets instead of exactly one`,
+      );
+    }
+    return [command.args[0]];
+  });
+
 const cloneCommands = (commands: readonly StoryCommand[]): StoryCommand[] =>
   commands.map((command) => ({
     command: command.command,
@@ -193,6 +211,46 @@ export function exportPhoneScripts(): void {
   writeJsonToTargets(path.join("phone_scripts", "phone.json"), scripts, {
     indent: 2,
   });
+
+  const momPurchaseSource = path.join(root, "engine", "events", "mom_phone.asm");
+  requireSource(momPurchaseSource, "script");
+  const momPurchaseCatalog = parseAsmFile(momPurchaseSource);
+  const momPurchaseScripts: StoryScripts = {};
+  for (const label of MOM_PURCHASE_SCRIPT_LABELS) {
+    const commands = momPurchaseCatalog[label];
+    if (!commands?.length) {
+      throw new Error(`Required Mom purchase script ${label} is missing from ${momPurchaseSource}`);
+    }
+    momPurchaseScripts[label] = cloneCommands(commands);
+  }
+  for (const label of [
+    ...new Set(
+      Object.values(momPurchaseScripts).flatMap(scriptTextTargets),
+    ),
+  ]) {
+    const commands = momPurchaseCatalog[label];
+    if (!commands?.length) {
+      throw new Error(
+        `Mom purchase script text ${label} is missing from ${momPurchaseSource}`,
+      );
+    }
+    momPurchaseScripts[label] = cloneCommands(commands);
+  }
+  writeJsonToTargets(
+    path.join("phone_scripts", "mom_purchase.json"),
+    momPurchaseScripts,
+    { indent: 2 },
+  );
+  writeJsonToTargets(
+    path.join(
+      "content-packs",
+      "core-modular",
+      "phone_scripts",
+      "mom_purchase.json",
+    ),
+    momPurchaseScripts,
+    { indent: 2 },
+  );
 
   for (const asmPath of fs
     .readdirSync(scriptDir)

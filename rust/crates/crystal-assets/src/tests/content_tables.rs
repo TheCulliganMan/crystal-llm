@@ -923,6 +923,12 @@
         assert_eq!(data.pokemon["BULBASAUR"].base_stats.hp, 45);
         assert_eq!(data.moves.len(), 251);
         assert_eq!(data.moves["POUND"].pp, 35);
+        let source_indices = data
+            .moves
+            .values()
+            .map(|move_data| move_data.source_index)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(source_indices, (1..=251).collect::<BTreeSet<_>>());
         assert_eq!(data.learnsets.len(), 251);
         assert_eq!(data.learnsets["BULBASAUR"][0].1, "TACKLE");
         assert_eq!(
@@ -933,6 +939,24 @@
             "IVYSAUR"
         );
         assert_eq!(data.items.len(), 255);
+        assert_eq!(
+            data.decorations.category_order,
+            vec![
+                DecorationCategory::Bed,
+                DecorationCategory::Carpet,
+                DecorationCategory::Plant,
+                DecorationCategory::Poster,
+                DecorationCategory::GameConsole,
+                DecorationCategory::Ornament,
+                DecorationCategory::BigDoll,
+            ]
+        );
+        assert_eq!(data.decorations.decorations.len(), 45);
+        assert!(data.decorations.decorations.iter().any(|decoration| {
+            decoration.id == "DECO_BIG_LAPRAS_DOLL"
+                && decoration.display_name == "BIG LAPRAS"
+                && decoration.event_flag == "EVENT_DECO_BIG_LAPRAS_DOLL"
+        }));
         assert_eq!(
             data.map_attributes["Route29"].map_constant.as_deref(),
             Some("ROUTE_29")
@@ -962,11 +986,32 @@
             data.story_event_script_constants.global.get("TRUE"),
             Some(&1)
         );
+        for (name, expected) in [
+            ("SPAWN_HOME", 0_i64),
+            ("SPAWN_LANCE", 1_i64),
+            ("SPAWN_RED", 2),
+            ("SPAWN_NEW_BARK", 14),
+            ("SPAWN_MT_SILVER", 26),
+        ] {
+            assert_eq!(
+                data.story_event_script_constants.global.get(name),
+                Some(&expected),
+                "compiled story constants must retain {name} from ASM"
+            );
+        }
+        for identifier in [14_u16, 26] {
+            assert!(
+                data.runtime_spawn_points
+                    .values()
+                    .any(|spawn| spawn.identifier == identifier),
+                "compiled spawn table must contain source identifier {identifier}"
+            );
+        }
         assert_eq!(
             data.asm_text
                 .get("WildPokemonAppearedText")
                 .map(String::as_str),
-            Some("Wild @\n\n\nappeared!")
+            Some("Wild <RAM:wEnemyMonNickname>\nappeared!")
         );
         assert_eq!(data.move_names.first().map(String::as_str), Some("POUND"));
         assert!(data.battle_animations.contains_key("BattleAnim_Pound"));
@@ -1056,6 +1101,7 @@
             moves: [(
                 "POUND".to_string(),
                 Move {
+                    source_index: 1,
                     name: "POUND".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 40,
@@ -1073,6 +1119,7 @@
                 groups: [(
                     "FISHGROUP_LAKE".to_string(),
                     crystal_core::world::fishing::FishingGroup {
+                        source_index: 1,
                         bite_threshold: crystal_core::world::fishing::threshold(50, true),
                         rod_tables: BTreeMap::new(),
                     },
@@ -1107,6 +1154,21 @@
                 wild_exp_divisor: 7,
                 trainer_exp_numerator: 3,
                 trainer_exp_denominator: 2,
+                mom_money_increment: 2_300,
+                mom_random_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                    trigger: 0,
+                    cost: 600,
+                    kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                    target: "SUPER_POTION".to_string(),
+                    decoration_flag: None,
+                }],
+                mom_progression_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                    trigger: 900,
+                    cost: 600,
+                    kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                    target: "SUPER_POTION".to_string(),
+                    decoration_flag: None,
+                }],
             },
             battle_escape_rules: BattleEscapeRules {
                 player_speed_multiplier: 32,
@@ -1334,6 +1396,7 @@
             moves: [(
                 "SPARK".to_string(),
                 Move {
+                    source_index: 1,
                     name: "SPARK".to_string(),
                     move_type: pokemon_type("ELECTRIC"),
                     power: 40,
@@ -1364,6 +1427,7 @@
             payload: ModpackPayload {
                 pokemon: pokemon_payload(vec![replacement]),
                 moves: move_payload(vec![Move {
+                    source_index: 1,
                     name: "NEW_MOVE".to_string(),
                     move_type: pokemon_type("NORMAL"),
                     power: 1,

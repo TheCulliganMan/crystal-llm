@@ -7,8 +7,8 @@
     "tree": "7209c2b8f6510a1d7ca728142183f040543aec24"
   },
   "pack": "content-packs/core-modular.crystalpack",
-  "pack_format": 6,
-  "pack_sha256": "801537d2323b0d6d69ca3e91a5bfc06305627e916cb970f643e2a770d6c197b9",
+  "pack_format": 7,
+  "pack_sha256": "1a6a9c933da4a12643f0e736414e08a854172caf4976689b745775a91bb8fedb",
   "schema": 2,
   "toolchain": {
     "exporter": "rust/crates/crystal-assets/src/bin/pack_core.rs",

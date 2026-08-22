@@ -13,7 +13,7 @@ use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
 pub const SAVE_EXTENSION: &str = "crystalsave";
-pub const SAVE_FORMAT_VERSION: u16 = 9;
+pub const SAVE_FORMAT_VERSION: u16 = 17;
 const SAVE_VERSION_OFFSET: usize = SAVE_MAGIC.len();
 const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;
@@ -1029,6 +1029,7 @@ mod tests {
         let path = temp_save_path("slot.crystalsave");
         let mut state = GameState::default();
         state.frame_counter = 42;
+        state.radio_tuning_knob = 52;
         state.pokedex.seen_species.insert("CHIKORITA".to_string());
         let mut sleeping_species = crate::models::PokemonSpecies::new_for_tests(
             "CHIKORITA",
@@ -1075,6 +1076,7 @@ mod tests {
             .expect("read save for exact pack");
 
         assert_eq!(loaded.state, state);
+        assert_eq!(loaded.state.radio_tuning_knob, 52);
         assert_eq!(loaded_for_pack, loaded);
         assert_eq!(loaded.metadata.modpack, modpack);
         assert_eq!(loaded.metadata.saved_frame, 42);
@@ -1565,12 +1567,12 @@ mod tests {
             Err(SaveError::UnsupportedVersion(_))
         ));
 
-        let mut framed_v8 = encode_save_game_bytes(&save).expect("encode current framed save");
-        framed_v8[SAVE_VERSION_OFFSET..SAVE_VERSION_OFFSET + 2]
-            .copy_from_slice(&8_u16.to_be_bytes());
+        let mut framed_v14 = encode_save_game_bytes(&save).expect("encode current framed save");
+        framed_v14[SAVE_VERSION_OFFSET..SAVE_VERSION_OFFSET + 2]
+            .copy_from_slice(&14_u16.to_be_bytes());
         assert!(matches!(
-            read_save_game_bytes(&framed_v8, "slot-v8.crystalsave"),
-            Err(SaveError::UnsupportedVersion(8))
+            read_save_game_bytes(&framed_v14, "slot-v14.crystalsave"),
+            Err(SaveError::UnsupportedVersion(14))
         ));
 
         #[derive(serde::Serialize)]
@@ -1644,13 +1646,13 @@ mod tests {
         )
         .expect("encode prior v8 roaming vector shape");
         prior_payload.splice(roaming_start..history_start + history.len(), legacy_roaming);
-        let mut prior_under_v9 = SAVE_MAGIC.to_vec();
-        prior_under_v9.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
-        prior_under_v9.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
-        prior_under_v9.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
-        prior_under_v9.extend_from_slice(&prior_payload);
+        let mut prior_under_v17 = SAVE_MAGIC.to_vec();
+        prior_under_v17.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
+        prior_under_v17.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
+        prior_under_v17.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
+        prior_under_v17.extend_from_slice(&prior_payload);
         assert!(matches!(
-            read_save_game_bytes(&prior_under_v9, "slot-v8-shape-under-v9.crystalsave"),
+            read_save_game_bytes(&prior_under_v17, "slot-v8-shape-under-v17.crystalsave"),
             Err(SaveError::Decode(_))
         ));
     }

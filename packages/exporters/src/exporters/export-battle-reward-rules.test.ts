@@ -43,6 +43,23 @@ BoostExp:
   adc b
 `;
       }
+      if (filePath.endsWith("constants/misc_constants.asm")) {
+        return "DEF MOM_MONEY EQU 2300\n";
+      }
+      if (filePath.endsWith("data/items/mom_phone.asm")) {
+        return `
+MomItems_1:
+  momitem 0, 600, MOM_ITEM, SUPER_POTION
+.End
+MomItems_2:
+  momitem 900, 600, MOM_ITEM, SUPER_POTION
+  momitem 10000, 1800, MOM_DOLL, DECO_CHARMANDER_DOLL
+.End
+`;
+      }
+      if (filePath.endsWith("data/decorations/attributes.asm")) {
+        return "decoration DECO_DOLL, CHARMANDER, SET_UP_DOLL, EVENT_DECO_CHARMANDER_DOLL, SPRITE_CHARMANDER\n";
+      }
       throw new Error(`Unexpected read ${filePath}`);
     });
 
@@ -53,6 +70,20 @@ BoostExp:
       wild_exp_divisor: 7,
       trainer_exp_numerator: 3,
       trainer_exp_denominator: 2,
+      mom_money_increment: 2300,
+      mom_random_items: [
+        { trigger: 0, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+      ],
+      mom_progression_items: [
+        { trigger: 900, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+        {
+          trigger: 10000,
+          cost: 1800,
+          kind: "doll",
+          target: "DECO_CHARMANDER_DOLL",
+          decoration_flag: "EVENT_DECO_CHARMANDER_DOLL",
+        },
+      ],
     });
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
       "battle_reward_rules.json",
@@ -61,6 +92,20 @@ BoostExp:
         wild_exp_divisor: 7,
         trainer_exp_numerator: 3,
         trainer_exp_denominator: 2,
+        mom_money_increment: 2300,
+        mom_random_items: [
+          { trigger: 0, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+        ],
+        mom_progression_items: [
+          { trigger: 900, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+          {
+            trigger: 10000,
+            cost: 1800,
+            kind: "doll",
+            target: "DECO_CHARMANDER_DOLL",
+            decoration_flag: "EVENT_DECO_CHARMANDER_DOLL",
+          },
+        ],
       },
       { indent: 2 }
     );

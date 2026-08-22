@@ -117,6 +117,73 @@ fn reset_obp0_uses_the_asm_hardware_values() {
 }
 
 #[test]
+fn faint_mon_drops_one_tile_every_two_frames_then_disappears() {
+    let mut animation = VisibleMoveAnimation {
+        trigger_message: "Enemy TEST\nfainted!".to_string(),
+        move_id: "FAINT_MON".to_string(),
+        animation_label: "BattleAnim_FaintMon".to_string(),
+        player_move: false,
+        started: true,
+        waiting_for_hp: false,
+        frame: 0,
+        total_frames: 14,
+        sound_events: Vec::new(),
+        next_sound_event: 0,
+        cry_events: Vec::new(),
+        next_cry_event: 0,
+        object_events: Vec::new(),
+        bg_events: vec![VisibleMoveBgEvent {
+            frame: 0,
+            effect_id: "BATTLE_BG_EFFECT_FAINT_MON".to_string(),
+            duration: 14,
+            target: "BG_EFFECT_USER".to_string(),
+            param: 0,
+            incremented: false,
+        }],
+        actor_species_override: None,
+        actor_shiny_override: None,
+    };
+    let source_pixel = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+
+    let enemy_y = [0_u16, 1, 2, 3, 4, 5, 12, 13].map(|frame| {
+        animation.frame = frame;
+        let (player, enemy) = visible_move_battler_offsets(Some(&animation));
+        assert_eq!(player, Vec3::ZERO);
+        enemy.y
+    });
+
+    assert_eq!(
+        enemy_y,
+        [-8.0, -8.0, -16.0, -16.0, -24.0, -24.0, -56.0, -56.0]
+            .map(|pixels| pixels * source_pixel)
+    );
+    animation.frame = 0;
+    assert_eq!(
+        visible_move_battler_row_extractions(Some(&animation)).1,
+        Some(VisibleBattlerRowExtraction {
+            rows: 1,
+            top: false,
+            bg_rows_cleared: true,
+            render_extracted: false,
+        })
+    );
+    animation.frame = 12;
+    assert_eq!(
+        visible_move_battler_row_extractions(Some(&animation)).1,
+        Some(VisibleBattlerRowExtraction {
+            rows: 7,
+            top: false,
+            bg_rows_cleared: true,
+            render_extracted: false,
+        })
+    );
+    animation.frame = 13;
+    assert_eq!(visible_move_battler_visibility(Some(&animation)), (true, true));
+    animation.frame = 14;
+    assert_eq!(visible_move_battler_visibility(Some(&animation)), (true, false));
+}
+
+#[test]
 fn vibrate_mon_toggles_one_pixel_every_two_updates_for_32_frames() {
     let mut animation = VisibleMoveAnimation {
         trigger_message: String::new(),
@@ -1246,12 +1313,12 @@ fn battlerobj_extracts_fixed_head_or_feet_rows_instead_of_resizing_the_battler()
     assert_eq!(visible_move_battler_clip_tiles(Some(&animation)), (None, None));
     assert_eq!(
         visible_move_battler_row_extractions(Some(&animation)).0,
-        Some(VisibleBattlerRowExtraction { rows: 1, top: true, bg_rows_cleared: false })
+        Some(VisibleBattlerRowExtraction { rows: 1, top: true, bg_rows_cleared: false, render_extracted: true })
     );
     animation.frame = 1;
     assert_eq!(
         visible_move_battler_row_extractions(Some(&animation)).0,
-        Some(VisibleBattlerRowExtraction { rows: 1, top: true, bg_rows_cleared: true })
+        Some(VisibleBattlerRowExtraction { rows: 1, top: true, bg_rows_cleared: true, render_extracted: true })
     );
     animation.bg_events.push(VisibleMoveBgEvent {
         frame: 5, effect_id: "BATTLE_BG_EFFECT_SHOW_MON".to_string(), duration: 0,
@@ -1275,7 +1342,7 @@ fn battlerobj_extracts_fixed_head_or_feet_rows_instead_of_resizing_the_battler()
     animation.frame = 1;
     assert_eq!(
         visible_move_battler_row_extractions(Some(&animation)).1,
-        Some(VisibleBattlerRowExtraction { rows: 2, top: false, bg_rows_cleared: true })
+        Some(VisibleBattlerRowExtraction { rows: 2, top: false, bg_rows_cleared: true, render_extracted: true })
     );
 }
 
@@ -1296,6 +1363,7 @@ fn extracted_battler_rows_render_as_an_independent_oam_strip() {
                 rows: 2,
                 top: true,
                 bg_rows_cleared: true,
+                render_extracted: true,
             },
         );
     });
@@ -1596,6 +1664,123 @@ fn b_cancels_visible_evolution_before_success_and_restores_exact_pokemon() {
     assert!(runtime_shell.battle_sounds_after_messages.is_empty());
 }
 
+#[test]
+fn pending_move_learn_prompt_uses_the_exported_asm_question() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .add_party_pokemon(
+            "CYNDAQUIL",
+            20,
+            None,
+            None,
+            "PENDING_MOVE_TEXT_TEST",
+            1,
+            Dv::from_non_hp(10, 11, 12, 13),
+        )
+        .expect("add Cyndaquil");
+    runtime_shell.shell.session_mut().state_mut().pending_move_learn =
+        Some(crate::core::state::PendingMoveLearn {
+            party_index: 0,
+            species_id: "CYNDAQUIL".to_string(),
+            level: 20,
+            learned_move: crate::core::models::LearnedMove {
+                name: "HEADBUTT".to_string(),
+                current_pp: 15,
+                pp_ups: 0,
+            },
+            defer_level_evolution: false,
+        });
+    runtime_shell.shell.session_mut().state_mut().sync_party_from_storage();
+
+    let expected = visible_move_learning_text_pages(
+        &runtime_shell,
+        "_AskForgetMoveText",
+        "CYNDAQUIL",
+        "CYNDAQUIL",
+        "HEADBUTT",
+    )
+    .expect("render exported move-learning text")
+    .pop()
+    .expect("final source question");
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("pending move presentation snapshot");
+    let mut entries = Vec::new();
+    push_visible_pending_move_learn_entries(&mut entries, &snapshot, &runtime_shell)
+        .expect("render pending move learn prompt");
+
+    assert_eq!(entries, vec![expected]);
+    assert!(!entries.iter().any(|entry| entry.contains("A/B CONTINUE")));
+}
+
+#[test]
+fn pending_move_replacement_uses_source_text_pause_and_sound_boundaries() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .add_party_pokemon(
+            "CYNDAQUIL",
+            20,
+            None,
+            None,
+            "PENDING_MOVE_REPLACE_TEST",
+            1,
+            Dv::from_non_hp(10, 11, 12, 13),
+        )
+        .expect("add Cyndaquil");
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        let pokemon = state.storage.party.pokemon[0]
+            .as_mut()
+            .expect("party Pokemon");
+        pokemon.moves = ["TACKLE", "LEER", "SMOKESCREEN", "EMBER"]
+            .into_iter()
+            .map(|name| crate::core::models::LearnedMove {
+                name: name.to_string(),
+                current_pp: 20,
+                pp_ups: 0,
+            })
+            .collect();
+        state.pending_move_learn = Some(crate::core::state::PendingMoveLearn {
+            party_index: 0,
+            species_id: "CYNDAQUIL".to_string(),
+            level: 20,
+            learned_move: crate::core::models::LearnedMove {
+                name: "HEADBUTT".to_string(),
+                current_pp: 15,
+                pp_ups: 0,
+            },
+            defer_level_evolution: false,
+        });
+        state.sync_party_from_storage();
+    }
+    runtime_shell.party_move_cursor = Some(MenuCursor {
+        surface_id: party_move_cursor_surface_id(0),
+        option_index: 0,
+    });
+
+    replace_visible_pending_move_learn(&mut runtime_shell)
+        .expect("replace the selected move");
+
+    assert_eq!(
+        runtime_shell
+            .special_boundary
+            .as_ref()
+            .map(|boundary| boundary.label.as_str()),
+        Some("Text_1_2_and_Poof")
+    );
+    assert_eq!(runtime_shell.visible_special_text_pause_frames, Some(30));
+    assert_eq!(
+        runtime_shell
+            .special_boundary_queue
+            .front()
+            .map(|boundary| boundary.label.as_str()),
+        Some("MoveForgotPoofText")
+    );
+}
+
 fn capture_ball_sprite_count(world: &mut World) -> usize {
     let mut commands = world.query_filtered::<&Transform, With<BattleCommandMarker>>();
     commands
@@ -1616,6 +1801,10 @@ fn assert_caught_capture_render_state(world: &mut World, ball_visible: bool) {
         "the still-live core enemy must stay hidden until capture commit"
     );
     assert_eq!(capture.ball_visible(), ball_visible);
+    assert_eq!(
+        runtime_shell.last_error, None,
+        "capture presentation must render without a hidden asset error"
+    );
     let _ = runtime_shell;
 
     let mut battlers = world.query_filtered::<Entity, With<BattleBattlerMarker>>();
@@ -1780,7 +1969,6 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
         .shell
         .snapshot()
         .expect("active capture battle snapshot");
-    let rng_seed_after = runtime_shell.shell.session().state.rng_seed;
     let unrelated = "An unrelated queued message.".to_string();
     let gotcha = "Gotcha! SUDOWOODO\nwas caught!".to_string();
     let pokedex = "SUDOWOODO's data\nwas newly added to\nthe POKéDEX.".to_string();
@@ -1806,7 +1994,6 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
         wobble_count: 3,
         animation_shakes: 3,
         final_catch_rate: u8::MAX,
-        rng_seed_after,
         ball_id: Some("POKE_BALL".to_string()),
     };
     runtime_shell.pending_standard_capture = Some(PendingStandardCapture {
@@ -2311,6 +2498,7 @@ fn every_battle_transition_variant_finishes_on_full_black_before_battle_canvas()
             canvases[0].0.custom_size,
             Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT))
         );
+        assert_eq!(canvases[0].0.color, Color::WHITE);
         assert_eq!(canvases[0].1.translation, Vec3::new(0.0, 0.0, 2.7));
     }
 }

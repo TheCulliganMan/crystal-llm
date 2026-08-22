@@ -343,6 +343,7 @@
 
     fn runtime_move_named(name: &str, pp: u8) -> Move {
         Move {
+            source_index: 1,
             name: name.to_string(),
             move_type: pokemon_type("NORMAL"),
             power: 40,
@@ -512,7 +513,7 @@
                 command: "callback".to_string(),
                 args: vec![
                     "MAPCALLBACK_NEWMAP".to_string(),
-                    "RuntimeScript".to_string(),
+                    "RuntimeMapCallback".to_string(),
                 ],
                 command_index: 0,
             }],
@@ -625,6 +626,11 @@
                     "content-packs/test/music/MUSIC_KANTO_WILD_BATTLE.mid",
                 )
                 .expect("kanto wild battle music asset"),
+                ModpackAudioAsset::music(
+                    "MUSIC_SUICUNE_BATTLE",
+                    "content-packs/test/music/MUSIC_SUICUNE_BATTLE.mid",
+                )
+                .expect("roaming battle music asset"),
                 ModpackAudioAsset::sound_effect(
                     "SFX_TACKLE",
                     "content-packs/test/sfx/SFX_TACKLE.mid",
@@ -679,13 +685,25 @@
             .into_iter()
             .collect(),
             runtime_title_screen: RuntimeTitleScreen {
-                new_game_spawn_identifier: Some(0),
                 title_music: Some("MUSIC_NONE".to_string()),
             },
+            story_event_script_constants:
+                crystal_core::systems::script_runtime::StoryEventScriptConstants {
+                    global: [
+                        ("SPAWN_HOME".to_string(), 0),
+                        ("CAUGHT_EGG_LEVEL".to_string(), 1),
+                        ("LANDMARK_GIFT".to_string(), 0x7e),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    maps: BTreeMap::new(),
+                },
             currency_constants: crystal_core::systems::economy::CurrencyCatalog(
                 [
                     ("MAX_MONEY".to_string(), 999_999),
                     ("MAX_COINS".to_string(), 9_999),
+                    ("START_MONEY".to_string(), 3_000),
+                    ("MOM_MONEY".to_string(), 2_300),
                 ]
                 .into_iter()
                 .collect(),
@@ -824,8 +842,22 @@
     }
 
     fn populate_minimal_runtime_presence_catalogs(data: &mut GameDataSet) {
+        for (constant, value) in [
+            ("ENGINE_STRENGTH_ACTIVE", 24),
+            ("ENGINE_ALWAYS_ON_BIKE", 25),
+            ("ENGINE_DOWNHILL", 26),
+            ("ENGINE_BUG_CONTEST_TIMER", 17),
+            ("ENGINE_SAFARI_ZONE", 18),
+            ("STATUSFLAGS_FLASH", 2),
+        ] {
+            data.story_event_script_constants
+                .global
+                .entry(constant.to_string())
+                .or_insert(value);
+        }
         data.story_events = vec![serde_json::json!({
             "StandardScripts": {
+                "GlobalScriptRoots": [],
                 "StdScripts": [
                     {"command": "add_stdscript", "args": ["PokecenterSignScript"]}
                 ],
@@ -870,6 +902,7 @@
             .groups
             .entry("FISHGROUP_RUNTIME".to_string())
             .or_insert_with(|| crystal_core::world::fishing::FishingGroup {
+                source_index: 1,
                 bite_threshold: 255,
                 rod_tables: [(
                     crystal_core::world::fishing::ROD_OLD.to_string(),
@@ -900,7 +933,12 @@
             .push(runtime_object("RuntimeNpc", "EVENT_RUNTIME_NPC"));
         data.map_scripts
             .entry("RuntimeMap_MapScripts".to_string())
-            .or_insert_with(|| serde_json::json!({ "RuntimeScript": [] }));
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "RuntimeMapCallback": [],
+                    "RuntimeScript": []
+                })
+            });
         data.map_scripts
             .entry("RuntimeMap_MapEvents".to_string())
             .or_insert_with(|| {
@@ -1165,6 +1203,11 @@
                     banned_species: BTreeMap::new(),
                     required_party_count: 3,
                     challenge_streak_length: 7,
+                    reward_candidates: vec!["HP_UP".to_string(), "LUCKY_PUNCH".to_string()],
+                    excluded_reward_items: vec!["LUCKY_PUNCH".to_string()],
+                    reward_quantity: 5,
+                    reward_failure_sentinel: "POTION".to_string(),
+                    reward_item_values: [("POTION".to_string(), 0x12), ("HP_UP".to_string(), 0x1a), ("LUCKY_PUNCH".to_string(), 0x1e)].into_iter().collect(),
                     minimum_level_group: 10,
                     maximum_level_group: 100,
                     level_group_size: 10,
@@ -1179,6 +1222,7 @@
                             trainer_class: "YOUNGSTER".to_string(),
                             name: "RUNTIME@".to_string(),
                             sprite_constant: "SPRITE_YOUNGSTER".to_string(),
+                            female: false,
                         },
                     ],
                     mon_groups: vec![vec![
@@ -1330,6 +1374,21 @@
             wild_exp_divisor: 7,
             trainer_exp_numerator: 3,
             trainer_exp_denominator: 2,
+            mom_money_increment: 2_300,
+            mom_random_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                trigger: 0,
+                cost: 600,
+                kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
+            mom_progression_items: vec![crystal_core::systems::battle_rewards::MomPurchaseRule {
+                trigger: 900,
+                cost: 600,
+                kind: crystal_core::systems::battle_rewards::MomPurchaseKind::Item,
+                target: "SUPER_POTION".to_string(),
+                decoration_flag: None,
+            }],
         }
     }
 
@@ -1449,6 +1508,20 @@
             squirtbottle: FieldItemRule {
                 item_id: "SQUIRTBOTTLE".to_string(),
             },
+            card_key: crystal_core::systems::field_moves::FieldStoryKeyRule {
+                item_id: "CARD_KEY".to_string(),
+                map_name: "RadioTower3F".to_string(),
+                required_facing: Some(Direction::Up),
+                target_tile: TilePosition::new(14, 2),
+                target_script: "CardKeySlotScript".to_string(),
+            },
+            basement_key: crystal_core::systems::field_moves::FieldStoryKeyRule {
+                item_id: "BASEMENT_KEY".to_string(),
+                map_name: "GoldenrodUnderground".to_string(),
+                required_facing: None,
+                target_tile: TilePosition::new(18, 6),
+                target_script: "BasementDoorScript".to_string(),
+            },
             coin_case: FieldItemRule {
                 item_id: "COIN_CASE".to_string(),
             },
@@ -1470,6 +1543,8 @@
             [
                 ("MAX_MONEY".to_string(), max_money),
                 ("MAX_COINS".to_string(), max_coins),
+                ("START_MONEY".to_string(), 3_000.min(max_money)),
+                ("MOM_MONEY".to_string(), 2_300),
             ]
             .into_iter()
             .collect(),
@@ -1630,6 +1705,170 @@
             ]);
         data.materialize_global_scripts()
             .expect("materialize exact Rock Smash common scripts");
+    }
+
+    fn add_runtime_headbutt_global_scripts(data: &mut GameDataSet) {
+        data.story_event_script_constants
+            .global
+            .insert("CHIKORITA".to_string(), 152);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/web/assets/data/story_events/StandardScripts.json");
+        let exported: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read canonical StandardScripts export"),
+        )
+        .expect("parse canonical StandardScripts export");
+        let exported = exported
+            .get("StandardScripts")
+            .and_then(serde_json::Value::as_object)
+            .expect("StandardScripts definitions");
+        let definitions = data
+            .story_events
+            .iter_mut()
+            .find_map(|catalog| catalog.get_mut("StandardScripts"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("minimal StandardScripts catalog");
+        for label in [
+            "TreeMonEncounter",
+            ".no_battle@TreeMonEncounter",
+            "HeadbuttScript",
+            ".no_battle@HeadbuttScript",
+            "HeadbuttFromMenuScript",
+            "GetPartyNickname",
+            "UseHeadbuttText",
+            "HeadbuttNothingText",
+            "ShakeHeadbuttTree",
+        ] {
+            definitions.insert(
+                label.to_string(),
+                exported.get(label).unwrap_or_else(|| panic!("{label} export")).clone(),
+            );
+        }
+        definitions
+            .get_mut("StdScripts")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("minimal StdScripts roots")
+            .extend([
+                serde_json::json!({"command": "add_stdscript", "args": ["HeadbuttScript"]}),
+                serde_json::json!({"command": "add_stdscript", "args": ["HeadbuttFromMenuScript"]}),
+            ]);
+        data.materialize_global_scripts()
+            .expect("materialize exact Headbutt common scripts");
+    }
+
+    fn add_runtime_sweet_scent_global_scripts(data: &mut GameDataSet) {
+        data.story_event_script_constants
+            .global
+            .insert("CHIKORITA".to_string(), 152);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/web/assets/data/story_events/StandardScripts.json");
+        let exported: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read canonical StandardScripts export"),
+        )
+        .expect("parse canonical StandardScripts export");
+        let exported = exported
+            .get("StandardScripts")
+            .and_then(serde_json::Value::as_object)
+            .expect("StandardScripts definitions");
+        let definitions = data
+            .story_events
+            .iter_mut()
+            .find_map(|catalog| catalog.get_mut("StandardScripts"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("minimal StandardScripts catalog");
+        for label in [
+            ".SweetScent@SweetScentFromMenu",
+            ".BugCatchingContest@SweetScentFromMenu",
+            "SweetScentNothing",
+            "SweetScentEncounter",
+            ".in_bug_contest@SweetScentEncounter",
+            ".start_battle@SweetScentEncounter",
+            ".no_battle@SweetScentEncounter",
+            "UseSweetScentText",
+            "SweetScentNothingText",
+            "GetPartyNickname",
+        ] {
+            definitions.insert(
+                label.to_string(),
+                exported.get(label).unwrap_or_else(|| panic!("{label} export")).clone(),
+            );
+        }
+        definitions
+            .get_mut("StdScripts")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("minimal StdScripts roots")
+            .push(serde_json::json!({
+                "command": "add_stdscript",
+                "args": [".SweetScent@SweetScentFromMenu"]
+            }));
+        data.materialize_global_scripts()
+            .expect("materialize exact Sweet Scent common script");
+    }
+
+    fn add_runtime_deferred_field_move_global_scripts(data: &mut GameDataSet) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/web/assets/data/story_events/StandardScripts.json");
+        let exported: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read canonical StandardScripts export"),
+        )
+        .expect("parse canonical StandardScripts export");
+        let exported = exported
+            .get("StandardScripts")
+            .and_then(serde_json::Value::as_object)
+            .expect("StandardScripts definitions");
+        let definitions = data
+            .story_events
+            .iter_mut()
+            .find_map(|catalog| catalog.get_mut("StandardScripts"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("minimal StandardScripts catalog");
+        for label in [
+            "Script_Cut",
+            "GetPartyNickname",
+            "UseCutText",
+            "CutDownTreeOrGrass",
+            "Script_UsedWhirlpool",
+            "UseWhirlpoolText",
+            "DisappearWhirlpool",
+            "Script_UseFlash",
+            "UseFlashTextScript",
+            "BlindingFlash",
+            "Script_StrengthFromMenu",
+            "Script_UsedStrength",
+            "SetStrengthFlag",
+            ".UseStrengthText@Script_UsedStrength",
+            ".MoveBoulderText@Script_UsedStrength",
+            "SurfFromMenuScript",
+            "UsedSurfScript",
+            ".stubbed_fn@UsedSurfScript",
+            "UsedSurfText",
+            "Script_UsedWaterfall",
+            ".loop@Script_UsedWaterfall",
+            ".CheckContinueWaterfall@Script_UsedWaterfall",
+            ".WaterfallStep@Script_UsedWaterfall",
+            ".UseWaterfallText@Script_UsedWaterfall",
+        ] {
+            definitions.insert(
+                label.to_string(),
+                exported
+                    .get(label)
+                    .unwrap_or_else(|| panic!("{label} export"))
+                    .clone(),
+            );
+        }
+        definitions.insert(
+            "GlobalScriptRoots".to_string(),
+            serde_json::json!([
+                "Script_Cut",
+                "Script_UsedWhirlpool",
+                "Script_UseFlash",
+                "Script_StrengthFromMenu",
+                "Script_UsedStrength",
+                "SurfFromMenuScript",
+                "Script_UsedWaterfall"
+            ]),
+        );
+        data.materialize_global_scripts()
+            .expect("materialize exact deferred field-move scripts");
     }
 
     fn minimal_runtime_data_with_oak_intro() -> GameDataSet {
@@ -1897,6 +2136,11 @@
             ModpackAudioAsset::music(
                 "MUSIC_KANTO_WILD_BATTLE",
                 "content-packs/test/music/MUSIC_KANTO_WILD_BATTLE.mid",
+            )
+            .expect("music asset"),
+            ModpackAudioAsset::music(
+                "MUSIC_SUICUNE_BATTLE",
+                "content-packs/test/music/MUSIC_SUICUNE_BATTLE.mid",
             )
             .expect("music asset"),
             ModpackAudioAsset::sound_effect("SFX_TACKLE", "content-packs/test/sfx/SFX_TACKLE.mid")
@@ -2472,6 +2716,7 @@
             groups: [(
                 "FISHGROUP_RUNTIME".to_string(),
                 FishingGroup {
+                    source_index: 1,
                     bite_threshold: 255,
                     rod_tables: [(
                         ROD_GOOD.to_string(),
@@ -2566,7 +2811,7 @@
                 {"command": "opentext", "args": []},
                 {"command": "writetext", "args": ["RuntimeSeenText"]},
                 {"command": "closetext", "args": []},
-                {"command": "jump", "args": ["RuntimeTrainerScript"]},
+                {"command": "sjump", "args": ["RuntimeTrainerScript"]},
                 {"command": "opentext", "args": []},
                 {"command": "writetext", "args": ["RuntimeWinText"]},
                 {"command": "closetext", "args": []},
@@ -2593,7 +2838,7 @@
                 {"command": "writetext", "args": ["RuntimeGiftText"]},
                 {"command": "closetext", "args": []},
                 {"command": "waitbutton", "args": []},
-                {"command": "givepoke", "args": ["CHIKORITA", "7", "BERRY", "RuntimeGiftName"]},
+                {"command": "givepoke", "args": ["CHIKORITA", "7", "BERRY"]},
             ]),
         );
         map.scripts.insert(
@@ -2611,7 +2856,6 @@
                 "CHIKORITA".to_string(),
                 "7".to_string(),
                 "BERRY".to_string(),
-                "RuntimeGiftName".to_string(),
             ],
             source_script: "RuntimeGiftScript".to_string(),
             command_index: 12,
@@ -2708,8 +2952,8 @@
             level_token: "7".to_string(),
             level: 7,
             held_item_id: Some("BERRY".to_string()),
-            nickname_label: Some("RuntimeGiftName".to_string()),
-            ot_label: Some("PLAYER".to_string()),
+            nickname_label: None,
+            ot_label: None,
             source_script: "RuntimeGiftScript".to_string(),
             command_index: 12,
             egg: false,
@@ -3125,6 +3369,19 @@
     }
 
     #[test]
+    fn exact_rng_staging_never_advances_the_live_divider_before_commit() {
+        let source = include_str!("../lib.rs");
+        assert!(
+            !source.contains("RecordingDivider::new(&mut self.divider)"),
+            "staged exact-RNG work must record against a cloned divider"
+        );
+        assert!(
+            !source.contains("divider_after: None"),
+            "every staged mutation must commit its cloned divider atomically"
+        );
+    }
+
+    #[test]
     fn regenerated_pack_keeps_pcm_lazy_until_playback() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -3148,6 +3405,46 @@
                 assert!(*byte_len > 0);
             }
             other => panic!("title music was expanded eagerly: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sidecar_pack_builds_on_demand_pcm_programs_without_embedded_bytes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repository root");
+        let pack = crystal_assets::read_verified_compiled_game_pack(
+            root.join("content-packs/core-modular.crystalpack"),
+        )
+        .expect("load core pack");
+        let (_, data, _, manifest, _, _, _, _) = pack.into_parts();
+        let playback = ModpackAudioPlaybackPlan::from_manifest(&manifest).expect("playback plan");
+        let catalog = RuntimeAudioCatalog::from_game_data_owned(
+            &data,
+            BTreeMap::new(),
+            manifest,
+            playback,
+            Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR),
+        )
+        .expect("sidecar audio catalog");
+        let source = &catalog
+            .require_music("MUSIC_TITLE")
+            .expect("title music")
+            .source;
+        match source {
+            AudioProgramSource::PcmGzipSidecar {
+                path,
+                byte_len,
+                payload_hash,
+                ..
+            } => {
+                assert!(path.starts_with("audio/MUSIC_TITLE."));
+                assert!(path.ends_with(".pcm.gz"));
+                assert!(*byte_len > 0);
+                assert_eq!(payload_hash.len(), 8);
+            }
+            other => panic!("sidecar pack embedded title PCM: {other:?}"),
         }
     }
 
@@ -3615,7 +3912,7 @@
                 level_token: "7".to_string(),
                 level: 7,
                 held_item_id: Some("BERRY".to_string()),
-                nickname_label: Some("RuntimeGiftName".to_string()),
+                nickname_label: None,
                 ot_label: None,
                 source_script: "RuntimeGiftScript".to_string(),
                 command_index: 12,
@@ -5122,7 +5419,7 @@
             level_token: "7".to_string(),
             level: 7,
             held_item_id: Some("BERRY".to_string()),
-            nickname_label: Some("RuntimeGiftName".to_string()),
+            nickname_label: None,
             ot_label: None,
             source_script: "RuntimeGiftScript".to_string(),
             command_index: 12,
@@ -5147,7 +5444,7 @@
             command: "callback".to_string(),
             args: vec![
                 "MAPCALLBACK_NEWMAP".to_string(),
-                "RuntimeScript".to_string(),
+                "RuntimeMapCallback".to_string(),
             ],
             command_index: 0,
         };
@@ -7073,10 +7370,7 @@
         );
         assert_eq!(initial.ui.gift_pokemon[0].command_index, 12);
         assert_eq!(initial.ui.gift_pokemon[0].species_id, "CHIKORITA");
-        assert_eq!(
-            initial.ui.gift_pokemon[0].nickname_label.as_deref(),
-            Some("RuntimeGiftName")
-        );
+        assert_eq!(initial.ui.gift_pokemon[0].nickname_label, None);
         assert!(!initial.ui.gift_pokemon[0].egg);
         assert!(initial.ui.text.is_none());
         assert!(!initial.ui.window_open);
@@ -7443,7 +7737,7 @@
         assert_eq!(initial.storage.party_count, 0);
         assert!(initial.storage.boxes.is_empty());
         assert_eq!(initial.trainer.player_name, "");
-        assert_eq!(initial.trainer.money, 0);
+        assert_eq!(initial.trainer.money, 3_000);
         assert_eq!(initial.trainer.coins, 0);
         assert_eq!(
             initial.trainer.options,
@@ -7466,10 +7760,8 @@
         assert!(initial.script_events.variables.is_empty());
         assert!(initial.script_events.named_buffers.is_empty());
         assert!(initial.script_events.phone_numbers.is_empty());
-        assert!(initial.script_events.variable_writes.is_empty());
-        assert!(initial.script_events.special_phone_calls.is_empty());
+        assert!(initial.script_events.special_phone_call.is_none());
         assert!(!initial.script_events.window_open);
-        assert!(initial.script_events.menu_coords.is_none());
         assert!(initial.script_events.active_pokemon_picture.is_none());
         assert!(initial.script_events.pending_text_label.is_none());
         assert!(!initial.script_events.reset_requested);
@@ -7481,7 +7773,7 @@
         let pc_pokemon = Pokemon::new_for_tests(runtime_species(), 6, Dv::default());
         shell.session_mut().state.storage.party.pokemon[0] = Some(party_pokemon.clone());
         let mut pc_box = PcBox::new(0);
-        pc_box.set_slot(3, Some(pc_pokemon.clone()));
+        pc_box.set_slot(0, Some(pc_pokemon.clone()));
         shell.session_mut().state.storage.pc_boxes.push(pc_box);
         shell.session_mut().state.current_pc_box = 0;
         let party_state =
@@ -7700,7 +7992,9 @@
         );
         let runtime_delay = ScriptRuntimeDelay {
             command: "pause".to_string(),
-            frames: 15,
+            parameter: 15,
+            frames: 30,
+            release_all_objects: false,
             source_script: "RuntimeScript".to_string(),
             command_index: 1,
         };
@@ -7725,6 +8019,28 @@
                 .pending_delays
                 .is_empty()
         );
+        shell.session_mut().state.script_runtime.all_input_locked = true;
+        let deactivate = ScriptRuntimeDelay {
+            command: "deactivatefacing".to_string(),
+            parameter: 3,
+            frames: 3,
+            release_all_objects: true,
+            source_script: "ChangeDirectionScript".to_string(),
+            command_index: 0,
+        };
+        shell
+            .session_mut()
+            .state
+            .script_runtime
+            .pending_delays
+            .push(deactivate.clone());
+        assert_eq!(
+            shell
+                .drain_script_runtime_queue(RuntimeScriptRuntimeQueue::PendingDelay)
+                .expect("complete deactivatefacing wait"),
+            RuntimeScriptRuntimeQueueDrainResult::PendingDelay(vec![deactivate])
+        );
+        assert!(!shell.session().state.script_runtime.all_input_locked);
         shell.session_mut().state.script_runtime.reset_requested = true;
         assert!(
             shell
@@ -7746,14 +8062,6 @@
                 .expect("post reset-consume snapshot")
                 .script_events
                 .reset_requested
-        );
-        assert!(
-            shell
-                .snapshot()
-                .expect("post variable-write-drain snapshot")
-                .script_events
-                .variable_writes
-                .is_empty()
         );
         shell.session_mut().state.script_runtime.script_value = Some("12".to_string());
         assert_eq!(
@@ -7778,6 +8086,7 @@
             .script_runtime
             .variables
             .insert("VAR_BLUECARDBALANCE".to_string(), "9".to_string());
+        shell.session_mut().state.blue_card_balance = 9;
         let removed_variable = shell
             .remove_script_runtime_memory_entry(
                 RuntimeScriptRuntimeMemoryEntry::Variable,
@@ -7810,7 +8119,7 @@
         assert_eq!(inventory.storage.boxes[0].name, "BOX 01");
         assert_eq!(inventory.storage.boxes[0].count, 1);
         assert_eq!(inventory.storage.boxes[0].slots.len(), 1);
-        assert_eq!(inventory.storage.boxes[0].slots[0].index, 3);
+        assert_eq!(inventory.storage.boxes[0].slots[0].index, 0);
         assert_eq!(inventory.storage.boxes[0].slots[0].pokemon, pc_pokemon);
         assert_eq!(
             inventory.bag.items,
@@ -7925,7 +8234,6 @@
             Some("RuntimeMenu")
         );
         assert!(shell.session().state.script_runtime.window_open);
-        shell.session_mut().state.script_runtime.menu_coords = Some([0, 0, 10, 8]);
         assert_eq!(
             shell
                 .snapshot()
@@ -8063,8 +8371,6 @@
         shell.session_mut().state.script_runtime.pending_shop = None;
         let closed_menu = shell.close_active_menu().expect("close active menu");
         assert_eq!(closed_menu.menu, "RuntimeMenu");
-        let cleared_menu_coords = shell.clear_menu_coords().expect("clear menu coords");
-        assert_eq!(cleared_menu_coords.coords, [0, 0, 10, 8]);
         shell.close_runtime_window().expect("close runtime window");
         assert_eq!(
             shell.snapshot().expect("post-menu snapshot").phase,
@@ -8076,14 +8382,6 @@
                 .expect("post-menu presentation snapshot")
                 .script_events
                 .window_open
-        );
-        assert!(
-            shell
-                .snapshot()
-                .expect("post-menu coords snapshot")
-                .script_events
-                .menu_coords
-                .is_none()
         );
         shell
             .session_mut()

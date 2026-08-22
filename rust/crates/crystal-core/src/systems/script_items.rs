@@ -304,6 +304,18 @@ pub fn grant_script_item(
         });
     }
 
+    // ASM GiveItem writes the received item's display name before the
+    // standard receive-item script expands its text buffers. Keep the same
+    // canonical buffers populated for both giveitem and verbosegiveitem.
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_1".to_string(), item.name.clone());
+    state
+        .script_runtime
+        .named_buffers
+        .insert("STRING_BUFFER_4".to_string(), item.name.clone());
+
     Ok(ScriptItemGrantOutcome::Granted {
         item_id: grant.item_id,
         quantity: grant.quantity,
@@ -402,7 +414,7 @@ fn validate_script_item_access_for_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ItemPocket, MAX_ITEM_STACK, item_pocket};
+    use crate::models::{ITEM_POCKET_CAPACITY, ItemPocket, MAX_ITEM_STACK, item_pocket};
 
     fn item(id: &str, pocket: ItemPocket) -> Item {
         Item {
@@ -510,6 +522,14 @@ mod tests {
             }
         );
         assert_eq!(state.bag.quantity(&items["POTION"]), 1);
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_1"),
+            Some(&"POTION".to_string())
+        );
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_4"),
+            Some(&"POTION".to_string())
+        );
     }
 
     #[test]
@@ -773,6 +793,9 @@ mod tests {
         let mut state = GameState::default();
         let items = catalog(vec![item("POTION", item_pocket("ITEM"))]);
         state.bag.items.insert("POTION".to_string(), MAX_ITEM_STACK);
+        for index in 1..ITEM_POCKET_CAPACITY {
+            state.bag.items.insert(format!("FILLER_{index}"), 1);
+        }
 
         let outcome =
             grant_script_item(&mut state, &items, grant("POTION", 1)).expect("bag full outcome");

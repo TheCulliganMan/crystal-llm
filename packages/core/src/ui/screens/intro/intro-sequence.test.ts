@@ -221,6 +221,22 @@ describe("IntroSequence scene parity fixes", () => {
     });
   });
 
+  it("scene 13 restores the ASM scroll origin before Suicune runs through the forest", () => {
+    const sequence = createIntroSequence();
+    const state = sequence as unknown as {
+      hSCX: number;
+      hSCY: number;
+      introScene13: () => boolean;
+    };
+
+    state.hSCX = 0x35;
+    state.hSCY = 0x4a;
+
+    expect(state.introScene13()).toBe(true);
+    expect(state.hSCX).toBe(0);
+    expect(state.hSCY).toBe(0);
+  });
+
   it("intro unown pulse uses exact ASM frame durations", () => {
     const sequence = createIntroSequence();
     const state = sequence as unknown as {

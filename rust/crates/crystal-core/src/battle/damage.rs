@@ -1712,6 +1712,7 @@ mod tests {
 
     fn tackle(move_type: PokemonType, power: u16) -> Move {
         Move {
+            source_index: 1,
             name: "TACKLE".to_string(),
             move_type,
             power,

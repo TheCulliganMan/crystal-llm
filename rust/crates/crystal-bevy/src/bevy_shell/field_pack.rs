@@ -224,6 +224,86 @@ fn selected_pack_entries(
         .collect()
 }
 
+fn required_selected_pack_entries(
+    snapshot: &RuntimeShellSnapshot,
+    items: &[RuntimeBagItemSnapshot],
+    cursor: &Option<MenuCursor>,
+    surface_id: &str,
+) -> Result<Vec<String>> {
+    let carried = items
+        .iter()
+        .filter(|item| item.quantity > 0)
+        .collect::<Vec<_>>();
+    let row_count = field_pack_selectable_count(carried.len());
+    let selected = strict_readonly_cursor_index(cursor, surface_id, row_count)
+        .with_context(|| format!("field Pack pocket {surface_id} has no valid cursor"))?;
+    windowed_index_range(selected, row_count)
+        .map(|index| {
+            let marker = if index == selected { ">" } else { " " };
+            if index >= carried.len() {
+                Ok(pack_cancel_entry(marker))
+            } else {
+                required_pack_item_entry(snapshot, carried[index], marker)
+            }
+        })
+        .collect()
+}
+
+fn required_pack_item_entry(
+    snapshot: &RuntimeShellSnapshot,
+    item: &RuntimeBagItemSnapshot,
+    marker: &str,
+) -> Result<String> {
+    let catalog = snapshot
+        .items
+        .iter()
+        .find(|catalog| catalog.item_id == item.item_id)
+        .with_context(|| format!("field Pack item {} is missing from the catalog", item.item_id))?;
+    Ok(compact_scene_label(
+        &format!(
+            "{marker}{} x{:02}",
+            catalog.name.replace('_', " "),
+            item.quantity
+        ),
+        30,
+    ))
+}
+
+fn required_selected_field_pack_item_label(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    pocket: &FieldPackPocket,
+) -> Result<String> {
+    if matches!(pocket, FieldPackPocket::TmHm) {
+        let selected = strict_readonly_cursor_index(
+            &runtime_shell.tmhm_cursor,
+            "bag:tmhm",
+            field_pack_selectable_count(snapshot.bag.tm_hm.len()),
+        )
+        .context("TM/HM pocket has no valid selected item cursor")?;
+        let tmhm = snapshot
+            .bag
+            .tm_hm
+            .get(selected)
+            .context("TM/HM CANCEL row does not own an item action")?;
+        return required_tmhm_pack_entry(snapshot, tmhm, "");
+    }
+    let item_id = selected_field_pack_item_id_from_snapshot(snapshot, runtime_shell, pocket)
+        .with_context(|| {
+            format!(
+                "field Pack {} pocket has no selected item",
+                field_pack_pocket_label(pocket)
+            )
+        })?;
+    let quantity = carried_item_quantity(snapshot, &item_id)
+        .with_context(|| format!("selected field Pack item {item_id} has no carried quantity"))?;
+    required_pack_item_entry(
+        snapshot,
+        &RuntimeBagItemSnapshot { item_id, quantity },
+        "",
+    )
+}
+
 fn pack_item_entry(
     snapshot: &RuntimeShellSnapshot,
     item: &RuntimeBagItemSnapshot,
@@ -277,6 +357,54 @@ fn selected_tmhm_pack_entries(
             }
         })
         .collect()
+}
+
+fn required_selected_tmhm_pack_entries(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+) -> Result<Vec<String>> {
+    let row_count = field_pack_selectable_count(snapshot.bag.tm_hm.len());
+    let selected = strict_readonly_cursor_index(
+        &runtime_shell.tmhm_cursor,
+        "bag:tmhm",
+        row_count,
+    )
+    .context("TM/HM pocket has no valid cursor")?;
+    windowed_index_range(selected, row_count)
+        .map(|index| {
+            let marker = if index == selected { ">" } else { " " };
+            if index >= snapshot.bag.tm_hm.len() {
+                Ok(pack_cancel_entry(marker))
+            } else {
+                required_tmhm_pack_entry(snapshot, &snapshot.bag.tm_hm[index], marker)
+            }
+        })
+        .collect()
+}
+
+fn required_tmhm_pack_entry(
+    snapshot: &RuntimeShellSnapshot,
+    tmhm: &crate::RuntimeTmHmSnapshot,
+    marker: &str,
+) -> Result<String> {
+    let move_id = tmhm.move_id.as_deref().with_context(|| {
+        format!(
+            "TM/HM item {} index {} has no move",
+            tmhm.item_id, tmhm.tmhm_index
+        )
+    })?;
+    anyhow::ensure!(
+        snapshot.moves.iter().any(|move_data| move_data.move_id == move_id),
+        "TM/HM item {} references missing move {move_id}",
+        tmhm.item_id
+    );
+    Ok(compact_scene_label(
+        &format!(
+            "{marker}{} x01",
+            item_display_name(snapshot, &tmhm.item_id)
+        ),
+        30,
+    ))
 }
 
 fn tmhm_pack_entry(
@@ -642,7 +770,9 @@ fn append_pokedex_context(
     if !runtime_shell.pokedex_menu_open {
         return;
     }
-    lines.extend(visible_pokedex_menu_entries(snapshot, runtime_shell));
+    if let Ok(entries) = visible_pokedex_menu_entries(snapshot, runtime_shell) {
+        lines.extend(entries);
+    }
 }
 
 fn append_pokegear_context(
@@ -653,7 +783,9 @@ fn append_pokegear_context(
     if !runtime_shell.pokegear_menu_open {
         return;
     }
-    lines.extend(visible_pokegear_menu_entries(snapshot, runtime_shell));
+    if let Ok(entries) = visible_pokegear_menu_entries(snapshot, runtime_shell) {
+        lines.extend(entries);
+    }
 }
 
 fn append_options_context(
@@ -664,7 +796,9 @@ fn append_options_context(
     if !runtime_shell.options_menu_open {
         return;
     }
-    lines.extend(visible_options_menu_entries(snapshot, runtime_shell));
+    if let Ok(entries) = visible_options_menu_entries(snapshot, runtime_shell) {
+        lines.extend(entries);
+    }
 }
 
 fn append_trainer_card_context(
@@ -1368,13 +1502,15 @@ fn format_map_details(
     for object in snapshot.visible_objects.iter().take(8) {
         lines.push(format_visible_object_detail_line(object));
     }
-    let active_flypoints = active_fly_destinations(snapshot, &runtime_shell.shell)
-        .into_iter()
-        .map(|destination| destination.flypoint_flag)
-        .take(8)
-        .collect::<Vec<_>>();
-    if !active_flypoints.is_empty() {
-        lines.push(format!("active_flypoints={active_flypoints:?}"));
+    if let Ok(destinations) = active_fly_destinations(snapshot, &runtime_shell.shell) {
+        let active_flypoints = destinations
+            .into_iter()
+            .map(|destination| destination.flypoint_flag)
+            .take(8)
+            .collect::<Vec<_>>();
+        if !active_flypoints.is_empty() {
+            lines.push(format!("active_flypoints={active_flypoints:?}"));
+        }
     }
     if let Some(wild) = snapshot.encounters.wild.get(&map.map_name) {
         lines.push(format!(
@@ -1405,16 +1541,14 @@ fn format_script_details(
         scripts.last_talked_object
     ));
     lines.push(format!(
-        "queues delays={} emotes={} commands={} call_stack={} deferred={} ended={} variable_writes={} effects={} asm={} text={} audio={} graphics={}",
+        "queues delays={} emotes={} commands={} call_stack={} deferred={} map_reentry={} ended={} text={} audio={} graphics={}",
         scripts.pending_delays.len(),
         scripts.pending_emotes.len(),
         scripts.command_queue.len(),
         scripts.call_stack.len(),
         scripts.deferred_scripts.len(),
+        scripts.map_reentry_script.is_some(),
         scripts.script_ended.is_some(),
-        scripts.variable_writes.len(),
-        scripts.effects.len(),
-        scripts.asm_directives.len(),
         scripts.text_events.len(),
         scripts.audio_events.len(),
         scripts.graphics_events.len()
@@ -1432,9 +1566,6 @@ fn format_script_details(
     }
     for command in scripts.command_queue.iter().take(8) {
         lines.push(format!("command {command:?}"));
-    }
-    for effect in scripts.effects.iter().take(8) {
-        lines.push(format!("effect {effect:?}"));
     }
     append_current_map_script_command_summary(snapshot, runtime_shell, lines);
 }

@@ -10,14 +10,12 @@ rust-version.workspace = true
 anyhow.workspace = true
 bevy = { version = "0.14", optional = true, default-features = false, features = [
     "bevy_asset",
-    "bevy_audio",
     "bevy_core_pipeline",
     "bevy_render",
     "bevy_sprite",
     "bevy_text",
     "bevy_ui",
     "bevy_winit",
-    "wav",
     "webgl2",
 ] }
 chrono.workspace = true
@@ -34,12 +32,22 @@ thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { version = "0.14", optional = true, default-features = false, features = ["multi_threaded", "x11"] }
-rodio = { version = "0.18.1", default-features = false, features = ["wav"] }
+rodio = { version = "0.18.1", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "Response",
+    "Window",
+] }
 uuid = { version = "1", features = ["js"] }
 
 [features]

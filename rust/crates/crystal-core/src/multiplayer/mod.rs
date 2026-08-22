@@ -7695,7 +7695,7 @@ mod tests {
         let journal_frame = DeterministicInputJournalFrame::new(journal).expect("journal frame");
         let payload = RuntimeCommandPayload::new("script-command", vec![0x10, 0x20])
             .expect("runtime payload");
-        let command = RuntimeCommandFrame::new(2, 7, payload, StateChecksum::new(5, 0xaabb_ccdd))
+        let command = RuntimeCommandFrame::new(2, 1, payload, StateChecksum::new(5, 0xaabb_ccdd))
             .expect("runtime command");
         let bound_command = SessionRuntimeCommandFrame::new(session.clone(), command.clone())
             .expect("bound command");

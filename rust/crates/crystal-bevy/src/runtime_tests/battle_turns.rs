@@ -38,29 +38,34 @@
             refresh_runtime_pokemon_stats(enemy_pokemon);
             refresh_runtime_pokemon_stats(&mut enemy_party[0]);
         }
+        // The slow/fast setup leaves a low first-attempt escape threshold, and
+        // Crystal succeeds when the roll is less than or equal to it. Use an
+        // exact stream whose first output is 255.
+        session.state.random_state = crystal_core::random::CrystalRandomState::default();
+        session.divider = crystal_core::random::RuntimeDividerSource::replay(
+            std::iter::repeat_n([0_u8, 1_u8], 64).flatten(),
+        );
 
         let player_action = BattleAction::Run;
         let enemy_action = BattleAction::Move { slot: 0 };
-        let rng_seed_after = preview_battle_command_rng_seed_after(
-            &runtime,
-            &session.state,
-            player_action.clone(),
-            enemy_action.clone(),
-        );
         let turn = session
-            .resolve_active_battle_command(&runtime, player_action, enemy_action, rng_seed_after)
+            .resolve_active_battle_command(&runtime, player_action, enemy_action)
             .expect("failed run command resolves as a full battle turn");
 
         let ActiveBattleCommandOutcome::Turn(outcome) = turn.outcome else {
             panic!("failed run command must resolve as a battle turn");
         };
-        assert!(outcome.events.iter().any(|event| matches!(
-            event,
-            crystal_core::battle::turn::BattleEvent::RunAttempt {
-                side: crystal_core::battle::turn::BattleSide::Player,
-                outcome
-            } if !outcome.escaped && outcome.attempts_before == 0 && outcome.attempts_after == 1
-        )));
+        assert!(
+            outcome.events.iter().any(|event| matches!(
+                event,
+                crystal_core::battle::turn::BattleEvent::RunAttempt {
+                    side: crystal_core::battle::turn::BattleSide::Player,
+                    outcome
+                } if !outcome.escaped && outcome.attempts_before == 0 && outcome.attempts_after == 1
+            )),
+            "events: {:?}",
+            outcome.events
+        );
         assert!(outcome.events.iter().any(|event| matches!(
             event,
             crystal_core::battle::turn::BattleEvent::MoveSelected {
@@ -73,7 +78,7 @@
     }
 
     #[test]
-    fn runtime_battle_command_rejects_mismatched_rng_boundary_without_state_mutation() {
+    fn runtime_battle_command_rejects_short_divider_trace_without_state_mutation() {
         let root = temp_repository_root("battle-command-run-rng-mismatch");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -103,26 +108,107 @@
             .expect("start battle");
         let before = session.state.clone();
 
-        let expected_rng = preview_battle_command_rng_seed_after(
-            &runtime,
-            &session.state,
-            BattleAction::Run,
-            BattleAction::Move { slot: 0 },
-        );
-        let wrong_rng = expected_rng.wrapping_add(1);
         let error = session
-            .resolve_active_battle_command(
+            .apply_runtime_mutation_command(
                 &runtime,
+                RuntimeMutationCommand::ResolveActiveBattleCommand(RuntimeBattleTurnCommand {
+                    player_action: BattleAction::Run,
+                    enemy_action: BattleAction::Move { slot: 0 },
+                    enemy_ai_divider_trace: RuntimeDividerTrace::new([]),
+                    divider_trace: RuntimeDividerTrace::new([]),
+                }),
+            )
+            .expect_err("short divider trace must reject");
+        let error = format!("{error:#}");
+        assert!(error.contains("divider replay exhausted"), "{error}");
+        assert_eq!(session.state, before);
+
+        let mut preview = before.clone();
+        let mut source = crystal_core::random::ReplayDivider::new([0; 128]);
+        let mut recording = crystal_core::random::RecordingDivider::new(&mut source);
+        runtime
+            .data
+            .resolve_active_battle_command_with_divider(
+                &mut preview,
                 BattleAction::Run,
                 BattleAction::Move { slot: 0 },
-                wrong_rng,
+                &mut recording,
             )
-            .expect_err("wrong rng boundary must reject");
-        let error = format!("{error:#}");
-        assert!(error.contains(&format!(
-            "resolve active battle command rng_seed_after {wrong_rng} does not match resolved rng_seed_after {expected_rng}"
-        )));
+            .expect("derive the exact battle command trace");
+        let mut surplus_trace = recording.samples().to_vec();
+        surplus_trace.push(1);
+        let error = session
+            .apply_runtime_mutation_command(
+                &runtime,
+                RuntimeMutationCommand::ResolveActiveBattleCommand(RuntimeBattleTurnCommand {
+                    player_action: BattleAction::Run,
+                    enemy_action: BattleAction::Move { slot: 0 },
+                    enemy_ai_divider_trace: RuntimeDividerTrace::new([]),
+                    divider_trace: RuntimeDividerTrace::new(surplus_trace),
+                }),
+            )
+            .expect_err("surplus divider trace must reject");
+        assert!(
+            format!("{error:#}").contains("1 unconsumed samples"),
+            "{error:#}"
+        );
         assert_eq!(session.state, before);
+
+        let error = session
+            .apply_runtime_mutation_command(
+                &runtime,
+                RuntimeMutationCommand::ResolveActiveBattleCommand(RuntimeBattleTurnCommand {
+                    player_action: BattleAction::Run,
+                    enemy_action: BattleAction::Move { slot: 0 },
+                    enemy_ai_divider_trace: RuntimeDividerTrace::new([1]),
+                    divider_trace: RuntimeDividerTrace::new([]),
+                }),
+            )
+            .expect_err("odd enemy AI divider trace must reject");
+        assert!(
+            format!("{error:#}").contains("enemy battle AI divider trace has odd sample count 1"),
+            "{error:#}"
+        );
+        assert_eq!(session.state, before);
+
+        let mut expected = before.clone();
+        let mut ai_divider = crystal_core::random::ReplayDivider::new([0, 1]);
+        let mut ai_rng = crystal_core::random::CrystalRandom::new(
+            expected.random_state,
+            &mut ai_divider,
+        );
+        ai_rng
+            .battle_random()
+            .expect("derive enemy AI random state");
+        expected.random_state = ai_rng.state();
+        drop(ai_rng);
+        let mut source = crystal_core::random::ReplayDivider::new([0; 128]);
+        let mut recording = crystal_core::random::RecordingDivider::new(&mut source);
+        runtime
+            .data
+            .resolve_active_battle_command_with_divider(
+                &mut expected,
+                BattleAction::Run,
+                BattleAction::Move { slot: 0 },
+                &mut recording,
+            )
+            .expect("derive turn trace after enemy AI");
+        let outcome = session
+            .apply_runtime_mutation_command(
+                &runtime,
+                RuntimeMutationCommand::ResolveActiveBattleCommand(RuntimeBattleTurnCommand {
+                    player_action: BattleAction::Run,
+                    enemy_action: BattleAction::Move { slot: 0 },
+                    enemy_ai_divider_trace: RuntimeDividerTrace::new([0, 1]),
+                    divider_trace: RuntimeDividerTrace::new(recording.samples().iter().copied()),
+                }),
+            )
+            .expect("enemy AI and turn traces share one random state");
+        assert!(matches!(
+            outcome.result,
+            RuntimeMutationResult::ActiveBattleCommandResolved(_)
+        ));
+        assert_eq!(session.state, expected);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -158,14 +244,8 @@
         session.state.battle_escape_attempts = 2;
         let player_action = BattleAction::Run;
         let enemy_action = BattleAction::Run;
-        let rng_seed_after = preview_battle_command_rng_seed_after(
-            &runtime,
-            &session.state,
-            player_action.clone(),
-            enemy_action.clone(),
-        );
         let turn = session
-            .resolve_active_battle_command(&runtime, player_action, enemy_action, rng_seed_after)
+            .resolve_active_battle_command(&runtime, player_action, enemy_action)
             .expect("player run command resolves");
 
         assert!(matches!(
@@ -211,14 +291,8 @@
 
         let player_action = BattleAction::Run;
         let enemy_action = BattleAction::Move { slot: 0 };
-        let rng_seed_after = preview_battle_turn_rng_seed_after(
-            &runtime,
-            &session.state,
-            player_action.clone(),
-            enemy_action.clone(),
-        );
         let turn = session
-            .resolve_active_battle_turn(&runtime, player_action, enemy_action, rng_seed_after)
+            .resolve_active_battle_turn(&runtime, player_action, enemy_action)
             .expect("run turn resolves through escape rules");
 
         assert!(turn.outcome.events.iter().any(|event| matches!(
@@ -268,14 +342,8 @@
 
         let player_action = BattleAction::Move { slot: 0 };
         let enemy_action = BattleAction::Move { slot: 0 };
-        let rng_seed_after = preview_battle_command_rng_seed_after(
-            &runtime,
-            &session.state,
-            player_action.clone(),
-            enemy_action.clone(),
-        );
         let turn = session
-            .resolve_active_battle_command(&runtime, player_action, enemy_action, rng_seed_after)
+            .resolve_active_battle_command(&runtime, player_action, enemy_action)
             .expect("move command resolves");
 
         let ActiveBattleCommandOutcome::Turn(outcome) = turn.outcome else {
@@ -332,8 +400,18 @@
             other => panic!("expected static wild battle, got {other:?}"),
         }
         let before = game_state_checksum(&session.state).expect("checksum before escape");
-        let mut expected_rng = Random::new_crystal(session.state.rng_seed);
-        let expected_roll = expected_rng.battle_random_byte();
+        let divider_sub = if session.state.random_state.sub == u8::MAX {
+            0
+        } else {
+            session.state.random_state.sub + 1
+        };
+        let samples = [0, divider_sub];
+        let mut expected_divider = ReplayDivider::new(samples);
+        let mut expected_rng = CrystalRandom::new(session.state.random_state, &mut expected_divider);
+        let expected_roll = expected_rng
+            .battle_random()
+            .expect("complete expected escape trace");
+        session.divider = RuntimeDividerSource::replay(samples);
 
         let escape = session
             .attempt_escape_active_wild_battle(&runtime)
@@ -342,16 +420,103 @@
         assert!(!escape.outcome.escaped);
         assert_eq!(escape.outcome.attempts_before, 0);
         assert_eq!(escape.outcome.attempts_after, 1);
-        // Continue from the saved HardwareRNG boundary. The exact byte depends
-        // on the authoritative setup samples consumed before RUN is selected.
         assert_eq!(escape.outcome.roll, Some(expected_roll));
-        assert_eq!(escape.outcome.rng_seed_after, expected_rng.seed());
+        assert_eq!(session.state.random_state, expected_rng.state());
         assert_eq!(session.state.battle_escape_attempts, 1);
         assert!(matches!(
             session.state.battle,
             BattleMemory::StaticWild { .. }
         ));
         assert_ne!(escape.state_checksum, before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_escape_records_exact_divider_trace_and_replays_atomically() {
+        let root = temp_repository_root("battle-escape-divider-trace");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(
+                minimal_runtime_data_with_scripted_battles(),
+                report(),
+            ),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime.clone(), 0)
+            .expect("runtime game shell");
+        let mut slow_species = runtime_species();
+        slow_species.base_stats.speed = 1;
+        let player = Pokemon::new_for_tests(slow_species, 8, Dv::default());
+        let mut fast_species = runtime_species();
+        fast_species.base_stats.speed = 255;
+        let enemy = Pokemon::new_for_tests(fast_species, 8, Dv::default());
+        let state = &mut shell.session_mut().state;
+        state.storage.party.pokemon[0] = Some(player);
+        state.sync_party_from_storage();
+        state.battle = BattleMemory::Wild {
+            roaming_slot: None,
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "RuntimeMap".to_string(),
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        shell.session_mut().divider = RuntimeDividerSource::replay([0, 0, 0, 255]);
+        let replay_base = shell.session().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        shell
+            .attempt_escape_active_wild_battle()
+            .expect("escape with exact trace");
+        let frame = shell.retained_runtime_commands()[retained_before].clone();
+        let recorded = crystal_assets::decode_runtime_mutation_command_frame(
+            &frame,
+            replay_base.state(),
+        )
+        .expect("decode recorded escape");
+        let RuntimeMutationCommand::AttemptEscapeActiveWildBattle(command) = recorded else {
+            panic!("escape must journal its typed command");
+        };
+        assert_eq!(command.divider_trace.samples, vec![0, 0, 0, 255]);
+
+        let mut remote = replay_base.clone();
+        remote.divider = RuntimeDividerSource::replay([]);
+        remote
+            .apply_runtime_command_frame(&runtime, &frame)
+            .expect("remote escape consumes recorded DIV trace");
+        assert_eq!(remote.state(), shell.session().state());
+
+        for (trace, message) in [
+            (vec![0, 0], "divider replay exhausted after 2 samples"),
+            (
+                vec![0, 0, 0, 255, 77],
+                "1 unconsumed samples after 4 reads",
+            ),
+        ] {
+            let mut rejected = replay_base.clone();
+            let request = rejected
+                .runtime_command_frame(
+                    1,
+                    1,
+                    RuntimeMutationCommand::AttemptEscapeActiveWildBattle(
+                        RuntimeBattleEscapeCommand {
+                            divider_trace: RuntimeDividerTrace::new(trace),
+                        },
+                    ),
+                )
+                .expect("frame malformed escape replay");
+            let rejected_before = rejected.clone();
+            let error = rejected
+                .apply_runtime_command_frame(&runtime, &request)
+                .expect_err("malformed escape trace rejects atomically");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(rejected, rejected_before);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -645,7 +810,6 @@
                 &runtime,
                 BattleAction::Run,
                 BattleAction::Move { slot: 0 },
-                0,
             )
             .expect_err("trainer player run is rejected");
 
@@ -688,7 +852,6 @@
                 &runtime,
                 BattleAction::Move { slot: 0 },
                 BattleAction::Run,
-                0,
             )
             .expect_err("trainer enemy run is rejected");
 
@@ -895,11 +1058,10 @@
             wobble_count: 4,
             animation_shakes: 4,
             final_catch_rate: u8::MAX,
-            rng_seed_after: state.rng_seed,
             ball_id: Some("MASTER_BALL".to_string()),
         };
         shell.session_mut().divider =
-            crystal_core::random::RuntimeDividerSource::replay([0, 100]);
+            crystal_core::random::RuntimeDividerSource::replay([0, 100, 0, 155]);
         let replay_base = shell.session().clone();
         let before = shell.session().state().clone();
         let retained_before = shell.retained_runtime_commands().len();
@@ -918,7 +1080,7 @@
         let RuntimeMutationCommand::CompleteActiveWildCapture(recorded) = command else {
             panic!("capture must journal its typed completion command");
         };
-        assert_eq!(recorded.divider_trace.samples, vec![0, 100]);
+        assert_eq!(recorded.divider_trace.samples, vec![0, 100, 0, 155]);
 
         let mut remote = replay_base.clone();
         remote
@@ -927,8 +1089,11 @@
         assert_eq!(remote.state, shell.session().state);
 
         for (trace, message) in [
-            (vec![0], "divider replay exhausted after 1 samples"),
-            (vec![0, 100, 77], "1 unconsumed samples after 2 reads"),
+            (vec![0, 100], "divider replay exhausted after 2 samples"),
+            (
+                vec![0, 100, 0, 155, 77],
+                "1 unconsumed samples after 4 reads",
+            ),
         ] {
             let mut rejected = replay_base.clone();
             let request = rejected
@@ -948,6 +1113,92 @@
             let error = rejected
                 .apply_runtime_command_frame(&runtime, &request)
                 .expect_err("malformed capture divider trace rejects atomically");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(rejected, rejected_before);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_ball_throw_records_exact_divider_trace_and_replays_atomically() {
+        let root = temp_repository_root("capture-attempt-divider-trace");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(
+                minimal_runtime_data_with_scripted_battles(),
+                report(),
+            ),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell = RuntimeGameShell::new_game(asset_root, runtime.clone(), 0)
+            .expect("runtime game shell");
+        let player = Pokemon::new_for_tests(runtime_species(), 10, Dv::default());
+        let enemy = Pokemon::new_for_tests(runtime_species(), 6, Dv::default());
+        let state = &mut shell.session_mut().state;
+        state.storage.party.pokemon[0] = Some(player);
+        state.sync_party_from_storage();
+        state.battle = BattleMemory::Wild {
+            roaming_slot: None,
+            battle_type: "BATTLETYPE_NORMAL".to_string(),
+            battle_music: "MUSIC_JOHTO_WILD_BATTLE".to_string(),
+            map_name: "RuntimeMap".to_string(),
+            enemy_pokemon: enemy.clone(),
+            enemy_party: vec![enemy],
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        state
+            .bag
+            .add_item(&runtime.data.items["POKE_BALL"], 1)
+            .expect("add Poke Ball");
+        shell.session_mut().divider = RuntimeDividerSource::replay([0, 0]);
+        let replay_base = shell.session().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        let attempt = shell
+            .throw_ball_at_active_battle("POKE_BALL")
+            .expect("throw Poke Ball with exact trace");
+        assert!(attempt.outcome.expect("capture outcome").caught);
+        let frame = shell.retained_runtime_commands()[retained_before].clone();
+        let recorded = crystal_assets::decode_runtime_mutation_command_frame(
+            &frame,
+            replay_base.state(),
+        )
+        .expect("decode recorded ball throw");
+        let RuntimeMutationCommand::ThrowBallAtActiveBattle(command) = recorded else {
+            panic!("ball throw must journal its typed command");
+        };
+        assert_eq!(command.divider_trace.samples, vec![0, 0]);
+
+        let mut remote = replay_base.clone();
+        remote.divider = RuntimeDividerSource::replay([]);
+        remote
+            .apply_runtime_command_frame(&runtime, &frame)
+            .expect("remote ball throw consumes recorded DIV trace");
+        assert_eq!(remote.state(), shell.session().state());
+
+        for (trace, message) in [
+            (vec![0], "divider replay exhausted after 1 samples"),
+            (vec![0, 0, 77], "1 unconsumed samples after 2 reads"),
+        ] {
+            let mut rejected = replay_base.clone();
+            let request = rejected
+                .runtime_command_frame(
+                    1,
+                    1,
+                    RuntimeMutationCommand::ThrowBallAtActiveBattle(RuntimeBattleItemCommand {
+                        item_id: "POKE_BALL".to_string(),
+                        divider_trace: RuntimeDividerTrace::new(trace),
+                    }),
+                )
+                .expect("frame malformed ball throw replay");
+            let rejected_before = rejected.clone();
+            let error = rejected
+                .apply_runtime_command_frame(&runtime, &request)
+                .expect_err("malformed ball throw trace rejects atomically");
             assert!(format!("{error:#}").contains(message), "{error:#}");
             assert_eq!(rejected, rejected_before);
         }
@@ -1198,8 +1449,6 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let (gift_dvs, gift_rng_seed_after) = crystal_gift_inputs(session.state.rng_seed);
-
         let grant = session
             .grant_scripted_gift_pokemon(
                 &runtime,
@@ -1208,26 +1457,82 @@
                 12,
                 "PLAYER",
                 1234,
-                gift_dvs.clone(),
-                gift_rng_seed_after,
                 true,
                 Some("Leafy".to_string()),
             )
             .expect("gift Pokemon grants");
         let mut dispatch_shell = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
             .expect("dispatch gift shell");
+        dispatch_shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0x10, 0x20, 0x30, 0x40]);
+        let replay_base = dispatch_shell.session().clone();
+        let before_dispatch = dispatch_shell.session().state().clone();
         let dispatched = dispatch_shell
             .grant_compiled_gift_pokemon_command(
                 "RuntimeGiftScript",
                 12,
                 "PLAYER",
                 1234,
-                gift_dvs.clone(),
-                gift_rng_seed_after,
                 true,
                 Some("Leafy".to_string()),
             )
             .expect("compiled gift Pokemon dispatch");
+        let frame = dispatch_shell.retained_runtime_commands()[0].clone();
+        let command = crystal_assets::decode_runtime_mutation_command_frame(
+            &frame,
+            &before_dispatch,
+        )
+        .expect("decode recorded gift command");
+        let RuntimeMutationCommand::GrantScriptedGiftPokemon(recorded) = command else {
+            panic!("gift must journal its typed divider trace");
+        };
+        assert_eq!(recorded.divider_trace.samples, vec![0x10, 0x20, 0x30, 0x40]);
+        assert_eq!(
+            dispatched.outcome.pokemon.dvs,
+            Dv::from_non_hp(14, 0, 10, 0)
+        );
+
+        let mut replayed = replay_base.clone();
+        replayed
+            .apply_runtime_command_frame(&runtime, &frame)
+            .expect("gift replay consumes the exact recorded divider trace");
+        assert_eq!(replayed.state, dispatch_shell.session().state);
+
+        for (trace, message) in [
+            (vec![0x10, 0x20, 0x30], "divider replay exhausted after 3 samples"),
+            (
+                vec![0x10, 0x20, 0x30, 0x40, 0x50],
+                "1 unconsumed samples after 4 reads",
+            ),
+        ] {
+            let mut rejected = replay_base.clone();
+            let request = rejected
+                .runtime_command_frame(
+                    1,
+                    1,
+                    RuntimeMutationCommand::GrantScriptedGiftPokemon(
+                        RuntimeGiftPokemonCommand {
+                            command: RuntimeScriptCommandRef::new(
+                                "RuntimeMap",
+                                "RuntimeGiftScript",
+                                12,
+                            ),
+                            original_trainer_name: "PLAYER".to_string(),
+                            original_trainer_id: 1234,
+                            nickname_accepted: true,
+                            nickname: Some("Leafy".to_string()),
+                            divider_trace: RuntimeDividerTrace::new(trace),
+                        },
+                    ),
+                )
+                .expect("frame malformed gift replay");
+            let rejected_before = rejected.clone();
+            let error = rejected
+                .apply_runtime_command_frame(&runtime, &request)
+                .expect_err("malformed gift divider trace rejects atomically");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(rejected, rejected_before);
+        }
         let mut script_shell = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
             .expect("compiled script gift shell");
         let script_dispatch = script_shell
@@ -1238,8 +1543,6 @@
                 ScriptRuntimeInputs {
                     gift_original_trainer_name: Some("PLAYER".to_string()),
                     gift_original_trainer_id: Some(1234),
-                    gift_dvs: Some(gift_dvs.clone()),
-                    gift_rng_seed_after: Some(gift_rng_seed_after),
                     gift_nickname_accepted: Some(true),
                     gift_nickname: Some("Leafy".to_string()),
                     ..ScriptRuntimeInputs::default()
@@ -1252,39 +1555,6 @@
         else {
             panic!("compiled gift command must dispatch as scripted gift Pokemon");
         };
-        let mut mismatched_rng_shell =
-            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
-                .expect("mismatched rng gift shell");
-        let before_mismatched_rng = mismatched_rng_shell.session.state().clone();
-        let mismatched_rng = mismatched_rng_shell
-            .apply_compiled_script_command(
-                "RuntimeMap",
-                "RuntimeGiftScript",
-                12,
-                ScriptRuntimeInputs {
-                    gift_original_trainer_name: Some("PLAYER".to_string()),
-                    gift_original_trainer_id: Some(1234),
-                    gift_dvs: Some(gift_dvs.clone()),
-                    gift_rng_seed_after: Some(gift_rng_seed_after.wrapping_add(1)),
-                    gift_nickname_accepted: Some(true),
-                    gift_nickname: Some("Leafy".to_string()),
-                    ..ScriptRuntimeInputs::default()
-                },
-                ScriptPhoneInputs::default(),
-            )
-            .expect_err("compiled gift dispatch must reject mismatched rng boundary");
-        let mismatched_rng = format!("{mismatched_rng:#}");
-        assert!(
-            mismatched_rng.contains(
-                &format!(
-                    "grant scripted gift Pokemon rng_seed_after {} does not match resolved rng_seed_after {}",
-                    gift_rng_seed_after.wrapping_add(1),
-                    gift_rng_seed_after
-                )
-            ),
-            "{mismatched_rng}"
-        );
-        assert_eq!(mismatched_rng_shell.session.state(), &before_mismatched_rng);
         let missing_inputs = RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0)
             .expect("missing input gift shell")
             .apply_compiled_script_command(
@@ -1307,8 +1577,6 @@
                 ScriptRuntimeInputs {
                     gift_original_trainer_name: Some("PLAYER".to_string()),
                     gift_original_trainer_id: Some(1234),
-                    gift_dvs: Some(Dv::from_non_hp(10, 10, 10, 10)),
-                    gift_rng_seed_after: Some(0),
                     gift_nickname_accepted: Some(false),
                     gift_nickname: None,
                     ..ScriptRuntimeInputs::default()
@@ -1330,7 +1598,6 @@
                 .expect("generated input gift shell");
         generated_input_shell.session_mut().state.player_name = "KRIS".to_string();
         generated_input_shell.session_mut().state.player_id = 0x2222;
-        generated_input_shell.session_mut().state.rng_seed = 0x1234_5678;
         let generated_inputs = generated_input_shell
             .compiled_script_runtime_inputs("RuntimeMap", "RuntimeGiftScript", 12)
             .expect("compiled gift command inputs");
@@ -1339,8 +1606,6 @@
             Some("KRIS")
         );
         assert_eq!(generated_inputs.gift_original_trainer_id, Some(0x2222));
-        assert!(generated_inputs.gift_dvs.is_some());
-        assert!(generated_inputs.gift_rng_seed_after.is_some());
         assert_eq!(generated_inputs.gift_nickname_accepted, Some(false));
         assert_eq!(generated_inputs.gift_nickname, None);
         let missing_runtime_inputs = generated_input_shell
@@ -1386,7 +1651,7 @@
     }
 
     #[test]
-    fn runtime_rejects_unresolved_gift_labels_and_uses_resolved_gift_levels() {
+    fn runtime_rejects_incomplete_nickname_input_and_uses_resolved_gift_levels() {
         let root = temp_repository_root("scripted-gift-rejections");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -1402,8 +1667,6 @@
         let mut session = runtime
             .start_overworld_session(&asset_root, 0)
             .expect("overworld session");
-        let (nickname_dvs, nickname_rng_seed_after) = crystal_gift_inputs(session.state.rng_seed);
-
         let nickname_error = session
             .grant_scripted_gift_pokemon(
                 &runtime,
@@ -1412,18 +1675,15 @@
                 12,
                 "PLAYER",
                 1234,
-                nickname_dvs,
-                nickname_rng_seed_after,
                 true,
                 None,
             )
-            .expect_err("nickname label must be resolved by caller");
+            .expect_err("accepted nickname requires a supplied value");
         let nickname_error = error_debug(nickname_error);
         assert!(
-            nickname_error.contains("requires resolved nickname label RuntimeGiftName"),
+            nickname_error.contains("cannot accept the supplied nickname"),
             "{nickname_error}"
         );
-        let (refused_dvs, refused_rng_seed_after) = crystal_gift_inputs(session.state.rng_seed);
         let refused = session
             .grant_scripted_gift_pokemon(
                 &runtime,
@@ -1432,15 +1692,12 @@
                 12,
                 "PLAYER",
                 1234,
-                refused_dvs,
-                refused_rng_seed_after,
                 false,
                 None,
             )
             .expect("refused nickname prompt grants species default nickname");
         assert_eq!(refused.outcome.pokemon.nickname, "CHIKORITA");
 
-        let (egg_dvs, egg_rng_seed_after) = crystal_gift_inputs(session.state.rng_seed);
         let egg = session
             .grant_scripted_gift_pokemon(
                 &runtime,
@@ -1449,8 +1706,6 @@
                 3,
                 "PLAYER",
                 1234,
-                egg_dvs,
-                egg_rng_seed_after,
                 false,
                 None,
             )
@@ -1737,8 +1992,8 @@
         assert_eq!(session.state.battle_active_party_index, None);
         assert_eq!(session.state.battle_active_enemy_party_index, None);
         assert_eq!(completion.trainer_prize_money, Some(2000));
-        assert_eq!(completion.money_after, Some(2075));
-        assert_eq!(session.state.money, 2075);
+        assert_eq!(completion.money_after, Some(5075));
+        assert_eq!(session.state.money, 5075);
         assert_eq!(session.state.battle_pay_day_money, 0);
         assert_eq!(
             session.state.script_runtime.script_value.as_deref(),
@@ -2027,7 +2282,7 @@
             .expect("trainer completion clears battle");
         assert!(completion.continued_after_battle);
         assert_eq!(completion.trainer_prize_money, Some(2400));
-        assert_eq!(completion.money_after, Some(2400));
+        assert_eq!(completion.money_after, Some(5400));
         assert_eq!(session.state.battle, BattleMemory::Inactive);
         assert_eq!(session.state.battle_active_party_index, None);
         assert_eq!(session.state.battle_active_enemy_party_index, None);
@@ -2676,34 +2931,6 @@
         pokemon.special_attack = stats.special_attack;
         pokemon.special_defense = stats.special_defense;
         pokemon.hp = pokemon.max_hp.saturating_sub(missing_hp).max(1);
-    }
-
-    fn preview_battle_turn_rng_seed_after(
-        runtime: &CrystalRuntime,
-        state: &GameState,
-        player_action: BattleAction,
-        enemy_action: BattleAction,
-    ) -> u32 {
-        let mut preview = state.clone();
-        runtime
-            .data
-            .resolve_active_battle_turn(&mut preview, player_action, enemy_action)
-            .expect("preview active battle turn rng boundary");
-        preview.rng_seed
-    }
-
-    fn preview_battle_command_rng_seed_after(
-        runtime: &CrystalRuntime,
-        state: &GameState,
-        player_action: BattleAction,
-        enemy_action: BattleAction,
-    ) -> u32 {
-        let mut preview = state.clone();
-        runtime
-            .data
-            .resolve_active_battle_command(&mut preview, player_action, enemy_action)
-            .expect("preview active battle command rng boundary");
-        preview.rng_seed
     }
 
     fn add_runtime_party_pokemon(runtime: &CrystalRuntime, session: &mut RuntimeOverworldSession) {
@@ -3608,7 +3835,7 @@
 
         assert_eq!(
             printer.outcome.effect,
-            SpecialRoutineEffect::UnownPrinter { unlocked: true }
+            SpecialRoutineEffect::UnownPrinter { letters: vec![] }
         );
 
         session
@@ -3910,24 +4137,13 @@
             runtime_results: Vec::new(),
             retain_runtime_journal: true,
         };
-        let before_happiness_rng = happiness_command_shell.session().state().clone();
-        let happiness_rng_error = happiness_command_shell
-            .apply_happiness_service(RuntimeHappinessServiceRoutine::OlderHaircutBrother, 0, 0, 2)
-            .expect_err("happiness service must reject mismatched rng boundary");
-        let happiness_rng_error = format!("{happiness_rng_error:#}");
-        assert!(
-            happiness_rng_error.contains(
-                "apply happiness service rng_seed_after 2 does not match resolved rng_seed_after 1"
-            ),
-            "{happiness_rng_error}"
-        );
-        assert_eq!(
-            happiness_command_shell.session().state(),
-            &before_happiness_rng
-        );
+        happiness_command_shell.session_mut().divider =
+            crystal_core::random::RuntimeDividerSource::replay([0, 0]);
+        let replay_base = happiness_command_shell.session().clone();
+        let before_happiness = happiness_command_shell.session().state().clone();
         let happiness_command = happiness_command_shell
-            .apply_happiness_service(RuntimeHappinessServiceRoutine::OlderHaircutBrother, 0, 0, 1)
-            .expect("happiness service command applies with exact rng boundary");
+            .apply_happiness_service(RuntimeHappinessServiceRoutine::OlderHaircutBrother, 0)
+            .expect("happiness service command consumes live divider samples");
         assert_eq!(
             happiness_command.outcome.effect,
             SpecialRoutineEffect::HappinessService {
@@ -3941,6 +4157,52 @@
             }
         );
         assert_eq!(happiness_command_shell.session().state().rng_seed, 1);
+        assert_eq!(
+            happiness_command_shell.session().state().random_state,
+            crystal_core::random::CrystalRandomState { add: 1, sub: 0 }
+        );
+        let frame = happiness_command_shell.retained_runtime_commands()[0].clone();
+        let command = crystal_assets::decode_runtime_mutation_command_frame(
+            &frame,
+            &before_happiness,
+        )
+        .expect("decode recorded happiness service command");
+        let RuntimeMutationCommand::ApplyHappinessService(recorded) = command else {
+            panic!("happiness service must journal a typed divider trace");
+        };
+        assert_eq!(recorded.divider_trace.samples, vec![0, 0]);
+
+        let mut replayed = replay_base.clone();
+        replayed
+            .apply_runtime_command_frame(&runtime, &frame)
+            .expect("happiness service replay consumes the exact trace");
+        assert_eq!(replayed.state, happiness_command_shell.session().state);
+
+        for (trace, message) in [
+            (vec![0], "divider replay exhausted after 1 samples"),
+            (vec![0, 0, 1], "1 unconsumed samples after 2 reads"),
+        ] {
+            let mut rejected = replay_base.clone();
+            let request = rejected
+                .runtime_command_frame(
+                    1,
+                    1,
+                    RuntimeMutationCommand::ApplyHappinessService(
+                        RuntimeHappinessServiceCommand {
+                            routine: RuntimeHappinessServiceRoutine::OlderHaircutBrother,
+                            party_index: 0,
+                            divider_trace: RuntimeDividerTrace::new(trace),
+                        },
+                    ),
+                )
+                .expect("frame malformed happiness service replay");
+            let rejected_before = rejected.clone();
+            let error = rejected
+                .apply_runtime_command_frame(&runtime, &request)
+                .expect_err("malformed happiness trace rejects atomically");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            assert_eq!(rejected, rejected_before);
+        }
 
         let pokerus = session
             .apply_special_routine(&runtime, "CheckPokerus")
@@ -3958,7 +4220,12 @@
                 .state
                 .flags
                 .is_engine_flag_set("ENGINE_CAUGHT_POKERUS"),
-            Ok(true)
+            Ok(false)
+        );
+        assert!(session.state.script_runtime.special_phone_call.is_none());
+        assert_eq!(
+            session.state.script_runtime.script_value.as_deref(),
+            Some("1")
         );
 
         session
@@ -4184,7 +4451,10 @@
             ),
             (
                 "Menu_ChallengeExplanationCancel",
-                SpecialRoutineEffect::BattleTowerChallengeExplanationCancel,
+                SpecialRoutineEffect::BattleTowerChallengeExplanationCancel {
+                    english: true,
+                    selection: None,
+                },
             ),
         ];
 
@@ -4196,6 +4466,9 @@
                     .variables
                     .insert("_party_slot".to_string(), "0".to_string());
             }
+            if routine == "Menu_ChallengeExplanationCancel" {
+                session.state.script_runtime.script_value = Some("1".to_string());
+            }
             let use_result = session
                 .apply_special_routine(&runtime, routine)
                 .expect("service special");
@@ -4203,9 +4476,14 @@
             assert_eq!(use_result.outcome.effect, expected_effect);
             if !matches!(
                 routine,
-                "UnusedCheckUnusedTwoDayTimer" | "TrainerHouse"
+                "UnusedCheckUnusedTwoDayTimer" | "TrainerHouse" | "PhotoStudio" | "BankOfMom"
             ) {
                 assert_eq!(
+                    session.state.script_runtime.active_menu.as_deref(),
+                    Some(routine)
+                );
+            } else if matches!(routine, "PhotoStudio" | "BankOfMom") {
+                assert_ne!(
                     session.state.script_runtime.active_menu.as_deref(),
                     Some(routine)
                 );
@@ -4216,7 +4494,12 @@
             previous_checksum = Some(use_result.state_checksum);
         }
         session.state.coins = 99;
-        session.state.rng_seed = 1;
+        session.state.random_state = Default::default();
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("slot_action".to_string(), "start".to_string());
         session
             .state
             .script_runtime
@@ -4225,12 +4508,11 @@
         let slot_result = session
             .apply_special_routine(&runtime, "SlotMachine")
             .expect("slot machine special");
-        let SpecialRoutineEffect::SlotMachine {
+        let SpecialRoutineEffect::SlotMachineStarted {
             coins_before,
             bet,
-            payout,
             coins,
-            rng_seed_after,
+            random_state_after,
             ..
         } = slot_result.outcome.effect
         else {
@@ -4238,19 +4520,85 @@
         };
         assert_eq!(coins_before, 99);
         assert_eq!(bet, 3);
-        assert_eq!(coins, 99 - 3 + payout);
+        assert_eq!(coins, 99 - 3);
         assert_eq!(session.state.coins, coins);
-        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(session.state.random_state, random_state_after);
         assert_eq!(session.state.script_runtime.active_menu, None);
+        for reel in 1..=3 {
+            session
+                .state
+                .script_runtime
+                .variables
+                .insert("slot_action".to_string(), "stop".to_string());
+            session
+                .state
+                .script_runtime
+                .variables
+                .insert("slot_reel".to_string(), reel.to_string());
+            let stop = session
+                .apply_special_routine(&runtime, "SlotMachine")
+                .expect("stop slot reel");
+            let SpecialRoutineEffect::SlotMachineReelStopped {
+                reel: stopped_reel,
+                ..
+            } = stop.outcome.effect
+            else {
+                panic!("slot machine returned non-stop effect");
+            };
+            assert_eq!(stopped_reel, reel);
+        }
+        session
+            .state
+            .script_runtime
+            .variables
+            .insert("slot_action".to_string(), "result".to_string());
+        let result = session
+            .apply_special_routine(&runtime, "SlotMachine")
+            .expect("resolve slot result");
+        let SpecialRoutineEffect::SlotMachineResult { payout, .. } = result.outcome.effect else {
+            panic!("slot machine returned non-result effect");
+        };
+        for expected_paid in 1..=payout {
+            session
+                .state
+                .script_runtime
+                .variables
+                .insert("slot_action".to_string(), "payout".to_string());
+            let payout_step = session
+                .apply_special_routine(&runtime, "SlotMachine")
+                .expect("slot machine payout step");
+            let SpecialRoutineEffect::SlotMachinePayout {
+                payout_remaining,
+                coins,
+                ..
+            } = payout_step.outcome.effect
+            else {
+                panic!("slot machine returned non-payout effect");
+            };
+            assert_eq!(payout_remaining, payout - expected_paid);
+            assert_eq!(coins, 99 - 3 + expected_paid);
+        }
 
         session.state.script_runtime.variables.insert("card_flip_initialize".to_string(), "1".to_string());
         session.state.script_runtime.variables.insert("card_flip_index".to_string(), "0".to_string());
         session.state.script_runtime.variables.insert("card_flip_bet_x".to_string(), "2".to_string());
         session.state.script_runtime.variables.insert("card_flip_bet_y".to_string(), "2".to_string());
+        session.state.script_runtime.variables.insert("card_flip_action".to_string(), "start".to_string());
+        let card_start = session
+            .apply_special_routine(&runtime, "CardFlip")
+            .expect("card flip start");
+        let SpecialRoutineEffect::CardFlipStarted {
+            coins: staked_coins,
+            ..
+        } = card_start.outcome.effect
+        else {
+            panic!("card flip returned non-start effect");
+        };
+        session.state.script_runtime.variables.insert("card_flip_action".to_string(), "reveal".to_string());
         let card_result = session
             .apply_special_routine(&runtime, "CardFlip")
-            .expect("card flip special");
-        let SpecialRoutineEffect::CardFlip {
+            .expect("card flip reveal");
+        let SpecialRoutineEffect::CardFlipRevealed {
             coins_before,
             card_index,
             card_name,
@@ -4264,10 +4612,26 @@
         };
         assert!(card_index < 24);
         assert!(!card_name.is_empty());
-        assert_eq!(coins, coins_before - 3 + payout);
+        assert_eq!(coins_before, staked_coins);
+        assert_eq!(coins, coins_before);
         assert_eq!(session.state.coins, coins);
         assert_eq!(session.state.random_state, random_state_after);
         assert_eq!(session.state.script_runtime.active_menu, None);
+        for expected in 1..=payout {
+            session
+                .state
+                .script_runtime
+                .variables
+                .insert("card_flip_action".to_string(), "payout".to_string());
+            let payout_step = session
+                .apply_special_routine(&runtime, "CardFlip")
+                .expect("card flip payout step");
+            let SpecialRoutineEffect::CardFlipPayout { coins, .. } = payout_step.outcome.effect
+            else {
+                panic!("card flip returned non-payout effect");
+            };
+            assert_eq!(coins, coins_before + expected);
+        }
 
         session.state.script_runtime.variables.insert(
             "memory_board".to_string(),
@@ -4292,7 +4656,7 @@
             first_index,
             second_index,
             coins,
-            rng_seed_after,
+            random_state_after,
         } = memory_result.outcome.effect
         else {
             panic!("memory game returned non-memory effect");
@@ -4301,7 +4665,7 @@
         assert_eq!(symbol.as_deref(), Some("ODDISH"));
         assert_eq!((first_index, second_index), (0, 1));
         assert_eq!(coins, session.state.coins);
-        assert_eq!(session.state.rng_seed, rng_seed_after);
+        assert_eq!(session.state.random_state, random_state_after);
         assert_eq!(
             session.state.script_runtime.script_value.as_deref(),
             Some("1")
@@ -4363,6 +4727,7 @@
             .script_runtime
             .variables
             .insert("_value".to_string(), "258".to_string());
+        session.state.script_runtime.script_value = Some("258".to_string());
         let swarm = session
             .apply_special_routine(&runtime, "ActivateFishingSwarm")
             .expect("activate fishing swarm");

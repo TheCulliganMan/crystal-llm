@@ -69,11 +69,27 @@ pub struct ScriptFlagCheckOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum ScriptFlagError {
-    InvalidCommand { command: String },
-    UnknownCommand { command: String },
-    EmptyFlagId { command: String },
-    InvalidFlagId { command: String, flag_id: String },
-    Flag { error: EventFlagError },
+    InvalidCommand {
+        command: String,
+    },
+    UnknownCommand {
+        command: String,
+    },
+    EmptyFlagId {
+        command: String,
+    },
+    InvalidFlagId {
+        command: String,
+        flag_id: String,
+    },
+    FlagKindMismatch {
+        command: String,
+        flag_id: String,
+        expected_engine_flag: bool,
+    },
+    Flag {
+        error: EventFlagError,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +99,7 @@ pub enum ScriptFlagCommandIssue {
     UnknownCommand,
     EmptyFlagId,
     InvalidFlagId,
+    FlagKindMismatch,
 }
 
 impl From<EventFlagError> for ScriptFlagError {
@@ -91,16 +108,9 @@ impl From<EventFlagError> for ScriptFlagError {
     }
 }
 
-pub const SCRIPT_FLAG_MUTATION_COMMANDS: &[&str] = &[
-    "setevent",
-    "clearevent",
-    "setflag",
-    "set_flag",
-    "setengineflag",
-    "clearflag",
-    "clear_flag",
-];
-pub const SCRIPT_FLAG_CHECK_COMMANDS: &[&str] = &["checkevent", "checkflag", "check_flag"];
+pub const SCRIPT_FLAG_MUTATION_COMMANDS: &[&str] =
+    &["setevent", "clearevent", "setflag", "clearflag"];
+pub const SCRIPT_FLAG_CHECK_COMMANDS: &[&str] = &["checkevent", "checkflag"];
 
 pub fn is_known_script_flag_command(command: &str) -> bool {
     SCRIPT_FLAG_MUTATION_COMMANDS.contains(&command)
@@ -118,6 +128,10 @@ pub fn script_flag_command_issues(command: &ScriptFlagCommand) -> Vec<ScriptFlag
         issues.push(ScriptFlagCommandIssue::EmptyFlagId);
     } else if !is_exact_script_flag_token(&command.flag_id) {
         issues.push(ScriptFlagCommandIssue::InvalidFlagId);
+    } else if is_known_script_flag_command(&command.command)
+        && command_uses_engine_storage(&command.command) != is_engine_flag_name(&command.flag_id)
+    {
+        issues.push(ScriptFlagCommandIssue::FlagKindMismatch);
     }
     issues
 }
@@ -144,7 +158,19 @@ pub fn validate_script_flag_command(command: &ScriptFlagCommand) -> Result<(), S
             flag_id: command.flag_id.clone(),
         });
     }
+    let expected_engine_flag = command_uses_engine_storage(&command.command);
+    if expected_engine_flag != is_engine_flag_name(&command.flag_id) {
+        return Err(ScriptFlagError::FlagKindMismatch {
+            command: command.command.clone(),
+            flag_id: command.flag_id.clone(),
+            expected_engine_flag,
+        });
+    }
     Ok(())
+}
+
+fn command_uses_engine_storage(command: &str) -> bool {
+    matches!(command, "setflag" | "clearflag" | "checkflag")
 }
 
 fn is_exact_script_flag_command_token(value: &str) -> bool {
@@ -227,8 +253,8 @@ pub fn apply_script_flag_mutation(
 ) -> Result<ScriptFlagMutationOutcome, ScriptFlagError> {
     validate_script_flag_command(&command)?;
     let value = match command.command.as_str() {
-        "setevent" | "setflag" | "set_flag" | "setengineflag" => true,
-        "clearevent" | "clearflag" | "clear_flag" => false,
+        "setevent" | "setflag" => true,
+        "clearevent" | "clearflag" => false,
         other => {
             return Err(ScriptFlagError::UnknownCommand {
                 command: other.to_string(),
@@ -257,7 +283,7 @@ pub fn check_script_flag(
 ) -> Result<ScriptFlagCheckOutcome, ScriptFlagError> {
     validate_script_flag_command(&command)?;
     match command.command.as_str() {
-        "checkevent" | "checkflag" | "check_flag" => {}
+        "checkevent" | "checkflag" => {}
         other => {
             return Err(ScriptFlagError::UnknownCommand {
                 command: other.to_string(),
@@ -281,16 +307,7 @@ pub fn check_script_flag(
 }
 
 fn is_engine_command(command: &ScriptFlagCommand) -> bool {
-    matches!(
-        command.command.as_str(),
-        "setflag"
-            | "set_flag"
-            | "setengineflag"
-            | "clearflag"
-            | "clear_flag"
-            | "checkflag"
-            | "check_flag"
-    ) || is_engine_flag_name(&command.flag_id)
+    command_uses_engine_storage(&command.command)
 }
 
 #[cfg(test)]
@@ -310,16 +327,30 @@ mod tests {
     fn exported_flag_command_sets_are_exact() {
         assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"setevent"));
         assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"clearflag"));
-        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"set_flag"));
-        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"clear_flag"));
-        assert!(SCRIPT_FLAG_MUTATION_COMMANDS.contains(&"setengineflag"));
         assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkevent"));
         assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"checkflag"));
-        assert!(SCRIPT_FLAG_CHECK_COMMANDS.contains(&"check_flag"));
         assert!(is_known_script_flag_command("setflag"));
-        assert!(is_known_script_flag_command("set_flag"));
+        for non_opcode in ["set_flag", "clear_flag", "check_flag", "setengineflag"] {
+            assert!(!is_known_script_flag_command(non_opcode));
+        }
         assert!(!is_known_script_flag_command("SetFlag"));
         assert!(!is_known_script_flag_command("toggleevent"));
+    }
+
+    #[test]
+    fn flag_storage_is_selected_by_the_exact_opcode_not_the_symbol_prefix() {
+        let mut state = GameState::default();
+
+        assert!(
+            apply_script_flag_mutation(&mut state, command("setevent", "ENGINE_ZEPHYRBADGE"))
+                .is_err()
+        );
+        assert!(
+            apply_script_flag_mutation(&mut state, command("setflag", "EVENT_ROUTE_29_POTION"))
+                .is_err()
+        );
+        assert!(check_script_flag(&state, command("checkevent", "ENGINE_ZEPHYRBADGE")).is_err());
+        assert!(check_script_flag(&state, command("checkflag", "EVENT_ROUTE_29_POTION")).is_err());
     }
 
     #[test]
@@ -442,22 +473,14 @@ mod tests {
             true
         );
 
-        apply_script_flag_mutation(&mut state, command("clear_flag", "ENGINE_ZEPHYRBADGE"))
-            .expect("clear exact underscore engine flag");
+        apply_script_flag_mutation(&mut state, command("clearflag", "ENGINE_ZEPHYRBADGE"))
+            .expect("clear engine flag");
         assert_eq!(
-            check_script_flag(&state, command("check_flag", "ENGINE_ZEPHYRBADGE"))
-                .expect("check exact underscore engine flag")
+            check_script_flag(&state, command("checkflag", "ENGINE_ZEPHYRBADGE"))
+                .expect("check cleared engine flag")
                 .set,
             false
         );
-
-        let set_engine =
-            apply_script_flag_mutation(&mut state, command("setengineflag", "ENGINE_FLYPOINT"))
-                .expect("set explicit engine flag");
-        assert_eq!(set_engine.command, "setengineflag");
-        assert!(set_engine.engine_flag);
-        assert_eq!(set_engine.value, true);
-        assert_eq!(state.flags.is_engine_flag_set("ENGINE_FLYPOINT"), Ok(true));
     }
 
     #[test]

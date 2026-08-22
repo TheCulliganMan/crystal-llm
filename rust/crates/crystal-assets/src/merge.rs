@@ -195,15 +195,6 @@ fn insert_happiness_data(target: &mut Option<HappinessData>, data: HappinessData
     Ok(())
 }
 
-#[cfg(test)]
-fn insert_exact_vec_table<T>(target: &mut Vec<T>, entries: Vec<T>, table_name: &str) -> Result<()> {
-    if !target.is_empty() {
-        anyhow::bail!("duplicate {table_name} table");
-    }
-    *target = entries;
-    Ok(())
-}
-
 fn insert_token_string_vec_table(
     target: &mut Vec<String>,
     entries: Vec<String>,
@@ -822,6 +813,8 @@ fn insert_field_move_catalog(
     validate_field_item_rule("field_moves:bicycle", &catalog.bicycle)?;
     validate_field_item_rule("field_moves:itemfinder", &catalog.itemfinder)?;
     validate_field_item_rule("field_moves:squirtbottle", &catalog.squirtbottle)?;
+    validate_field_story_key_rule("field_moves:card_key", &catalog.card_key)?;
+    validate_field_story_key_rule("field_moves:basement_key", &catalog.basement_key)?;
     validate_field_item_rule("field_moves:coin_case", &catalog.coin_case)?;
     validate_field_item_rule("field_moves:blue_card", &catalog.blue_card)?;
     validate_field_item_rule("field_moves:town_map", &catalog.town_map)?;
@@ -870,9 +863,6 @@ fn insert_runtime_title_screen(
 }
 
 fn validate_runtime_title_screen(title_screen: &RuntimeTitleScreen) -> Result<()> {
-    if title_screen.new_game_spawn_identifier.is_none() {
-        anyhow::bail!("runtime_title_screen requires new_game_spawn_identifier");
-    }
     let Some(title_music) = &title_screen.title_music else {
         anyhow::bail!("runtime_title_screen requires title_music");
     };
@@ -954,6 +944,12 @@ fn validate_field_escape_item_rule(rule: &FieldEscapeItemRule) -> Result<()> {
 
 fn validate_field_item_rule(subject: &str, rule: &FieldItemRule) -> Result<()> {
     validate_modpack_payload_token(&rule.item_id, &format!("{subject} item id"))
+}
+
+fn validate_field_story_key_rule(subject: &str, rule: &FieldStoryKeyRule) -> Result<()> {
+    validate_modpack_payload_token(&rule.item_id, &format!("{subject} item id"))?;
+    validate_modpack_payload_token(&rule.map_name, &format!("{subject} map name"))?;
+    validate_modpack_payload_token(&rule.target_script, &format!("{subject} target script"))
 }
 
 fn validate_field_move_badge(
@@ -1532,22 +1528,6 @@ fn validate_pokemon_cry_metadata(_species: &str, metadata: &PokemonCryMetadata) 
     Ok(())
 }
 
-#[cfg(test)]
-fn merge_exact_keyed_map<T>(
-    target: &mut BTreeMap<String, T>,
-    source: BTreeMap<String, T>,
-    description: &str,
-) -> Result<()> {
-    for (key, value) in source {
-        validate_exact_modpack_key(&key, description)?;
-        if target.contains_key(&key) {
-            anyhow::bail!("duplicate {description} '{key}'");
-        }
-        target.insert(key, value);
-    }
-    Ok(())
-}
-
 fn merge_token_keyed_map<T>(
     target: &mut BTreeMap<String, T>,
     source: BTreeMap<String, T>,
@@ -1588,31 +1568,6 @@ fn merge_special_routine_rules(
             anyhow::bail!("duplicate special routine '{routine}'");
         }
         target.insert(routine, rule);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn merge_exact_keyed_string_vec_map(
-    target: &mut BTreeMap<String, Vec<String>>,
-    source: BTreeMap<String, Vec<String>>,
-    key_description: &str,
-    value_description: &str,
-) -> Result<()> {
-    for (key, values) in source {
-        validate_exact_modpack_key(&key, key_description)?;
-        if values.is_empty() {
-            anyhow::bail!(
-                "{key_description} '{key}' must declare at least one {value_description}"
-            );
-        }
-        for value in &values {
-            validate_exact_modpack_value(value, value_description)?;
-        }
-        if target.contains_key(&key) {
-            anyhow::bail!("duplicate {key_description} '{key}'");
-        }
-        target.insert(key, values);
     }
     Ok(())
 }
@@ -2063,31 +2018,6 @@ fn merge_keyed_egg_moves_entry(
     Ok(())
 }
 
-#[cfg(test)]
-fn merge_object_payload(
-    target: &mut BTreeMap<String, Value>,
-    payload: Value,
-    key_description: &str,
-) -> Result<()> {
-    let Some(object) = payload.as_object() else {
-        anyhow::bail!("object payload must be an object");
-    };
-    if object.is_empty() {
-        anyhow::bail!("object payload must contain at least one entry");
-    }
-    let key_validation_description = key_description
-        .strip_suffix(" key")
-        .unwrap_or(key_description);
-    for (key, value) in object {
-        validate_battle_table_token(key, key_validation_description)?;
-        if target.contains_key(key) {
-            anyhow::bail!("duplicate object payload key '{key}'");
-        }
-        target.insert(key.clone(), value.clone());
-    }
-    Ok(())
-}
-
 fn merge_map_script_payload(target: &mut BTreeMap<String, Value>, payload: Value) -> Result<()> {
     let Some(object) = payload.as_object() else {
         anyhow::bail!("map script payload must be an object");
@@ -2320,36 +2250,6 @@ fn merge_keyed_pokedex_payload(target: &mut Vec<Value>, key: &str, payload: Valu
         serde_json::to_value(entry)
             .with_context(|| format!("encode canonical pokedex payload for '{key}'"))?,
     );
-    Ok(())
-}
-
-#[cfg(test)]
-fn merge_raw_object_payload(
-    target: &mut Vec<Value>,
-    payload: Value,
-    payload_description: &str,
-    key_description: &str,
-) -> Result<()> {
-    let Some(object) = payload.as_object() else {
-        anyhow::bail!("{payload_description} must be an object");
-    };
-    if object.is_empty() {
-        anyhow::bail!("{payload_description} must contain at least one entry");
-    }
-    let key_validation_description = key_description
-        .strip_suffix(" key")
-        .unwrap_or(key_description);
-    for key in object.keys() {
-        validate_modpack_payload_token(key, key_validation_description)?;
-        if target.iter().any(|entry| {
-            entry
-                .as_object()
-                .is_some_and(|existing| existing.contains_key(key))
-        }) {
-            anyhow::bail!("duplicate {key_description} '{key}'");
-        }
-    }
-    target.push(payload);
     Ok(())
 }
 
@@ -2903,20 +2803,22 @@ fn resolve_trainer_command_reference(
     if label.is_empty() || !label.starts_with('.') {
         return Ok(label);
     }
-    let parent = source_script
-        .rsplit_once('@')
-        .map(|(_, parent)| parent)
-        .unwrap_or(source_script);
-    let scoped = format!("{label}@{parent}");
-    match (scripts.contains_key(&label), scripts.contains_key(&scoped)) {
-        (false, true) => Ok(scoped),
-        (true, false) => Ok(label),
-        (false, false) => anyhow::bail!(
-            "trainer command {field} {label} from {source_script} resolves to neither {label} nor {scoped}"
-        ),
-        (true, true) => anyhow::bail!(
-            "trainer command {field} {label} from {source_script} is ambiguous between {label} and {scoped}"
-        ),
+    let parent = script_label_parent(source_script);
+    let scoped = if label.contains('@') {
+        anyhow::ensure!(
+            script_label_parent(&label) == parent,
+            "trainer command {field} {label} from {source_script} crosses ASM parent scope"
+        );
+        label
+    } else {
+        format!("{label}@{parent}")
+    };
+    if scripts.contains_key(&scoped) {
+        Ok(scoped)
+    } else {
+        anyhow::bail!(
+            "trainer command {field} {scoped} from {source_script} resolves to missing scoped script"
+        )
     }
 }
 

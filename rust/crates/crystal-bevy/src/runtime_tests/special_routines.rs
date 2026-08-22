@@ -591,7 +591,7 @@
     }
 
     #[test]
-    fn runtime_blue_card_reports_exact_script_runtime_balance() {
+    fn runtime_blue_card_reports_exact_saved_wram_balance() {
         let root = temp_repository_root("blue-card");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -613,11 +613,7 @@
             .bag
             .add_item(&runtime.data.items["BLUE_CARD"], 1)
             .expect("add blue card");
-        session
-            .state
-            .script_runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), "12".to_string());
+        session.state.blue_card_balance = 12;
 
         let use_item = session
             .use_bag_blue_card_in_field(&runtime, "BLUE_CARD")
@@ -631,15 +627,7 @@
             session.state.bag.quantity(&runtime.data.items["BLUE_CARD"]),
             1
         );
-        assert_eq!(
-            session
-                .state
-                .script_runtime
-                .variables
-                .get("VAR_BLUECARDBALANCE")
-                .map(String::as_str),
-            Some("12")
-        );
+        assert_eq!(session.state.blue_card_balance, 12);
         assert_eq!(session.state.script_runtime.item_use_events.len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -736,11 +724,7 @@
         assert!(bad_blue.contains("InvalidFieldItemId"), "{bad_blue}");
         assert_eq!(session.state, before_bad_blue);
 
-        session
-            .state
-            .script_runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), "31".to_string());
+        session.state.blue_card_balance = 31;
         let before_out_of_range = session.state.clone();
         let out_of_range = session
             .use_bag_blue_card_in_field(&runtime, "BLUE_CARD")
@@ -752,18 +736,6 @@
         );
         assert_eq!(session.state, before_out_of_range);
 
-        session
-            .state
-            .script_runtime
-            .variables
-            .insert("VAR_BLUECARDBALANCE".to_string(), " 12".to_string());
-        let before_invalid = session.state.clone();
-        let invalid = session
-            .use_bag_blue_card_in_field(&runtime, "BLUE_CARD")
-            .expect_err("non-exact blue card balance rejected");
-        let invalid = error_debug(invalid);
-        assert!(invalid.contains("InvalidBlueCardBalance"), "{invalid}");
-        assert_eq!(session.state, before_invalid);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2534,6 +2506,7 @@
         module.blocks = vec![0x5b, 0x00];
         data.map_attributes
             .insert("RuntimeMap".to_string(), module.attributes.clone());
+        add_runtime_deferred_field_move_global_scripts(&mut data);
         let mut connected_map = runtime_map();
         connected_map.id = "ConnectedMap".to_string();
         connected_map.attributes.map_constant = None;
@@ -2577,7 +2550,27 @@
         assert_eq!(field_move.outcome.move_id, "CUT");
         assert_eq!(field_move.outcome.previous_block_id, 0x5b);
         assert_eq!(field_move.outcome.replacement_block_id, 0x3c);
+        assert_eq!(session.overworld.map.metatile_at(0, 0), Some(0x5b));
+        assert_eq!(
+            session.state.script_runtime.pending_block_field_move,
+            Some(field_move.outcome.clone())
+        );
+        assert!(session.state.map_block_overrides.get("RuntimeMap").is_none());
+
+        runtime
+            .data
+            .apply_script_runtime_command_in_session(
+                &mut session.state,
+                &mut session.overworld,
+                "RuntimeMap",
+                "Script_Cut",
+                3,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute source CutDownTreeOrGrass callasm");
+
         assert_eq!(session.overworld.map.metatile_at(0, 0), Some(0x3c));
+        assert!(session.state.script_runtime.pending_block_field_move.is_none());
         assert_eq!(
             session
                 .state
@@ -2702,6 +2695,7 @@
         module.blocks = vec![0x07, 0x00];
         data.map_attributes
             .insert("RuntimeMap".to_string(), module.attributes.clone());
+        add_runtime_deferred_field_move_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -2732,7 +2726,26 @@
         assert_eq!(field_move.outcome.move_id, "WHIRLPOOL");
         assert_eq!(field_move.outcome.replacement_block_id, 0x36);
         assert_eq!(field_move.outcome.variant, "whirlpool");
+        assert_eq!(session.overworld.map.metatile_at(0, 0), Some(0x07));
+        assert_eq!(
+            session.state.script_runtime.pending_block_field_move,
+            Some(field_move.outcome.clone())
+        );
+
+        runtime
+            .data
+            .apply_script_runtime_command_in_session(
+                &mut session.state,
+                &mut session.overworld,
+                "RuntimeMap",
+                "Script_UsedWhirlpool",
+                3,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute source DisappearWhirlpool callasm");
+
         assert_eq!(session.overworld.map.metatile_at(0, 0), Some(0x36));
+        assert!(session.state.script_runtime.pending_block_field_move.is_none());
         assert_eq!(
             session
                 .state
@@ -2746,16 +2759,15 @@
     }
 
     #[test]
-    fn runtime_strength_and_flash_set_exact_engine_flags() {
+    fn runtime_strength_and_flash_commit_flags_at_exact_source_callasm_boundaries() {
         let root = temp_repository_root("field-move-flags");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        add_runtime_deferred_field_move_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(
-                minimal_runtime_data_with_scripted_battles(),
-                report(),
-            ),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
@@ -2768,6 +2780,7 @@
             current_pp: 15,
             pp_ups: 0,
         }];
+        let strength_species = strength_user.species.id.clone();
         let mut flash_user = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         flash_user.moves = vec![LearnedMove {
             name: "FLASH".to_string(),
@@ -2789,13 +2802,57 @@
         session.state.badges.johto[0] = true;
 
         let strength = session
-            .use_strength_field_move(&runtime, 0)
-            .expect("use strength");
+            .queue_strength_from_menu(&runtime, 0)
+            .expect("queue Script_StrengthFromMenu");
+
+        assert_eq!(
+            session
+                .state
+                .flags
+                .is_engine_flag_set("ENGINE_STRENGTH_ACTIVE"),
+            Ok(false),
+            "party-menu dispatch must not run SetStrengthFlag before the source script"
+        );
+        assert_eq!(strength.next_script, "Script_StrengthFromMenu");
+
+        runtime
+            .data
+            .apply_script_runtime_command_in_session(
+                &mut session.state,
+                &mut session.overworld,
+                "RuntimeMap",
+                "Script_UsedStrength",
+                0,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute source SetStrengthFlag callasm");
+        assert_eq!(
+            session
+                .state
+                .flags
+                .is_engine_flag_set("ENGINE_STRENGTH_ACTIVE"),
+            Ok(true)
+        );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .memory
+                .get("wStrengthSpecies"),
+            Some(&strength_species)
+        );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .named_buffers
+                .get("STRING_BUFFER_1"),
+            Some(&strength_species)
+        );
         let flash = session
             .use_flash_field_move(&runtime, 1)
             .expect("use flash");
 
-        assert_eq!(strength.outcome.engine_flag, "ENGINE_STRENGTH_ACTIVE");
         assert_eq!(flash.outcome.engine_flag, "STATUSFLAGS_FLASH");
         assert_eq!(
             session
@@ -2806,8 +2863,30 @@
         );
         assert_eq!(
             session.state.flags.is_engine_flag_set("STATUSFLAGS_FLASH"),
+            Ok(false)
+        );
+        assert_eq!(
+            session.state.script_runtime.pending_flash_field_move,
+            Some(flash.outcome.clone())
+        );
+
+        runtime
+            .data
+            .apply_script_runtime_command_in_session(
+                &mut session.state,
+                &mut session.overworld,
+                "RuntimeMap",
+                "Script_UseFlash",
+                3,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute source BlindingFlash callasm");
+
+        assert_eq!(
+            session.state.flags.is_engine_flag_set("STATUSFLAGS_FLASH"),
             Ok(true)
         );
+        assert!(session.state.script_runtime.pending_flash_field_move.is_none());
         assert_ne!(strength.state_checksum, flash.state_checksum);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2824,6 +2903,7 @@
         );
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_scripted_battles();
+        add_runtime_deferred_field_move_global_scripts(&mut data);
         data.tilesets.insert(
             "johto".to_string(),
             test_tileset(&[("00", &["FLOOR", "WATER", "FLOOR", "FLOOR"])]),
@@ -2838,34 +2918,96 @@
             identity(),
         )
         .expect("runtime");
-        let mut session = runtime
-            .start_overworld_session(&asset_root, 0)
-            .expect("overworld session");
+        let mut shell = RuntimeGameShell::new_game(asset_root.clone(), runtime, 0)
+            .expect("runtime game shell");
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         player.moves = vec![LearnedMove {
             name: "SURF".to_string(),
             current_pp: 15,
             pp_ups: 0,
         }];
-        session
+        shell
+            .session
             .state
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
-        session.state.sync_party_from_storage();
-        session.state.badges.johto[3] = true;
-        session.overworld.player.tile = TilePosition::new(0, 0);
-        session.overworld.player.facing = Direction::Right;
+        shell.session.state.sync_party_from_storage();
+        shell.session.state.badges.johto[3] = true;
+        shell.session.overworld.player.tile = TilePosition::new(0, 0);
+        shell.session.overworld.player.facing = Direction::Right;
 
-        let surf = session.use_surf_field_move(&runtime, 0).expect("use surf");
+        shell.session.overworld.tileset.metatiles[0].collision[0] =
+            permissions::RIGHT_WALL;
+        assert!(
+            shell
+                .contextual_surf_direction_is_blocked()
+                .expect("evaluate exact CheckDirection mask"),
+            "contextual TrySurfOW must not prompt across the current tile's RIGHT_WALL"
+        );
+        shell.session.overworld.tileset.metatiles[0].collision[0] = permissions::FLOOR;
+        assert!(
+            !shell
+                .contextual_surf_direction_is_blocked()
+                .expect("evaluate clear Surf direction"),
+            "ordinary floor-to-water Surf direction must remain available"
+        );
+
+        shell
+            .session
+            .state
+            .flags
+            .set_engine_flag("ENGINE_ALWAYS_ON_BIKE", true)
+            .expect("set exact always-on-bike flag");
+        shell.session.overworld.player.mode = MovementMode::Bike;
+        let before = (shell.session.state.clone(), shell.session.overworld.clone());
+        let error = shell
+            .use_surf_field_move(0)
+            .expect_err("always-on-bike state must reject Surf atomically");
+        assert!(
+            format!("{error:#}").contains("ENGINE_ALWAYS_ON_BIKE"),
+            "{error:#}"
+        );
+        assert_eq!((shell.session.state.clone(), shell.session.overworld.clone()), before);
+        shell
+            .session
+            .state
+            .flags
+            .set_engine_flag("ENGINE_ALWAYS_ON_BIKE", false)
+            .expect("clear exact always-on-bike flag");
+        shell.session.overworld.player.mode = MovementMode::Normal;
+
+        let surf = shell.use_surf_field_move(0).expect("use surf");
 
         assert_eq!(surf.outcome.from_tile, TilePosition::new(0, 0));
         assert_eq!(surf.outcome.to_tile, TilePosition::new(1, 0));
-        assert_eq!(session.overworld.player.mode, MovementMode::Surf);
-        assert_eq!(session.overworld.player.tile, TilePosition::new(1, 0));
+        assert_eq!(shell.session.overworld.player.mode, MovementMode::Normal);
+        assert_eq!(shell.session.overworld.player.tile, TilePosition::new(0, 0));
         assert_eq!(
-            session.state.overworld,
-            OverworldMemory::from_snapshot(&session.overworld.snapshot())
+            shell.session.state.script_runtime.pending_surf_field_move,
+            Some(surf.outcome.clone())
+        );
+
+        for command_index in [3, 4, 5, 9] {
+            shell
+                .step_compiled_script_command(
+                    "RuntimeMap",
+                    "UsedSurfScript",
+                    command_index,
+                    ScriptRuntimeInputs::default(),
+                    ScriptPhoneInputs::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("execute UsedSurfScript command {command_index}: {error:#}")
+                });
+        }
+
+        assert_eq!(shell.session.overworld.player.mode, MovementMode::Surf);
+        assert_eq!(shell.session.overworld.player.tile, TilePosition::new(1, 0));
+        assert!(shell.session.state.script_runtime.pending_surf_field_move.is_none());
+        assert_eq!(
+            shell.session.state.overworld,
+            OverworldMemory::from_snapshot(&shell.session.overworld.snapshot())
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2948,6 +3090,7 @@
         );
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_scripted_battles();
+        add_runtime_deferred_field_move_global_scripts(&mut data);
         data.tilesets.insert(
             "johto".to_string(),
             test_tileset(&[
@@ -3000,7 +3143,55 @@
         assert_eq!(waterfall.outcome.from_tile, TilePosition::new(0, 5));
         assert_eq!(waterfall.outcome.to_tile, TilePosition::new(0, 1));
         assert_eq!(session.overworld.player.mode, MovementMode::Surf);
+        assert_eq!(session.overworld.player.tile, TilePosition::new(0, 5));
+        assert_eq!(
+            session.state.script_runtime.pending_waterfall_field_move,
+            Some(waterfall.outcome.clone())
+        );
+
+        for step_index in 0..waterfall.outcome.steps {
+            runtime
+                .data
+                .apply_script_movement_in_session(
+                    &mut session.state,
+                    &mut session.overworld,
+                    "RuntimeMap",
+                    ".loop@Script_UsedWaterfall",
+                    0,
+                )
+                .unwrap_or_else(|error| panic!("execute Waterfall step {step_index}: {error:#}"));
+            runtime
+                .data
+                .apply_script_runtime_command_in_session(
+                    &mut session.state,
+                    &mut session.overworld,
+                    "RuntimeMap",
+                    ".loop@Script_UsedWaterfall",
+                    1,
+                    ScriptRuntimeInputs::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("execute Waterfall continuation {step_index}: {error:#}")
+                });
+            let expected_value = if step_index + 1 == waterfall.outcome.steps {
+                "1"
+            } else {
+                "0"
+            };
+            assert_eq!(
+                session.state.script_runtime.script_value.as_deref(),
+                Some(expected_value)
+            );
+        }
+
         assert_eq!(session.overworld.player.tile, TilePosition::new(0, 1));
+        assert!(
+            session
+                .state
+                .script_runtime
+                .pending_waterfall_field_move
+                .is_none()
+        );
         assert_eq!(
             session.state.overworld,
             OverworldMemory::from_snapshot(&session.overworld.snapshot())
@@ -3043,6 +3234,9 @@
             .flags
             .set_engine_flag("ENGINE_FLYPOINT_NEW_BARK", true)
             .expect("set flypoint flag");
+        session.overworld.player.mode = MovementMode::Bike;
+        session.state.overworld = OverworldMemory::from_snapshot(&session.overworld.snapshot());
+        let source_snapshot = session.overworld.snapshot();
 
         let fly = session
             .use_fly_field_move(&runtime, &asset_root, 0, 14, "ENGINE_FLYPOINT_NEW_BARK")
@@ -3055,11 +3249,27 @@
         assert_eq!(fly.destination_spawn_identifier, 14);
         assert_eq!(fly.destination_map, "FlyMap");
         assert_eq!(fly.destination_tile, TilePosition::new(1, 1));
+        assert_eq!(session.overworld.snapshot(), source_snapshot);
+        let pending = session
+            .state
+            .script_runtime
+            .pending_field_travel
+            .as_ref()
+            .expect("FLY travel remains pending through the departure script");
+        assert_eq!(pending.move_id, "FLY");
+        assert_eq!(pending.source_map, "RuntimeMap");
+        assert_eq!(pending.destination_map, "FlyMap");
+
+        let committed = session
+            .commit_pending_field_travel(&runtime)
+            .expect("commit FLY at the source warp boundary");
+        assert_eq!(committed.move_id, "FLY");
         assert_eq!(session.overworld.map.name, "FlyMap");
         assert_eq!(session.overworld.player.tile, TilePosition::new(1, 1));
         assert_eq!(session.overworld.player.facing, Direction::Down);
         assert_eq!(session.overworld.player.mode, MovementMode::Normal);
         assert_eq!(session.state.last_spawn_identifier, Some(14));
+        assert!(session.state.script_runtime.pending_field_travel.is_none());
         assert_eq!(
             session.state.overworld,
             OverworldMemory::from_snapshot(&session.overworld.snapshot())
@@ -3192,6 +3402,7 @@
             .expect("register player");
         session.state.sync_party_from_storage();
         session.state.last_spawn_identifier = Some(21);
+        let source_snapshot = session.overworld.snapshot();
 
         let teleport = session
             .use_teleport_field_move(&runtime, &asset_root, 0)
@@ -3203,9 +3414,25 @@
         assert_eq!(teleport.destination_spawn_identifier, 21);
         assert_eq!(teleport.destination_map, "TeleportMap");
         assert_eq!(teleport.destination_tile, TilePosition::new(1, 1));
+        assert_eq!(session.overworld.snapshot(), source_snapshot);
+        let pending = session
+            .state
+            .script_runtime
+            .pending_field_travel
+            .as_ref()
+            .expect("TELEPORT travel remains pending through the departure script");
+        assert_eq!(pending.move_id, "DIG");
+        assert_eq!(pending.source_map, "RuntimeMap");
+        assert_eq!(pending.destination_map, "TeleportMap");
+
+        let committed = session
+            .commit_pending_field_travel(&runtime)
+            .expect("commit TELEPORT at the source warp boundary");
+        assert_eq!(committed.move_id, "DIG");
         assert_eq!(session.overworld.map.name, "TeleportMap");
         assert_eq!(session.overworld.player.tile, TilePosition::new(1, 1));
         assert_eq!(session.state.last_spawn_identifier, Some(21));
+        assert!(session.state.script_runtime.pending_field_travel.is_none());
         assert_eq!(
             session.state.overworld,
             OverworldMemory::from_snapshot(&session.overworld.snapshot())
@@ -3305,7 +3532,7 @@
     }
 
     #[test]
-    fn runtime_headbutt_field_move_uses_exact_field_encounter_table() {
+    fn runtime_headbutt_menu_defers_exact_rng_until_tree_mon_encounter_callasm() {
         let root = temp_repository_root("field-move-headbutt");
         write_headbutt_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -3315,47 +3542,156 @@
             test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
+        add_runtime_headbutt_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
-        let mut session = runtime
-            .start_overworld_session(&asset_root, 0)
-            .expect("overworld session");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), 0).expect("game shell");
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         player.moves = vec![LearnedMove {
             name: "HEADBUTT".to_string(),
             current_pp: 15,
             pp_ups: 0,
         }];
-        session
+        shell
+            .session_mut()
             .state
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
-        session.state.sync_party_from_storage();
-        session.overworld.player.facing = Direction::Down;
-        session.state.rng_seed = 1;
-
-        let use_result = session
-            .use_headbutt_field_move(&runtime, 0, 0)
-            .expect("use headbutt");
-
-        assert_eq!(
-            use_result.field_encounter.kind,
-            FieldEncounterKind::Headbutt
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().overworld.player.facing = Direction::Down;
+        shell.session_mut().divider = RuntimeDividerSource::replay(
+            [255, 0, 53, 0]
+                .into_iter()
+                .chain(std::iter::repeat_n(0, 32)),
         );
-        assert_eq!(use_result.field_encounter.target_tile_x, 0);
-        assert_eq!(use_result.field_encounter.target_tile_y, 1);
-        assert_eq!(use_result.field_encounter.score, Some(0));
-        assert_eq!(use_result.field_encounter.chance_roll, 0);
-        assert_eq!(use_result.field_encounter.entry_roll, Some(88));
-        let battle = use_result.wild_battle.expect("headbutt battle");
-        assert_eq!(battle.enemy_pokemon.species.id, "CHIKORITA");
-        assert_eq!(battle.enemy_pokemon.level, 12);
-        assert!(matches!(session.state.battle, BattleMemory::Wild { .. }));
+        let state_before_dispatch = shell.session().state().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        let dispatch = shell
+            .queue_headbutt_script(0, true)
+            .expect("queue HeadbuttFromMenuScript");
+
+        assert_eq!(dispatch.next_script, "HeadbuttFromMenuScript");
+        assert_eq!(shell.session().state().random_state, state_before_dispatch.random_state);
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
+        assert_eq!(
+            shell.session().state().script_runtime.memory.get("wCurPartyMon"),
+            Some(&"0".to_string())
+        );
+        let frame = &shell.retained_runtime_commands()[retained_before];
+        let recorded = crystal_assets::decode_runtime_mutation_command_frame(
+            frame,
+            &state_before_dispatch,
+        )
+        .expect("decode journaled Headbutt menu dispatch");
+        assert_eq!(
+            recorded,
+            RuntimeMutationCommand::QueueHeadbuttScript(RuntimeHeadbuttScriptCommand {
+                party_index: 0,
+                from_menu: true,
+            })
+        );
+
+        let resolved = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                "HeadbuttScript",
+                4,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute TreeMonEncounter after the tree animation");
+        let RuntimeMutationResult::TreeMonEncounterResolved(outcome) = resolved.mutation.result
+        else {
+            panic!("TreeMonEncounter returned the wrong mutation");
+        };
+        assert_eq!(outcome.roll.kind, FieldEncounterKind::Headbutt);
+        assert_eq!(outcome.roll.target_tile_x, 0);
+        assert_eq!(outcome.roll.target_tile_y, 1);
+        assert_eq!(outcome.roll.score, Some(0));
+        assert_eq!(outcome.roll.chance_roll, 0);
+        assert_eq!(outcome.roll.entry_roll, Some(54));
+        let encounter = outcome
+            .roll
+            .resolved
+            .as_ref()
+            .expect("Headbutt roll resolves the common encounter");
+        assert_eq!(encounter.encounter.species, "CHIKORITA");
+        assert_eq!(encounter.encounter.level, 12);
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_contextual_headbutt_queues_headbutt_script_without_the_menu_wrapper() {
+        let root = temp_repository_root("field-move-contextual-headbutt");
+        write_headbutt_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        data.tilesets.insert(
+            "johto".to_string(),
+            test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
+        );
+        add_runtime_field_encounters(&mut data);
+        add_runtime_headbutt_global_scripts(&mut data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.moves = vec![LearnedMove {
+            name: "HEADBUTT".to_string(),
+            current_pp: 15,
+            pp_ups: 0,
+        }];
+        shell
+            .session_mut()
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().overworld.player.facing = Direction::Down;
+        let state_before_dispatch = shell.session().state().clone();
+        let retained_before = shell.retained_runtime_commands().len();
+
+        let dispatch = shell
+            .queue_headbutt_script(0, false)
+            .expect("queue contextual HeadbuttScript");
+
+        assert_eq!(dispatch.next_script, "HeadbuttScript");
+        let recorded = crystal_assets::decode_runtime_mutation_command_frame(
+            &shell.retained_runtime_commands()[retained_before],
+            &state_before_dispatch,
+        )
+        .expect("decode journaled contextual Headbutt dispatch");
+        assert_eq!(
+            recorded,
+            RuntimeMutationCommand::QueueHeadbuttScript(RuntimeHeadbuttScriptCommand {
+                party_index: 0,
+                from_menu: false,
+            })
+        );
+        assert_eq!(
+            shell
+                .session()
+                .state()
+                .script_runtime
+                .next_script
+                .as_ref()
+                .map(|location| location.script.as_str()),
+            Some("HeadbuttScript")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3475,7 +3811,7 @@
     }
 
     #[test]
-    fn runtime_headbutt_field_move_rejects_missing_field_encounters_without_rng_change() {
+    fn runtime_tree_mon_encounter_rejects_missing_field_encounters_without_rng_change() {
         let root = temp_repository_root("field-move-headbutt-missing-table");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -3484,6 +3820,7 @@
             "johto".to_string(),
             test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
+        add_runtime_headbutt_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
             CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -3505,12 +3842,23 @@
             .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.rng_seed = 1;
+        session.overworld.player.facing = Direction::Down;
+        session
+            .queue_headbutt_script(&runtime, 0, true)
+            .expect("menu dispatch succeeds before TreeMonEncounter");
         let before = session.state.clone();
+        let command = RuntimeScriptCommandRef::new("RuntimeMap", "HeadbuttScript", 4);
+        let mut divider = RuntimeDividerSource::replay([]);
 
-        let error = session
-            .use_headbutt_field_move(&runtime, 0, 0)
-            .expect_err("missing field encounters reject headbutt");
+        let error = runtime
+            .data
+            .resolve_tree_mon_encounter(
+                &mut session.state,
+                &session.overworld,
+                &command,
+                &mut divider,
+            )
+            .expect_err("missing field encounters reject TreeMonEncounter");
         let error = error_debug(error);
 
         assert!(error.contains("missing field encounters"));
@@ -3519,7 +3867,7 @@
     }
 
     #[test]
-    fn runtime_headbutt_field_move_rejects_present_map_missing_table_without_rng_change() {
+    fn runtime_tree_mon_encounter_rejects_present_map_missing_table_without_rng_change() {
         let root = temp_repository_root("field-move-headbutt-present-map-missing-table");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -3529,6 +3877,7 @@
             test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
+        add_runtime_headbutt_global_scripts(&mut data);
         data.field_encounters
             .get_mut("RuntimeMap")
             .expect("RuntimeMap field encounters")
@@ -3555,18 +3904,29 @@
             .register_capture_in_box(0, player)
             .expect("register player");
         session.state.sync_party_from_storage();
-        session.state.rng_seed = 1;
+        session.overworld.player.facing = Direction::Down;
+        session
+            .queue_headbutt_script(&runtime, 0, true)
+            .expect("menu dispatch succeeds before TreeMonEncounter");
         let before = session.state.clone();
+        let command = RuntimeScriptCommandRef::new("RuntimeMap", "HeadbuttScript", 4);
+        let mut divider = RuntimeDividerSource::replay([]);
 
-        let error = session
-            .use_headbutt_field_move(&runtime, 0, 0)
-            .expect_err("present map missing headbutt table");
+        let error = runtime
+            .data
+            .resolve_tree_mon_encounter(
+                &mut session.state,
+                &session.overworld,
+                &command,
+                &mut divider,
+            )
+            .expect_err("present map missing Headbutt table");
         let error = error_debug(error);
 
         assert!(
-            error.contains("MissingFieldEncounterTable")
+            error.contains("Headbutt field encounter table")
                 && error.contains("RuntimeMap")
-                && error.contains("Headbutt"),
+                && error.contains("missing from the modpack"),
             "{error}"
         );
         assert_eq!(session.state, before);
@@ -3574,7 +3934,7 @@
     }
 
     #[test]
-    fn runtime_headbutt_field_move_rejects_empty_selected_bucket_without_rng_change() {
+    fn runtime_tree_mon_encounter_rejects_empty_selected_bucket_without_rng_change() {
         let root = temp_repository_root("field-move-headbutt-empty-rare");
         write_floor_tileset(&root, "johto");
         let asset_root = AssetRoot::new(&root);
@@ -3584,6 +3944,7 @@
             test_tileset(&[("00", &["FLOOR", "FLOOR", "HEADBUTT_TREE", "FLOOR"])]),
         );
         add_runtime_field_encounters(&mut data);
+        add_runtime_headbutt_global_scripts(&mut data);
         data.field_encounters
             .get_mut("RuntimeMap")
             .expect("RuntimeMap field encounters")
@@ -3613,18 +3974,32 @@
             .expect("register player");
         session.state.sync_party_from_storage();
         session.overworld.player.facing = Direction::Down;
-        session.state.rng_seed = 1;
+        session
+            .queue_headbutt_script(&runtime, 0, true)
+            .expect("menu dispatch succeeds before TreeMonEncounter");
         let before = session.state.clone();
+        let command = RuntimeScriptCommandRef::new("RuntimeMap", "HeadbuttScript", 4);
+        let mut divider = RuntimeDividerSource::replay(
+            [255, 0, 53, 0]
+                .into_iter()
+                .chain(std::iter::repeat_n(0, 32)),
+        );
 
-        let error = session
-            .use_headbutt_field_move(&runtime, 0, 0)
+        let error = runtime
+            .data
+            .resolve_tree_mon_encounter(
+                &mut session.state,
+                &session.overworld,
+                &command,
+                &mut divider,
+            )
             .expect_err("empty selected rare bucket");
         let error = error_debug(error);
 
         assert!(
-            error.contains("EmptyFieldEncounterEntries")
+            error.contains("Headbutt field encounter table")
                 && error.contains("RuntimeMap")
-                && error.contains("Headbutt")
+                && error.contains("no entries")
                 && error.contains("rare"),
             "{error}"
         );
@@ -3633,7 +4008,7 @@
     }
 
     #[test]
-    fn runtime_sweet_scent_field_move_starts_exact_surface_wild_battle() {
+    fn runtime_sweet_scent_menu_defers_rng_and_battle_until_exact_script_boundaries() {
         let root = temp_repository_root("field-move-sweet-scent");
         write_grass_tileset(&root, "johto");
         write_midi(
@@ -3642,32 +4017,30 @@
                 .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
         );
         let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_grass_encounter();
+        add_runtime_sweet_scent_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(
-                minimal_runtime_data_with_grass_encounter(),
-                report(),
-            ),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
-        let mut session = runtime
-            .start_overworld_session(&asset_root, 0)
-            .expect("overworld session");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         player.moves = vec![LearnedMove {
             name: "SWEET_SCENT".to_string(),
             current_pp: 20,
             pp_ups: 0,
         }];
-        session
+        shell.session_mut()
             .state
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
-        session.state.sync_party_from_storage();
-        session.state.random_state = crystal_core::random::CrystalRandomState::default();
-        session.divider = crystal_core::random::RuntimeDividerSource::replay([
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().state.random_state = crystal_core::random::CrystalRandomState::default();
+        shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([
             0, 0, // roaming selector
             0, 0, // slot
             0, 0, // level
@@ -3676,13 +4049,28 @@
             0, 0, // speed/special
         ]);
 
-        let use_result = session
-            .use_sweet_scent_field_move(&runtime, 0)
-            .expect("use sweet scent");
+        let random_before = shell.session().state().random_state;
+        let dispatch = shell
+            .queue_sweet_scent_from_menu(0)
+            .expect("queue Sweet Scent script");
+        assert_eq!(dispatch.next_script, ".SweetScent@SweetScentFromMenu");
+        assert_eq!(shell.session().state().random_state, random_before);
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
 
-        assert_eq!(use_result.actor_party_index, 0);
-        assert_eq!(use_result.actor_species, "CHIKORITA");
-        let wild_encounter = use_result
+        let resolved = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                5,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute exact SweetScentEncounter callasm");
+        let RuntimeMutationResult::SweetScentEncounterResolved(outcome) = resolved.mutation.result
+        else {
+            panic!("SweetScentEncounter returned the wrong mutation");
+        };
+        let wild_encounter = outcome
             .wild_encounter
             .as_ref()
             .expect("grass Sweet Scent encounter");
@@ -3698,16 +4086,40 @@
             .expect("resolved");
         assert_eq!(resolved.encounter.species, "CHIKORITA");
         assert_eq!(resolved.level, 14);
-        let wild_battle = use_result.wild_battle.as_ref().expect("Sweet Scent battle");
-        assert_eq!(wild_battle.enemy_pokemon.species.id, "CHIKORITA");
-        assert_eq!(wild_battle.enemy_pokemon.level, 14);
-        assert_eq!(&wild_battle.encounter, wild_encounter);
-        assert!(matches!(session.state.battle, BattleMemory::Wild { .. }));
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
+        assert_eq!(shell.session().state().script_runtime.script_value.as_deref(), Some("1"));
+        shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                9,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute Sweet Scent randomwildmon");
+        let started = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                10,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute Sweet Scent startbattle");
+        let RuntimeMutationResult::ScriptedWildBattleStarted(start) = started.mutation.result else {
+            panic!("Sweet Scent startbattle returned the wrong mutation");
+        };
+        assert_eq!(start.species, "CHIKORITA");
+        assert_eq!(start.level, 14);
+        assert!(matches!(
+            shell.session().state().battle,
+            BattleMemory::StaticWild { .. }
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn runtime_sweet_scent_field_move_rejects_missing_surface_without_rng_change() {
+    fn runtime_sweet_scent_exact_callasm_returns_false_on_missing_surface_without_rng() {
         let root = temp_repository_root("field-move-sweet-scent-missing-surface");
         write_grass_tileset(&root, "johto");
         write_midi(
@@ -3716,45 +4128,160 @@
                 .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
         );
         let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_grass_encounter();
+        add_runtime_sweet_scent_global_scripts(&mut data);
         let runtime = CrystalRuntime::from_compiled_pack(
             &asset_root,
-            CompiledGamePack::new_unchecked_for_tests(
-                minimal_runtime_data_with_grass_encounter(),
-                report(),
-            ),
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
             identity(),
         )
         .expect("runtime");
-        let mut session = runtime
-            .start_overworld_session(&asset_root, 0)
-            .expect("overworld session");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
         let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
         player.moves = vec![LearnedMove {
             name: "SWEET_SCENT".to_string(),
             current_pp: 20,
             pp_ups: 0,
         }];
-        session
+        shell.session_mut()
             .state
             .storage
             .register_capture_in_box(0, player)
             .expect("register player");
-        session.state.sync_party_from_storage();
-        for metatile in &mut session.overworld.tileset.metatiles {
+        shell.session_mut().state.sync_party_from_storage();
+        for metatile in &mut shell.session_mut().overworld.tileset.metatiles {
             metatile.collision = [
                 crystal_core::world::collision::permissions::FLOOR;
                 4
             ];
         }
-        session.divider = crystal_core::random::RuntimeDividerSource::replay([]);
-        let before = session.state.clone();
+        shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([]);
+        let before = shell.session().state().clone();
+        shell.queue_sweet_scent_from_menu(0).expect("queue Sweet Scent script");
+        let resolved = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                5,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("Sweet Scent on a non-encounter tile resolves false");
+        let RuntimeMutationResult::SweetScentEncounterResolved(outcome) = resolved.mutation.result
+        else {
+            panic!("SweetScentEncounter returned the wrong mutation");
+        };
+        assert_eq!(outcome.wild_encounter, None);
+        assert_eq!(shell.session().state().random_state, before.random_state);
+        assert_eq!(shell.session().state().script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(shell.session().state().battle, BattleMemory::Inactive);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        let use_result = session
-            .use_sweet_scent_field_move(&runtime, 0)
-            .expect("Sweet Scent on a non-encounter tile is a no-battle outcome");
-        assert_eq!(use_result.wild_encounter, None);
-        assert_eq!(use_result.wild_battle, None);
-        assert_eq!(session.state.random_state, before.random_state);
+    #[test]
+    fn runtime_sweet_scent_preserves_roaming_battle_identity_through_startbattle() {
+        let root = temp_repository_root("field-move-sweet-scent-roaming");
+        write_grass_tileset(&root, "johto");
+        write_midi(
+            &root
+                .join("apps/web/assets/data")
+                .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+        );
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_grass_encounter();
+        add_runtime_sweet_scent_global_scripts(&mut data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut shell =
+            RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.moves = vec![LearnedMove {
+            name: "SWEET_SCENT".to_string(),
+            current_pp: 20,
+            pp_ups: 0,
+        }];
+        shell
+            .session_mut()
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        shell.session_mut().state.sync_party_from_storage();
+        shell.session_mut().state.roaming_pokemon[0] =
+            crystal_core::state::RoamingPokemonState {
+                species: Some("CHIKORITA".to_string()),
+                level: 40,
+                map_group: 1,
+                map_number: 1,
+                hp: 1,
+                dvs_be: [0, 0],
+            };
+        shell.session_mut().state.random_state =
+            crystal_core::random::CrystalRandomState { add: 0xff, sub: 0 };
+        shell.session_mut().divider = RuntimeDividerSource::replay(
+            [0, 255]
+                .into_iter()
+                .chain(std::iter::repeat_n(0, 32)),
+        );
+
+        shell
+            .queue_sweet_scent_from_menu(0)
+            .expect("queue Sweet Scent script");
+        let resolved = shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                5,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute SweetScentEncounter");
+        let RuntimeMutationResult::SweetScentEncounterResolved(outcome) = resolved.mutation.result
+        else {
+            panic!("SweetScentEncounter returned the wrong mutation");
+        };
+        assert_eq!(
+            outcome
+                .wild_encounter
+                .as_ref()
+                .expect("roaming encounter roll")
+                .roaming_slot,
+            Some(0)
+        );
+        shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                9,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute randomwildmon");
+        shell
+            .step_compiled_script_command(
+                "RuntimeMap",
+                ".SweetScent@SweetScentFromMenu",
+                10,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .expect("execute startbattle");
+
+        assert!(matches!(
+            &shell.session().state().battle,
+            BattleMemory::StaticWild {
+                battle_type,
+                battle_music,
+                roaming_slot: Some(0),
+                ..
+            } if battle_type == "BATTLETYPE_ROAMING"
+                && battle_music == "MUSIC_SUICUNE_BATTLE"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

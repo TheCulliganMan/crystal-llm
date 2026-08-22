@@ -2,7 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::battle::stats::{BattleStatMultiplierTables, apply_stage};
 use crate::models::{Pokemon, Stat};
-use crate::random::Random;
+use crate::random::{BattleRandomSource, CrystalRandom, DividerSource};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -102,8 +102,24 @@ pub struct BattleEscapeAttempt {
     pub roll: Option<u8>,
     pub attempts_before: u8,
     pub attempts_after: u8,
-    pub rng_seed_after: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactBattleEscapeError<E> {
+    Escape(BattleEscapeError),
+    Divider(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ExactBattleEscapeError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Escape(error) => write!(formatter, "battle escape: {error:?}"),
+            Self::Divider(error) => write!(formatter, "battle escape divider source: {error}"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for ExactBattleEscapeError<E> {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,7 +143,7 @@ pub fn attempt_wild_battle_escape(
     stat_multipliers: &BattleStatMultiplierTables,
     rules: &BattleEscapeRules,
     attempts_before: u8,
-    rng: &mut Random,
+    rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleEscapeAttempt, BattleEscapeError> {
     let player_speed = escape_speed(EscapeSide::Player, player, stat_multipliers)?;
     let enemy_speed = escape_speed(EscapeSide::Enemy, enemy, stat_multipliers)?;
@@ -140,7 +156,6 @@ pub fn attempt_wild_battle_escape(
             roll: None,
             attempts_before,
             attempts_after,
-            rng_seed_after: rng.seed(),
         });
     }
     let roll = rng.battle_random_byte();
@@ -151,7 +166,45 @@ pub fn attempt_wild_battle_escape(
         roll: Some(roll),
         attempts_before,
         attempts_after,
-        rng_seed_after: rng.seed(),
+    })
+}
+
+pub fn attempt_wild_battle_escape_exact<S>(
+    player: &Pokemon,
+    enemy: &Pokemon,
+    stat_multipliers: &BattleStatMultiplierTables,
+    rules: &BattleEscapeRules,
+    attempts_before: u8,
+    rng: &mut CrystalRandom<&mut S>,
+) -> Result<BattleEscapeAttempt, ExactBattleEscapeError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    let player_speed = escape_speed(EscapeSide::Player, player, stat_multipliers)
+        .map_err(ExactBattleEscapeError::Escape)?;
+    let enemy_speed = escape_speed(EscapeSide::Enemy, enemy, stat_multipliers)
+        .map_err(ExactBattleEscapeError::Escape)?;
+    let chance = escape_chance(player_speed, enemy_speed, attempts_before, rules)
+        .map_err(ExactBattleEscapeError::Escape)?;
+    let attempts_after = attempts_before.saturating_add(1);
+    if player_speed >= enemy_speed || chance >= rules.rng_roll_values {
+        return Ok(BattleEscapeAttempt {
+            escaped: true,
+            chance,
+            roll: None,
+            attempts_before,
+            attempts_after,
+        });
+    }
+    let roll = rng
+        .battle_random()
+        .map_err(ExactBattleEscapeError::Divider)?;
+    Ok(BattleEscapeAttempt {
+        escaped: u16::from(roll) <= chance,
+        chance,
+        roll: Some(roll),
+        attempts_before,
+        attempts_after,
     })
 }
 
@@ -213,6 +266,7 @@ mod tests {
     use super::*;
     use crate::battle::stats::BattleStatMultiplier;
     use crate::models::{BaseStats, Dv, PokemonSpecies};
+    use crate::random::Random;
 
     fn stat_multipliers() -> BattleStatMultiplierTables {
         BattleStatMultiplierTables {
@@ -340,7 +394,7 @@ mod tests {
         assert_eq!(outcome.roll, None);
         assert_eq!(outcome.attempts_before, 2);
         assert_eq!(outcome.attempts_after, 3);
-        assert_eq!(outcome.rng_seed_after, 7);
+        assert_eq!(rng.seed(), 7);
     }
 
     #[test]
@@ -361,7 +415,7 @@ mod tests {
 
         assert!(outcome.escaped);
         assert_eq!(outcome.roll, None);
-        assert_eq!(outcome.rng_seed_after, 7);
+        assert_eq!(rng.seed(), 7);
     }
 
     #[test]
@@ -384,7 +438,55 @@ mod tests {
         assert_eq!(outcome.roll, Some(64));
         assert!(!outcome.escaped);
         assert_eq!(outcome.attempts_after, 1);
-        assert_eq!(outcome.rng_seed_after, rng.seed());
+    }
+
+    #[test]
+    fn exact_escape_uses_battle_random_and_zero_read_speed_shortcut() {
+        let slow = pokemon("GEODUDE", 20);
+        let fast = pokemon("RATTATA", 120);
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng =
+            CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut divider);
+        let outcome = attempt_wild_battle_escape_exact(
+            &slow,
+            &fast,
+            &stat_multipliers(),
+            &escape_rules(),
+            0,
+            &mut rng,
+        )
+        .expect("exact escape roll");
+        assert!(outcome.roll.is_some());
+        assert_eq!(divider.consumed(), 2);
+
+        let mut empty = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut empty);
+        let guaranteed = attempt_wild_battle_escape_exact(
+            &fast,
+            &slow,
+            &stat_multipliers(),
+            &escape_rules(),
+            0,
+            &mut rng,
+        )
+        .expect("faster player consumes no DIV");
+        assert!(guaranteed.escaped);
+        assert_eq!(guaranteed.roll, None);
+        assert_eq!(empty.consumed(), 0);
+
+        let mut short = crate::random::ReplayDivider::new([0]);
+        let mut rng = CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut short);
+        assert!(matches!(
+            attempt_wild_battle_escape_exact(
+                &slow,
+                &fast,
+                &stat_multipliers(),
+                &escape_rules(),
+                0,
+                &mut rng,
+            ),
+            Err(ExactBattleEscapeError::Divider(_))
+        ));
     }
 
     #[test]

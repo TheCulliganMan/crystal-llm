@@ -90,7 +90,11 @@ const CONTROL_CODE_REPLACEMENTS = {
   "<DONE>": "",
   "<PROMPT>": "",
 };
-const TEXT_DIRS = [path.join("data", "text"), path.join("data", "phone", "text")];
+const TEXT_DIRS = [
+  path.join("data", "text"),
+  path.join("data", "phone", "text"),
+  path.join("data", "battle_tower"),
+];
 const TEXT_JSON_FILENAME = "asm_text.json";
 const MOVE_NAMES_JSON_FILENAME = "move_names.json";
 const SILENT_TEXT_TOKENS = new Set([
@@ -191,21 +195,6 @@ const extractTextString = (argument) => {
   }
   return String(argument).trim().replace(/@+$/g, "");
 };
-const parseTextDigitCount = (argument) => {
-  const tokens = String(argument)
-    .split(",")
-    .map((token) => token.trim().replace(/,$/, ""));
-  for (const token of tokens.reverse()) {
-    if (!token) {
-      continue;
-    }
-    const digits = Number(token);
-    if (!Number.isNaN(digits)) {
-      return Math.max(1, digits);
-    }
-  }
-  return 1;
-};
 const parseTextAsmFile = (filePath) => {
   const results = {};
   let label = null;
@@ -266,16 +255,15 @@ const parseTextAsmFile = (filePath) => {
       continue;
     }
     if (token === "text_start") {
-      buffer.push("\n\n");
       continue;
     }
     if (token === "text_ram") {
       const match = /wStringBuffer(\d+)/i.exec(argument);
-      buffer.push(match ? `<STRING_BUFFER_${match[1]}>` : "@");
+      buffer.push(match ? `<STRING_BUFFER_${match[1]}>` : `<RAM:${argument.trim()}>`);
       continue;
     }
     if (token === "text_decimal") {
-      buffer.push("@".repeat(parseTextDigitCount(argument)));
+      buffer.push(`<DECIMAL:${argument.trim()}>`);
       continue;
     }
     if (token === "text_today") {
@@ -1974,6 +1962,7 @@ const parseDefConstants = (filePath, baseConstants = {}) => {
   }
   const known = { ...baseConstants };
   let constValue = 0;
+  let constIncrement = 1;
   for (const rawLine of readLines(filePath)) {
     const line = rawLine.split(";", 1)[0].trim();
     if (!line) {
@@ -1981,11 +1970,13 @@ const parseDefConstants = (filePath, baseConstants = {}) => {
     }
     const parts = line.split(/\s+/);
     if (parts[0] === "const_def") {
-      const expr = parts.slice(1).join(" ");
+      const operands = parts.slice(1).join(" ").split(",").map((operand) => operand.trim());
       try {
-        constValue = expr ? resolveExpression(expr, known) : 0;
+        constValue = operands[0] ? resolveExpression(operands[0], known) : 0;
+        constIncrement = operands[1] ? resolveExpression(operands[1], known) : 1;
       } catch {
         constValue = 0;
+        constIncrement = 1;
       }
       known.const_value = constValue;
       continue;
@@ -1994,16 +1985,16 @@ const parseDefConstants = (filePath, baseConstants = {}) => {
       const name = parts[1];
       constants[name] = constValue;
       known[name] = constValue;
-      constValue += 1;
+      constValue += constIncrement;
       known.const_value = constValue;
       continue;
     }
     if (parts[0] === "const_skip") {
       const expr = parts.slice(1).join(" ");
       try {
-        constValue += expr ? resolveExpression(expr, known) : 1;
+        constValue += (expr ? resolveExpression(expr, known) : 1) * constIncrement;
       } catch {
-        constValue += 1;
+        constValue += constIncrement;
       }
       known.const_value = constValue;
       continue;
@@ -2182,9 +2173,23 @@ const exportStoryEventScriptConstants = () => {
   Object.assign(
     global,
     parseDefConstants(path.join(disassemblyRoot, "constants", "pokemon_constants.asm"), global),
+    parseDefConstants(path.join(disassemblyRoot, "constants", "pokemon_data_constants.asm"), global),
     parseDefConstants(path.join(disassemblyRoot, "constants", "battle_constants.asm"), global),
-    parseDefConstants(path.join(disassemblyRoot, "constants", "ram_constants.asm"), global)
+    parseDefConstants(path.join(disassemblyRoot, "constants", "landmark_constants.asm"), global),
+    parseDefConstants(path.join(disassemblyRoot, "constants", "phone_constants.asm"), global),
+    parseDefConstants(path.join(disassemblyRoot, "constants", "ram_constants.asm"), global),
+    parseDefConstants(path.join(disassemblyRoot, "engine", "pokemon", "move_mon.asm"), global)
   );
+  const mapDataConstants = parseDefConstants(
+    path.join(disassemblyRoot, "constants", "map_data_constants.asm"),
+    global
+  );
+  for (const name of ["SPAWN_HOME", "SPAWN_NEW_BARK", "SPAWN_MT_SILVER"]) {
+    if (!Number.isInteger(mapDataConstants[name])) {
+      throw new Error(`Could not parse ${name} from map_data_constants.asm.`);
+    }
+    global[name] = mapDataConstants[name];
+  }
   const maps = {};
   const mapsDir = path.join(disassemblyRoot, "maps");
   for (const entry of fs.readdirSync(mapsDir, { withFileTypes: true })) {
@@ -2210,9 +2215,63 @@ const exportStoryEventScriptConstants = () => {
       maps[mapName] = constants;
     }
   }
+  const payload = { global, maps };
   fs.writeFileSync(
     path.join(outDir, "story_event_script_constants.json"),
-    `${JSON.stringify({ global, maps }, null, 2)}\n`
+    `${JSON.stringify(payload, null, 2)}\n`
+  );
+
+  // Keep the committed modular mirror source-derived without requiring the
+  // full graphics/audio exporter. Its only intentional additions are the
+  // decoration flags consumed by the two field box-item rules.
+  const modularConstantsPath = path.join(
+    outDir,
+    "content-packs",
+    "core-modular",
+    "story_event_script_constants",
+    "constants.json"
+  );
+  const fieldBoxItemsPath = path.join(outDir, "field_box_items.json");
+  if (fs.existsSync(modularConstantsPath) && fs.existsSync(fieldBoxItemsPath)) {
+    const modularGlobal = { ...global };
+    const fieldBoxItems = JSON.parse(fs.readFileSync(fieldBoxItemsPath, "utf8"));
+    for (const entry of Object.values(fieldBoxItems)) {
+      const decorationFlag = entry?.decoration_flag;
+      if (typeof decorationFlag === "string" && modularGlobal[decorationFlag] === undefined) {
+        modularGlobal[decorationFlag] = 0;
+      }
+    }
+    fs.writeFileSync(
+      modularConstantsPath,
+      `${JSON.stringify({ global: modularGlobal, maps }, null, 2)}\n`
+    );
+  }
+};
+
+const exportRuntimeTitleScreen = () => {
+  const targetPath = path.join(
+    outDir,
+    "content-packs",
+    "core-modular",
+    "runtime_title_screen",
+    "title.json"
+  );
+  if (!fs.existsSync(targetPath)) {
+    return;
+  }
+  const introMenu = fs.readFileSync(
+    path.join(disassemblyRoot, "engine", "menus", "intro_menu.asm"),
+    "utf8"
+  );
+  const matches = [...introMenu.matchAll(/; Play the title screen music\.\s*\n\s*ld de,\s*([A-Z0-9_]+)/g)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one source title-music load in intro_menu.asm, found ${matches.length}.`
+    );
+  }
+  fs.writeFileSync(
+    targetPath,
+    `${JSON.stringify({ title_music: matches[0][1] }, null, 2)}\n`
   );
 };
 
@@ -2335,10 +2394,17 @@ const exportAsmText = () => {
   if (!Object.keys(payload).length) {
     throw new Error(`Missing text sources needed to build ${TEXT_JSON_FILENAME}`);
   }
-  fs.writeFileSync(
-    path.join(outDir, TEXT_JSON_FILENAME),
-    `${JSON.stringify(payload, null, 2)}\n`
+  const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+  fs.writeFileSync(path.join(outDir, TEXT_JSON_FILENAME), serialized);
+  const modularTextPath = path.join(
+    outDir,
+    "content-packs",
+    "core-modular",
+    "asm_text",
+    "texts.json"
   );
+  fs.mkdirSync(path.dirname(modularTextPath), { recursive: true });
+  fs.writeFileSync(modularTextPath, serialized);
 };
 
 const exportMoveNames = () => {
@@ -2445,6 +2511,7 @@ const exportRuntimeAssets = ({
   exportPermanentPhoneNumbers();
   exportInitializeEvents({ projectRoot });
   exportStoryEventScriptConstants();
+  exportRuntimeTitleScreen();
   exportPhoneContacts();
   exportAsmText();
   exportMoveNames();
@@ -2458,4 +2525,4 @@ if (require.main === module) {
   exportRuntimeAssets();
 }
 
-module.exports = { exportRuntimeAssets };
+module.exports = { exportRuntimeAssets, exportAsmText };

@@ -7,6 +7,11 @@ fn field_move_play_refusals_do_not_swallow_unsupported_pack_coverage() {
             badge_index: 5,
         }
     )));
+    assert!(party_field_move_error_is_play_refusal(&anyhow::anyhow!(
+        FieldMoveError::AlwaysOnBike {
+            move_id: "SURF".to_string(),
+        }
+    )));
     assert!(!party_field_move_error_is_play_refusal(&anyhow::anyhow!(
         FieldMoveError::UnsupportedReplacement {
             move_id: "CUT".to_string(),
@@ -20,6 +25,118 @@ fn field_move_play_refusals_do_not_swallow_unsupported_pack_coverage() {
             block_id: 0x30,
         }
     )));
+}
+
+#[test]
+fn contextual_surf_prompt_obeys_the_source_player_state_gates() {
+    assert!(source_allows_contextual_surf_prompt(
+        MovementMode::Normal,
+        false
+    ));
+    assert!(source_allows_contextual_surf_prompt(
+        MovementMode::Bike,
+        false
+    ));
+    assert!(!source_allows_contextual_surf_prompt(
+        MovementMode::Bike,
+        true
+    ));
+    assert!(!source_allows_contextual_surf_prompt(
+        MovementMode::Surf,
+        false
+    ));
+    assert!(!source_allows_contextual_surf_prompt(
+        MovementMode::SurfPika,
+        false
+    ));
+}
+
+#[test]
+fn contextual_whirlpool_prompt_requires_the_source_block_replacement() {
+    let rule = crate::RuntimeFieldMoveRuleKey {
+        rule_id: "whirlpool".to_string(),
+        rule_kind: "block".to_string(),
+        move_id: Some("WHIRLPOOL".to_string()),
+        item_id: None,
+        badge_region: Some("johto".to_string()),
+        badge_index: Some(6),
+        engine_flag: None,
+        escape_rope_mode: None,
+        target_collisions: vec![0x38],
+        blocked_collisions: Vec::new(),
+        replacements: [(
+            "johto".to_string(),
+            [(
+                0x07,
+                crate::RuntimeFieldMoveReplacementKey {
+                    replacement_block_id: 0x36,
+                    variant: "whirlpool".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )]
+        .into_iter()
+        .collect(),
+    };
+
+    assert!(source_allows_contextual_block_field_move_prompt(
+        &rule,
+        "johto",
+        Some(0x07),
+    ));
+    assert!(
+        !source_allows_contextual_block_field_move_prompt(&rule, "johto", Some(0x08)),
+        "a target collision without an exact WhirlpoolBlockPointers replacement must fail before yesorno"
+    );
+    assert!(!source_allows_contextual_block_field_move_prompt(
+        &rule, "kanto", Some(0x07),
+    ));
+    assert!(!source_allows_contextual_block_field_move_prompt(
+        &rule, "johto", None,
+    ));
+}
+
+#[test]
+fn contextual_headbutt_prompt_tests_the_exact_facing_collision() {
+    let rule = crate::RuntimeFieldMoveRuleKey {
+        rule_id: "headbutt".to_string(),
+        rule_kind: "move".to_string(),
+        move_id: Some("HEADBUTT".to_string()),
+        item_id: None,
+        badge_region: None,
+        badge_index: None,
+        engine_flag: None,
+        escape_rope_mode: None,
+        target_collisions: vec![0x15, 0x1d],
+        blocked_collisions: Vec::new(),
+        replacements: Default::default(),
+    };
+
+    assert!(source_allows_contextual_move_only_target_prompt(&rule, 0x15));
+    assert!(source_allows_contextual_move_only_target_prompt(&rule, 0x1d));
+    assert!(
+        !source_allows_contextual_move_only_target_prompt(&rule, 0x00),
+        "a different quadrant of the same metatile must not inherit its Headbutt collision"
+    );
+}
+
+#[test]
+fn headbutt_dispatch_preserves_menu_vs_overworld_script_roots() {
+    assert_eq!(
+        source_headbutt_script_root(true),
+        "HeadbuttFromMenuScript"
+    );
+    assert_eq!(source_headbutt_script_root(false), "HeadbuttScript");
+}
+
+#[test]
+fn every_asm_text_button_wait_exposes_the_blinking_advance_cursor() {
+    assert!(pending_text_wait_command_shows_prompt_arrow("promptbutton"));
+    assert!(
+        pending_text_wait_command_shows_prompt_arrow("waitbutton"),
+        "ElmText_GotAnEmail ends in waitbutton and must not look frozen on its final `Okay...` page"
+    );
 }
 
 #[test]
@@ -59,6 +176,16 @@ fn overworld_sprites_anchor_to_their_complete_oam_footprint() {
         base,
         "single-tile icon sprites remain anchored to their addressed render tile"
     );
+}
+
+#[test]
+fn same_map_redraw_retains_only_the_player_not_grass_rustle_frames() {
+    assert!(!should_despawn_player_facing_entity(true, true));
+    assert!(
+        should_despawn_player_facing_entity(true, false),
+        "grass rustle and other transient player-facing OAM must be replaced each frame"
+    );
+    assert!(should_despawn_player_facing_entity(false, true));
 }
 
 #[test]
@@ -261,6 +388,39 @@ fn viewport_tile_composite_preserves_native_tile_grid_for_gpu_scaling() {
 }
 
 #[test]
+fn scrolling_map_composite_carries_one_runtime_tile_beyond_every_lcd_edge() {
+    let mut images = Assets::<Image>::default();
+    let tile = images.add(Image::new(
+        Extent3d {
+            width: SOURCE_TILE_SIZE as u32,
+            height: SOURCE_TILE_SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0xff; SOURCE_TILE_SIZE * SOURCE_TILE_SIZE * 4],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    ));
+    let handles = vec![tile; (CLASSIC_SCROLL_TILES_X * CLASSIC_SCROLL_TILES_Y) as usize];
+    let composite = compose_tile_grid(
+        &handles,
+        CLASSIC_SCROLL_TILES_X as usize,
+        CLASSIC_SCROLL_TILES_Y as usize,
+        None,
+        &mut images,
+    );
+    let size = images
+        .get(&composite)
+        .expect("scrolling map composite")
+        .texture_descriptor
+        .size;
+
+    assert_eq!(size.width, 192);
+    assert_eq!(size.height, 176);
+    assert_eq!(CLASSIC_SCROLL_HALO_TILES, METATILE_WIDTH);
+}
+
+#[test]
 fn bitmap_font_art_loads_runtime_menu_glyphs() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -287,8 +447,9 @@ fn bitmap_font_art_loads_runtime_menu_glyphs() {
 fn field_dialogue_uses_the_game_boy_text_grid() {
     assert_eq!(SCENE_DIALOG_TEXT_CHARS, 18);
     assert_eq!(FIELD_TEXT_BOX_TEXT_LEFT_TILE, 1.0);
-    assert_eq!(FIELD_TEXT_BOX_TEXT_TOP_TILE, 13.0);
-    assert_eq!(FIELD_TEXT_BOX_VISIBLE_ROWS, 4);
+    assert_eq!(FIELD_TEXT_BOX_TEXT_TOP_TILE, 14.0);
+    assert_eq!(FIELD_TEXT_BOX_ROW_SPACING_TILES, 2.0);
+    assert_eq!(FIELD_TEXT_BOX_VISIBLE_ROWS, 2);
     assert_eq!(BITMAP_FONT_ADVANCE, TILE_SIZE);
 }
 
@@ -335,7 +496,7 @@ fn textbox_frame_ids_cover_every_saved_option() {
 }
 
 #[test]
-fn field_dialogue_wraps_pokegear_text_inside_the_four_row_box() {
+fn field_dialogue_wraps_to_the_asm_eighteen_character_baseline() {
     assert_eq!(
         wrap_scene_dialog_line(
             "POKéMON GEAR, or just POKéGEAR. It's essential information.",
@@ -365,6 +526,169 @@ fn player_walk_foot_phase_alternates_on_consecutive_steps() {
 }
 
 #[test]
+fn held_direction_cycles_standing_and_both_step_frames() {
+    let mut stride = false;
+    let mut mirror = false;
+    let mut frames = Vec::new();
+
+    for _ in 0..4 {
+        let previous_stride = stride;
+        stride = next_player_walk_stride(WALK_FRAME_HOLD_TICKS, stride);
+        if previous_stride && !stride {
+            mirror = !mirror;
+        }
+        frames.push((player_walk_uses_action_frame(stride), mirror));
+    }
+
+    assert_eq!(
+        frames,
+        vec![(true, false), (false, true), (true, true), (false, false)],
+        "held input must match TypeScript's step, standing, mirrored-step, standing cycle"
+    );
+}
+
+#[test]
+fn catch_up_draws_the_same_walk_subtile_as_typescript() {
+    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 0), 8);
+    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 1), 7);
+    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 4), 4);
+
+    let target = TilePosition { x: 4, y: 2 };
+    let from = TilePosition { x: 2, y: 2 };
+    let one_tick = visible_player_playfield_position(target, Some(from), 8, 0, 0)
+        .expect("one-tick TypeScript position");
+    let two_ticks = visible_player_playfield_position(target, Some(from), 7, 0, 0)
+        .expect("two-tick TypeScript position");
+    let settled = visible_player_playfield_position(target, None, 0, 0, 0)
+        .expect("settled TypeScript position");
+    let origin = visible_player_playfield_position(from, None, 0, 0, 0)
+        .expect("origin TypeScript position");
+
+    assert_eq!(two_ticks.0 - one_tick.0, (settled.0 - origin.0) / 8.0);
+    assert_eq!(two_ticks.1, one_tick.1);
+}
+
+#[test]
+fn moving_objects_cycle_instead_of_holding_the_step_frame() {
+    let frames = (0..4)
+        .map(|phase| {
+            (
+                object_walk_uses_action_frame(phase),
+                object_walk_uses_mirrored_action_frame(phase),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        frames,
+        vec![(false, false), (true, false), (false, false), (true, true)]
+    );
+}
+
+#[test]
+fn follower_walk_animation_preserves_a_cycle_for_each_direction() {
+    let mut direction_phases = HashMap::<Direction, u8>::new();
+    let path = [
+        Direction::Down,
+        Direction::Right,
+        Direction::Down,
+        Direction::Right,
+        Direction::Down,
+    ];
+    let phases = path
+        .into_iter()
+        .map(|direction| {
+            let phase = next_directional_walk_phase(direction_phases.get(&direction).copied());
+            direction_phases.insert(direction, phase);
+            phase
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        phases,
+        vec![1, 1, 2, 2, 3],
+        "a follower returning to a direction must resume that direction's TypeScript gait"
+    );
+    assert_eq!(
+        phases
+            .iter()
+            .map(|phase| object_walk_uses_action_frame(*phase))
+            .collect::<Vec<_>>(),
+        vec![true, true, false, false, true]
+    );
+}
+
+#[test]
+fn player_cornering_preserves_each_directions_own_walk_cycle() {
+    let mut direction_phases = HashMap::<Direction, u8>::new();
+    let path = [
+        Direction::Down,
+        Direction::Right,
+        Direction::Down,
+        Direction::Right,
+        Direction::Down,
+    ];
+    let frames = path
+        .into_iter()
+        .map(|direction| {
+            let phase = next_directional_walk_phase(direction_phases.get(&direction).copied());
+            direction_phases.insert(direction, phase);
+            (phase & 1 == 1, phase == 3)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        frames,
+        vec![(true, false), (true, false), (false, false), (false, false), (true, true)]
+    );
+}
+
+#[test]
+fn scripted_follow_waits_for_the_final_follower_step_to_land() {
+    let follower_id = "FOLLOWER".to_string();
+    let mut follower_timers = BTreeMap::new();
+    follower_timers.insert(follower_id.clone(), WALK_FRAME_HOLD_TICKS);
+
+    assert!(visible_actor_walk_in_flight(
+        &follower_id,
+        0,
+        0,
+        &follower_timers,
+    ));
+    follower_timers.insert(follower_id.clone(), 1);
+    assert!(visible_actor_walk_in_flight(
+        &follower_id,
+        0,
+        0,
+        &follower_timers,
+    ));
+    follower_timers.remove(&follower_id);
+    assert!(!visible_actor_walk_in_flight(
+        &follower_id,
+        0,
+        0,
+        &follower_timers,
+    ));
+}
+
+#[test]
+fn scripted_follow_drains_its_last_queued_command_without_requeueing_it() {
+    let final_step = VisibleFollowerStep {
+        direction: Direction::Left,
+        stride: 2,
+        duration: WALK_FRAME_HOLD_TICKS * 2,
+        jump: true,
+        standing_frame: false,
+    };
+    let mut queued_step = Some(final_step);
+
+    let active_step = rotate_visible_follower_step(Some("FOLLOWER"), &mut queued_step, None);
+
+    assert_eq!(active_step, Some(final_step));
+    assert_eq!(queued_step, None);
+}
+
+#[test]
 fn player_walk_interpolates_each_lcd_frame_between_committed_tiles() {
     for (from, to) in [
         (TilePosition { x: 2, y: 2 }, TilePosition { x: 3, y: 2 }),
@@ -372,26 +696,25 @@ fn player_walk_interpolates_each_lcd_frame_between_committed_tiles() {
         (TilePosition { x: 2, y: 2 }, TilePosition { x: 2, y: 1 }),
         (TilePosition { x: 2, y: 2 }, TilePosition { x: 2, y: 3 }),
     ] {
-        let positions = (0..=WALK_FRAME_HOLD_TICKS)
+        let positions = (1..=WALK_FRAME_HOLD_TICKS)
             .rev()
             .map(|remaining| {
                 visible_player_playfield_position(to, Some(from), remaining, 0, 0)
                     .expect("walk position")
             })
             .collect::<Vec<_>>();
+        let initial_position =
+            visible_player_playfield_position(from, None, 0, 0, 0).expect("initial tile");
         let final_position =
             visible_player_playfield_position(to, None, 0, 0, 0).expect("final walk position");
-        assert_eq!(
-            positions[0],
-            visible_player_playfield_position(from, None, 0, 0, 0).expect("initial tile")
-        );
         assert_eq!(positions.last().copied(), Some(final_position));
 
-        let dx = (final_position.0 - positions[0].0) / f32::from(WALK_FRAME_HOLD_TICKS);
-        let dy = (final_position.1 - positions[0].1) / f32::from(WALK_FRAME_HOLD_TICKS);
+        let dx = (final_position.0 - initial_position.0) / f32::from(WALK_FRAME_HOLD_TICKS);
+        let dy = (final_position.1 - initial_position.1) / f32::from(WALK_FRAME_HOLD_TICKS);
         for (frame, position) in positions.iter().enumerate() {
-            assert_eq!(position.0, positions[0].0 + dx * frame as f32);
-            assert_eq!(position.1, positions[0].1 + dy * frame as f32);
+            let completed_frames = (frame + 1) as f32;
+            assert_eq!(position.0, initial_position.0 + dx * completed_frames);
+            assert_eq!(position.1, initial_position.1 + dy * completed_frames);
         }
     }
 }
@@ -408,8 +731,8 @@ fn walking_camera_scroll_is_interpolated_with_the_player() {
     let middle = overworld_walk_camera_offset(&rendered, WALK_FRAME_HOLD_TICKS / 2);
     let final_offset = overworld_walk_camera_offset(&rendered, 0);
 
-    assert_eq!(initial, Vec2::new(TILE_SIZE * 2.0, 0.0));
-    assert_eq!(middle, Vec2::new(TILE_SIZE, 0.0));
+    assert_eq!(initial, Vec2::new(TILE_SIZE * 1.75, 0.0));
+    assert_eq!(middle, Vec2::new(TILE_SIZE * 0.75, 0.0));
     assert_eq!(final_offset, Vec2::ZERO);
 }
 
@@ -441,6 +764,79 @@ fn camera_following_walk_keeps_player_screen_position_exactly_stable() {
     assert!(
         positions.windows(2).all(|pair| pair[0] == pair[1]),
         "player must not drift against the viewport during a camera-following step: {positions:?}"
+    );
+}
+
+#[test]
+fn held_camera_steps_move_static_objects_without_a_tile_boundary_stutter() {
+    let world_x = 15.0 * TILE_SIZE;
+    let first_step = RenderedViewport {
+        walk_viewport_origin: Some((10, 10)),
+        viewport_origin: Some((12, 10)),
+        ..default()
+    };
+    let second_step = RenderedViewport {
+        walk_viewport_origin: Some((12, 10)),
+        viewport_origin: Some((14, 10)),
+        ..default()
+    };
+    let screen_x = |rendered: &RenderedViewport, remaining| {
+        let viewport_x = f32::from(rendered.viewport_origin.expect("viewport origin").0);
+        world_x - viewport_x * TILE_SIZE + overworld_walk_camera_offset(rendered, remaining).x
+    };
+
+    let positions = [
+        screen_x(&first_step, 2),
+        screen_x(&first_step, 1),
+        screen_x(&second_step, WALK_FRAME_HOLD_TICKS),
+        screen_x(&second_step, WALK_FRAME_HOLD_TICKS - 1),
+    ];
+    let expected_delta = -(2.0 * TILE_SIZE / f32::from(WALK_FRAME_HOLD_TICKS));
+
+    for pair in positions.windows(2) {
+        assert_eq!(
+            pair[1] - pair[0],
+            expected_delta,
+            "a static NPC and the map must continue at the same speed across held-step boundaries"
+        );
+    }
+}
+
+#[test]
+fn follow_command_steps_advance_on_the_first_visible_frame() {
+    for total in [
+        WALK_FRAME_HOLD_TICKS / 2,
+        WALK_FRAME_HOLD_TICKS,
+        WALK_FRAME_HOLD_TICKS * 2,
+    ] {
+        let progress = (1..=total)
+            .rev()
+            .map(|remaining| visible_movement_progress(remaining, total))
+            .collect::<Vec<_>>();
+
+        assert_eq!(progress[0], 1.0 / f32::from(total));
+        assert_eq!(progress.last().copied(), Some(1.0));
+        assert!(progress.windows(2).all(|frames| frames[0] < frames[1]));
+    }
+}
+
+#[test]
+fn follow_command_jump_arc_uses_the_advanced_movement_frame() {
+    const OFFSETS: [i16; 16] = [
+        -4, -6, -8, -10, -11, -12, -12, -12, -11, -10, -9, -8, -6, -4, 0, 0,
+    ];
+    let total = WALK_FRAME_HOLD_TICKS * 2;
+
+    let first = visible_script_jump_y_offset(&OFFSETS, total, total);
+    let landed = visible_script_jump_y_offset(&OFFSETS, total, 1);
+
+    assert!(
+        first > 0.0,
+        "the follower jump must lift on its first moving frame"
+    );
+    assert_eq!(
+        landed, 0.0,
+        "the final moving frame must land on the map tile"
     );
 }
 
@@ -490,6 +886,147 @@ fn overworld_actor_depth_is_viewport_relative_bounded_and_stably_ordered() {
 }
 
 #[test]
+fn scripted_poke_ball_objects_use_item_ball_priority() {
+    let object = crate::core::map::ObjectEvent {
+        sprite: "SPRITE_POKE_BALL".to_string(),
+        x: 6,
+        y: 3,
+        spritemovedata: "SPRITEMOVEDATA_STILL".to_string(),
+        move_range_x: 0,
+        move_range_y: 0,
+        hram_x: -1,
+        hram_y: -1,
+        pal: 0,
+        object_type: "OBJECTTYPE_SCRIPT".to_string(),
+        radius: 0,
+        script: "CyndaquilPokeBallScript".to_string(),
+        label: None,
+        event_flag: "EVENT_CYNDAQUIL_POKEBALL_IN_ELMS_LAB".to_string(),
+        object_identifier: Some("ELMSLAB_POKE_BALL1".to_string()),
+        sightline_direction_override: None,
+    };
+
+    assert!(
+        object_uses_item_ball_priority(&object),
+        "Elm's scripted starter balls must render above the desk priority tiles"
+    );
+}
+
+#[test]
+fn ambient_map_animation_retains_visible_object_entities() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize animated New Bark Town fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    let initial_objects = {
+        let world = app.world_mut();
+        let mut objects = world.query_filtered::<Entity, With<ObjectMarker>>();
+        let mut entities = objects.iter(world).collect::<Vec<_>>();
+        entities.sort();
+        assert!(
+            !entities.is_empty(),
+            "fixture must have visible map objects"
+        );
+        entities
+    };
+    let initial_surfaces = retained_map_surface_pair(app.world_mut());
+
+    for frame in 0..64 {
+        app.update();
+        let world = app.world_mut();
+        let mut objects = world.query_filtered::<Entity, With<ObjectMarker>>();
+        let mut entities = objects.iter(world).collect::<Vec<_>>();
+        entities.sort();
+        assert_eq!(
+            entities, initial_objects,
+            "ambient redraw frame {frame} must not replace visible object entities"
+        );
+        assert_eq!(
+            retained_map_surface_pair(world),
+            initial_surfaces,
+            "ambient redraw frame {frame} must retain both map surfaces"
+        );
+    }
+}
+
+#[test]
+fn fly_animation_retains_map_objects_without_accumulating_old_effect_frames() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize Fly rendering fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    let stable_objects = {
+        let world = app.world_mut();
+        let mut objects = world.query_filtered::<Entity, With<VisibleObjectSprite>>();
+        let mut entities = objects.iter(world).collect::<Vec<_>>();
+        entities.sort();
+        assert!(!entities.is_empty(), "fixture must have stable map objects");
+        entities
+    };
+    app.world_mut()
+        .resource_mut::<BevyRuntimeShell>()
+        .visible_fly_animation = Some(VisibleFlyAnimation {
+            phase: VisibleFlyAnimationPhase::From,
+            frame: 0,
+        });
+
+    for frame in 0..12 {
+        app.update();
+        let world = app.world_mut();
+        let mut objects = world.query_filtered::<Entity, With<VisibleObjectSprite>>();
+        let mut entities = objects.iter(world).collect::<Vec<_>>();
+        entities.sort();
+        assert_eq!(
+            entities, stable_objects,
+            "Fly frame {frame} must retain the map's stable NPC entities"
+        );
+
+        let transient_count = world
+            .query_filtered::<Entity, (With<ObjectMarker>, Without<VisibleObjectSprite>)>()
+            .iter(world)
+            .count();
+        assert!(
+            transient_count <= 4,
+            "early Fly frame {frame} accumulated stale effect entities: {transient_count}"
+        );
+    }
+}
+
+#[test]
 fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -522,6 +1059,41 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         .tile;
     let viewport_surfaces = retained_map_surface_pair(app.world_mut());
     let image_count = app.world().resource::<Assets<Image>>().len();
+    let (backing_base, backing_priority, initial_base_pixels, initial_priority_pixels) = {
+        let world = app.world();
+        let rendered = world.resource::<RenderedViewport>();
+        let backing_base = rendered
+            .map_backing_texture
+            .clone()
+            .expect("walking renderer must retain a distinct base backing image");
+        let backing_priority = rendered
+            .map_backing_priority_texture
+            .clone()
+            .expect("walking renderer must retain a distinct priority backing image");
+        assert_ne!(
+            backing_base, viewport_surfaces.base_texture,
+            "the previous base viewport must not alias the mutable front image"
+        );
+        assert_ne!(
+            backing_priority, viewport_surfaces.priority_texture,
+            "the previous priority viewport must not alias the mutable front image"
+        );
+        let images = world.resource::<Assets<Image>>();
+        (
+            backing_base,
+            backing_priority,
+            images
+                .get(&viewport_surfaces.base_texture)
+                .expect("initial front base image")
+                .data
+                .clone(),
+            images
+                .get(&viewport_surfaces.priority_texture)
+                .expect("initial front priority image")
+                .data
+                .clone(),
+        )
+    };
 
     app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 16;
     for _ in 0..16 {
@@ -547,6 +1119,22 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         WALK_FRAME_HOLD_TICKS,
         "fixture must execute an authoritative walking step"
     );
+    {
+        let images = app.world().resource::<Assets<Image>>();
+        assert_eq!(
+            images.get(&backing_base).expect("retained base backing").data,
+            initial_base_pixels,
+            "recomposing the destination viewport must not mutate the retained source base through an aliased handle"
+        );
+        assert_eq!(
+            images
+                .get(&backing_priority)
+                .expect("retained priority backing")
+                .data,
+            initial_priority_pixels,
+            "recomposing the destination viewport must not mutate the retained source priority through an aliased handle"
+        );
+    }
 
     let mut player_x_positions = Vec::new();
     let mut base_map_positions = Vec::new();
@@ -723,6 +1311,82 @@ fn positive_and_negative_full_tile_camera_scroll_never_expose_clear_color() {
     assert!(
         most_positive >= TILE_SIZE && most_negative <= -TILE_SIZE,
         "fixture must cover both ±one-tile camera extremes, got {most_negative}..={most_positive}"
+    );
+}
+
+#[test]
+fn direction_tap_between_game_ticks_rotates_player_on_next_tick() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize inter-tick tap fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    let initial_tile = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .shell
+        .snapshot()
+        .expect("initial snapshot")
+        .overworld
+        .tile;
+    app.world_mut().resource_mut::<RuntimeTickTimer>().step_seconds = 999.0;
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ArrowUp);
+    app.update();
+    {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::ArrowUp);
+        keys.clear_just_pressed(KeyCode::ArrowUp);
+    }
+    app.update();
+
+    {
+        let snapshot = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .expect("snapshot before next game tick");
+        assert_eq!(snapshot.overworld.tile, initial_tile);
+        assert_eq!(snapshot.overworld.facing, Direction::Down);
+    }
+    {
+        let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
+        timer.finished_vblanks = 1;
+        timer.finished_ticks = 1;
+    }
+    app.update();
+
+    let snapshot = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .shell
+        .snapshot()
+        .expect("snapshot after next game tick");
+    assert_eq!(snapshot.overworld.tile, initial_tile, "a tap turns without walking");
+    assert_eq!(snapshot.overworld.facing, Direction::Up);
+    assert_eq!(
+        app.world().resource::<RenderedViewport>().player_sprite_facing,
+        Some(Direction::Up),
+        "the latched tap must refresh the retained player sprite"
     );
 }
 

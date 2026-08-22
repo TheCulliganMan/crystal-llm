@@ -107,6 +107,17 @@ pub enum AudioProgramSource {
         loop_start_sample: Option<usize>,
         loop_end_sample: Option<usize>,
     },
+    /// PCM stored as a separately fetched gzip payload. `path` is relative to
+    /// the compiled pack and is integrity-checked after decompression with the
+    /// manifest's raw byte length and payload hash.
+    PcmGzipSidecar {
+        path: String,
+        format: AudioPcmFormat,
+        byte_len: usize,
+        payload_hash: String,
+        loop_start_sample: Option<usize>,
+        loop_end_sample: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -651,7 +662,9 @@ mod tests {
         assert!(!program.cache_key.contains(".mp3"));
         match program.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmGzip { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmGzipSidecar { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }
@@ -668,7 +681,9 @@ mod tests {
         assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
         match sfx.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmGzip { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmGzipSidecar { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }
@@ -686,7 +701,9 @@ mod tests {
         assert!(!cry.cache_key.contains(".mp3"));
         match cry.source {
             AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. } | AudioProgramSource::PcmGzip { .. } => {
+            AudioProgramSource::Pcm { .. }
+            | AudioProgramSource::PcmGzip { .. }
+            | AudioProgramSource::PcmGzipSidecar { .. } => {
                 panic!("MIDI repository must not emit PCM")
             }
         }

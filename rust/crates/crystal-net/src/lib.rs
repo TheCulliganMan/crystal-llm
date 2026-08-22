@@ -1158,7 +1158,7 @@ mod tests {
     fn runtime_command_frame() -> RuntimeCommandFrame {
         RuntimeCommandFrame::new(
             2,
-            17,
+            1,
             RuntimeCommandPayload::new(
                 "crystal_runtime_mutation_command_v2",
                 br#"{"kind":"apply_overworld_input","payload":{"buttons":["a","right"]}}"#.to_vec(),

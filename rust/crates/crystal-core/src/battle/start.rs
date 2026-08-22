@@ -56,6 +56,7 @@ impl StaticWildBattleRequest {
 pub struct StaticWildBattleStart {
     pub battle_type: String,
     pub battle_music: String,
+    pub roaming_slot: Option<u8>,
     pub species: String,
     pub level: u8,
     pub source_script: String,
@@ -525,11 +526,7 @@ where
 }
 
 fn unown_letter_from_dvs(dvs: Dv) -> u8 {
-    let packed = ((dvs.attack & 0x06) >> 1) << 6
-        | ((dvs.defense & 0x06) >> 1) << 4
-        | ((dvs.speed & 0x06) >> 1) << 2
-        | ((dvs.special & 0x06) >> 1);
-    packed / 10 + 1
+    dvs.unown_letter()
 }
 
 fn unown_letter_is_unlocked(letter: u8, unlocked_sets: u8) -> bool {
@@ -737,15 +734,47 @@ where
             expected_slot: roaming_slot,
         });
     }
+    materialize_staged_roaming_wild_battle_with_rng(
+        roaming_slot,
+        &resolved.encounter.species,
+        resolved.level,
+        roaming,
+        species,
+        learnsets,
+        moves,
+        growth_rates,
+        rng,
+    )
+}
+
+/// Materialize the roaming `LoadEnemyMon` branch from the exact WRAM values
+/// staged by `CheckEncounterRoamMon`. Scripted encounter paths such as Sweet
+/// Scent retain only species, level, and `BATTLETYPE_ROAMING` between the
+/// chooser and `startbattle`, just like the cartridge.
+pub fn materialize_staged_roaming_wild_battle_with_rng<S>(
+    roaming_slot: u8,
+    staged_species: &str,
+    staged_level: u8,
+    roaming: &RoamingPokemonState,
+    species: &PokemonSpecies,
+    learnsets: &SpeciesLearnsets,
+    moves: &BTreeMap<String, Move>,
+    growth_rates: &GrowthRateCatalog,
+    rng: &mut CrystalRandom<&mut S>,
+) -> Result<RoamingWildBattleMaterialization, RoamingWildBattleMaterializationError>
+where
+    S: DividerSource + ?Sized,
+    S::Error: std::fmt::Display,
+{
     let saved_species = roaming
         .species
         .as_deref()
         .ok_or(RoamingWildBattleMaterializationError::InactiveSlot { slot: roaming_slot })?;
-    if saved_species != resolved.encounter.species {
+    if saved_species != staged_species {
         return Err(RoamingWildBattleMaterializationError::SpeciesMismatch {
             slot: roaming_slot,
             saved: saved_species.to_string(),
-            encounter: resolved.encounter.species.clone(),
+            encounter: staged_species.to_string(),
         });
     }
     if saved_species != species.id {
@@ -757,11 +786,11 @@ where
             },
         );
     }
-    if roaming.level != resolved.level {
+    if roaming.level != staged_level {
         return Err(RoamingWildBattleMaterializationError::LevelMismatch {
             slot: roaming_slot,
             saved: roaming.level,
-            encounter: resolved.level,
+            encounter: staged_level,
         });
     }
 
@@ -963,6 +992,7 @@ where
     Ok(StaticWildBattleStart {
         battle_type: request.battle_type,
         battle_music: request.battle_music,
+        roaming_slot: None,
         species: request.species,
         level: request.level,
         source_script: request.source_script,
@@ -1256,6 +1286,7 @@ pub fn activate_static_wild_battle_start(
     state.battle = BattleMemory::StaticWild {
         battle_type: start.battle_type.clone(),
         battle_music: start.battle_music.clone(),
+        roaming_slot: start.roaming_slot,
         origin_map_name: origin.map_name.clone(),
         species: start.species.clone(),
         level: start.level,
@@ -2019,7 +2050,7 @@ mod tests {
             short,
             Err(RoamingWildBattleMaterializationError::Divider { .. })
         ));
-        assert_eq!(short_remaining, 1);
+        assert_eq!(short_remaining, 0);
         assert_eq!(roaming, roaming_state(0));
 
         let mut trace = divider_trace_for_sub_values([0, 0x34, 0xab]);

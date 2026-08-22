@@ -205,6 +205,7 @@ fn modpack_payload_replaces_fishing_catalog_as_definitive_data() {
         groups: [(
             "FISHGROUP_NEW".to_string(),
             crystal_core::world::fishing::FishingGroup {
+                source_index: 1,
                 bite_threshold: crystal_core::world::fishing::threshold(50, true),
                 rod_tables: BTreeMap::new(),
             },
@@ -296,6 +297,7 @@ fn verifier_rejects_unknown_fishing_facts_without_case_coercion() {
                 (
                     "FISHGROUP_LAKE".to_string(),
                     crystal_core::world::fishing::FishingGroup {
+                        source_index: 1,
                         bite_threshold: 128,
                         rod_tables: [
                             (
@@ -336,6 +338,7 @@ fn verifier_rejects_unknown_fishing_facts_without_case_coercion() {
                 (
                     " FISHGROUP_BAD".to_string(),
                     crystal_core::world::fishing::FishingGroup {
+                        source_index: 1,
                         bite_threshold: 128,
                         rod_tables: [(
                             crystal_core::world::fishing::ROD_OLD.to_string(),
@@ -348,6 +351,7 @@ fn verifier_rejects_unknown_fishing_facts_without_case_coercion() {
                 (
                     "FISHGROUP_TABLE_BAD".to_string(),
                     crystal_core::world::fishing::FishingGroup {
+                        source_index: 2,
                         bite_threshold: 128,
                         rod_tables: [(
                             crystal_core::world::fishing::ROD_OLD.to_string(),
@@ -916,6 +920,7 @@ fn verifier_solves_explicit_progression_event_and_item_goals() {
         ..GameDataSet::default()
     };
     add_runtime_species_and_move(&mut data);
+    add_roaming_verification_maps(&mut data);
 
     let report = verify_complete_test_game_data(
         &data,
@@ -966,6 +971,7 @@ fn verifier_solves_events_from_script_granted_loaded_maps() {
         ..GameDataSet::default()
     };
     add_runtime_species_and_move(&mut data);
+    add_roaming_verification_maps(&mut data);
 
     let report = verify_complete_test_game_data(
         &data,
@@ -1103,6 +1109,7 @@ fn verifier_applies_map_access_requirements_to_reachable_maps() {
         ..GameDataSet::default()
     };
     add_runtime_species_and_move(&mut data);
+    add_roaming_verification_maps(&mut data);
 
     let blocked = verify_complete_test_game_data(
         &data,
@@ -1511,6 +1518,64 @@ fn base_game_script_movements_are_all_supported_by_rust_runtime() {
         issues.is_empty(),
         "unsupported or malformed base-game movement steps: {}",
         issues.join(", ")
+    );
+}
+
+#[test]
+fn global_change_direction_script_exports_typed_deactivatefacing_wait() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+
+    let command = data
+        .script_runtime_command("NewBarkTown", "ChangeDirectionScript", 0)
+        .expect("typed deactivatefacing command");
+    assert_eq!(command.command, "deactivatefacing");
+    assert_eq!(command.args, vec!["3".to_string()]);
+
+    let mut state = GameState::default();
+    state
+        .flags
+        .set_engine_flag("STATUSFLAGS_NO_WILD_ENCOUNTERS_F", true)
+        .expect("disable wild encounters before the direction event");
+    state.script_runtime.all_input_locked = true;
+    let mut session = data
+        .overworld_session("NewBarkTown", TilePosition::new(8, 6), 0)
+        .expect("start New Bark Town overworld session");
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "NewBarkTown",
+        "ChangeDirectionScript",
+        0,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact deactivatefacing wait");
+    assert_eq!(state.script_runtime.pending_delays.len(), 1);
+    assert_eq!(state.script_runtime.pending_delays[0].parameter, 3);
+    assert_eq!(state.script_runtime.pending_delays[0].frames, 3);
+    assert!(state.script_runtime.pending_delays[0].release_all_objects);
+
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "NewBarkTown",
+        "ChangeDirectionScript",
+        1,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exported EnableWildEncounters CPU routine");
+    assert_eq!(
+        state
+            .flags
+            .engine_flags
+            .get("STATUSFLAGS_NO_WILD_ENCOUNTERS_F"),
+        Some(&false)
+    );
+    assert!(
+        state.script_runtime.command_queue.is_empty(),
+        "certified synchronous callasm must not leave an engine queue fallback"
     );
 }
 
@@ -2030,7 +2095,7 @@ fn map_module_extracts_static_snorlax_post_battle_event() {
     let battle = module
         .scripted_wild_battles
         .iter()
-        .find(|battle| battle.source_script == "VermilionSnorlax")
+        .find(|battle| battle.source_script == ".Awake@VermilionSnorlax")
         .expect("Snorlax scripted wild battle");
 
     assert_eq!(battle.request.battle_type, "BATTLETYPE_FORCEITEM");
@@ -2472,10 +2537,12 @@ fn map_module_extracts_takeitem_commands_with_exact_ids() {
     let access = module
         .script_item_takes
         .iter()
-        .find(|access| access.source_script == "Copycat" && access.item_id == "LOST_ITEM")
+        .find(|access| {
+            access.source_script == ".ReturnLostItem@Copycat" && access.item_id == "LOST_ITEM"
+        })
         .expect("Copycat lost item take");
 
-    assert_eq!(access.command_index, 65);
+    assert_eq!(access.command_index, 3);
 
     let mut state = GameState::default();
     state
@@ -2509,6 +2576,31 @@ fn map_module_extracts_givepoke_commands_with_exact_metadata() {
     assert_eq!(gift.held_item_id.as_deref(), Some("BERRY"));
     assert_eq!(gift.command_index, 22);
     assert!(!gift.egg);
+
+    let state = GameState::default();
+    let request = data
+        .gift_pokemon_request(
+            &state,
+            "ElmsLab",
+            "CyndaquilPokeBallScript",
+            gift.command_index,
+            "CHRIS",
+            1,
+            Dv::from_non_hp(10, 10, 10, 10),
+            false,
+            None,
+        )
+        .expect("resolve starter caught data");
+    let caught = request.caught_data.expect("starter caught data");
+    assert_eq!(caught.level, 5);
+    assert_eq!(caught.time_of_day, Some(state.time.time_of_day));
+    assert_eq!(caught.original_trainer_gender, state.player_gender);
+    assert_eq!(
+        u16::from(caught.location),
+        data.pokegear_landmark_for_map("ElmsLab")
+            .expect("Elm's Lab landmark")
+            .id
+    );
 }
 
 #[test]
@@ -2533,6 +2625,32 @@ fn map_module_extracts_custom_gift_metadata_labels() {
     assert_eq!(gift.held_item_id, None);
     assert_eq!(gift.nickname_label.as_deref(), Some("GiftSpearowName"));
     assert_eq!(gift.ot_label.as_deref(), Some("GiftSpearowOTName"));
+
+    let request = data
+        .gift_pokemon_request(
+            &GameState::default(),
+            "Route35GoldenrodGate",
+            "RandyScript",
+            gift.command_index,
+            "CHRIS",
+            1,
+            Dv::from_non_hp(10, 10, 10, 10),
+            false,
+            None,
+        )
+        .expect("resolve Randy's authored gift identity");
+    assert_eq!(request.nickname.as_deref(), Some("KENYA"));
+    assert_eq!(request.original_trainer_name, "RANDY");
+    assert_eq!(request.original_trainer_id, 1001);
+    assert_eq!(
+        request.caught_data,
+        Some(CaughtData {
+            level: 0,
+            time_of_day: None,
+            original_trainer_gender: 0,
+            location: 0x7e,
+        })
+    );
 }
 
 #[test]
@@ -2555,6 +2673,31 @@ fn map_module_extracts_giveegg_with_resolved_pack_level() {
     assert_eq!(egg.level_token, "EGG_LEVEL");
     assert_eq!(egg.level, 5);
     assert!(egg.egg);
+
+    let state = GameState::default();
+    let request = data
+        .gift_pokemon_request(
+            &state,
+            "VioletPokecenter1F",
+            "VioletPokecenter1F_ElmsAideScript",
+            egg.command_index,
+            "CHRIS",
+            1,
+            Dv::from_non_hp(10, 10, 10, 10),
+            false,
+            None,
+        )
+        .expect("resolve egg caught data");
+    let caught = request.caught_data.expect("egg caught data");
+    assert_eq!(caught.level, 1);
+    assert_eq!(caught.time_of_day, Some(state.time.time_of_day));
+    assert_eq!(caught.original_trainer_gender, state.player_gender);
+    assert_eq!(
+        u16::from(caught.location),
+        data.pokegear_landmark_for_map("VioletPokecenter1F")
+            .expect("Violet Pokemon Center landmark")
+            .id
+    );
 }
 
 #[test]
@@ -2594,7 +2737,7 @@ fn map_module_extracts_script_flag_commands_and_applies_exact_storage() {
         .script_flag_commands
         .iter()
         .find(|command| {
-            command.source_script == "RuinsOfAlphKabutoChamberPuzzle"
+            command.source_script == ".PuzzleComplete@RuinsOfAlphKabutoChamberPuzzle"
                 && command.command == "setevent"
                 && command.flag_id == "EVENT_SOLVED_KABUTO_PUZZLE"
         })
@@ -2604,15 +2747,15 @@ fn map_module_extracts_script_flag_commands_and_applies_exact_storage() {
         .script_flag_commands
         .iter()
         .find(|command| {
-            command.source_script == "RuinsOfAlphKabutoChamberPuzzle"
+            command.source_script == ".PuzzleComplete@RuinsOfAlphKabutoChamberPuzzle"
                 && command.command == "setflag"
                 && command.flag_id == "ENGINE_UNLOCKED_UNOWNS_A_TO_K"
         })
         .expect("exact Kabuto puzzle setflag")
         .clone();
 
-    assert_eq!(solved.command_index, 7);
-    assert_eq!(unlocked.command_index, 8);
+    assert_eq!(solved.command_index, 1);
+    assert_eq!(unlocked.command_index, 2);
 
     let mut state = GameState::default();
     let solved_outcome =
@@ -2855,12 +2998,42 @@ fn map_module_extracts_script_map_commands_with_exact_destinations() {
     let bedroom = data
         .map_module("PlayersHouse2F")
         .expect("assemble PlayersHouse2F module");
-    assert!(bedroom.script_map_commands.iter().any(|command| {
-        command.command == "warp"
+    let bad_warp = bedroom
+        .script_map_commands
+        .iter()
+        .find(|command| {
+            command.command == "warp"
             && command.target_map.as_deref() == Some("NONE")
             && command.x == Some(0)
             && command.y == Some(0)
-    }));
+        })
+        .expect("PlayersHousePCScript bad warp");
+    assert_eq!(bad_warp.source_script, ".Warp@PlayersHousePCScript");
+    let mut state = GameState::default();
+    assert_eq!(
+        data.apply_script_map_command(
+            &mut state,
+            "PlayersHouse2F",
+            "PlayersHouse2F",
+            &bad_warp.source_script,
+            bad_warp.command_index,
+        )
+        .expect("apply PlayersHousePCScript bad warp"),
+        ScriptMapAction::LoadMap {
+            command: "warp".to_string(),
+            map_setup: Some("MAPSETUP_BADWARP".to_string()),
+            source_script: ".Warp@PlayersHousePCScript".to_string(),
+            command_index: bad_warp.command_index,
+        }
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .pending_map_load
+            .as_ref()
+            .and_then(|request| request.map_setup.as_deref()),
+        Some("MAPSETUP_BADWARP")
+    );
 }
 
 #[test]
@@ -2976,7 +3149,7 @@ fn map_module_extracts_script_variable_commands_with_exact_tokens() {
                 && command.target.as_deref() == Some("VAR_CALLERID")
         })
         .expect("Vance caller variable");
-    assert_eq!(caller.command_index, 1);
+    assert_eq!(caller.command_index, 0);
     assert_eq!(caller.value_tokens, vec!["PHONE_BIRDKEEPER_VANCE"]);
 
     let rematch_read = route44
@@ -3008,12 +3181,12 @@ fn map_module_extracts_script_variable_commands_with_exact_tokens() {
         .script_variable_commands
         .iter()
         .find(|command| {
-            command.source_script == "Route29TuscanyCallback"
+            command.source_script == ".DoesTuscanyAppear@Route29TuscanyCallback"
                 && command.command == "readvar"
                 && command.target.as_deref() == Some("VAR_WEEKDAY")
         })
         .expect("Tuscany weekday read");
-    assert_eq!(weekday.command_index, 4);
+    assert_eq!(weekday.command_index, 0);
     assert!(
         route29
             .objects
@@ -3021,6 +3194,7 @@ fn map_module_extracts_script_variable_commands_with_exact_tokens() {
             .any(|object| object.event_flag == "EVENT_ROUTE_29_TUSCANY_OF_TUESDAY")
     );
     assert!(data.saved_event_flag_exists("EVENT_ROUTE_29_TUSCANY_OF_TUESDAY"));
+    assert!(data.saved_event_flag_exists("EVENT_PLAYERS_ROOM_POSTER"));
     let day_check = route29
         .script_variable_commands
         .iter()
@@ -3082,6 +3256,12 @@ fn script_control_compares_party_count_to_pret_party_length_byte() {
         data.script_numeric_constants().get("PARTY_LENGTH"),
         Some(&(crystal_core::models::PARTY_SIZE as i32))
     );
+    assert_eq!(
+        data.script_numeric_constants()
+            .get("BATTLETOWER_STREAK_LENGTH"),
+        Some(&7),
+        "script comparisons must consume the streak length exported from battle_tower_constants.asm"
+    );
 
     let command = data
         .map_module("VioletPokecenter1F")
@@ -3115,6 +3295,76 @@ fn script_control_compares_party_count_to_pret_party_length_byte() {
 }
 
 #[test]
+fn cross_map_battle_tower_jump_continues_after_warpfacing() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let command = data
+        .map_module("BattleTowerBattleRoom")
+        .expect("assemble Battle Tower battle room")
+        .script_control_commands
+        .iter()
+        .find(|command| {
+            command.source_script == "Script_BeatenAllTrainers"
+                && command.command == "sjump"
+        })
+        .expect("post-warp prize jump");
+    let mut state = GameState::default();
+
+    let action = data
+        .apply_script_control_command(
+            &mut state,
+            "BattleTower1F",
+            "BattleTowerBattleRoom",
+            &command.source_script,
+            command.command_index,
+        )
+        .expect("script control remains valid after warpfacing installs the destination map");
+
+    assert!(matches!(
+        action,
+        ScriptControlAction::Jump { target_script, .. }
+            if target_script == "Script_BeatenAllTrainers2"
+    ));
+    assert_eq!(
+        state
+            .script_runtime
+            .next_script
+            .as_ref()
+            .map(|next| next.origin_map_name.as_str()),
+        Some("BattleTower1F")
+    );
+
+    let prize_jump = data
+        .map_module("BattleTowerBattleRoom")
+        .expect("assemble Battle Tower battle room")
+        .script_control_commands
+        .iter()
+        .find(|command| {
+            command.source_script == "Script_BeatenAllTrainers2"
+                && command.command == "sjump"
+        })
+        .expect("cross-map prize handoff");
+    data.apply_script_control_command(
+        &mut state,
+        "BattleTower1F",
+        "BattleTowerBattleRoom",
+        &prize_jump.source_script,
+        prize_jump.command_index,
+    )
+    .expect("cross-map prize handoff resolves its destination script owner");
+    assert_eq!(
+        state
+            .script_runtime
+            .next_script
+            .as_ref()
+            .map(|next| (next.origin_map_name.as_str(), next.script.as_str())),
+        Some(("BattleTower1F", "Script_GivePlayerHisPrize"))
+    );
+}
+
+#[test]
 fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
     let root = repository_root_for_tests();
     let data = AssetRoot::new(root)
@@ -3128,7 +3378,7 @@ fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
         .script_control_commands
         .iter()
         .find(|command| {
-            command.source_script == "TrainerBirdKeeperVance1"
+            command.source_script == ".Script@TrainerBirdKeeperVance1"
                 && command.command == "endifjustbattled"
         })
         .expect("Vance after-battle guard")
@@ -3187,7 +3437,7 @@ fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
         }
     }
 
-    let mut divider = crystal_core::random::ReplayDivider::new([]);
+    let mut divider = crystal_core::random::ReplayDivider::new([0, 255]);
     let completion = data
         .complete_scripted_trainer_battle(
             &mut state,
@@ -3237,18 +3487,29 @@ fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
     ));
 
     let manual_talk = data
-        .start_scripted_trainer_battle(
+        .resolve_map_trainer_interaction(
             &mut state,
             "Route44",
             "Route44",
             "TrainerBirdKeeperVance1",
             trainer_command_index,
+            false,
         )
         .expect("talk to beaten Vance");
     assert!(matches!(
         manual_talk,
-        TrainerBattleStartStatus::AlreadyDefeated { .. }
+        RuntimeMapTrainerInteractionOutcome::AlreadyDefeated { ref callback }
+            if callback == ".Script@TrainerBirdKeeperVance1"
     ));
+    assert_eq!(
+        state
+            .script_runtime
+            .next_script
+            .as_ref()
+            .map(|location| location.script.as_str()),
+        Some(".Script@TrainerBirdKeeperVance1"),
+        "AlreadyBeatenTrainerScript must dispatch the trainer table callback",
+    );
     assert_eq!(
         state
             .script_runtime
@@ -3288,7 +3549,7 @@ fn route44_endifjustbattled_only_ends_post_battle_dispatch() {
         trainer_command_index,
     )
     .expect("start loss-continuation trainer battle");
-    let mut divider = crystal_core::random::ReplayDivider::new([]);
+    let mut divider = crystal_core::random::ReplayDivider::new([0, 255]);
     let lost = data
         .complete_scripted_trainer_battle(
             &mut lost_state,
@@ -3719,6 +3980,7 @@ fn runtime_script_movement_visibility_steps_update_visibility_state() {
             emote: "EMOTE_SHOCK".to_string(),
             object: "ROUTE_29_YOUNGSTER".to_string(),
             duration: 16,
+            frames: 32,
             source_script: "Route29ObjectScript".to_string(),
             command_index: 0,
         });
@@ -3729,6 +3991,7 @@ fn runtime_script_movement_visibility_steps_update_visibility_state() {
             emote: "EMOTE_HAPPY".to_string(),
             object: "OTHER_OBJECT".to_string(),
             duration: 8,
+            frames: 16,
             source_script: "Route29ObjectScript".to_string(),
             command_index: 0,
         });
@@ -4140,10 +4403,18 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
             && command.args.is_empty()
             && command.source_script == "CeladonDeptStore6FVendingMachine"
     }));
-    assert!(vending.script_runtime_commands.iter().any(|command| {
-        command.command == "menu_coords"
-            && command.args == vec!["0", "2", "SCREEN_WIDTH - 1", "TEXTBOX_Y - 1"]
-    }));
+    assert!(!vending
+        .script_runtime_commands
+        .iter()
+        .any(|command| command.command == "menu_coords"));
+    assert!(vending.script_menu_definitions
+        [".MenuHeader@CeladonDeptStore6FVendingMachine"]
+        .commands
+        .iter()
+        .any(|command| {
+            command.command == "menu_coords"
+                && command.args == vec!["0", "2", "SCREEN_WIDTH - 1", "TEXTBOX_Y - 1"]
+        }));
 
     let bills_family = data
         .map_module("BillsFamilysHouse")
@@ -4204,25 +4475,19 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
                     && command.source_script == "BlackthornGym2FSetUpStoneTableCallback"
             })
     );
-    assert!(
-        blackthorn_gym
-            .script_runtime_commands
-            .iter()
-            .any(|command| {
-                command.command == "cmdqueue"
-                    && command.args == vec!["CMDQUEUE_STONETABLE", ".StoneTable"]
-                    && command.source_script
-                        == ".CommandQueue@BlackthornGym2FSetUpStoneTableCallback"
-            })
+    assert!(!blackthorn_gym
+        .script_runtime_commands
+        .iter()
+        .any(|command| matches!(command.command.as_str(), "cmdqueue" | "stonetable")));
+    assert_eq!(
+        blackthorn_gym.scripts
+            [".CommandQueue@BlackthornGym2FSetUpStoneTableCallback"][0]["command"],
+        "cmdqueue"
     );
-    assert!(
-        blackthorn_gym
-            .script_runtime_commands
-            .iter()
-            .any(|command| {
-                command.command == "stonetable"
-                    && command.args == vec!["5", "BLACKTHORNGYM2F_BOULDER1", ".Boulder1"]
-            })
+    assert_eq!(
+        blackthorn_gym.scripts
+            [".StoneTable@BlackthornGym2FSetUpStoneTableCallback"][0]["command"],
+        "stonetable"
     );
 
     let elevator = data
@@ -4233,9 +4498,16 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
             && command.args == vec!["CeladonDeptStoreElevatorData"]
             && command.source_script == "CeladonDeptStoreElevatorScript"
     }));
-    assert!(elevator.script_runtime_commands.iter().any(|command| {
-        command.command == "elevfloor"
-            && command.args == vec!["FLOOR_1F", "4", "CELADON_DEPT_STORE_1F"]
+    assert!(!elevator
+        .script_runtime_commands
+        .iter()
+        .any(|command| command.command == "elevfloor"));
+    assert!(elevator.script_elevators.values().any(|definition| {
+        definition.floors.iter().any(|floor| {
+            floor.floor == "FLOOR_1F"
+                && floor.warp == 4
+                && floor.target_map == "CeladonDeptStore1F"
+        })
     }));
 
     let bedroom = data
@@ -4246,11 +4518,17 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
             && command.args == vec!["DECODESC_LEFT_DOLL"]
             && command.source_script == "PlayersHouseDoll1Script"
     }));
-    assert!(bedroom.script_runtime_commands.iter().any(|command| {
-        command.command == "conditional_event"
-            && command.args == vec!["EVENT_PLAYERS_ROOM_POSTER", ".Script"]
-            && command.source_script == "PlayersHousePosterScript"
-    }));
+    assert!(!bedroom
+        .script_runtime_commands
+        .iter()
+        .any(|command| command.command == "conditional_event"));
+    assert_eq!(
+        bedroom.scripts["PlayersHousePosterScript"][0],
+        serde_json::json!({
+            "command": "conditional_event",
+            "args": ["EVENT_PLAYERS_ROOM_POSTER", ".Script"]
+        })
+    );
 
     let route31 = data.map_module("Route31").expect("assemble Route31");
     assert!(route31.script_runtime_commands.iter().any(|command| {
@@ -4275,18 +4553,20 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
             && command.args == vec![".asm_load_battle_room"]
             && command.source_script == "BattleTowerHallwayChooseBattleRoomScript"
     }));
-    assert!(hallway.script_runtime_commands.iter().any(|command| {
-        command.command == "ldh"
-            && command.args == vec!["a", "[rWBK]"]
-            && command.source_script
-                == ".asm_load_battle_room@BattleTowerHallwayChooseBattleRoomScript"
+    assert!(!hallway
+        .script_runtime_commands
+        .iter()
+        .any(|command| matches!(command.command.as_str(), "ld" | "ldh" | "ret")));
+    let hallway_cpu_body = hallway.scripts
+        [".asm_load_battle_room@BattleTowerHallwayChooseBattleRoomScript"]
+        .as_array()
+        .expect("Battle Tower callasm CPU body");
+    assert!(hallway_cpu_body.iter().any(|entry| {
+        entry["command"] == "ldh" && entry["args"] == serde_json::json!(["a", "[rWBK]"])
     }));
-    assert!(hallway.script_runtime_commands.iter().any(|command| {
-        command.command == "ret"
-            && command.args.is_empty()
-            && command.source_script
-                == ".asm_load_battle_room@BattleTowerHallwayChooseBattleRoomScript"
-    }));
+    assert!(hallway_cpu_body
+        .iter()
+        .any(|entry| entry["command"] == "ret" && entry["args"] == serde_json::json!([])));
 
     let academy = data
         .map_module("EarlsPokemonAcademy")
@@ -4296,11 +4576,10 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
             && command.args.is_empty()
             && command.source_script == "AcademyBlackboard"
     }));
-    assert!(academy.script_runtime_commands.iter().any(|command| {
-        command.command == "dba"
-            && command.args == vec![".Text"]
-            && command.source_script == ".MenuData@AcademyBlackboard"
-    }));
+    assert!(!academy
+        .script_runtime_commands
+        .iter()
+        .any(|command| command.command == "dba"));
 
     let radio_tower = data
         .map_module("RadioTower2F")
@@ -4322,7 +4601,945 @@ fn map_module_extracts_runtime_commands_with_exact_tokens() {
 }
 
 #[test]
-fn writecmdqueue_canonicalizes_map_local_target_before_state_validation() {
+fn buenas_source_script_commits_points_to_the_authoritative_saved_balance() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state.blue_card_balance = 11;
+    let mut session = data
+        .overworld_session("RadioTower2F", TilePosition::new(8, 7), 0)
+        .expect("start Radio Tower 2F session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "RadioTower2F",
+        "Buena",
+        41,
+    )
+    .expect("read exact Blue Card balance");
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "RadioTower2F",
+        "Buena",
+        42,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("increment exact Blue Card balance byte");
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "RadioTower2F",
+        "Buena",
+        43,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("write exact Blue Card balance variable");
+
+    assert_eq!(state.blue_card_balance, 12);
+    assert_eq!(
+        state
+            .script_runtime
+            .variables
+            .get("VAR_BLUECARDBALANCE")
+            .map(String::as_str),
+        Some("12")
+    );
+}
+
+#[test]
+fn kenjis_registered_source_script_reads_the_saved_break_timer() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state.kenji_break_timer = 4;
+    let session = data
+        .overworld_session("Route45", TilePosition::new(8, 8), 0)
+        .expect("start Route 45 session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "Route45",
+        ".Registered@TrainerBlackbeltKenji",
+        0,
+    )
+    .expect("read exact Kenji break timer");
+
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("4"));
+}
+
+#[test]
+fn source_readvar_commands_derive_every_typed_overworld_value() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+
+    state.pokedex.caught_species.extend([
+        "CHIKORITA".to_string(),
+        "CYNDAQUIL".to_string(),
+        "TOTODILE".to_string(),
+    ]);
+    let celadon = data
+        .overworld_session("CeladonMansion3F", TilePosition::new(0, 0), 0)
+        .expect("start Celadon Mansion 3F session");
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &celadon,
+        "CeladonMansion3F",
+        "GameFreakGameDesignerScript",
+        3,
+    )
+    .expect("read exact caught Pokédex count");
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("3"));
+
+    let route29 = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &route29,
+        "Route29",
+        "CatchingTutorialDudeScript",
+        2,
+    )
+    .expect("read exact current-box free space");
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("20"));
+
+    state.bug_contest.timer_minutes_remaining = 7;
+    let gate = data
+        .overworld_session("Route35NationalParkGate", TilePosition::new(3, 0), 0)
+        .expect("start Route 35 gate session");
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &gate,
+        "Route35NationalParkGate",
+        "Route35NationalParkGateLeavingContestEarlyScript",
+        3,
+    )
+    .expect("read exact Bug Contest minutes");
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
+
+    let new_bark = data
+        .overworld_session("NewBarkTown", TilePosition::new(8, 8), 0)
+        .expect("start New Bark Town session");
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &new_bark,
+        "NewBarkTown",
+        ".started_quest@MomPhoneCalleeScript",
+        5,
+    )
+    .expect("read exact map environment");
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("TOWN"));
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &new_bark,
+        "NewBarkTown",
+        "MomPhoneInTown",
+        0,
+    )
+    .expect("read exact map group");
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("24"));
+
+    state.script_runtime.special_phone_call = Some("SPECIALCALL_MASTERBALL".to_string());
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &new_bark,
+        "NewBarkTown",
+        "ElmPhoneCalleeScript",
+        0,
+    )
+    .expect("read exact pending special phone call");
+    assert_eq!(
+        state.script_runtime.script_value.as_deref(),
+        Some("8")
+    );
+}
+
+#[test]
+fn ruins_source_scripts_count_distinct_caught_unown_letters() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let unown = data.pokemon.get("UNOWN").expect("compiled Unown species");
+    let mut state = GameState::default();
+
+    for dvs in [
+        Dv::from_non_hp(0, 0, 0, 0),
+        Dv::from_non_hp(0, 0, 4, 4),
+        Dv::from_non_hp(0, 2, 2, 0),
+    ] {
+        let pokemon = create_pokemon_from_known_dvs(
+            unown,
+            5,
+            dvs,
+            &data.learnsets,
+            &data.moves,
+            &data.growth_rates,
+        )
+        .expect("materialize caught Unown letter");
+        state.pokedex.record_caught_pokemon(&pokemon);
+    }
+
+    let session = data
+        .overworld_session("RuinsOfAlphOutside", TilePosition::new(10, 10), 0)
+        .expect("start Ruins of Alph outside session");
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "RuinsOfAlphOutside",
+        ".MaybeScientist@RuinsOfAlphOutsideScientistCallback",
+        0,
+    )
+    .expect("read exact unique Unown count");
+
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("3"));
+}
+
+#[test]
+fn oaks_source_script_counts_both_asm_badge_bytes() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state.badges.johto = [true; 8];
+    state.badges.kanto = [true; 8];
+    let session = data
+        .overworld_session("OaksLab", TilePosition::new(4, 6), 0)
+        .expect("start Oak's Lab session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "OaksLab",
+        ".CheckBadges@Oak",
+        0,
+    )
+    .expect("read both exact saved badge bytes");
+
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("16"));
+    let action = data
+        .apply_script_control_command_in_session(
+            &mut state,
+            &session,
+            "OaksLab",
+            ".CheckBadges@Oak",
+            1,
+        )
+        .expect("compare Oak's exact NUM_BADGES constant");
+    assert!(matches!(
+        action,
+        ScriptControlAction::Jump { target_script, .. }
+            if target_script == ".OpenMtSilver@Oak"
+    ));
+}
+
+#[test]
+fn source_loadvar_movement_updates_live_and_saved_player_state() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let source_command = data
+        .story_events
+        .iter()
+        .find_map(|payload| payload.get("StandardScripts"))
+        .and_then(|catalog| catalog.get("Script_GetOnBike"))
+        .and_then(Value::as_array)
+        .and_then(|commands| commands.get(2))
+        .expect("exported Script_GetOnBike loadvar command");
+    assert_eq!(
+        source_command,
+        &serde_json::json!({
+            "command": "loadvar",
+            "args": ["VAR_MOVEMENT", "PLAYER_BIKE"]
+        })
+    );
+    assert!(
+        data.map_declares_script("Route29", "Script_GetOnBike")
+            .expect("query canonical global script")
+    );
+
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    data.apply_script_variable_command_now_in_mut_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        "Script_GetOnBike",
+        2,
+    )
+    .expect("execute exact Script_GetOnBike movement write");
+
+    assert_eq!(session.player.mode, MovementMode::Bike);
+    assert_eq!(
+        state.overworld.snapshot_identity().map(|(_, _, _, mode)| mode),
+        Some(MovementMode::Bike)
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .variables
+            .get("VAR_MOVEMENT")
+            .map(String::as_str),
+        Some("PLAYER_BIKE")
+    );
+}
+
+#[test]
+fn source_writevar_movement_updates_live_and_saved_player_state() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let source_command = data
+        .story_events
+        .iter()
+        .find_map(|payload| payload.get("StandardScripts"))
+        .and_then(|catalog| catalog.get("UsedSurfScript"))
+        .and_then(Value::as_array)
+        .and_then(|commands| commands.get(5))
+        .expect("exported UsedSurfScript writevar command");
+    assert_eq!(
+        source_command,
+        &serde_json::json!({
+            "command": "writevar",
+            "args": ["VAR_MOVEMENT"]
+        })
+    );
+    assert!(
+        data.map_declares_script("Route29", "UsedSurfScript")
+            .expect("query canonical global script")
+    );
+
+    let mut state = GameState::default();
+    state.script_runtime.script_value = Some("8".to_string());
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        "UsedSurfScript",
+        5,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact UsedSurfScript movement write");
+
+    assert_eq!(session.player.mode, MovementMode::SurfPika);
+    assert_eq!(
+        state.overworld.snapshot_identity().map(|(_, _, _, mode)| mode),
+        Some(MovementMode::SurfPika)
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .variables
+            .get("VAR_MOVEMENT")
+            .map(String::as_str),
+        Some("8")
+    );
+}
+
+#[test]
+fn source_put_the_rod_away_executes_its_exact_wram_writes_synchronously() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        "Script_NotEvenANibble_FallThrough",
+        1,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact PutTheRodAway CPU routine");
+
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("hBGMapMode")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wPlayerAction")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert!(state.script_runtime.command_queue.is_empty());
+}
+
+#[test]
+fn source_waterfall_continuation_reads_the_live_player_collision() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    let expected_collision = sample_collision(
+        &session.map,
+        &session.tileset,
+        session.player.tile,
+    )
+    .expect("sample live Route 29 collision")
+    .permission
+    .to_string();
+
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        ".loop@Script_UsedWaterfall",
+        1,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact Waterfall continuation CPU routine");
+
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wPlayerTileCollision")
+            .map(String::as_str),
+        Some(expected_collision.as_str())
+    );
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+}
+
+#[test]
+fn source_waterfall_continuation_matches_exact_collision_predicate() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let base_session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+
+    for (collision, expected_script_value) in [
+        (permissions::WATERFALL, "0"),
+        (permissions::CURRENT_DOWN, "0"),
+        (permissions::WATERFALL_RIGHT, "1"),
+        (permissions::WATERFALL_LEFT, "1"),
+        (permissions::WATERFALL_UP, "1"),
+        (permissions::FLOOR, "1"),
+    ] {
+        let mut state = GameState::default();
+        let mut session = base_session.clone();
+        for metatile in &mut session.tileset.metatiles {
+            metatile.collision = [collision; 4];
+        }
+
+        data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            ".loop@Script_UsedWaterfall",
+            1,
+            ScriptRuntimeInputs::default(),
+        )
+        .unwrap_or_else(|error| {
+            panic!("execute Waterfall collision {collision:#04x}: {error:#}")
+        });
+
+        assert_eq!(
+            state.script_runtime.script_value.as_deref(),
+            Some(expected_script_value),
+            "collision {collision:#04x}"
+        );
+    }
+}
+
+#[test]
+fn source_tree_mon_encounter_uses_live_position_player_id_and_rng() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState {
+        player_id: 0x1234,
+        ..GameState::default()
+    };
+    let session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    let command = RuntimeScriptCommandRef::new("Route29", "HeadbuttScript", 4);
+    let mut divider = crystal_core::random::ReplayDivider::new([0, 0, 0, 0]);
+
+    let outcome = data
+        .resolve_tree_mon_encounter(&mut state, &session, &command, &mut divider)
+        .expect("resolve exact TreeMonEncounter typed edge");
+
+    assert_eq!(outcome.roll.target_tile_x, 27);
+    assert_eq!(outcome.roll.target_tile_y, 2);
+    let expected_species = outcome
+        .roll
+        .resolved
+        .as_ref()
+        .map(|resolved| resolved.encounter.species.as_str())
+        .unwrap_or("0");
+    let expected_level = outcome
+        .roll
+        .resolved
+        .as_ref()
+        .map(|resolved| resolved.encounter.level.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let found = outcome.roll.resolved.is_some();
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wTempWildMonSpecies")
+            .map(String::as_str),
+        Some(expected_species)
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wCurPartyLevel")
+            .map(String::as_str),
+        Some(expected_level.as_str())
+    );
+    assert_eq!(
+        state.script_runtime.memory.get("wBattleType").map(String::as_str),
+        Some(if found { "BATTLETYPE_TREE" } else { "0" })
+    );
+    assert_eq!(
+        state.script_runtime.script_value.as_deref(),
+        Some(if found { "1" } else { "0" })
+    );
+}
+
+#[test]
+fn source_headbutt_dynamic_start_preserves_tree_battle_type_and_saved_origin() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let session = data
+        .overworld_session("Route29", TilePosition::new(0, 0), 0)
+        .expect("start Route 29 session");
+    let command = RuntimeScriptCommandRef::new("Route29", "HeadbuttScript", 4);
+    let mut encounter_divider =
+        crystal_core::random::ReplayDivider::new([255, 0, 53, 0]);
+    let outcome = data
+        .resolve_tree_mon_encounter(
+            &mut state,
+            &session,
+            &command,
+            &mut encounter_divider,
+        )
+        .expect("resolve exact TreeMonEncounter hit");
+    let resolved = outcome.roll.resolved.expect("source divider selects encounter");
+    state
+        .script_runtime
+        .memory
+        .insert("wBattleScriptFlags".to_string(), "0".to_string());
+    let mut battle_divider = crystal_core::random::ReplayDivider::new([0; 32]);
+
+    let start = data
+        .start_scripted_wild_battle(
+            &mut state,
+            "Route29",
+            "Route29",
+            "HeadbuttScript",
+            8,
+            &mut battle_divider,
+        )
+        .expect("start dynamic Headbutt battle");
+
+    assert_eq!(start.battle_type, "BATTLETYPE_TREE");
+    assert_eq!(start.enemy_pokemon.species.id, resolved.encounter.species);
+    assert!(data.saved_static_wild_battle_origin_exists(
+        "Route29",
+        "HeadbuttScript",
+        8,
+        9,
+        "BATTLETYPE_TREE",
+        &start.enemy_pokemon.species.id,
+        start.enemy_pokemon.level,
+    ));
+}
+
+#[test]
+fn source_fishing_facing_check_reads_the_live_player_direction() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let base_session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+
+    for (facing, expected) in [(Direction::Up, "1"), (Direction::Down, "0")] {
+        let mut state = GameState::default();
+        let mut session = base_session.clone();
+        session.player.facing = facing;
+
+        let (_, outcome) = data
+            .apply_script_runtime_command_in_session(
+                &mut state,
+                &mut session,
+                "Route29",
+                "Script_GotABite",
+                1,
+                ScriptRuntimeInputs::default(),
+            )
+            .expect("execute exact Fishing_CheckFacingUp CPU routine");
+
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::ScriptValueSet { ref value, .. } if value == expected
+        ));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some(expected));
+        assert!(state.script_runtime.command_queue.is_empty());
+    }
+}
+
+#[test]
+fn source_global_field_move_callasm_bodies_execute_synchronously() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let base_session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+
+    for (source_script, command_index) in [("Script_FishCastRod", 4)] {
+        let mut state = GameState::default();
+        let mut session = base_session.clone();
+
+        data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            source_script,
+            command_index,
+            ScriptRuntimeInputs::default(),
+        )
+        .unwrap_or_else(|error| panic!("execute exact {source_script} callasm: {error}"));
+
+        assert!(
+            state.script_runtime.command_queue.is_empty(),
+            "{source_script} callasm remained queued"
+        );
+    }
+
+    for (source_script, move_id, previous_block_id, replacement_block_id, variant) in [
+        ("Script_Cut", "CUT", 0x5b, 0x3c, "tree"),
+        (
+            "Script_UsedWhirlpool",
+            "WHIRLPOOL",
+            0x07,
+            0x36,
+            "whirlpool",
+        ),
+    ] {
+        let mut state = GameState::default();
+        let mut session = base_session.clone();
+        session.map.metatile_ids[0] = previous_block_id;
+        state.script_runtime.pending_block_field_move = Some(FieldMoveBlockOutcome {
+            move_id: move_id.to_string(),
+            actor_party_index: 0,
+            actor_species: "CHIKORITA".to_string(),
+            map_name: session.map.name.clone(),
+            tileset_name: "johto".to_string(),
+            metatile_x: 0,
+            metatile_y: 0,
+            previous_block_id,
+            replacement_block_id,
+            variant: variant.to_string(),
+        });
+
+        data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            source_script,
+            3,
+            ScriptRuntimeInputs::default(),
+        )
+        .unwrap_or_else(|error| panic!("execute exact {source_script} callasm: {error}"));
+
+        assert_eq!(session.map.metatile_at(0, 0), Some(replacement_block_id));
+        assert_eq!(
+            state
+                .map_block_overrides
+                .get("Route29")
+                .and_then(|overrides| overrides.get(&(0, 0)))
+                .copied(),
+            Some(replacement_block_id)
+        );
+        assert!(state.script_runtime.pending_block_field_move.is_none());
+        assert!(state.script_runtime.command_queue.is_empty());
+    }
+}
+
+#[test]
+fn certified_strength_callasm_rejects_missing_live_party_cursor_atomically() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    let before = (state.clone(), session.clone());
+
+    let error = data
+        .apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "Route29",
+            "Script_UsedStrength",
+            0,
+            ScriptRuntimeInputs::default(),
+        )
+        .expect_err("certified SetStrengthFlag cannot defer when wCurPartyMon is missing");
+
+    assert!(
+        format!("{error:#}").contains(
+            "certified synchronous callasm SetStrengthFlag could not execute from live runtime state"
+        ),
+        "{error:#}"
+    );
+    assert_eq!((state, session), before);
+}
+
+#[test]
+fn source_try_strength_failure_clears_stale_party_cursor() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state
+        .script_runtime
+        .memory
+        .insert("wCurPartyMon".to_string(), "4".to_string());
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    certify_synchronous_script_callasm_target(
+        &data
+            .global_scripts
+            .as_ref()
+            .expect("base pack global scripts")
+            .definitions,
+        "TryStrengthOW",
+    )
+    .expect("certify exact TryStrengthOW CPU routine");
+
+    let (_, outcome) = data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        "AskStrengthScript",
+        0,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact TryStrengthOW failure path");
+
+    assert!(
+        matches!(outcome, ScriptRuntimeOutcome::ScriptValueSet { ref value, .. } if value == "1"),
+        "unexpected TryStrengthOW outcome: {outcome:?}; queue: {:?}",
+        state.script_runtime.command_queue
+    );
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wCurPartyMon")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert!(state.script_runtime.command_queue.is_empty());
+}
+
+#[test]
+fn source_blinding_flash_sets_the_exact_status_flag() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("Route29", TilePosition::new(27, 1), 0)
+        .expect("start Route 29 session");
+    state.script_runtime.pending_flash_field_move = Some(FieldMoveFlagOutcome {
+        move_id: "FLASH".to_string(),
+        actor_party_index: 0,
+        actor_species: "CHIKORITA".to_string(),
+        engine_flag: "STATUSFLAGS_FLASH".to_string(),
+        was_set: false,
+        is_set: true,
+    });
+
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "Route29",
+        "Script_UseFlash",
+        3,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact BlindingFlash CPU routine");
+
+    assert!(
+        state
+            .flags
+            .is_engine_flag_set("STATUSFLAGS_FLASH")
+            .expect("read FLASH status flag")
+    );
+    assert!(state.script_runtime.command_queue.is_empty());
+    assert!(state.script_runtime.pending_flash_field_move.is_none());
+}
+
+#[test]
+fn generic_phone_callee_routes_the_symbolic_caller_through_its_asm_byte() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state.script_runtime.variables.insert(
+        "VAR_CALLERID".to_string(),
+        "PHONE_BLACKBELT_KENJI".to_string(),
+    );
+    let session = data
+        .overworld_session("NewBarkTown", TilePosition::new(8, 8), 0)
+        .expect("start New Bark Town session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "NewBarkTown",
+        "PhoneScript_AnswerPhone_Male",
+        4,
+    )
+    .expect("read exact caller id");
+    let action = data
+        .apply_script_control_command_in_session(
+            &mut state,
+            &session,
+            "NewBarkTown",
+            "PhoneScript_AnswerPhone_Male",
+            23,
+        )
+        .expect("compare Kenji's exact phone-contact byte");
+
+    assert!(matches!(
+        action,
+        ScriptControlAction::Jump { target_script, .. }
+            if target_script == ".Kenji@PhoneScript_AnswerPhone_Male"
+    ));
+}
+
+#[test]
+fn bug_contest_battle_source_reads_the_live_park_ball_counter() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    state.bug_contest.park_balls_remaining = 5;
+    let session = data
+        .overworld_session("NationalPark", TilePosition::new(15, 25), 0)
+        .expect("start National Park session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "NationalPark",
+        "BugCatchingContestBattleScript",
+        4,
+    )
+    .expect("read exact remaining Park Ball count");
+
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("5"));
+
+    state.bug_contest.park_balls_remaining = 0;
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "NationalPark",
+        "BugCatchingContestBattleScript",
+        4,
+    )
+    .expect("read exhausted Park Ball count");
+    let action = data
+        .apply_script_control_command_in_session(
+            &mut state,
+            &session,
+            "NationalPark",
+            "BugCatchingContestBattleScript",
+            5,
+        )
+        .expect("branch to the authored out-of-balls script");
+    assert!(matches!(
+        action,
+        ScriptControlAction::Jump { target_script, .. }
+            if target_script == "BugCatchingContestOutOfBallsScript"
+    ));
+}
+
+#[test]
+fn source_readmem_observes_cleared_wram_before_its_first_write() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let mut state = GameState::default();
+    let session = data
+        .overworld_session("IlexForest", TilePosition::new(1, 5), 0)
+        .expect("start Ilex Forest session");
+
+    data.apply_script_variable_command_now_in_session(
+        &mut state,
+        &session,
+        "IlexForest",
+        "IlexForestFarfetchdCallback",
+        2,
+    )
+    .expect("read cleared Farfetch'd position byte");
+
+    assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+}
+
+#[test]
+fn writecmdqueue_installs_typed_stone_table_without_queuing_data_as_script() {
     let root = repository_root_for_tests();
     let data = AssetRoot::new(root)
         .load_base_game_data()
@@ -4353,28 +5570,20 @@ fn writecmdqueue_canonicalizes_map_local_target_before_state_validation() {
     )
     .expect("execute Ice Path B1F command-queue callback");
 
-    assert_eq!(state.script_runtime.command_queue.len(), 1);
-    assert_eq!(
-        state.script_runtime.command_queue[0].target,
-        ".CommandQueue"
-    );
-    let audio_ids = BTreeSet::new();
-    data.apply_runtime_mutation_command(
-        &mut state,
-        &mut session,
-        RuntimeMutationCommand::ExecuteNextQueuedScriptCommand,
-        &audio_ids,
-        &audio_ids,
-        &audio_ids,
-    )
-    .expect("execute queued local callback");
+    assert!(state.script_runtime.command_queue.is_empty());
     assert_eq!(
         state
             .script_runtime
-            .next_script
-            .as_ref()
-            .map(|location| location.script.as_str()),
-        Some(".CommandQueue@IcePathB1FSetUpStoneTableCallback")
+            .stone_table_entries
+            .iter()
+            .map(|entry| (entry.warp, entry.object_event.as_str(), entry.script.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (3, "ICEPATHB1F_BOULDER1", ".Boulder1@IcePathB1FSetUpStoneTableCallback"),
+            (4, "ICEPATHB1F_BOULDER2", ".Boulder2@IcePathB1FSetUpStoneTableCallback"),
+            (5, "ICEPATHB1F_BOULDER3", ".Boulder3@IcePathB1FSetUpStoneTableCallback"),
+            (6, "ICEPATHB1F_BOULDER4", ".Boulder4@IcePathB1FSetUpStoneTableCallback"),
+        ]
     );
 }
 
@@ -4731,13 +5940,96 @@ fn phone_callasm_targets_retain_non_accumulator_engine_dispatch() {
 }
 
 #[test]
+fn source_phone_callasms_execute_typed_ringing_hangup_timer_and_caller_effects() {
+    let data = AssetRoot::new(repository_root_for_tests())
+        .load_base_game_data()
+        .expect("load source-backed base game data");
+    let events = MapEvents::default();
+    let mut session = OverworldSession::with_events_and_objects(
+        OverworldMapData {
+            name: "PhoneRuntime".to_string(),
+            width: 1,
+            height: 1,
+            border_block: 0,
+            connections: Vec::new(),
+            metatile_ids: vec![0],
+        },
+        events,
+        Vec::new(),
+        TilesetCollision {
+            metatiles: vec![MetatileCollision {
+                collision: [permissions::FLOOR; 4],
+            }],
+        },
+        TilePosition::new(0, 0),
+    );
+    let mut state = GameState::default();
+
+    let mut presentations = Vec::new();
+    for (source_script, command_index) in [
+        ("Script_ReceivePhoneCall", 1),
+        ("Script_ReceivePhoneCall", 4),
+        ("Script_ReceivePhoneCall", 6),
+        ("Script_SpecialBillCall", 0),
+    ] {
+        let (_, outcome) = data.apply_script_runtime_command_in_session(
+            &mut state,
+            &mut session,
+            "PhoneRuntime",
+            source_script,
+            command_index,
+            ScriptRuntimeInputs::default(),
+        )
+        .expect("execute exact source phone callasm");
+        if let ScriptRuntimeOutcome::PhoneCallasmPresentation { effect, .. } = outcome {
+            presentations.push(effect);
+        }
+    }
+
+    assert_eq!(
+        presentations,
+        vec![
+            crystal_core::systems::script_runtime::ScriptPhoneCallasmPresentation::RingTwice,
+            crystal_core::systems::script_runtime::ScriptPhoneCallasmPresentation::HangUp,
+        ]
+    );
+    assert!(state.script_runtime.command_queue.is_empty());
+    assert!(state.script_runtime.audio_events.is_empty());
+    assert!(state.script_runtime.window_open);
+    assert!(state.script_runtime.phone_call_timer.initialized);
+    assert_eq!(
+        state
+            .script_runtime
+            .phone_call_timer
+            .time_cycles_since_last_call,
+        0
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wPhoneCallerScript")
+            .map(String::as_str),
+        Some("BillPhoneCallerScript")
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .variables
+            .get("VAR_CALLERID")
+            .map(String::as_str),
+        Some("PHONE_BILL")
+    );
+}
+
+#[test]
 fn script_runtime_name_commands_write_pack_owned_display_buffers() {
     let mut module = test_map_module("RuntimeNameMap", "RUNTIME_NAME_MAP", None);
     module.script_runtime_commands = vec![
         ScriptRuntimeCommand {
             command: "gettrainername".to_string(),
             args: vec![
-                "STRING_BUFFER_1".to_string(),
+                "STRING_BUFFER_3".to_string(),
                 "YOUNGSTER".to_string(),
                 "YOUNGSTER_JOEY".to_string(),
             ],
@@ -4746,14 +6038,14 @@ fn script_runtime_name_commands_write_pack_owned_display_buffers() {
         },
         ScriptRuntimeCommand {
             command: "getitemname".to_string(),
-            args: vec!["STRING_BUFFER_2".to_string(), "POTION".to_string()],
+            args: vec!["STRING_BUFFER_4".to_string(), "POTION".to_string()],
             source_script: "RuntimeNameScript".to_string(),
             command_index: 1,
         },
         ScriptRuntimeCommand {
             command: "getmonname".to_string(),
             args: vec![
-                "STRING_BUFFER_3".to_string(),
+                "STRING_BUFFER_5".to_string(),
                 SCRIPT_RUNTIME_USE_SCRIPT_VAR_ID.to_string(),
             ],
             source_script: "RuntimeNameScript".to_string(),
@@ -4822,7 +6114,7 @@ fn script_runtime_name_commands_write_pack_owned_display_buffers() {
         state
             .script_runtime
             .named_buffers
-            .get("STRING_BUFFER_1")
+            .get("STRING_BUFFER_3")
             .map(String::as_str),
         Some("Joey")
     );
@@ -4830,7 +6122,15 @@ fn script_runtime_name_commands_write_pack_owned_display_buffers() {
         state
             .script_runtime
             .named_buffers
-            .get("STRING_BUFFER_2")
+            .get("STRING_BUFFER_4")
+            .map(String::as_str),
+        Some("POTION")
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wNamedObjectIndex")
             .map(String::as_str),
         Some("POTION")
     );
@@ -4838,7 +6138,7 @@ fn script_runtime_name_commands_write_pack_owned_display_buffers() {
         state
             .script_runtime
             .named_buffers
-            .get("STRING_BUFFER_3")
+            .get("STRING_BUFFER_5")
             .map(String::as_str),
         Some("CHIKORITA")
     );
@@ -4895,10 +6195,6 @@ fn blackoutmod_updates_last_spawn_from_compiled_spawn_table() {
     )
     .expect("blackoutmod applies against compiled spawn table");
 
-    assert_eq!(
-        state.script_runtime.blackout_mod.as_deref(),
-        Some("ROUTE_29")
-    );
     assert_eq!(state.last_spawn_identifier, Some(15));
 
     let mut missing_spawn_state = GameState {

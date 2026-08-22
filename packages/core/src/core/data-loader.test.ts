@@ -66,6 +66,7 @@ const SPECIES_FIXTURE = {
 };
 
 const MOVE_FIXTURE = {
+  source_index: 33,
   name: "TACKLE",
   type: "NORMAL",
   power: 35,

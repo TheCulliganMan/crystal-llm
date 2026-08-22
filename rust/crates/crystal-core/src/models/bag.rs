@@ -289,12 +289,6 @@ impl Bag {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
         }
-        if definition.pocket != ITEM_POCKET_ITEM {
-            return Err(format!(
-                "PC item '{}' is not in the ITEM pocket",
-                definition.script_name
-            ));
-        }
         add_to_inventory(
             &mut self.pc_items,
             &definition.script_name,
@@ -308,12 +302,6 @@ impl Bag {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
         }
-        if definition.pocket != ITEM_POCKET_ITEM {
-            return Err(format!(
-                "PC item '{}' is not in the ITEM pocket",
-                definition.script_name
-            ));
-        }
         remove_from_inventory(&mut self.pc_items, &definition.script_name, quantity)
     }
 
@@ -325,12 +313,6 @@ impl Bag {
     ) -> Result<bool, String> {
         if quantity == 0 {
             return Err("quantity must be positive".to_string());
-        }
-        if definition.pocket != ITEM_POCKET_ITEM {
-            return Err(format!(
-                "PC item '{}' is not in the ITEM pocket",
-                definition.script_name
-            ));
         }
         remove_from_inventory_at(
             &mut self.pc_items,
@@ -359,9 +341,6 @@ impl Bag {
     }
 
     pub fn pc_item_quantity(&self, definition: &Item) -> u16 {
-        if definition.pocket != ITEM_POCKET_ITEM {
-            return 0;
-        }
         inventory_quantity(&self.pc_items, &definition.script_name)
     }
 
@@ -482,6 +461,29 @@ pub fn validate_saved_bag_pocket_references<'a>(
                 item_id: item_id.clone(),
                 actual_pocket: item.pocket.clone(),
                 expected_pocket: expected_pocket.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_saved_pc_item_references<'a>(
+    items: &BTreeMap<String, Item>,
+    path: &str,
+    inventory: impl IntoIterator<Item = (&'a String, &'a u16)>,
+) -> Result<(), BagSaveError> {
+    for (item_id, _) in inventory {
+        let item = items
+            .get(item_id)
+            .ok_or_else(|| BagSaveError::MissingItem {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+            })?;
+        if item.script_name.as_str() != item_id {
+            return Err(BagSaveError::ItemScriptNameMismatch {
+                path: path.to_string(),
+                item_id: item_id.clone(),
+                script_name: item.script_name.clone(),
             });
         }
     }
@@ -1129,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn pc_items_use_exact_item_pocket_storage() {
+    fn pc_items_accept_ball_pocket_items_bought_by_mom() {
         let potion = item("POTION", item_pocket("ITEM"));
         let ball = item("POKE_BALL", item_pocket("BALL"));
         let mut bag = Bag::default();
@@ -1137,10 +1139,12 @@ mod tests {
         assert!(bag.add_pc_item(&potion, 2).expect("add pc item"));
         assert_eq!(bag.pc_item_quantity(&potion), 2);
         assert!(bag.has_pc_item(&potion));
-        assert_eq!(
-            bag.add_pc_item(&ball, 1),
-            Err("PC item 'POKE_BALL' is not in the ITEM pocket".to_string())
+        assert!(
+            bag.add_pc_item(&ball, 1)
+                .expect("Mom can put a ball in PC storage")
         );
+        assert_eq!(bag.pc_item_quantity(&ball), 1);
+        assert!(bag.remove_pc_item(&ball, 1).expect("withdraw Mom's ball"));
         bag.validate().expect("valid pc items");
     }
 

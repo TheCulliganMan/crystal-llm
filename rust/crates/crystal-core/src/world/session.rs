@@ -735,7 +735,7 @@ impl OverworldSession {
     fn validate_follow_after_entity_move(
         &self,
         moved_object_id: &str,
-        from: TilePosition,
+        _from: TilePosition,
     ) -> Result<(), OverworldCoordinateError> {
         let Some(following) = self.following.as_ref() else {
             return Ok(());
@@ -1756,18 +1756,17 @@ impl OverworldSession {
     ) -> Result<bool, OverworldCoordinateError> {
         let stride = require_runtime_stride(options.stride_tiles)?;
         self.require_checked_tile_bounds()?;
-        let ledge =
-            checked_move_by_stride(self.player.tile, direction, stride).ok_or_else(|| {
-                OverworldCoordinateError::RuntimeTileOverflow {
-                    x: self.player.tile.x,
-                    y: self.player.tile.y,
-                    facing: direction,
-                }
-            })?;
+        checked_move_by_stride(self.player.tile, direction, stride).ok_or_else(|| {
+            OverworldCoordinateError::RuntimeTileOverflow {
+                x: self.player.tile.x,
+                y: self.player.tile.y,
+                facing: direction,
+            }
+        })?;
         Ok(can_jump_ledge(
             &self.map,
             &self.tileset,
-            ledge,
+            self.player.tile,
             direction,
             stride,
         ))
@@ -2679,13 +2678,16 @@ mod tests {
             TilePosition::new(6, 6),
         );
         session.frame = 16;
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
         session
-            .advance_autonomous_objects()
+            .advance_autonomous_objects_exact(&mut rng)
             .expect("walker advances");
         assert_eq!(
             session.object_runtime_tile_by_id("WALKER").unwrap(),
             TilePosition::new(0, 1)
         );
+        assert_eq!(divider.remaining(), 0);
     }
 
     #[test]
@@ -2702,15 +2704,16 @@ mod tests {
             TilePosition::new(6, 6),
         );
         session.frame = 16;
-        let mut rng = Random::new_crystal(0x1234_5678);
+        let mut divider = crate::random::ReplayDivider::new([0, 0xff]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
         session
-            .advance_autonomous_objects_with_rng(Some(&mut rng))
+            .advance_autonomous_objects_exact(&mut rng)
             .expect("wanderer advances");
         assert_ne!(
             session.object_runtime_tile_by_id("WANDERER").unwrap(),
             TilePosition::new(2, 2)
         );
-        assert_ne!(rng.seed(), 0x1234_5678);
+        assert_eq!(divider.remaining(), 0);
     }
 
     #[test]
@@ -2985,10 +2988,15 @@ mod tests {
         TilesetCollision {
             metatiles: vec![
                 MetatileCollision {
-                    collision: [permissions::FLOOR; 4],
+                    collision: [
+                        permissions::FLOOR,
+                        permissions::FLOOR,
+                        permissions::HOP_DOWN,
+                        permissions::HOP_DOWN,
+                    ],
                 },
                 MetatileCollision {
-                    collision: [permissions::HOP_DOWN; 4],
+                    collision: [permissions::FLOOR; 4],
                 },
             ],
         }
@@ -3152,7 +3160,7 @@ mod tests {
             Some(WarpTrigger {
                 map_name: "test".to_string(),
                 tile: TilePosition::new(51, 2),
-                permission: permissions::DOOR,
+                permission: permissions::WARP_PANEL,
                 warp,
             })
         );
@@ -4445,7 +4453,7 @@ mod tests {
             Some(WarpTrigger {
                 map_name: "test".to_string(),
                 tile: TilePosition::new(1, 2),
-                permission: permissions::DOOR,
+                permission: permissions::WARP_PANEL,
                 warp,
             })
         );

@@ -11,6 +11,24 @@ import {
 } from "./export-story-events";
 
 describe("export-story-events", () => {
+  it("parses the exact global player-event pointer roots and direction script", () => {
+    const source = path.resolve(
+      __dirname,
+      "../../../../vendor/pokecrystal/engine/overworld/events.asm",
+    );
+    const scripts = parseAsmFile(source);
+    const roots = scripts.PlayerEventScriptPointers.filter(
+      (command) => command.command === "dba",
+    ).map((command) => (command.args as string[])[0]);
+
+    expect(roots).toContain("ChangeDirectionScript");
+    expect(scripts.ChangeDirectionScript).toEqual([
+      { command: "deactivatefacing", args: ["3"] },
+      { command: "callasm", args: ["EnableWildEncounters"] },
+      { command: "end", args: [] },
+    ]);
+  });
+
   it("exports the exact standard-script pointer order with parsed command bodies", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "standard-scripts-"));
     const asmSource = path.join(tmpDir, "std_scripts.asm");
@@ -111,7 +129,163 @@ SharedScript:
     );
   });
 
-  it("exports the exact Bug Contest timeout global root and reachable standard-script handoff", () => {
+  it("exports every exact overworld QueueScript entry as a shared global root", () => {
+    const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
+    const standardSource = path.join(root, "engine/events/std_scripts.asm");
+    const overworldSource = path.join(root, "engine/events/overworld.asm");
+    const queuedRoots = [
+      "Script_CutFromMenu",
+      "Script_UseFlash",
+      "SurfFromMenuScript",
+      ".FlyScript@FlyFunction",
+      "Script_WaterfallFromMenu",
+      ".UsedDigScript@EscapeRopeOrDig",
+      ".UsedEscapeRopeScript@EscapeRopeOrDig",
+      ".TeleportScript@TeleportFunction",
+      "Script_StrengthFromMenu",
+      "Script_WhirlpoolFromMenu",
+      "HeadbuttFromMenuScript",
+      "RockSmashFromMenuScript",
+      "Script_GotABite",
+      "Script_NotEvenANibble",
+      "Script_NotEvenANibble2",
+      "Script_GetOnBike",
+      "Script_GetOnBike_Register",
+      "Script_GetOffBike",
+      "Script_GetOffBike_Register",
+      "Script_CantGetOffBike",
+    ];
+    const payload = parseStandardScriptsFile(
+      standardSource,
+      [overworldSource],
+      [],
+      [{ filePath: overworldSource, roots: queuedRoots }],
+    );
+
+    expect(payload.globalScriptRoots).toEqual(queuedRoots);
+    for (const rootLabel of queuedRoots) {
+      expect(payload.scripts[rootLabel]).not.toHaveLength(0);
+    }
+  });
+
+  it("exports Sweet Scent's queued script as a shared global root", () => {
+    const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
+    const standardSource = path.join(root, "engine/events/std_scripts.asm");
+    const sweetScentSource = path.join(root, "engine/events/sweet_scent.asm");
+    const queuedRoot = ".SweetScent@SweetScentFromMenu";
+    const payload = parseStandardScriptsFile(
+      standardSource,
+      [sweetScentSource],
+      [],
+      [{ filePath: sweetScentSource, roots: [queuedRoot] }],
+    );
+
+    expect(payload.globalScriptRoots).toEqual([queuedRoot]);
+    expect(payload.scripts[queuedRoot]).toEqual(
+      expect.arrayContaining([
+        { command: "writetext", args: ["UseSweetScentText"] },
+        { command: "waitbutton", args: [] },
+        { command: "callasm", args: ["SweetScentEncounter"] },
+        { command: "randomwildmon", args: [] },
+        { command: "startbattle", args: [] },
+      ]),
+    );
+  });
+
+  it("exports Fly's exact external CPU helpers as definition-only bodies", () => {
+    const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
+    const standardSource = path.join(root, "engine/events/std_scripts.asm");
+    const overworldSource = path.join(root, "engine/events/overworld.asm");
+    const clearSpritesSource = path.join(root, "home/clear_sprites.asm");
+    const fieldMovesSource = path.join(root, "engine/events/field_moves.asm");
+    const fishingGfxSource = path.join(root, "engine/events/fishing_gfx.asm");
+    const mapSetupSource = path.join(root, "engine/overworld/map_setup.asm");
+    const payload = parseStandardScriptsFile(
+      standardSource,
+      [overworldSource],
+      [],
+      [
+        {
+          filePath: overworldSource,
+          roots: [".FlyScript@FlyFunction"],
+        },
+      ],
+      [
+        {
+          filePath: clearSpritesSource,
+          roots: ["HideSprites"],
+          reachableLabels: ["HideSprites", ".loop@HideSprites"],
+        },
+        {
+          filePath: fieldMovesSource,
+          roots: ["BlindingFlash", "ShakeHeadbuttTree", "FlyFromAnim", "FlyToAnim"],
+          reachableLabels: [
+            "BlindingFlash",
+            "ShakeHeadbuttTree",
+            ".loop@ShakeHeadbuttTree",
+            ".done@ShakeHeadbuttTree",
+            "HideHeadbuttTree",
+            "TreeRelativeLocationTable",
+            "OWCutAnimation",
+            ".loop@OWCutAnimation",
+            ".finish@OWCutAnimation",
+            ".LoadCutGFX@OWCutAnimation",
+            "OWCutJumptable",
+            ".dw@OWCutJumptable",
+            "Cut_SpawnAnimateTree",
+            "Cut_SpawnAnimateLeaves",
+            "Cut_StartWaiting",
+            "Cut_WaitAnimSFX",
+            ".finished@Cut_WaitAnimSFX",
+            "Cut_SpawnLeaf",
+            "Cut_GetLeafSpawnCoords",
+            ".left_side@Cut_GetLeafSpawnCoords",
+            ".top_side@Cut_GetLeafSpawnCoords",
+            ".Coords@Cut_GetLeafSpawnCoords",
+            "Cut_Headbutt_GetPixelFacing",
+            ".Coords@Cut_Headbutt_GetPixelFacing",
+            "FlyFromAnim",
+            ".loop@FlyFromAnim",
+            ".exit@FlyFromAnim",
+            "FlyToAnim",
+            ".loop@FlyToAnim",
+            ".exit@FlyToAnim",
+            ".RestorePlayerSprite_DespawnLeaves@FlyToAnim",
+            ".OAMloop@FlyToAnim",
+            "FlyFunction_InitGFX",
+            "FlyFunction_FrameTimer",
+            ".exit@FlyFunction_FrameTimer",
+            ".SpawnLeaf@FlyFunction_FrameTimer",
+          ],
+        },
+        {
+          filePath: fishingGfxSource,
+          roots: ["LoadFishingGFX"],
+          reachableLabels: [
+            "LoadFishingGFX",
+            ".got_gender@LoadFishingGFX",
+            ".LoadGFX@LoadFishingGFX",
+          ],
+        },
+        {
+          filePath: mapSetupSource,
+          roots: ["SkipUpdateMapSprites"],
+          reachableLabels: ["SkipUpdateMapSprites"],
+        },
+      ],
+    );
+
+    expect(payload.globalScriptRoots).toEqual([".FlyScript@FlyFunction"]);
+    expect(payload.scripts.HideSprites).not.toHaveLength(0);
+    expect(payload.scripts.BlindingFlash).not.toHaveLength(0);
+    expect(payload.scripts.LoadFishingGFX).not.toHaveLength(0);
+    expect(payload.scripts.ShakeHeadbuttTree).not.toHaveLength(0);
+    expect(payload.scripts.FlyFromAnim).not.toHaveLength(0);
+    expect(payload.scripts.FlyToAnim).not.toHaveLength(0);
+    expect(payload.scripts.SkipUpdateMapSprites).not.toHaveLength(0);
+  });
+
+  it("exports the exact Bug Contest battle and timeout global roots", () => {
     const root = path.resolve(__dirname, "../../../../vendor/pokecrystal");
     const contestSource = path.join(root, "engine/events/bug_contest/contest.asm");
     const payload = parseStandardScriptsFile(
@@ -126,18 +300,36 @@ SharedScript:
       [
         {
           filePath: contestSource,
-          roots: ["BugCatchingContestOverScript"],
-          reachableLabels: [
+          roots: [
+            "BugCatchingContestBattleScript",
             "BugCatchingContestOverScript",
+          ],
+          reachableLabels: [
+            "BugCatchingContestBattleScript",
+            "BugCatchingContestOverScript",
+            "BugCatchingContestOutOfBallsScript",
             "BugCatchingContestReturnToGateScript",
             "BugCatchingContestTimeUpText",
+            "BugCatchingContestIsOverText",
           ],
           standardTargets: ["BugContestResultsWarpScript"],
         },
       ],
     );
 
-    expect(payload.globalScriptRoots).toEqual(["BugCatchingContestOverScript"]);
+    expect(payload.globalScriptRoots).toEqual([
+      "BugCatchingContestBattleScript",
+      "BugCatchingContestOverScript",
+    ]);
+    expect(payload.scripts.BugCatchingContestBattleScript).toEqual([
+      { command: "loadvar", args: ["VAR_BATTLETYPE", "BATTLETYPE_CONTEST"] },
+      { command: "randomwildmon", args: [] },
+      { command: "startbattle", args: [] },
+      { command: "reloadmapafterbattle", args: [] },
+      { command: "readmem", args: ["wParkBallsRemaining"] },
+      { command: "iffalse", args: ["BugCatchingContestOutOfBallsScript"] },
+      { command: "end", args: [] },
+    ]);
     expect(payload.scripts.BugCatchingContestOverScript).toEqual([
       { command: "playsound", args: ["SFX_ELEVATOR_END"] },
       { command: "opentext", args: [] },
@@ -153,15 +345,23 @@ SharedScript:
       { command: "text_far", args: ["_BugCatchingContestTimeUpText"] },
       { command: "text_end", args: [] },
     ]);
-    expect(payload.scripts.BugCatchingContestBattleScript).toBeUndefined();
-    expect(payload.scripts.BugCatchingContestOutOfBallsScript).toBeUndefined();
+    expect(payload.scripts.BugCatchingContestOutOfBallsScript).toEqual([
+      { command: "playsound", args: ["SFX_ELEVATOR_END"] },
+      { command: "opentext", args: [] },
+      { command: "writetext", args: ["BugCatchingContestIsOverText"] },
+      { command: "waitbutton", args: [] },
+      { command: "sjump", args: ["BugCatchingContestReturnToGateScript"] },
+    ]);
     expect(payload.order).toContain("BugContestResultsWarpScript");
     expect(
       standardScriptsStoryEventPayload(payload).StandardScripts.BugContestResultsWarpScript,
     ).toEqual(payload.scripts.BugContestResultsWarpScript);
     expect(
       standardScriptsStoryEventPayload(payload).StandardScripts.GlobalScriptRoots,
-    ).toEqual(["BugCatchingContestOverScript"]);
+    ).toEqual([
+      "BugCatchingContestBattleScript",
+      "BugCatchingContestOverScript",
+    ]);
   });
 
   it("fails closed when a required global root source or exact standard handoff changes", () => {
@@ -932,6 +1132,36 @@ endc
       { command: "para", args: '"blew it on card"' },
       { command: "line", args: '"flipping..."' },
       { command: "done", args: "" },
+    ]);
+  });
+
+  it("preserves every shipped non-printing text opcode inside text bodies", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "story-text-opcodes-"));
+    const asmSource = path.join(tmpDir, "TextOpcodes.asm");
+    fs.writeFileSync(
+      asmSource,
+      `OpcodeText:
+\ttext "Used the@"
+\ttext_low
+\ttext_ram wStringBuffer2
+\ttext_pause
+\ttext_today
+\tsound_caught_mon
+\tsound_slot_machine_start
+\ttext_end
+`,
+      "utf8"
+    );
+
+    expect(parseAsmFile(asmSource).OpcodeText).toEqual([
+      { command: "text", args: '"Used the@"' },
+      { command: "text_low", args: [] },
+      { command: "text_ram", args: ["wStringBuffer2"] },
+      { command: "text_pause", args: [] },
+      { command: "text_today", args: [] },
+      { command: "sound_caught_mon", args: [] },
+      { command: "sound_slot_machine_start", args: [] },
+      { command: "text_end", args: [] },
     ]);
   });
 

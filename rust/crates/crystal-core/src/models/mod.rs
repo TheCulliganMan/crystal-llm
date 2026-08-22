@@ -15,7 +15,7 @@ pub mod trainer;
 pub use bag::{
     BALL_POCKET_CAPACITY, Bag, BagSaveError, ITEM_POCKET_CAPACITY, KEY_ITEM_POCKET_CAPACITY,
     MAX_ITEM_STACK, PC_ITEM_CAPACITY, PocketInventory, PocketStack,
-    validate_saved_bag_pocket_references,
+    validate_saved_bag_pocket_references, validate_saved_pc_item_references,
 };
 pub use battle_animation::{
     BattleAnimationCatalogIssue, BattleAnimationCommandTable, BattleAnimationTable,
@@ -42,8 +42,8 @@ pub use item::{
 };
 pub use menu_icon::{MenuIconCatalogIssue, MenuIconTable, menu_icon_catalog_issues};
 pub use move_data::{
-    Move, MoveNameCatalogIssue, MoveNameTable, MovePayloadIssue, move_name_catalog_issues,
-    move_payload_issues,
+    Move, MoveNameCatalogIssue, MoveNameTable, MovePayloadIssue, MoveSourceIndexCatalogIssue,
+    move_name_catalog_issues, move_payload_issues, move_source_index_catalog_issues,
 };
 pub use party::{PARTY_SIZE, Party};
 pub use pc_string::{PcStringCatalogIssue, PcStringTable, pc_string_catalog_issues};

@@ -73,6 +73,20 @@ the <STRING_BUFFER_1> you
 received?`);
   });
 
+  it("preserves exact text_ram operand names when parsing ASM", () => {
+    const asmDir = path.join(tempDir, "data", "text");
+    fs.mkdirSync(asmDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(asmDir, "seer.asm"),
+      'SeerText:\n\ttext "Met @"\n\ttext_ram wSeerNickname\n\ttext_start\n\tline "here at level @"\n\ttext_decimal wStringBuffer2 + 1, 1, 3\n\tdone\n'
+    );
+
+    const loader = new AsmTextLoader(tempDir, dataDir);
+    expect(loader.get("SeerText")).toBe(
+      "Met <RAM:wSeerNickname>\nhere at level <DECIMAL:wStringBuffer2 + 1, 1, 3>"
+    );
+  });
+
   it("loads entries with paragraph breaks", () => {
     writeTextJson({
       ParaText: `First paragraph.

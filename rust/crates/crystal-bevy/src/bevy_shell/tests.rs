@@ -10,3 +10,23 @@ include!("tests/menu_and_input.rs");
 include!("tests/story_progression.rs");
 include!("tests/art_text_and_determinism.rs");
 include!("tests/battle_render_regressions.rs");
+include!("tests/shop_rendering.rs");
+include!("tests/heal_machine_rendering.rs");
+
+#[test]
+fn egg_hatch_wobble_uses_exact_asm_pairs_and_crack_boundaries() {
+    assert_eq!(visible_egg_wobble_x(0), -2);
+    assert_eq!(visible_egg_wobble_x(2), -2);
+    assert_eq!(visible_egg_wobble_x(3), 2);
+    assert_eq!(visible_egg_wobble_x(5), 2);
+    assert_eq!(visible_egg_wobble_x(6), 0);
+    assert_eq!(visible_egg_wobble_x(21), 0);
+    assert_eq!(visible_egg_wobble_x(22), -2);
+    assert_eq!(visible_egg_wobble_x(343), 0);
+    assert_eq!(
+        (0..344)
+            .filter(|frame| visible_egg_crack_at(*frame))
+            .collect::<Vec<_>>(),
+        vec![50, 124, 222]
+    );
+}

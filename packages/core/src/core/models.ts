@@ -60,6 +60,7 @@ export {
 import { PartySchema as ImportedPartySchema } from "./models/party";
 
 export const MoveSchema = z.object({
+  source_index: z.number().int().min(1).max(251),
   name: z.nativeEnum(MoveName),
   type: z.nativeEnum(PokemonType),
   power: z.number(),

@@ -451,8 +451,14 @@ pub fn text_body_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("text_promptbutton", 0),
         ("text_ram", 1),
         ("text_decimal", 3),
+        ("text_low", 0),
+        ("text_pause", 0),
+        ("text_today", 0),
         ("text_far", 1),
+        ("text_asm", 0),
         ("sound_item", 0),
+        ("sound_caught_mon", 0),
+        ("sound_slot_machine_start", 0),
         ("sound_dex_fanfare_50_79", 0),
         ("sound_dex_fanfare_80_109", 0),
         ("sound_dex_fanfare_140_169", 0),
@@ -851,7 +857,15 @@ mod tests {
         assert_eq!(text_body_command_arg_counts()["text_end"], 0);
         assert_eq!(text_body_command_arg_counts()["next"], 1);
         assert_eq!(text_body_command_arg_counts()["text_decimal"], 3);
+        assert_eq!(text_body_command_arg_counts()["text_low"], 0);
+        assert_eq!(text_body_command_arg_counts()["text_pause"], 0);
+        assert_eq!(text_body_command_arg_counts()["text_today"], 0);
         assert_eq!(text_body_command_arg_counts()["sound_item"], 0);
+        assert_eq!(text_body_command_arg_counts()["sound_caught_mon"], 0);
+        assert_eq!(
+            text_body_command_arg_counts()["sound_slot_machine_start"],
+            0
+        );
         assert_eq!(
             text_body_command_arg_counts()["sound_dex_fanfare_230_plus"],
             0
