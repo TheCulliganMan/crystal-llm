@@ -262,6 +262,14 @@ struct BuiltTerrain {
     solid_mesh: Mesh,
 }
 
+fn should_start_terrain_build(
+    cached_key: Option<&TerrainCacheKey>,
+    queued_key: Option<&TerrainCacheKey>,
+    next_key: &TerrainCacheKey,
+) -> bool {
+    cached_key != Some(next_key) && queued_key.is_none()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerrainSyncState {
     Ready,
@@ -434,6 +442,18 @@ fn sync_voxel_view(
         ),
     >,
 ) {
+    if status.active
+        && !frame.is_changed()
+        && !settings.is_changed()
+        && terrain_builds.key.is_none()
+    {
+        // The published frame is retained and Bevy change detection proves
+        // there is no camera, actor, texture, or terrain work to synchronize.
+        // Avoid validating and profile-scanning the complete terrain grid on
+        // every vsynced host frame while the game is visually idle.
+        status.active_frames = status.active_frames.saturating_add(1);
+        return;
+    }
     let failure = if !settings.enabled {
         Some("disabled")
     } else if !frame.active {
@@ -604,7 +624,7 @@ fn sync_terrain(
     terrain_entities: &mut Query<(&mut Visibility, &mut Transform), VoxelTerrainFilter>,
 ) -> Result<TerrainSyncState, TerrainSyncError> {
     let next_key = TerrainCacheKey::from_frame(frame);
-    if cache.key.as_ref() != Some(&next_key) && builds.key.as_ref() != Some(&next_key) {
+    if should_start_terrain_build(cache.key.as_ref(), builds.key.as_ref(), &next_key) {
         let build_frame = frame.clone();
         let samples = TerrainImageSamples::capture(frame, images);
         let build_key = next_key.clone();
@@ -1279,6 +1299,25 @@ mod renderer_tests {
         let retained = retained_terrain_transform(&frame, &cache)
             .expect("a pending replacement keeps the completed terrain posed");
         assert_eq!(retained.translation, Vec3::new(24.0, 0.0, 12.0));
+    }
+
+    #[test]
+    fn movement_coalesces_terrain_rebuilds_while_one_is_in_flight() {
+        let key = |revision| TerrainCacheKey {
+            revision,
+            viewport_bits: [160.0_f32.to_bits(), 144.0_f32.to_bits()],
+            tile_bits: [8.0_f32.to_bits(), 8.0_f32.to_bits()],
+            grid_size: UVec2::new(84, 82),
+        };
+        let cached = key(1);
+        let queued = key(2);
+        let latest_movement = key(3);
+
+        assert!(should_start_terrain_build(Some(&cached), None, &queued));
+        assert!(
+            !should_start_terrain_build(Some(&cached), Some(&queued), &latest_movement),
+            "a newer walking viewport must not replace work already running on the compute pool"
+        );
     }
 
     #[test]

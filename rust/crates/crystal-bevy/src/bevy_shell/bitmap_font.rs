@@ -3126,6 +3126,7 @@ fn town_map_frame_for_art(
     region: &str,
     player_gender: u8,
     tile_palettes: &[String],
+    pokegear_tile_palettes: &[String],
     images: &mut Assets<Image>,
 ) -> Option<SpriteFrame> {
     let region = if region.eq_ignore_ascii_case("KANTO") { "kanto" } else { "johto" };
@@ -3133,7 +3134,14 @@ fn town_map_frame_for_art(
     if !rendered_art.town_map_cache.contains_key(&key)
         && !rendered_art.town_map_errors.contains_key(&key)
     {
-        match load_town_map_frame(asset_root, region, player_gender, tile_palettes, images) {
+        match load_town_map_frame(
+            asset_root,
+            region,
+            player_gender,
+            tile_palettes,
+            pokegear_tile_palettes,
+            images,
+        ) {
             Ok(frame) => {
                 rendered_art.town_map_cache.insert(key.clone(), frame);
             }
@@ -3150,6 +3158,7 @@ fn load_town_map_frame(
     region: &str,
     player_gender: u8,
     tile_palettes: &[String],
+    pokegear_tile_palettes: &[String],
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     const WIDTH_TILES: usize = 20;
@@ -3171,6 +3180,11 @@ fn load_town_map_frame(
         tile_palettes.len() >= 48,
         "Town Map palette map has {} entries, expected at least 48",
         tile_palettes.len()
+    );
+    anyhow::ensure!(
+        pokegear_tile_palettes.len() >= 5,
+        "Pokégear palette map has {} entries, expected at least 5",
+        pokegear_tile_palettes.len()
     );
     let palette_path = root.join(if player_gender == 0 {
         "pokegear.pal"
@@ -3223,6 +3237,44 @@ fn load_town_map_frame(
             }
         }
     }
+
+    // PokegearMap_UpdateLandmarkName owns a 12x2 tile panel at (8, 0).
+    // The regional .bin contains the map underneath that panel; leaving it
+    // intact makes the label collide with the map art. Clear the panel and
+    // restore its map-pin tile exactly as the TypeScript/ASM composition does.
+    let panel_colour = palettes[0][0];
+    for row in 0..(2 * TILE_PIXELS) {
+        for col in (8 * TILE_PIXELS)..width {
+            let offset = (row * width + col) * 4;
+            data[offset..offset + 3].copy_from_slice(&panel_colour);
+            data[offset + 3] = 255;
+        }
+    }
+    let pokegear_path = root.join("pokegear.png");
+    let pokegear = crate::open_runtime_image(&pokegear_path)
+        .with_context(|| format!("decode Pokégear tiles {}", pokegear_path.display()))?
+        .to_rgba8();
+    const MAP_LABEL_ICON_TILE: usize = 4; // VRAM tile $34 after PokegearGFX loads at $30.
+    let icon_palette = match pokegear_tile_palettes[MAP_LABEL_ICON_TILE].as_str() {
+        "BORDER" => 0,
+        "EARTH" => 1,
+        "MOUNTAIN" => 2,
+        "CITY" => 3,
+        "POI" => 4,
+        "POI_MTN" => 5,
+        token => anyhow::bail!("unknown Pokégear palette token {token}"),
+    };
+    let icon_x = (MAP_LABEL_ICON_TILE % 16) * TILE_PIXELS;
+    let icon_y = (MAP_LABEL_ICON_TILE / 16) * TILE_PIXELS;
+    for row in 0..TILE_PIXELS {
+        for col in 0..TILE_PIXELS {
+            let pixel = pokegear.get_pixel((icon_x + col) as u32, (icon_y + row) as u32);
+            let colour = palettes[icon_palette][palette_index_from_gray(pixel[0])];
+            let offset = (row * width + 8 * TILE_PIXELS + col) * 4;
+            data[offset..offset + 3].copy_from_slice(&colour);
+            data[offset + 3] = 255;
+        }
+    }
     let mut image = Image::new(
         Extent3d {
             width: width as u32,
@@ -3239,6 +3291,300 @@ fn load_town_map_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
+}
+
+fn pokegear_card_frame_for_art(
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    page: PokegearPage,
+    player_gender: u8,
+    unlocked_mask: u8,
+    phone_service: bool,
+    town_tile_palettes: &[String],
+    pokegear_tile_palettes: &[String],
+    images: &mut Assets<Image>,
+) -> Option<SpriteFrame> {
+    let card = match page {
+        PokegearPage::Clock => "clock",
+        PokegearPage::Phone => "phone",
+        PokegearPage::Radio => "radio",
+        PokegearPage::Map => return None,
+    };
+    let key = (
+        format!("{card}:{unlocked_mask:02x}:{}", u8::from(phone_service)),
+        player_gender,
+    );
+    if !rendered_art.town_map_cache.contains_key(&key)
+        && !rendered_art.town_map_errors.contains_key(&key)
+    {
+        match load_pokegear_card_frame(
+            asset_root,
+            page,
+            player_gender,
+            unlocked_mask,
+            phone_service,
+            town_tile_palettes,
+            pokegear_tile_palettes,
+            images,
+        ) {
+            Ok(frame) => {
+                rendered_art.town_map_cache.insert(key.clone(), frame);
+            }
+            Err(error) => {
+                rendered_art
+                    .town_map_errors
+                    .insert(key.clone(), format!("{error:#}"));
+            }
+        }
+    }
+    rendered_art.town_map_cache.get(&key).cloned()
+}
+
+fn decode_pokegear_card_tilemap(source: &[u8]) -> Result<Vec<u8>> {
+    const TILE_COUNT: usize = 20 * 18;
+    let mut tilemap = vec![0x4f; TILE_COUNT];
+    let mut source_index = 0;
+    let mut target_index: usize = 0;
+    let mut terminated = false;
+    while source_index < source.len() {
+        let tile = source[source_index];
+        source_index += 1;
+        if tile == 0xff {
+            terminated = true;
+            break;
+        }
+        let count = *source
+            .get(source_index)
+            .context("Pokégear RLE stream ends before its run count")?;
+        source_index += 1;
+        let end = target_index
+            .checked_add(usize::from(count))
+            .context("Pokégear RLE run length overflow")?;
+        anyhow::ensure!(
+            end <= TILE_COUNT,
+            "Pokégear RLE stream expands beyond the 20x18 tilemap"
+        );
+        tilemap[target_index..end].fill(tile);
+        target_index = end;
+    }
+    anyhow::ensure!(terminated, "Pokégear RLE stream has no terminator");
+    Ok(tilemap)
+}
+
+fn pokegear_palette_index(token: &str) -> Result<usize> {
+    match token {
+        "BORDER" => Ok(0),
+        "EARTH" => Ok(1),
+        "MOUNTAIN" => Ok(2),
+        "CITY" => Ok(3),
+        "POI" => Ok(4),
+        "POI_MTN" => Ok(5),
+        _ => anyhow::bail!("unknown Pokégear palette token {token}"),
+    }
+}
+
+fn load_pokegear_card_frame(
+    asset_root: &AssetRoot,
+    page: PokegearPage,
+    player_gender: u8,
+    unlocked_mask: u8,
+    phone_service: bool,
+    town_tile_palettes: &[String],
+    pokegear_tile_palettes: &[String],
+    images: &mut Assets<Image>,
+) -> Result<SpriteFrame> {
+    const WIDTH_TILES: usize = 20;
+    const HEIGHT_TILES: usize = 18;
+    const TILE_PIXELS: usize = 8;
+    let card = match page {
+        PokegearPage::Clock => "clock",
+        PokegearPage::Phone => "phone",
+        PokegearPage::Radio => "radio",
+        PokegearPage::Map => anyhow::bail!("Town Map uses its regional tilemap renderer"),
+    };
+    anyhow::ensure!(town_tile_palettes.len() >= 48, "Town Map palette map is incomplete");
+    anyhow::ensure!(pokegear_tile_palettes.len() >= 48, "Pokégear palette map is incomplete");
+    let root = asset_root.runtime_assets().join("gfx/pokegear");
+    let town = crate::open_runtime_image(root.join("town_map.png"))
+        .context("decode Town Map tile bank for Pokégear")?
+        .to_rgba8();
+    let pokegear = crate::open_runtime_image(root.join("pokegear.png"))
+        .context("decode Pokégear tile bank")?
+        .to_rgba8();
+    anyhow::ensure!(town.width() == 128 && town.height() == 24, "Town Map tile bank dimensions changed");
+    anyhow::ensure!(pokegear.width() == 128 && pokegear.height() == 24, "Pokégear tile bank dimensions changed");
+    let palette_path = root.join(if player_gender == 0 {
+        "pokegear.pal"
+    } else {
+        "pokegear_f.pal"
+    });
+    let palettes = parse_palette_file(
+        &crate::read_runtime_asset_to_string(&palette_path)
+            .with_context(|| format!("read Pokégear palette {}", palette_path.display()))?,
+        None,
+    )?;
+    anyhow::ensure!(palettes.len() >= 6, "Pokégear palette bank is incomplete");
+    let rle_path = root.join(format!("{card}.tilemap.rle"));
+    let mut tilemap = decode_pokegear_card_tilemap(
+        &crate::read_runtime_asset(&rle_path)
+            .with_context(|| format!("read Pokégear tilemap {}", rle_path.display()))?,
+    )?;
+
+    // Card tabs are populated at runtime from the unlocked card set.
+    for row in 0..2 {
+        tilemap[row * WIDTH_TILES..row * WIDTH_TILES + 8].fill(0x7f);
+    }
+    for (bit, x, base_tile) in [(0, 0, 0x46_u8), (1, 2, 0x40), (2, 4, 0x44), (3, 6, 0x42)] {
+        if unlocked_mask & (1 << bit) == 0 {
+            continue;
+        }
+        tilemap[x] = base_tile;
+        tilemap[x + 1] = base_tile + 1;
+        tilemap[WIDTH_TILES + x] = base_tile + 0x10;
+        tilemap[WIDTH_TILES + x + 1] = base_tile + 0x11;
+    }
+    if page == PokegearPage::Phone {
+        tilemap[WIDTH_TILES + 17] = 0x3c;
+        tilemap[WIDTH_TILES + 18] = 0x3d;
+        tilemap[2 * WIDTH_TILES + 17] = 0x3e;
+        tilemap[2 * WIDTH_TILES + 18] = if phone_service { 0x3f } else { 0x4f };
+    }
+
+    let width = WIDTH_TILES * TILE_PIXELS;
+    let height = HEIGHT_TILES * TILE_PIXELS;
+    let mut data = vec![0_u8; width * height * 4];
+    for (map_index, tile_id) in tilemap.into_iter().enumerate() {
+        let target_x = (map_index % WIDTH_TILES) * TILE_PIXELS;
+        let target_y = (map_index / WIDTH_TILES) * TILE_PIXELS;
+        if tile_id == 0x7f {
+            pokegear_fill_rect(
+                &mut data,
+                width,
+                target_x,
+                target_y,
+                TILE_PIXELS,
+                TILE_PIXELS,
+                palettes[0][0],
+            );
+            continue;
+        }
+        let (source, tile, token) = if tile_id < 0x30 {
+            (&town, usize::from(tile_id), &town_tile_palettes[usize::from(tile_id)])
+        } else if tile_id < 0x60 {
+            let tile = usize::from(tile_id - 0x30);
+            (&pokegear, tile, &pokegear_tile_palettes[tile])
+        } else {
+            anyhow::bail!("Pokégear card tile id ${tile_id:02x} has no compiled tile art");
+        };
+        let palette = &palettes[pokegear_palette_index(token)?];
+        pokegear_blit_paletted_tile(source, tile, palette, target_x, target_y, width, &mut data)?;
+    }
+
+    let frame_source = crate::open_runtime_image(asset_root.runtime_assets().join("gfx/frames/1.png"))
+        .context("decode Pokégear textbox frame")?
+        .to_rgba8();
+    draw_pokegear_textbox(&frame_source, &palettes[0], width, &mut data)?;
+
+    // The active-card indicator is the black triangle immediately below its
+    // 2x2 tab, matching Pokegear::drawIndicatorArrow.
+    let active = match page {
+        PokegearPage::Clock => 0,
+        PokegearPage::Map => 1,
+        PokegearPage::Phone => 2,
+        PokegearPage::Radio => 3,
+    };
+    let center_x = (active * 2 + 1) * TILE_PIXELS;
+    for row in 0..8 {
+        let half_width = row / 2;
+        for x in center_x.saturating_sub(half_width)..=center_x + half_width {
+            let offset = ((2 * TILE_PIXELS + row) * width + x.min(width - 1)) * 4;
+            data[offset..offset + 3].copy_from_slice(&palettes[0][3]);
+            data[offset + 3] = 255;
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::nearest();
+    Ok(SpriteFrame {
+        handle: images.add(image),
+        size: Vec2::new(width as f32, height as f32),
+    })
+}
+
+fn pokegear_fill_rect(
+    target: &mut [u8],
+    target_width: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    colour: [u8; 3],
+) {
+    for row in y..y + height {
+        for col in x..x + width {
+            let offset = (row * target_width + col) * 4;
+            target[offset..offset + 3].copy_from_slice(&colour);
+            target[offset + 3] = 255;
+        }
+    }
+}
+
+fn pokegear_blit_paletted_tile(
+    source: &image::RgbaImage,
+    tile: usize,
+    palette: &Palette,
+    target_x: usize,
+    target_y: usize,
+    target_width: usize,
+    target: &mut [u8],
+) -> Result<()> {
+    const TILE_PIXELS: usize = 8;
+    let columns = source.width() as usize / TILE_PIXELS;
+    let source_x = tile % columns * TILE_PIXELS;
+    let source_y = tile / columns * TILE_PIXELS;
+    anyhow::ensure!(source_y + TILE_PIXELS <= source.height() as usize, "Pokégear tile {tile} is outside its source sheet");
+    for row in 0..TILE_PIXELS {
+        for col in 0..TILE_PIXELS {
+            let pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
+            let colour = palette[palette_index_from_gray(pixel[0])];
+            let offset = ((target_y + row) * target_width + target_x + col) * 4;
+            target[offset..offset + 3].copy_from_slice(&colour);
+            target[offset + 3] = 255;
+        }
+    }
+    Ok(())
+}
+
+fn draw_pokegear_textbox(
+    source: &image::RgbaImage,
+    palette: &Palette,
+    target_width: usize,
+    target: &mut [u8],
+) -> Result<()> {
+    anyhow::ensure!(source.width() == 24 && source.height() == 16, "Pokégear textbox frame must be 24x16");
+    let top = 12;
+    pokegear_fill_rect(target, target_width, 8, (top + 1) * 8, 18 * 8, 4 * 8, palette[0]);
+    for x in 0..20 {
+        let tile = if x == 0 { 0 } else if x == 19 { 2 } else { 1 };
+        pokegear_blit_paletted_tile(source, tile, palette, x * 8, top * 8, target_width, target)?;
+        let tile = if x == 0 { 4 } else if x == 19 { 5 } else { 1 };
+        pokegear_blit_paletted_tile(source, tile, palette, x * 8, 17 * 8, target_width, target)?;
+    }
+    for y in 13..17 {
+        pokegear_blit_paletted_tile(source, 3, palette, 0, y * 8, target_width, target)?;
+        pokegear_blit_paletted_tile(source, 3, palette, 19 * 8, y * 8, target_width, target)?;
+    }
+    Ok(())
 }
 
 fn sprite_frame_for_art(

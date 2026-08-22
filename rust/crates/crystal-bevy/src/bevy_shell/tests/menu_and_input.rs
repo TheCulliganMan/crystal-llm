@@ -407,6 +407,68 @@ fn select_without_a_registered_item_opens_the_exact_asm_textbox() {
 
     assert_eq!(runtime_shell.field_notice.as_deref(), Some(expected.as_str()));
     assert!(runtime_shell.field_notice_scene.is_some());
+    let notice_snapshot = runtime_shell
+        .shell
+        .snapshot()
+        .expect("snapshot with SelectMenu notice");
+    assert_eq!(
+        visible_field_dialog_pages(&notice_snapshot, &runtime_shell),
+        Some(vec![
+            "An item in your\nPACK may be".to_string(),
+            "registered for use\non SELECT Button.".to_string(),
+        ]),
+        "ASM `para` must retain its MapTextbox page boundary"
+    );
+
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+    {
+        let world = app.world_mut();
+        let background = world
+            .query_filtered::<&Sprite, With<SceneDialogTextBoxBackgroundMarker>>()
+            .iter(world)
+            .next()
+            .expect("SelectMenu must render MapTextbox paper");
+        assert_eq!(
+            background.custom_size,
+            Some(Vec2::new(
+                TILE_SIZE * (FIELD_TEXT_BOX_WIDTH_TILES - 2.0),
+                TILE_SIZE * (FIELD_TEXT_BOX_HEIGHT_TILES - 2.0),
+            )),
+            "SelectMenu must use Crystal's canonical 20x6 MapTextbox"
+        );
+    }
+
+    {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        for _ in 0..256 {
+            let snapshot = shell.shell.snapshot().expect("first notice page snapshot");
+            if visible_field_dialogue_is_fully_revealed(&shell, &snapshot) {
+                break;
+            }
+            tick_visible_field_text_reveal(&mut shell, true).expect("reveal first notice page");
+        }
+        press_visible_a_button(&mut shell).expect("advance across ASM para");
+        assert_eq!(
+            shell
+                .field_text_reveal
+                .as_ref()
+                .map(|reveal| reveal.page_index),
+            Some(1),
+            "the first A must advance to the paragraph after `para`"
+        );
+        assert!(shell.field_notice.is_some());
+
+        for _ in 0..256 {
+            let snapshot = shell.shell.snapshot().expect("second notice page snapshot");
+            if visible_field_dialogue_is_fully_revealed(&shell, &snapshot) {
+                break;
+            }
+            tick_visible_field_text_reveal(&mut shell, true).expect("reveal second notice page");
+        }
+        press_visible_a_button(&mut shell).expect("close SelectMenu MapTextbox");
+        assert!(shell.field_notice.is_none());
+    }
 }
 
 #[test]
@@ -2691,7 +2753,7 @@ fn battle_tower_receptionist_escort_launches_canonical_opponent_battle() {
                 .shell
                 .presentation_snapshot()
                 .expect("escort waitsfx snapshot");
-            advance_visible_wait_sfx_boundary(&mut runtime_shell, &presentation)
+            advance_visible_wait_sfx_boundary(&mut runtime_shell, &presentation, false)
                 .expect("complete elevator sound fence");
             runtime_shell.transient_audio_playing = retained_transient_audio;
         }
@@ -3934,7 +3996,7 @@ fn move_deleter_waits_before_and_after_the_deleted_move_sound() {
 
     runtime_shell.transient_audio_playing = false;
     let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
-    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot)
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("play deletion sound after initial wait");
     assert!(runtime_shell
         .pending_audio
@@ -3945,7 +4007,7 @@ fn move_deleter_waits_before_and_after_the_deleted_move_sound() {
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = false;
     let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
-    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot)
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("finish deletion sound wait");
     assert!(!runtime_shell.visible_wait_sfx_boundary);
     assert_eq!(
@@ -6380,12 +6442,15 @@ fn initialized_mail_reader_shell(mail_type: &str) -> BevyRuntimeShell {
 #[test]
 fn malformed_script_snapshot_cannot_fall_through_b_to_overworld_input() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell
-        .shell
-        .session_mut()
-        .state_mut()
-        .script_runtime
-        .pending_text_label = Some("MISSING_COMPILED_TEXT_LABEL".to_string());
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        state.script_runtime.text_window_open = true;
+        state.script_runtime.active_text_label =
+            Some("MISSING_COMPILED_TEXT_LABEL".to_string());
+        state.script_runtime.pending_text_label =
+            Some("MISSING_COMPILED_TEXT_LABEL".to_string());
+    }
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
     assert!(runtime_shell.shell.presentation_snapshot().is_err());
 
     let mut keys = ButtonInput::<KeyCode>::default();

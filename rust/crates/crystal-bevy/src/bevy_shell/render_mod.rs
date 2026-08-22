@@ -39,10 +39,6 @@ fn publish_visual_world_frame(
         return;
     }
 
-    // Full-screen modes and genuinely incomplete world renders must not leave
-    // a stale overworld behind a title, battle, naming screen, or map handoff.
-    *published = crystal_render_api::VisualWorldFrame::default();
-
     if rendered.title_active
         // The naming screen is committed through Commands later in the classic
         // render pass. Check its live state too: waiting for the presenter
@@ -57,6 +53,7 @@ fn publish_visual_world_frame(
         || rendered.map_name.is_none()
         || !visual_tile_grid_is_complete(&rendered.visual_tiles)
     {
+        clear_published_visual_world(&mut published);
         return;
     }
 
@@ -66,6 +63,7 @@ fn publish_visual_world_frame(
         rendered.viewport_origin,
         rendered.map_texture.as_ref(),
     ) else {
+        clear_published_visual_world(&mut published);
         return;
     };
     let terrain_revision = visual_terrain_revision(
@@ -77,15 +75,18 @@ fn publish_visual_world_frame(
         .iter()
         .find(|(texture, _)| texture.id() == map_texture.id())
     else {
+        clear_published_visual_world(&mut published);
         return;
     };
     let center = map_transform.translation.truncate();
     if !center.is_finite() {
+        clear_published_visual_world(&mut published);
         return;
     }
     #[cfg(feature = "voxel-view")]
     let (published_map_texture, published_grid_size) = {
         let Some(texture) = rendered.visual_world_texture.as_ref() else {
+            clear_published_visual_world(&mut published);
             return;
         };
         (texture.clone(), rendered.visual_world_grid_size)
@@ -104,6 +105,7 @@ fn publish_visual_world_frame(
         // A second player sprite is an incomplete deferred scene transition,
         // not a valid immutable frame to hand to a renderer mod.
         if player_iter.next().is_some() {
+            clear_published_visual_world(&mut published);
             return;
         }
         let Some(actor) = visual_actor(
@@ -114,6 +116,7 @@ fn publish_visual_world_frame(
             transform,
             false,
         ) else {
+            clear_published_visual_world(&mut published);
             return;
         };
         actors.push(actor);
@@ -128,10 +131,12 @@ fn publish_visual_world_frame(
         .windows(2)
         .any(|pair| pair[0].0.object_index == pair[1].0.object_index)
     {
+        clear_published_visual_world(&mut published);
         return;
     }
     for (object, texture, sprite, transform) in visible_objects {
         let Ok(object_index) = u32::try_from(object.object_index) else {
+            clear_published_visual_world(&mut published);
             return;
         };
         let Some(actor) = visual_actor(
@@ -142,6 +147,7 @@ fn publish_visual_world_frame(
             transform,
             object.above_priority,
         ) else {
+            clear_published_visual_world(&mut published);
             return;
         };
         if visual_actor_intersects_grid(&actor, center, published_grid_size) {
@@ -152,6 +158,7 @@ fn publish_visual_world_frame(
     let mut rustle_iter = grass_rustles.iter();
     if let Some((texture, sprite, transform)) = rustle_iter.next() {
         if rustle_iter.next().is_some() {
+            clear_published_visual_world(&mut published);
             return;
         }
         let Some(effect) = visual_actor(
@@ -164,6 +171,7 @@ fn publish_visual_world_frame(
             transform,
             true,
         ) else {
+            clear_published_visual_world(&mut published);
             return;
         };
         if visual_actor_intersects_grid(&effect, center, published_grid_size) {
@@ -171,6 +179,25 @@ fn publish_visual_world_frame(
         }
     }
 
+    let terrain_unchanged = published.active
+        && published.map_id.as_ref() == map_id
+        && published.terrain_revision == terrain_revision
+        && published.map_texture == published_map_texture
+        && published.viewport_size == Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)
+        && published.tile_size == Vec2::splat(TILE_SIZE)
+        && published.grid_size == published_grid_size;
+    if terrain_unchanged && published.center == center && published.actors == actors {
+        // The optional renderer consumes change detection. Do not republish an
+        // identical 6,888-tile frame on every host update: that cloned the
+        // complete grid and forced validation/profile work while standing
+        // still, even though neither simulation nor presentation had moved.
+        return;
+    }
+    let tiles = if terrain_unchanged {
+        std::mem::take(&mut published.tiles)
+    } else {
+        rendered.visual_tiles.clone()
+    };
     let next = crystal_render_api::VisualWorldFrame {
         active: true,
         map_id: Arc::from(map_id),
@@ -180,11 +207,21 @@ fn publish_visual_world_frame(
         viewport_size: Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT),
         tile_size: Vec2::splat(TILE_SIZE),
         grid_size: published_grid_size,
-        tiles: rendered.visual_tiles.clone(),
+        tiles,
         actors,
     };
-    if next.validate().is_ok() {
+    if terrain_unchanged || next.validate().is_ok() {
         *published = next;
+    } else {
+        clear_published_visual_world(&mut published);
+    }
+}
+
+fn clear_published_visual_world(published: &mut crystal_render_api::VisualWorldFrame) {
+    // Avoid marking an already-inactive resource as changed. Optional
+    // renderers can then skip their expensive validation and profile passes.
+    if published.active {
+        *published = crystal_render_api::VisualWorldFrame::default();
     }
 }
 

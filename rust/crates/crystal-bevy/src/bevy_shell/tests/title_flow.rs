@@ -892,7 +892,7 @@ fn retained_map_surface_pair(world: &mut World) -> RetainedMapSurfacePair {
 
     let rendered = world.resource::<RenderedViewport>();
     let expected_offset =
-        visible_overworld_camera_offset(rendered, world.resource::<BevyRuntimeShell>());
+        visible_overworld_camera_offset(rendered, world.resource::<BevyRuntimeShell>(), 0.0);
     if expected_offset == Vec2::ZERO {
         assert_eq!(
             (base_transform.x, base_transform.y),
@@ -1043,6 +1043,7 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .insert_resource(RuntimeTickTimer::new(0.0))
         .insert_resource(VisibleSequenceTickClock::deterministic_test())
         .insert_resource(ButtonInput::<KeyCode>::default())
+        .add_event::<WindowFocused>()
         .insert_resource(HeldArrowRightTestFrames(0))
         .init_resource::<Assets<Image>>()
         .insert_resource(RenderedViewport::default())
@@ -1050,6 +1051,10 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .insert_resource(HudMode::Status)
         .add_systems(Startup, setup_shell_view)
         .add_systems(Update, inject_held_arrow_right_for_test)
+        .add_systems(
+            Update,
+            release_input_on_focus_loss.before(apply_keyboard_input),
+        )
         .add_systems(
             Update,
             apply_keyboard_input.after(inject_held_arrow_right_for_test),

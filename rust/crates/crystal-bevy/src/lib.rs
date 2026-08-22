@@ -692,6 +692,7 @@ pub struct RuntimeScriptEventsSnapshot {
     pub window_open: bool,
     pub active_pokemon_picture: Option<String>,
     pub text_window_open: bool,
+    pub active_text_label: Option<String>,
     pub pending_text_label: Option<String>,
     pub pending_text_wait: Option<ScriptTextWait>,
     pub pending_yes_no: Option<ScriptYesNoPrompt>,
@@ -10965,6 +10966,7 @@ impl RuntimeScriptEventsSnapshot {
             window_open: runtime.window_open,
             active_pokemon_picture: runtime.active_pokemon_picture.clone(),
             text_window_open: runtime.text_window_open,
+            active_text_label: runtime.active_text_label.clone(),
             pending_text_label: runtime.pending_text_label.clone(),
             pending_text_wait: runtime.pending_text_wait.clone(),
             pending_yes_no: runtime.pending_yes_no.clone(),
@@ -17148,36 +17150,15 @@ impl CrystalRuntime {
     }
 
     fn active_text_snapshot(&self, state: &GameState) -> Result<Option<RuntimeTextSnapshot>> {
-        if let Some(label) = state.script_runtime.pending_text_label.as_deref() {
-            return self
-                .text_snapshot_for_label(state, label)
-                .map(Some)
-                .with_context(|| format!("resolve runtime text snapshot for '{label}'"));
-        }
         if !state.script_runtime.text_window_open {
             return Ok(None);
         }
-        // Text events are retained as diagnostics, so the most recent Write
-        // in the entire history is not necessarily the text owned by this
-        // window. An Open after that Write starts an empty window; rendering
-        // past it is the source of the bogus pre-text seen between Mom's
-        // canonical lines (and after changing maps). Wait/YesNo retain the
-        // current Write, while Open/Close explicitly delimit it.
-        for event in state.script_runtime.text_events.iter().rev() {
-            match event.kind {
-                crate::core::state::ScriptTextRuntimeKind::Write => {
-                    let label = event.text_label.as_deref().with_context(|| {
-                        format!("runtime Write event {} has no text label", event.command)
-                    })?;
-                    return self.text_snapshot_for_label(state, label).map(Some);
-                }
-                crate::core::state::ScriptTextRuntimeKind::Open
-                | crate::core::state::ScriptTextRuntimeKind::Close => return Ok(None),
-                crate::core::state::ScriptTextRuntimeKind::WaitButton
-                | crate::core::state::ScriptTextRuntimeKind::YesNo => {}
-            }
-        }
-        Ok(None)
+        let Some(label) = state.script_runtime.active_text_label.as_deref() else {
+            return Ok(None);
+        };
+        self.text_snapshot_for_label(state, label)
+            .map(Some)
+            .with_context(|| format!("resolve active runtime text snapshot for '{label}'"))
     }
 
     fn text_snapshot_for_label(
@@ -22333,6 +22314,9 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
             command,
             &args,
         )?;
+    }
+    if let Some(text_label) = &runtime.active_text_label {
+        data.validate_saved_text_reference("script_runtime.active_text_label", text_label)?;
     }
     if let Some(text_label) = &runtime.pending_text_label {
         data.validate_saved_text_reference("script_runtime.pending_text_label", text_label)?;

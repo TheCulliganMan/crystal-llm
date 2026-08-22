@@ -198,6 +198,12 @@ fn integrated_title_to_overworld_schedule_accepts_name_renders_music_and_movemen
             .session_mut()
             .state
             .script_runtime
+            .active_text_label = Some(text_label.clone());
+        runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
             .pending_text_label = Some(text_label.clone());
         // Mutating the authoritative fixture directly bypasses the
         // normal input/mutation boundary, so explicitly invalidate the
@@ -253,6 +259,12 @@ fn integrated_title_to_overworld_schedule_accepts_name_renders_music_and_movemen
             .state
             .script_runtime
             .pending_text_label = None;
+        runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
+            .active_text_label = None;
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     app.update();
@@ -755,14 +767,46 @@ fn integrated_players_house_bookshelf_renders_dialogue_from_the_live_compiled_pa
         Color::WHITE,
         "field dialogue must use TypeScript's first textbox palette color"
     );
+    let retained_glyphs = world
+        .query::<(Entity, &DialogGlyphMarker)>()
+        .iter(world)
+        .map(|(entity, marker)| (marker.key, entity))
+        .collect::<std::collections::HashMap<_, _>>();
+    let initial_glyph_count = retained_glyphs.len();
     assert!(
-        world
-            .query_filtered::<Entity, With<DialogGlyphMarker>>()
-            .iter(world)
-            .count()
-            > 0,
-        "bookshelf text must render glyph entities, not only mutate runtime state"
+        initial_glyph_count < "A whole collection\nof POKéMON picture\nbooks!".chars().count(),
+        "a newly opened textbox must not flash its complete text before the typewriter starts"
     );
+    let _ = world;
+    let mut advanced_glyphs = std::collections::HashMap::new();
+    for _ in 0..8 {
+        app.update();
+        let world = app.world_mut();
+        advanced_glyphs = world
+            .query::<(Entity, &DialogGlyphMarker)>()
+            .iter(world)
+            .map(|(entity, marker)| (marker.key, entity))
+            .collect();
+        if advanced_glyphs.len() > initial_glyph_count {
+            break;
+        }
+    }
+    assert!(
+        advanced_glyphs.len() > initial_glyph_count,
+        "the ASM typewriter must append another glyph within its selected text delay: initial={} advanced={} reveal={:?}",
+        initial_glyph_count,
+        advanced_glyphs.len(),
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .field_text_reveal,
+    );
+    for (key, entity) in retained_glyphs {
+        assert_eq!(
+            advanced_glyphs.get(&key),
+            Some(&entity),
+            "PlaceString must retain the already printed glyph at tile key {key}"
+        );
+    }
     for _ in 0..128 {
         app.update();
     }
@@ -1226,24 +1270,47 @@ fn integrated_house_tv_map_and_radio_render_and_progress_from_live_collision_scr
                 &runtime_shell.shell.session.overworld.map.metatile_ids[..4],
                 runtime_shell.last_audio_events,
             );
-            let world = app.world_mut();
-            assert!(
-                world
-                    .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
-                    .iter(world)
-                    .next()
-                    .is_some(),
-                "{script} must render a textbox"
-            );
-            assert!(
-                world
+            {
+                let world = app.world_mut();
+                assert!(
+                    world
+                        .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
+                        .iter(world)
+                        .next()
+                        .is_some(),
+                    "{script} must render a textbox"
+                );
+            }
+            let mut rendered_glyph = false;
+            for _ in 0..8 {
+                app.update();
+                let world = app.world_mut();
+                rendered_glyph = world
                     .query_filtered::<Entity, With<DialogGlyphMarker>>()
                     .iter(world)
                     .next()
-                    .is_some(),
-                "{script} must render glyphs"
-            );
+                    .is_some();
+                if rendered_glyph {
+                    break;
+                }
+            }
+            assert!(rendered_glyph, "{script} must render typewriter glyphs");
             if script == "PlayersHouseRadioScript" {
+                {
+                    let shell = app.world().resource::<BevyRuntimeShell>();
+                    assert_eq!(
+                        shell.active_music.as_deref(),
+                        Some("MUSIC_POKEMON_TALK"),
+                        "the bedroom radio must select its authored broadcast music"
+                    );
+                    assert!(
+                        shell.last_audio_events.iter().any(|event| {
+                            event.contains("played Music MUSIC_POKEMON_TALK")
+                        }),
+                        "the authored radio music must reach the playback system: {:?}",
+                        shell.last_audio_events
+                    );
+                }
                 let mut labels = Vec::new();
                 let mut previous_label = None;
                 let mut previous_label_completed = false;
@@ -1601,6 +1668,48 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
             0,
             "closing Trainer Card should remove the rendered field-command panel"
         );
+    }
+}
+
+#[test]
+fn trainer_card_border_uses_the_asm_opposite_gender_palette() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+
+    for (gender, expected) in [
+        (PLAYER_GENDER_MALE, [57, 41, 255, 255]),
+        (PLAYER_GENDER_FEMALE, [181, 74, 41, 255]),
+    ] {
+        let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
+            asset_root.clone(),
+            runtime.clone(),
+            1,
+            "NewBarkTown",
+            6,
+            8,
+        )
+        .expect("start trainer-card palette shell");
+        shell
+            .set_player_gender(gender)
+            .expect("set trainer-card player gender");
+        let snapshot = shell.snapshot().expect("trainer-card palette snapshot");
+        let mut images = Assets::<Image>::default();
+        let frame = load_trainer_card_frame(
+            &asset_root,
+            &snapshot,
+            VisibleTrainerCardPage::Info,
+            0,
+            false,
+            &mut images,
+        )
+        .expect("render trainer card");
+        let image = images.get(&frame.handle).expect("trainer-card image");
+
+        assert_eq!(&image.data[0..4], &expected, "gender {gender}");
     }
 }
 

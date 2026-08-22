@@ -682,8 +682,23 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
         let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
         assert_eq!(
             presenters.iter(world).count(),
+            1,
+            "the retained LCD must cover the deferred frame that stages the replacement map layers",
+        );
+        assert!(
+            world
+                .resource::<RenderedTilesetArt>()
+                .presented_fullscreen_release_pending
+        );
+    }
+    app.update();
+    {
+        let world = app.world_mut();
+        let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
+        assert_eq!(
+            presenters.iter(world).count(),
             0,
-            "a field overlay releases immediately when both retained map layers were already staged"
+            "the retained LCD must release once both deferred map layers are query-visible",
         );
         let surfaces = retained_map_surface_pair(world);
         assert_base_map_surface_is_fully_opaque(world, &surfaces);

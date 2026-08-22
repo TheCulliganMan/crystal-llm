@@ -1464,6 +1464,19 @@ fn runtime_tick_timer_preserves_all_vblanks_while_bounding_input_catch_up() {
 }
 
 #[test]
+fn runtime_tick_timer_exposes_the_fraction_until_the_next_game_tick() {
+    let mut timer = RuntimeTickTimer::new(1.0 / 60.0);
+    timer.tick(1.0 / 120.0);
+
+    assert!((timer.presentation_subframe() - 0.5).abs() < f32::EPSILON);
+    assert_eq!(timer.take_ticks(), 0);
+
+    timer.tick(1.0 / 120.0);
+    assert_eq!(timer.take_ticks(), 1);
+    assert!(timer.presentation_subframe().abs() < f32::EPSILON);
+}
+
+#[test]
 fn runtime_tick_timer_matches_typescripts_five_frame_catch_up_bound() {
     let mut timer = RuntimeTickTimer::new(1.0 / 60.0);
     timer.tick(1.0);
@@ -1537,6 +1550,23 @@ fn interruption_unfocused_game_window_keeps_presentation_sequences_running() {
     let settings = continuous_game_winit_settings();
     assert_eq!(settings.focused_mode, UpdateMode::Continuous);
     assert_eq!(settings.unfocused_mode, UpdateMode::Continuous);
+}
+
+#[test]
+fn interruption_focus_loss_releases_stuck_keys_and_allows_a_new_edge() {
+    let mut keys = ButtonInput::<KeyCode>::default();
+    keys.press(KeyCode::KeyZ);
+    keys.press(KeyCode::ArrowDown);
+
+    reset_keyboard_after_focus_loss(&mut keys);
+
+    assert!(!keys.pressed(KeyCode::KeyZ));
+    assert!(!keys.pressed(KeyCode::ArrowDown));
+    keys.press(KeyCode::KeyZ);
+    assert!(
+        keys.just_pressed(KeyCode::KeyZ),
+        "A must produce a fresh edge after the game regains focus"
+    );
 }
 
 #[test]
@@ -1791,6 +1821,7 @@ fn runtime_snapshot_performance_benchmark() {
     timed("dialog_dirty", &mut || {
         let state = shell.shell.session_mut().state_mut();
         state.script_runtime.text_window_open = true;
+        state.script_runtime.active_text_label = Some(benchmark_text_label.clone());
         state.script_runtime.pending_text_label = Some(benchmark_text_label.clone());
         mark_runtime_snapshot_dirty(&mut shell);
         black_box(cached_runtime_snapshot(&mut shell)?);
@@ -1799,6 +1830,7 @@ fn runtime_snapshot_performance_benchmark() {
     {
         let state = shell.shell.session_mut().state_mut();
         state.script_runtime.text_window_open = false;
+        state.script_runtime.active_text_label = None;
         state.script_runtime.pending_text_label = None;
     }
     mark_runtime_snapshot_dirty(&mut shell);
@@ -2093,6 +2125,45 @@ fn field_dialogue_reveal_uses_the_selected_text_speed() {
 }
 
 #[test]
+fn field_dialogue_printer_obeys_mid_speed_and_never_advances_without_input() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.shell.session_mut().state_mut().options.text_speed = TextSpeed::Mid;
+    runtime_shell.field_notice = Some("AB".to_string());
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
+
+    let mut visible_counts = Vec::new();
+    for _ in 0..4 {
+        tick_visible_field_text_reveal(&mut runtime_shell, false)
+            .expect("tick unaccelerated field printer");
+        visible_counts.push(
+            runtime_shell
+                .field_text_reveal
+                .as_ref()
+                .expect("field reveal")
+                .visible_chars,
+        );
+    }
+    assert_eq!(
+        visible_counts,
+        vec![1, 1, 1, 2],
+        "MID text must reveal exactly one character every three LCD frames without A/B acceleration"
+    );
+
+    let stable = runtime_shell.field_text_reveal.clone();
+    for _ in 0..60 {
+        assert!(
+            !tick_visible_field_text_reveal(&mut runtime_shell, false)
+                .expect("hold completed field page"),
+            "a fully printed page must not advance itself"
+        );
+    }
+    assert_eq!(
+        runtime_shell.field_text_reveal, stable,
+        "the completed page changed during sixty LCD frames with no button press"
+    );
+}
+
+#[test]
 fn runtime_tile_to_metatile_u16_uses_runtime_metatile_width() {
     assert_eq!(
         runtime_tile_to_metatile_u16(2, 0, "test").expect("runtime metatile coordinate"),
@@ -2147,6 +2218,32 @@ fn facing_metatile_coordinates_skip_unaligned_runtime_tiles() {
         None
     );
 }
+#[cfg(feature = "voxel-view")]
+#[test]
+fn inactive_voxel_view_uses_only_the_classic_scroll_grid() {
+    assert_eq!(
+        visual_world_grid_dimensions(false),
+        (
+            CLASSIC_SCROLL_HALO_TILES,
+            CLASSIC_SCROLL_TILES_X,
+            CLASSIC_SCROLL_TILES_Y,
+        ),
+        "a classic frame must not walk the optional 84x82 terrain grid"
+    );
+    assert_eq!(
+        visual_world_grid_dimensions(true),
+        (
+            VISUAL_WORLD_HALO_TILES,
+            VISUAL_WORLD_TILES_X,
+            VISUAL_WORLD_TILES_Y,
+        )
+    );
+    assert!(
+        i32::from(VISUAL_WORLD_TILES_X) * i32::from(VISUAL_WORLD_TILES_Y)
+            > 10 * i32::from(CLASSIC_SCROLL_TILES_X) * i32::from(CLASSIC_SCROLL_TILES_Y)
+    );
+}
+
 #[cfg(feature = "voxel-view")]
 #[test]
 fn renderer_readiness_cannot_switch_the_manually_selected_world_view_to_2d() {

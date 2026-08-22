@@ -3886,6 +3886,7 @@ struct RenderEntityQueries<'w, 's> {
         'w,
         's,
         (
+            Entity,
             &'static DialogGlyphMarker,
             &'static mut Handle<Image>,
             &'static mut Transform,
@@ -4042,6 +4043,53 @@ fn queue_existing_entity_despawn(
     }
 }
 
+fn visual_world_grid_dimensions(_enabled: bool) -> (i16, i16, i16) {
+    #[cfg(feature = "voxel-view")]
+    if _enabled {
+        return (
+            VISUAL_WORLD_HALO_TILES,
+            VISUAL_WORLD_TILES_X,
+            VISUAL_WORLD_TILES_Y,
+        );
+    }
+    (
+        CLASSIC_SCROLL_HALO_TILES,
+        CLASSIC_SCROLL_TILES_X,
+        CLASSIC_SCROLL_TILES_Y,
+    )
+}
+
+fn retained_field_dialog_structure_matches(
+    text_box_background_count: usize,
+    frame_tile_count: usize,
+    retained_yes_no_prompt: bool,
+    desired_yes_no_prompt: bool,
+) -> bool {
+    let expected_frame_tile_count = battle_window_frame_tile_count(
+        FIELD_TEXT_BOX_WIDTH_TILES as usize,
+        FIELD_TEXT_BOX_HEIGHT_TILES as usize,
+    ) + usize::from(desired_yes_no_prompt)
+        * battle_window_frame_tile_count(
+            FIELD_YES_NO_WIDTH_TILES as usize,
+            FIELD_YES_NO_HEIGHT_TILES as usize,
+        );
+    text_box_background_count == 1
+        && frame_tile_count == expected_frame_tile_count
+        && retained_yes_no_prompt == desired_yes_no_prompt
+}
+
+fn acknowledge_rendered_field_text(
+    runtime_shell: &mut BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) {
+    runtime_shell.rendered_field_text_identity = visible_field_dialog_pages(snapshot, runtime_shell)
+        .and_then(|pages| {
+            let reveal = runtime_shell.field_text_reveal.as_ref()?;
+            visible_field_dialogue_is_entirely_consumed(runtime_shell, snapshot)
+                .then(|| (reveal.text.clone(), reveal.page_index.min(pages.len().saturating_sub(1))))
+        });
+}
+
 fn render_playfield(
     mut commands: Commands,
     mut runtime_shell: ResMut<BevyRuntimeShell>,
@@ -4049,7 +4097,23 @@ fn render_playfield(
     mut tileset_art: ResMut<RenderedTilesetArt>,
     mut images: ResMut<Assets<Image>>,
     entity_queries: RenderEntityQueries,
+    tick_timer: Option<Res<RuntimeTickTimer>>,
+    #[cfg(feature = "voxel-view")] voxel_settings: Option<
+        Res<crystal_voxel_view::VoxelViewSettings>,
+    >,
 ) {
+    let movement_subframe = tick_timer.map_or(0.0, |timer| timer.presentation_subframe());
+    #[cfg(feature = "voxel-view")]
+    // Production always installs the setting. Feature-gated extraction tests
+    // that invoke this system in isolation intentionally request the complete
+    // optional frame by omitting it.
+    let visual_world_enabled = voxel_settings.map_or(true, |settings| settings.enabled);
+    #[cfg(not(feature = "voxel-view"))]
+    let visual_world_enabled = false;
+    #[cfg(feature = "voxel-view")]
+    let visual_world_mode_unchanged = rendered.visual_world_enabled == visual_world_enabled;
+    #[cfg(not(feature = "voxel-view"))]
+    let visual_world_mode_unchanged = true;
     let RenderEntityQueries {
         tiles,
         map_base_surfaces,
@@ -4637,6 +4701,72 @@ fn render_playfield(
         }
         return;
     }
+    let player_name_choice = runtime_shell
+        .pending_name_choice
+        .as_ref()
+        .filter(|_| {
+            runtime_shell.pending_standard_capture.is_none()
+                && runtime_shell.pending_gift_pokemon_nickname.is_none()
+                && runtime_shell.pending_egg_hatch_nickname.is_none()
+        })
+        .cloned();
+    let player_name_input = runtime_shell
+        .pending_name_input
+        .as_ref()
+        .filter(|input| input.label == "YOUR NAME?")
+        .cloned();
+    if player_name_choice.is_some() || player_name_input.is_some() {
+        let shell_render_key = shell_render_key(&runtime_shell);
+        if rendered.title_active && rendered.shell_render_key == Some(shell_render_key) {
+            return;
+        }
+        for entity in tiles
+            .iter()
+            .chain(players.iter())
+            .chain(objects.iter())
+            .chain(events.iter())
+            .chain(prompts.iter())
+            .chain(field_commands.iter())
+            .chain(scene_dialogs.iter())
+            .chain(pokemon_pictures.iter())
+            .chain(title_markers.iter())
+            .chain(battlers.iter())
+            .chain(battle_commands.iter())
+        {
+            queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
+        }
+        rendered.map_name = None;
+        rendered.tile = None;
+        rendered.state_hash = None;
+        rendered.dialog_key = None;
+        rendered.shell_render_key = Some(shell_render_key);
+        rendered.title_active = true;
+        let result = if let Some(choice) = player_name_choice.as_ref() {
+            spawn_visible_name_choice_screen(
+                &mut commands,
+                &runtime_shell,
+                &mut tileset_art,
+                &runtime_shell.asset_root,
+                &mut images,
+                choice,
+            )
+        } else {
+            spawn_visible_name_entry_screen(
+                &mut commands,
+                &runtime_shell,
+                &mut tileset_art,
+                &runtime_shell.asset_root,
+                &mut images,
+                player_name_input
+                    .as_ref()
+                    .expect("player name input was checked above"),
+            )
+        };
+        if let Err(error) = result {
+            record_visible_render_error(&mut commands, &mut runtime_shell, error);
+        }
+        return;
+    }
     // A freshly spawned base/priority pair is deferred until this system
     // completes. Keep the previous complete LCD presenter through that first
     // field extraction, then retire it on the next update once both layers
@@ -4653,6 +4783,7 @@ fn render_playfield(
     // revision; walking animation and queued audio are the only visual work
     // that can legitimately require a refresh without a new snapshot.
     if rendered.snapshot_revision == Some(runtime_shell.snapshot_revision)
+        && visual_world_mode_unchanged
         && runtime_shell.pending_audio.is_empty()
         && runtime_shell.player_walk_frame_ticks == 0
         && runtime_shell.object_walk_frame_ticks == 0
@@ -4764,6 +4895,7 @@ fn render_playfield(
     // CPU spikes and the apparent one-FPS runtime. Refresh only the dialog
     // layer when the world itself is unchanged.
     let dialog_only_update = rendered.title_active == false
+        && visual_world_mode_unchanged
         && rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && rendered.tile == Some(snapshot.overworld.tile)
         && rendered.world_key == Some(world_key)
@@ -4783,14 +4915,21 @@ fn render_playfield(
         && runtime_shell.visible_mom_bank.is_none()
         && (snapshot.ui.text.is_some() || snapshot.ui.pending_yes_no.is_some());
     if dialog_only_update && rendered.dialog_key != dialog_key {
-        let has_retained_dialog_frame = dialog_frame_tiles.iter().next().is_some();
         let retained_yes_no_prompt = yes_no_prompts.iter().next().is_some();
         let desired_yes_no_prompt = scene_dialog_yes_no_active(&snapshot, &runtime_shell);
-        // A YesNoBox is a separate window, not merely another set of glyphs.
-        // Text-only mutation cannot add or remove its frame. Rebuild the
-        // complete dialog layer exactly at that structural boundary so the
-        // prompt cannot remain over the overworld after `closetext`.
-        if retained_yes_no_prompt != desired_yes_no_prompt {
+        let retained_dialog_frame_tile_count = dialog_frame_tiles.iter().count();
+        let has_retained_dialog_frame = retained_field_dialog_structure_matches(
+            dialog_text_box_backgrounds.iter().count(),
+            retained_dialog_frame_tile_count,
+            retained_yes_no_prompt,
+            desired_yes_no_prompt,
+        );
+        // Every field dialog owns one 20x6 frame and, while yes/no is active,
+        // exactly one additional 6x4 frame. Looking only for any retained
+        // frame mistook orphaned YesNoBox tiles for the next field textbox;
+        // its blank surface then survived while the text fast path updated no
+        // usable glyphs. Validate the complete layer before mutating it.
+        if !has_retained_dialog_frame {
             for entity in scene_dialogs.iter() {
                 queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
             }
@@ -4809,10 +4948,12 @@ fn render_playfield(
             rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
             rendered.dialog_key = dialog_key;
             rendered.shell_render_key = Some(shell_render_key);
+            acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
             return;
         }
         if has_retained_dialog_frame
             && update_scene_dialog_text_content_in_place(
+                &mut commands,
                 &snapshot,
                 &runtime_shell,
                 &mut dialog_glyphs,
@@ -4825,6 +4966,7 @@ fn render_playfield(
             rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
             rendered.dialog_key = dialog_key;
             rendered.shell_render_key = Some(shell_render_key);
+            acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
             return;
         }
         let retained_dialog_frames = dialog_frame_tiles
@@ -4873,6 +5015,7 @@ fn render_playfield(
         rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
         rendered.dialog_key = dialog_key;
         rendered.shell_render_key = Some(shell_render_key);
+        acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
         return;
     }
     if dialog_only_update && rendered.dialog_key == dialog_key {
@@ -4882,6 +5025,7 @@ fn render_playfield(
         rendered.state_hash = Some(state_hash);
         rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
         rendered.shell_render_key = Some(shell_render_key);
+        acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
         return;
     }
     if visible_scene_dialog_entries(&snapshot, &runtime_shell)
@@ -4896,6 +5040,7 @@ fn render_playfield(
     // and object entities in that case; rebuilding them here was the other
     // major source of frame stalls after the tile layer was composited.
     let world_only_update = !rendered.title_active
+        && visual_world_mode_unchanged
         && rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && rendered.tile == Some(snapshot.overworld.tile)
         && rendered.world_key == Some(world_key)
@@ -4949,6 +5094,7 @@ fn render_playfield(
         if let Some((start_x, start_y)) = rendered.viewport_origin
             && update_overworld_sprite_positions(
                 &snapshot,
+                movement_subframe,
                 runtime_shell.visible_ledge_jump,
                 runtime_shell.player_walk_from,
                 runtime_shell.player_walk_frame_ticks,
@@ -4959,7 +5105,7 @@ fn render_playfield(
                 runtime_shell.trainer_walk_from.as_ref(),
                 runtime_shell.object_walk_frame_ticks,
                 runtime_shell.object_walk_total_ticks,
-                visible_overworld_camera_offset(&rendered, &runtime_shell),
+                visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe),
                 start_x,
                 start_y,
                 &mut player_sprites,
@@ -4967,7 +5113,8 @@ fn render_playfield(
                 &mut object_sprites,
             )
         {
-            let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
+            let camera_offset =
+                visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe);
             set_overworld_map_scroll(&mut map_sprites, &mut map_backing_priorities, camera_offset);
             if camera_offset == Vec2::ZERO {
                 rendered.walk_viewport_origin = None;
@@ -4989,6 +5136,7 @@ fn render_playfield(
         return;
     }
     if rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
+        && visual_world_mode_unchanged
         && rendered.tile == Some(snapshot.overworld.tile)
         && rendered.world_key == Some(world_key)
         && rendered.state_hash == Some(state_hash)
@@ -5347,6 +5495,7 @@ fn render_playfield(
         && rendered.viewport_origin == Some((start_x, start_y))
         && update_overworld_sprite_positions(
             &snapshot,
+            movement_subframe,
             runtime_shell.visible_ledge_jump,
             runtime_shell.player_walk_from,
             runtime_shell.player_walk_frame_ticks,
@@ -5357,7 +5506,7 @@ fn render_playfield(
             runtime_shell.trainer_walk_from.as_ref(),
             runtime_shell.object_walk_frame_ticks,
             runtime_shell.object_walk_total_ticks,
-            visible_overworld_camera_offset(&rendered, &runtime_shell),
+            visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe),
             start_x,
             start_y,
             &mut player_sprites,
@@ -5501,18 +5650,24 @@ fn render_playfield(
     let mut priority_viewport_tiles = Vec::with_capacity(
         usize::try_from(CLASSIC_SCROLL_TILES_X * CLASSIC_SCROLL_TILES_Y).unwrap_or_default(),
     );
+    let (visual_world_halo, visual_world_tiles_x, visual_world_tiles_y) =
+        visual_world_grid_dimensions(visual_world_enabled);
     let mut visual_tiles = Vec::with_capacity(
-        usize::try_from(VISUAL_WORLD_TILES_X * VISUAL_WORLD_TILES_Y).unwrap_or_default(),
+        usize::try_from(visual_world_tiles_x * visual_world_tiles_y).unwrap_or_default(),
     );
     #[cfg(feature = "voxel-view")]
     let mut visual_world_tile_handles = Vec::with_capacity(
-        usize::try_from(VISUAL_WORLD_TILES_X * VISUAL_WORLD_TILES_Y).unwrap_or_default(),
+        if visual_world_enabled {
+            usize::try_from(visual_world_tiles_x * visual_world_tiles_y).unwrap_or_default()
+        } else {
+            0
+        },
     );
     let mut visual_tileset_ids = HashMap::<&str, Arc<str>>::new();
-    for visual_y in 0..VISUAL_WORLD_TILES_Y {
-        for visual_x in 0..VISUAL_WORLD_TILES_X {
-            let x = visual_x - VISUAL_WORLD_HALO_TILES;
-            let y = visual_y - VISUAL_WORLD_HALO_TILES;
+    for visual_y in 0..visual_world_tiles_y {
+        for visual_x in 0..visual_world_tiles_x {
+            let x = visual_x - visual_world_halo;
+            let y = visual_y - visual_world_halo;
             let inside_scroll_surface = x >= -CLASSIC_SCROLL_HALO_TILES
                 && y >= -CLASSIC_SCROLL_HALO_TILES
                 && x < VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES
@@ -5605,7 +5760,9 @@ fn render_playfield(
                 viewport_tile_handles.push(tile_handle.clone());
             }
             #[cfg(feature = "voxel-view")]
-            visual_world_tile_handles.push(tile_handle.clone());
+            if visual_world_enabled {
+                visual_world_tile_handles.push(tile_handle.clone());
+            }
             // Collision data remains private to the faithful 2D compositor:
             // it selects the classic foreground-priority layer, but is never
             // exported as optional-renderer height or shape information.
@@ -5778,17 +5935,20 @@ fn render_playfield(
     rendered.map_priority_texture = Some(priority_viewport_texture.clone());
     #[cfg(feature = "voxel-view")]
     {
-        if !facing_only_redraw && !retained_texture_content {
+        if visual_world_enabled && !facing_only_redraw && !retained_texture_content {
             rendered.visual_world_texture = Some(compose_visual_world_tiles(
                 &visual_world_tile_handles,
-                VISUAL_WORLD_TILES_X as usize,
-                VISUAL_WORLD_TILES_Y as usize,
+                visual_world_tiles_x as usize,
+                visual_world_tiles_y as usize,
                 rendered.visual_world_texture.clone(),
                 &mut images,
             ));
         }
-        rendered.visual_world_grid_size =
-            UVec2::new(VISUAL_WORLD_TILES_X as u32, VISUAL_WORLD_TILES_Y as u32);
+        rendered.visual_world_grid_size = UVec2::new(
+            visual_world_tiles_x as u32,
+            visual_world_tiles_y as u32,
+        );
+        rendered.visual_world_enabled = visual_world_enabled;
     }
     rendered.visual_tiles = visual_tiles;
     rendered.viewport_origin = Some((start_x, start_y));
@@ -5860,12 +6020,14 @@ fn render_playfield(
     schedule.sort_unstable();
     schedule.dedup();
     runtime_shell.ambient_tileset_animation_schedule = schedule;
-    let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
+    let camera_offset =
+        visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe);
     set_overworld_map_scroll(&mut map_sprites, &mut map_backing_priorities, camera_offset);
     if can_update_positions_in_place
         && tiles.iter().count() == 2
         && update_overworld_sprite_positions(
             &snapshot,
+            movement_subframe,
             runtime_shell.visible_ledge_jump,
             runtime_shell.player_walk_from,
             runtime_shell.player_walk_frame_ticks,
@@ -5876,7 +6038,7 @@ fn render_playfield(
             runtime_shell.trainer_walk_from.as_ref(),
             runtime_shell.object_walk_frame_ticks,
             runtime_shell.object_walk_total_ticks,
-            visible_overworld_camera_offset(&rendered, &runtime_shell),
+            visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe),
             start_x,
             start_y,
             &mut player_sprites,
@@ -6620,14 +6782,17 @@ fn render_playfield(
             runtime_shell.player_walk_frame_ticks,
             runtime_shell.player_walk_total_ticks,
         ));
-    let Some((mut player_x, mut player_y_base)) = visible_player_playfield_position_for_duration(
-        snapshot.overworld.tile,
-        movement_from,
-        movement_remaining,
-        movement_total,
-        start_x,
-        start_y,
-    ) else {
+    let Some((mut player_x, mut player_y_base)) =
+        visible_player_playfield_position_for_duration_with_subframe(
+            snapshot.overworld.tile,
+            movement_from,
+            movement_remaining,
+            movement_total,
+            movement_subframe,
+            start_x,
+            start_y,
+        )
+    else {
         record_visible_render_error(
             &mut commands,
             &mut runtime_shell,
@@ -7317,6 +7482,11 @@ fn render_playfield(
     rendered.dialog_key = dialog_key;
     rendered.shell_render_key = Some(shell_render_key);
     rendered.title_active = false;
+    acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
+    #[cfg(feature = "voxel-view")]
+    {
+        rendered.visual_world_enabled = visual_world_enabled;
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -7804,6 +7804,8 @@
         shell.session_mut().state.repel_steps_remaining = 100;
         shell.session_mut().state.active_repel_item = Some("REPEL".to_string());
         shell.session_mut().state.script_runtime.text_window_open = true;
+        shell.session_mut().state.script_runtime.active_text_label =
+            Some("RuntimeText".to_string());
         shell.session_mut().state.script_runtime.pending_text_label =
             Some("RuntimeText".to_string());
         let inventory = shell.snapshot().expect("inventory snapshot");
@@ -7842,6 +7844,11 @@
             .session_mut()
             .state
             .script_runtime
+            .active_text_label = Some("MissingRuntimeText".to_string());
+        bad_ui_shell
+            .session_mut()
+            .state
+            .script_runtime
             .pending_text_label = Some("MissingRuntimeText".to_string());
         let bad_ui_error = bad_ui_shell
             .snapshot()
@@ -7849,7 +7856,7 @@
         let bad_ui_error = format!("{bad_ui_error:#}");
         assert!(
             bad_ui_error.contains("MissingRuntimeText")
-                && bad_ui_error.contains("saved script_runtime.pending_text_label"),
+                && bad_ui_error.contains("saved script_runtime.active_text_label"),
             "{bad_ui_error}"
         );
         let runtime_text_event = ScriptTextRuntimeEvent {
@@ -7967,6 +7974,8 @@
                 .is_none()
         );
         shell.session_mut().state.script_runtime.text_window_open = true;
+        shell.session_mut().state.script_runtime.active_text_label =
+            Some("RuntimeText".to_string());
         shell.session_mut().state.script_runtime.pending_text_label =
             Some("RuntimeText".to_string());
         let jumptext_wait = ScriptTextWait {

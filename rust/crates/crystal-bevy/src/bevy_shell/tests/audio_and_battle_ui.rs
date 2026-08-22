@@ -136,7 +136,7 @@ fn wait_play_sfx_sequence_promotes_all_itemfinder_cues_before_text() {
         .shell
         .presentation_snapshot()
         .expect("busy-channel presentation snapshot");
-    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot)
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("poll busy WaitPlaySFX channel");
     assert!(runtime_shell.pending_audio.is_empty());
     assert_eq!(runtime_shell.pending_wait_play_sfx.len(), 8);
@@ -148,7 +148,7 @@ fn wait_play_sfx_sequence_promotes_all_itemfinder_cues_before_text() {
             .shell
             .presentation_snapshot()
             .expect("presentation snapshot");
-        advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot)
+        advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
             .expect("promote next WaitPlaySFX cue");
         let pending = std::mem::take(&mut runtime_shell.pending_audio);
         assert_eq!(pending.len(), 1, "cue {index} must be promoted alone");
@@ -161,7 +161,7 @@ fn wait_play_sfx_sequence_promotes_all_itemfinder_cues_before_text() {
         .shell
         .presentation_snapshot()
         .expect("final presentation snapshot");
-    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot)
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("finish WaitPlaySFX loop");
     assert_eq!(promoted, expected);
     assert!(!runtime_shell.visible_wait_sfx_boundary);

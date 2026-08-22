@@ -310,7 +310,7 @@ fn sync_visible_ledge_jump(
     let base_x = from_x + (to_x - from_x) * progress;
     let base_y = from_y + (to_y - from_y) * progress;
     let (sprite_x, sprite_y) = overworld_sprite_position_from_base(base_x, base_y, size);
-    let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell);
+    let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell, 0.0);
     transform.translation.x = sprite_x + camera_offset.x;
     transform.translation.y =
         sprite_y + camera_offset.y

@@ -1330,6 +1330,50 @@
     }
 
     #[test]
+    fn map_connection_preserves_the_live_step_direction_on_the_destination_map() {
+        let root = repository_root_for_tests();
+        let asset_root = AssetRoot::new(root);
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load base game data");
+        let module = data.map_module("Route29").expect("assemble route module");
+        let map = data.overworld_map("Route29").expect("assemble route map");
+        let tileset = asset_root
+            .load_tileset_collision("johto")
+            .expect("load johto collision");
+        let mut state = GameState::default();
+        let mut session = OverworldSession::with_events(
+            map,
+            module.events.clone(),
+            tileset,
+            TilePosition::new(59, 4),
+        );
+        session.player.facing = Direction::Right;
+        let music_ids = data
+            .audio
+            .iter()
+            .map(|asset| asset.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let frame = data
+            .apply_overworld_input(
+                &mut state,
+                &mut session,
+                [GameButton::Right],
+                &music_ids,
+                &mut ReplayDivider::new([]),
+            )
+            .expect("cross Route29's east connection");
+
+        assert!(frame.connection.is_some());
+        assert_eq!(frame.snapshot.map_name, "NewBarkTown");
+        assert_eq!(frame.snapshot.tile, TilePosition::new(0, 4));
+        assert_eq!(frame.snapshot.facing, Direction::Right);
+        assert_eq!(session.player.facing, Direction::Right);
+        assert_eq!(session.last_step_direction, Some(Direction::Right));
+    }
+
+    #[test]
     fn route29_input_blocks_connection_edge_outside_target_overlap() {
         let root = repository_root_for_tests();
         let asset_root = AssetRoot::new(root);

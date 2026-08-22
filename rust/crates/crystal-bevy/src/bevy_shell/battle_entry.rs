@@ -8696,6 +8696,7 @@ fn overworld_render_appearance_key(snapshot: &RuntimeShellSnapshot) -> u64 {
 
 fn update_overworld_sprite_positions(
     snapshot: &RuntimeShellSnapshot,
+    movement_subframe: f32,
     visible_ledge_jump: Option<VisibleLedgeJump>,
     player_walk_from: Option<TilePosition>,
     player_walk_frame_ticks: u8,
@@ -8753,11 +8754,13 @@ fn update_overworld_sprite_positions(
             player_walk_frame_ticks,
             player_walk_total_ticks,
         ));
-    let Some((player_base_x, player_base_y)) = visible_player_playfield_position_for_duration(
+    let Some((player_base_x, player_base_y)) =
+        visible_player_playfield_position_for_duration_with_subframe(
         snapshot.overworld.tile,
         movement_from,
         movement_remaining,
         movement_total,
+        movement_subframe,
         start_x,
         start_y,
     ) else {
@@ -8919,7 +8922,11 @@ fn update_overworld_sprite_positions(
                     return false;
                 };
                 let from = render_tile_playfield_position(from_view_x, from_view_y);
-                let progress = visible_movement_progress(remaining, total_ticks);
+                let progress = visible_movement_progress_with_subframe(
+                    remaining,
+                    total_ticks,
+                    movement_subframe,
+                );
                 overworld_sprite_position_from_base(
                     from.0 + (target.0 - from.0) * progress,
                     from.1 + (target.1 - from.1) * progress,
@@ -9150,6 +9157,20 @@ fn overworld_walk_camera_offset_for_duration(
     frames_remaining: u8,
     total_frames: u8,
 ) -> Vec2 {
+    overworld_walk_camera_offset_for_duration_with_subframe(
+        rendered,
+        frames_remaining,
+        total_frames,
+        0.0,
+    )
+}
+
+fn overworld_walk_camera_offset_for_duration_with_subframe(
+    rendered: &RenderedViewport,
+    frames_remaining: u8,
+    total_frames: u8,
+    movement_subframe: f32,
+) -> Vec2 {
     let Some((from_x, from_y)) = rendered.walk_viewport_origin else {
         return Vec2::ZERO;
     };
@@ -9164,7 +9185,12 @@ fn overworld_walk_camera_offset_for_duration(
     // and the last active frame is on the destination. Retaining an extra
     // zero-progress frame makes the map and actors appear to skate behind the
     // authoritative movement.
-    let remaining = 1.0 - visible_movement_progress(frames_remaining, total_frames);
+    let remaining = 1.0
+        - visible_movement_progress_with_subframe(
+            frames_remaining,
+            total_frames,
+            movement_subframe,
+        );
     Vec2::new(
         f32::from(to_x - from_x) * TILE_SIZE * remaining,
         -f32::from(to_y - from_y) * TILE_SIZE * remaining,
@@ -9174,20 +9200,23 @@ fn overworld_walk_camera_offset_for_duration(
 fn visible_overworld_camera_offset(
     rendered: &RenderedViewport,
     runtime_shell: &BevyRuntimeShell,
+    movement_subframe: f32,
 ) -> Vec2 {
     if let Some(jump) = runtime_shell.visible_ledge_jump {
         // Keep the camera on the same two-source-pixels-per-frame schedule as
         // the 32-pixel ledge traversal, including its terminal landing update.
-        return overworld_walk_camera_offset_for_duration(
+        return overworld_walk_camera_offset_for_duration_with_subframe(
             rendered,
             16_u8.saturating_sub(jump.frame),
             16,
+            movement_subframe,
         );
     }
-    overworld_walk_camera_offset_for_duration(
+    overworld_walk_camera_offset_for_duration_with_subframe(
         rendered,
         runtime_shell.player_walk_frame_ticks,
         runtime_shell.player_walk_total_ticks,
+        movement_subframe,
     )
 }
 
@@ -9230,6 +9259,26 @@ fn visible_player_playfield_position_for_duration(
     start_x: i16,
     start_y: i16,
 ) -> Option<(f32, f32)> {
+    visible_player_playfield_position_for_duration_with_subframe(
+        target,
+        from,
+        frames_remaining,
+        total_frames,
+        0.0,
+        start_x,
+        start_y,
+    )
+}
+
+fn visible_player_playfield_position_for_duration_with_subframe(
+    target: TilePosition,
+    from: Option<TilePosition>,
+    frames_remaining: u8,
+    total_frames: u8,
+    movement_subframe: f32,
+    start_x: i16,
+    start_y: i16,
+) -> Option<(f32, f32)> {
     let target = runtime_tile_playfield_position(target, start_x, start_y)?;
     let Some(from) = from.filter(|_| frames_remaining > 0) else {
         return Some(target);
@@ -9243,7 +9292,11 @@ fn visible_player_playfield_position_for_duration(
     let from = render_tile_playfield_position(from_view_x, from_view_y);
     // Match TypeScript's tick order: movement pixels advance before drawing.
     // Active walk frames therefore cover 1/total through total/total.
-    let progress = visible_movement_progress(frames_remaining, total_frames);
+    let progress = visible_movement_progress_with_subframe(
+        frames_remaining,
+        total_frames,
+        movement_subframe,
+    );
     Some((
         from.0 + (target.0 - from.0) * progress,
         from.1 + (target.1 - from.1) * progress,
@@ -9251,15 +9304,25 @@ fn visible_player_playfield_position_for_duration(
 }
 
 fn visible_movement_progress(frames_remaining: u8, total_frames: u8) -> f32 {
+    visible_movement_progress_with_subframe(frames_remaining, total_frames, 0.0)
+}
+
+fn visible_movement_progress_with_subframe(
+    frames_remaining: u8,
+    total_frames: u8,
+    movement_subframe: f32,
+) -> f32 {
     let total_frames = total_frames.max(1);
     if frames_remaining == 0 {
         return 1.0;
     }
-    f32::from(
+    let completed_frames = f32::from(
         total_frames
             .saturating_sub(frames_remaining.min(total_frames))
             .saturating_add(1),
-    ) / f32::from(total_frames)
+    );
+    ((completed_frames + movement_subframe.clamp(0.0, 1.0)) / f32::from(total_frames))
+        .min(1.0)
 }
 
 fn hash_menu_cursor(hasher: &mut impl Hasher, cursor: &Option<MenuCursor>) {

@@ -1617,8 +1617,10 @@ fn apply_visibility_command(
     if event_flag == "-1" {
         if hidden {
             session.hidden_object_identifiers.insert(object_id.clone());
+            session.shown_object_identifiers.remove(&object_id);
         } else {
             session.hidden_object_identifiers.remove(&object_id);
+            session.shown_object_identifiers.insert(object_id.clone());
         }
     } else {
         validate_toggle_flag(&object_id, &event_flag)?;
@@ -1627,6 +1629,13 @@ fn apply_visibility_command(
             .set_event_flag(&event_flag, hidden)
             .map_err(|error| ScriptObjectCommandError::EventFlag { error })?;
         session.sync_event_flag_memory(&state.flags);
+        if hidden {
+            session.hidden_object_identifiers.insert(object_id.clone());
+            session.shown_object_identifiers.remove(&object_id);
+        } else {
+            session.hidden_object_identifiers.remove(&object_id);
+            session.shown_object_identifiers.insert(object_id.clone());
+        }
     }
 
     Ok(ScriptObjectMutationOutcome {

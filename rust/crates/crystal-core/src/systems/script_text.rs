@@ -596,6 +596,10 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             source_script,
             command_index,
         } => {
+            // OpenText begins a new textbox lifetime even if malformed or
+            // interrupted state already claims a box is open. It must never
+            // inherit the previous interaction's rendered body.
+            state.script_runtime.active_text_label = None;
             state.script_runtime.text_window_open = true;
             state
                 .script_runtime
@@ -615,6 +619,7 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             command_index,
         } => {
             state.script_runtime.text_window_open = false;
+            state.script_runtime.active_text_label = None;
             state.script_runtime.pending_text_label = None;
             state.script_runtime.pending_text_wait = None;
             state.script_runtime.pending_yes_no = None;
@@ -687,6 +692,7 @@ pub fn apply_script_text_action_to_state(state: &mut GameState, action: &ScriptT
             command_index,
         } => {
             state.script_runtime.text_window_open = true;
+            state.script_runtime.active_text_label = Some(text_label.clone());
             state.script_runtime.pending_text_label = Some(text_label.clone());
             if *closes_text {
                 state.script_runtime.pending_text_wait = Some(ScriptTextWait {
@@ -1131,6 +1137,10 @@ mod tests {
 
         assert!(state.script_runtime.text_window_open);
         assert_eq!(
+            state.script_runtime.active_text_label.as_deref(),
+            Some("GreetingText")
+        );
+        assert_eq!(
             state.script_runtime.pending_text_label.as_deref(),
             Some("GreetingText")
         );
@@ -1160,6 +1170,10 @@ mod tests {
         .expect("jump text");
 
         assert!(state.script_runtime.text_window_open);
+        assert_eq!(
+            state.script_runtime.active_text_label.as_deref(),
+            Some("SignText")
+        );
         assert_eq!(
             state.script_runtime.pending_text_label.as_deref(),
             Some("SignText")
@@ -1229,10 +1243,16 @@ mod tests {
         .expect("write");
         apply_script_text_command(&mut state, command("yesorno", None), &labels()).expect("yes no");
         assert_eq!(state.script_runtime.pending_text_label, None);
+        assert_eq!(
+            state.script_runtime.active_text_label.as_deref(),
+            Some("GreetingText"),
+            "yesorno retains the text currently visible behind its prompt"
+        );
         apply_script_text_command(&mut state, command("closetext", None), &labels())
             .expect("close");
 
         assert!(!state.script_runtime.text_window_open);
+        assert_eq!(state.script_runtime.active_text_label, None);
         assert_eq!(state.script_runtime.pending_text_label, None);
         assert_eq!(state.script_runtime.pending_text_wait, None);
         assert_eq!(state.script_runtime.pending_yes_no, None);

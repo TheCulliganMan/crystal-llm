@@ -110,6 +110,7 @@ const buildHarness = () => {
   return {
     gameState,
     screen,
+    surface: ui.screen,
     setFrame(frame: number) {
       gameState.frame_counter = frame;
     },
@@ -245,6 +246,19 @@ describe("trainer card ASM parity", () => {
   it("loads trainer portraits from the clean PNG source data", () => {
     expect(trainerCardPortraitTilePixels(PlayerGender.MALE)).toEqual(decodePngPortraitTiles("chris_card"));
     expect(trainerCardPortraitTilePixels(PlayerGender.FEMALE)).toEqual(decodePngPortraitTiles("kris_card"));
+  });
+
+  it.each([
+    [PlayerGender.MALE, [57, 41, 255, 255]],
+    [PlayerGender.FEMALE, [181, 74, 41, 255]],
+  ] as const)("colors the %s trainer-card border with the ASM opposite-gender palette", (gender, expected) => {
+    const { gameState, screen, setFrame, surface } = buildHarness();
+    gameState.sram.player_gender = gender;
+
+    setFrame(1);
+    screen.draw();
+
+    expect(surface.get_at([0, 0])).toEqual(expected);
   });
 
   it("does not let trailing name padding overwrite portrait tiles", () => {

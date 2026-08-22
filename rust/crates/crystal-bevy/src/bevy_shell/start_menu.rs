@@ -9902,7 +9902,6 @@ fn spawn_battle_window_frame_tiles(
     }
 }
 
-#[cfg(test)]
 fn battle_window_frame_tile_count(width: usize, height: usize) -> usize {
     if width < 2 || height < 2 {
         return 0;

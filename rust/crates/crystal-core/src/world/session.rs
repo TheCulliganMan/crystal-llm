@@ -76,6 +76,16 @@ pub struct OverworldSession {
     pub player_hidden: bool,
     pub hidden_event_flags: BTreeSet<String>,
     pub hidden_object_identifiers: BTreeSet<String>,
+    /// Explicit `appear` commands can keep a loaded object visible even when
+    /// its backing event flag has changed. Ordinary setevent/clearevent only
+    /// affect which objects are loaded on the next map entry.
+    #[serde(default)]
+    pub shown_object_identifiers: BTreeSet<String>,
+    /// Fresh map sessions apply event/time visibility once; later flag
+    /// mutations retain that loaded roster until an explicit object command
+    /// or the next map entry.
+    #[serde(default)]
+    pub object_visibility_initialized: bool,
     /// The time used by Crystal's object scheduler (`hram_y`).  This lives on
     /// the session because collision, interaction, and trainer sight all
     /// query the same visible-object set.
@@ -468,6 +478,8 @@ impl OverworldSession {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            shown_object_identifiers: BTreeSet::new(),
+            object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(player_tile),
@@ -484,11 +496,30 @@ impl OverworldSession {
 
     pub fn with_event_flag_memory(mut self, flags: &EventFlagMemory) -> Self {
         self.hidden_event_flags = flags.active_event_flags().cloned().collect();
+        self.object_visibility_initialized = true;
         self
     }
 
     pub fn sync_event_flag_memory(&mut self, flags: &EventFlagMemory) {
+        if !self.object_visibility_initialized {
+            self.hidden_event_flags = flags.active_event_flags().cloned().collect();
+            self.object_visibility_initialized = true;
+            return;
+        }
+        let visibility = self.loaded_object_visibility();
         self.hidden_event_flags = flags.active_event_flags().cloned().collect();
+        self.retain_loaded_object_visibility(&visibility);
+    }
+
+    pub fn hide_loaded_objects_with_event_flag(&mut self, event_flag: &str) {
+        for object_id in self.objects.iter().filter_map(|object| {
+            (object.event_flag == event_flag)
+                .then(|| object.object_identifier.clone())
+                .flatten()
+        }) {
+            self.shown_object_identifiers.remove(&object_id);
+            self.hidden_object_identifiers.insert(object_id);
+        }
     }
 
     pub fn current_encounter_surface_checked(
@@ -979,6 +1010,17 @@ impl OverworldSession {
         {
             return false;
         }
+        if object
+            .object_identifier
+            .as_ref()
+            .is_some_and(|object_id| self.shown_object_identifiers.contains(object_id))
+        {
+            return true;
+        }
+        self.is_object_visible_without_identifier_override(object)
+    }
+
+    fn is_object_visible_without_identifier_override(&self, object: &ObjectEvent) -> bool {
         if object.event_flag != "-1" && self.hidden_event_flags.contains(&object.event_flag) {
             return false;
         }
@@ -986,7 +1028,42 @@ impl OverworldSession {
     }
 
     pub fn set_time_of_day(&mut self, time_of_day: TimeOfDay) {
+        if !self.object_visibility_initialized {
+            self.time_of_day = time_of_day;
+            return;
+        }
+        let visibility = self.loaded_object_visibility();
         self.time_of_day = time_of_day;
+        self.retain_loaded_object_visibility(&visibility);
+    }
+
+    fn loaded_object_visibility(&self) -> Vec<(String, bool)> {
+        self.objects
+            .iter()
+            .filter_map(|object| {
+                object
+                    .object_identifier
+                    .as_ref()
+                    .map(|id| (id.clone(), self.is_object_visible(object)))
+            })
+            .collect()
+    }
+
+    fn retain_loaded_object_visibility(&mut self, visibility: &[(String, bool)]) {
+        for (object_id, was_visible) in visibility {
+            let raw_visible = self
+                .objects
+                .iter()
+                .find(|object| object.object_identifier.as_ref() == Some(object_id))
+                .is_some_and(|object| self.is_object_visible_without_identifier_override(object));
+            self.hidden_object_identifiers.remove(object_id);
+            self.shown_object_identifiers.remove(object_id);
+            if *was_visible && !raw_visible {
+                self.shown_object_identifiers.insert(object_id.clone());
+            } else if !*was_visible && raw_visible {
+                self.hidden_object_identifiers.insert(object_id.clone());
+            }
+        }
     }
 
     pub fn forced_movement_direction(&self) -> Option<Direction> {
@@ -2517,6 +2594,8 @@ impl WarpTransition {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            shown_object_identifiers: BTreeSet::new(),
+            object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
@@ -2555,6 +2634,8 @@ impl ConnectionTransition {
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
+            shown_object_identifiers: BTreeSet::new(),
+            object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
@@ -3351,6 +3432,65 @@ mod tests {
 
         assert!(matches!(outcome, StepOutcome::Moved { .. }));
         assert_eq!(session.snapshot().tile, TilePosition::new(1, 0));
+    }
+
+    #[test]
+    fn event_flag_changes_do_not_replace_objects_already_loaded_on_the_map() {
+        let first = object("MOM_1", 1, 0, "EVENT_MOM_1");
+        let second = object("MOM_2", 2, 0, "EVENT_MOM_2");
+        let mut initial_flags = EventFlagMemory::default();
+        initial_flags
+            .set_event_flag("EVENT_MOM_2", true)
+            .expect("hide replacement before map load");
+        let mut session = OverworldSession::with_events_and_objects(
+            map(),
+            MapEvents::default(),
+            vec![first.clone(), second.clone()],
+            tileset(),
+            TilePosition::new(0, 0),
+        )
+        .with_event_flag_memory(&initial_flags);
+        assert!(session.is_object_visible(&first));
+        assert!(!session.is_object_visible(&second));
+
+        let mut next_load_flags = initial_flags;
+        next_load_flags
+            .set_event_flag("EVENT_MOM_1", true)
+            .expect("hide current object for next load");
+        next_load_flags
+            .set_event_flag("EVENT_MOM_2", false)
+            .expect("show replacement on next load");
+        session.sync_event_flag_memory(&next_load_flags);
+
+        assert!(
+            session.is_object_visible(&first),
+            "setevent must not despawn a live object before map reload"
+        );
+        assert!(
+            !session.is_object_visible(&second),
+            "clearevent must not load a replacement object before map reload"
+        );
+        let reloaded = OverworldSession::with_events_and_objects(
+            map(),
+            MapEvents::default(),
+            vec![first.clone(), second.clone()],
+            tileset(),
+            TilePosition::new(0, 0),
+        )
+        .with_event_flag_memory(&next_load_flags);
+        assert!(!reloaded.is_object_visible(&first));
+        assert!(reloaded.is_object_visible(&second));
+
+        let mut synchronized_on_entry = OverworldSession::with_events_and_objects(
+            map(),
+            MapEvents::default(),
+            vec![first.clone(), second.clone()],
+            tileset(),
+            TilePosition::new(0, 0),
+        );
+        synchronized_on_entry.sync_event_flag_memory(&next_load_flags);
+        assert!(!synchronized_on_entry.is_object_visible(&first));
+        assert!(synchronized_on_entry.is_object_visible(&second));
     }
 
     #[test]

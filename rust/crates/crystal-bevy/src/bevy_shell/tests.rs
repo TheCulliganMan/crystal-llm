@@ -12,6 +12,7 @@ include!("tests/art_text_and_determinism.rs");
 include!("tests/battle_render_regressions.rs");
 include!("tests/shop_rendering.rs");
 include!("tests/heal_machine_rendering.rs");
+include!("tests/town_map_rendering.rs");
 
 #[test]
 fn egg_hatch_wobble_uses_exact_asm_pairs_and_crack_boundaries() {

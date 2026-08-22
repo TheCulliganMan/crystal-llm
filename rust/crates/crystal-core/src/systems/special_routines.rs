@@ -9979,6 +9979,7 @@ pub fn resolve_bug_contest_caught_mon(
     }
     state.script_runtime.pending_yes_no = None;
     state.script_runtime.text_window_open = false;
+    state.script_runtime.active_text_label = None;
     set_script_numeric_value(state, u8::from(!keep_new));
     state.script_runtime.last_special_routine = Some("BugContestSetCaughtContestMon".to_string());
     Ok(SpecialRoutineOutcome {

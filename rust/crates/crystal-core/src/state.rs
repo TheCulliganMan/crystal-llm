@@ -3091,6 +3091,10 @@ pub struct ScriptRuntimeMemory {
     pub pending_map_refresh: Option<ScriptMapRefreshRequest>,
     pub text_events: Vec<ScriptTextRuntimeEvent>,
     pub text_window_open: bool,
+    /// Text body currently owned by the open field textbox. Unlike
+    /// `pending_text_label`, this survives after PrintText completes and
+    /// remains authoritative through promptbutton/waitbutton/yesorno.
+    pub active_text_label: Option<String>,
     pub pending_text_label: Option<String>,
     pub pending_text_wait: Option<ScriptTextWait>,
     pub pending_yes_no: Option<ScriptYesNoPrompt>,
@@ -3166,6 +3170,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_map_refresh: Option<ScriptMapRefreshRequest>,
             text_events: Vec<ScriptTextRuntimeEvent>,
             text_window_open: bool,
+            active_text_label: Option<String>,
             pending_text_label: Option<String>,
             pending_text_wait: Option<ScriptTextWait>,
             pending_yes_no: Option<ScriptYesNoPrompt>,
@@ -3234,6 +3239,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_map_refresh: raw.pending_map_refresh,
             text_events: raw.text_events,
             text_window_open: raw.text_window_open,
+            active_text_label: raw.active_text_label,
             pending_text_label: raw.pending_text_label,
             pending_text_wait: raw.pending_text_wait,
             pending_yes_no: raw.pending_yes_no,
@@ -3591,6 +3597,10 @@ impl ScriptRuntimeMemory {
         }
         validate_optional_script_runtime_token("current_music", self.current_music.as_deref())?;
         validate_optional_script_runtime_token(
+            "active_text_label",
+            self.active_text_label.as_deref(),
+        )?;
+        validate_optional_script_runtime_token(
             "pending_text_label",
             self.pending_text_label.as_deref(),
         )?;
@@ -3775,6 +3785,11 @@ impl ScriptRuntimeMemory {
 
     fn validate_text_continuation_state(&self) -> Result<(), String> {
         if !self.text_window_open {
+            if let Some(text_label) = &self.active_text_label {
+                return Err(format!(
+                    "active_text_label {text_label} cannot be saved without an open text window"
+                ));
+            }
             if let Some(text_label) = &self.pending_text_label {
                 return Err(format!(
                     "pending_text_label {text_label} cannot be saved without an open text window"
@@ -3790,6 +3805,13 @@ impl ScriptRuntimeMemory {
                     "pending_yes_no cannot be saved without an open text window".to_string()
                 );
             }
+        }
+        if let Some(pending) = &self.pending_text_label
+            && self.active_text_label.as_ref() != Some(pending)
+        {
+            return Err(format!(
+                "pending_text_label {pending} must match active_text_label"
+            ));
         }
         if self.pending_text_wait.is_some() && self.pending_yes_no.is_some() {
             return Err("pending_text_wait and pending_yes_no cannot both be saved".to_string());
@@ -13123,6 +13145,7 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime.text_window_open = true;
+        runtime.active_text_label = Some("GreetingText".to_string());
         runtime.pending_text_label = Some("GreetingText".to_string());
         runtime.pending_yes_no = Some(ScriptYesNoPrompt {
             source_script: "PromptScript".to_string(),

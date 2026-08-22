@@ -506,6 +506,33 @@ fn oak_intro_renders_real_oak_wooper_and_player_portraits() {
 }
 
 #[test]
+fn new_game_name_choice_does_not_render_the_uninitialized_bedroom() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    open_visible_name_choice(&mut runtime_shell).expect("open player name choices");
+
+    let mut app = App::new();
+    app.insert_resource(runtime_shell)
+        .insert_resource(RenderedViewport::default())
+        .insert_resource(RenderedTilesetArt::default())
+        .init_resource::<Assets<Image>>()
+        .add_systems(Update, render_playfield);
+    app.update();
+
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+    assert_eq!(
+        runtime_shell.last_error, None,
+        "the full-screen player-name menu must not try to render bedroom decorations"
+    );
+    let world = app.world_mut();
+    let mut objects = world.query_filtered::<Entity, With<ObjectMarker>>();
+    assert_eq!(objects.iter(world).count(), 0);
+    let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
+    assert_eq!(presenters.iter(world).count(), 1);
+}
+
+#[test]
 fn oak_intro_fade_phases_gate_text_and_clear_sprite_on_fade_out() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;

@@ -560,7 +560,16 @@ fn spawn_field_command_menu(
             *render_error = Some(error);
             return;
         }
-        spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
+        if let Err(error) = spawn_field_notice(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
         return;
     }
     // The Town Map is a complete raster surface and intentionally has no
@@ -3031,77 +3040,55 @@ fn spawn_field_pokegear_screen(
             );
         }
     }
+    let tile_palette_map = &snapshot.presentation.pokegear_town_map_palette_map;
+    let town_tile_palettes = tile_palette_map
+        .get("town_map")
+        .context("compiled pack has no Town Map palette assignment")?;
+    let pokegear_tile_palettes = tile_palette_map
+        .get("pokegear")
+        .context("compiled pack has no Pokégear palette assignment")?;
     if runtime_shell.pokegear_page != PokegearPage::Map {
-        commit_presented_fullscreen_solid(
+        let flags = &snapshot.progression.active_engine_flags;
+        let unlocked_mask = 1
+            | (u8::from(flags.contains("ENGINE_MAP_CARD")) << 1)
+            | (u8::from(flags.contains("ENGINE_PHONE_CARD")) << 2)
+            | (u8::from(flags.contains("ENGINE_RADIO_CARD")) << 3);
+        let phone_service = snapshot
+            .maps
+            .iter()
+            .find(|map| map.map_name == snapshot.overworld.map_name)
+            .and_then(|map| map.metadata.as_ref())
+            .is_none_or(|metadata| ((metadata.phone_service & 0xf0) >> 4) == 0);
+        let frame = pokegear_card_frame_for_art(
+            rendered_art,
+            asset_root,
+            runtime_shell.pokegear_page,
+            snapshot.trainer.player_gender,
+            unlocked_mask,
+            phone_service,
+            town_tile_palettes,
+            pokegear_tile_palettes,
+            images,
+        )
+        .with_context(|| format!("render {:?} Pokégear card", runtime_shell.pokegear_page))?;
+        commit_presented_fullscreen_frame(
             commands,
             rendered_art,
-            [230, 209, 140, 255],
+            &frame,
+            PresentedFullscreenFrameSource::Cached,
             3.4,
             images,
         )?;
     }
-    let cards = [
-        (PokegearPage::Clock, "CLOCK"),
-        (PokegearPage::Map, "MAP"),
-        (PokegearPage::Phone, "PHONE"),
-        (PokegearPage::Radio, "RADIO"),
-    ];
-    for (index, (page, label)) in cards
-        .iter()
-        .enumerate()
-        .filter(|_| runtime_shell.pokegear_page != PokegearPage::Map)
-    {
-        let unlocked = match page {
-            PokegearPage::Clock => true,
-            PokegearPage::Map => snapshot
-                .progression
-                .active_engine_flags
-                .contains("ENGINE_MAP_CARD"),
-            PokegearPage::Phone => snapshot
-                .progression
-                .active_engine_flags
-                .contains("ENGINE_PHONE_CARD"),
-            PokegearPage::Radio => snapshot
-                .progression
-                .active_engine_flags
-                .contains("ENGINE_RADIO_CARD"),
-        };
-        if !unlocked {
-            continue;
-        }
-        let (x, y) = battle_hud_tile_origin(1.0 + index as f32 * 4.5, 0.5);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &format!(
-                "{}{}",
-                if *page == runtime_shell.pokegear_page {
-                    ">"
-                } else {
-                    " "
-                },
-                label
-            ),
-            x,
-            y,
-            3.8,
-        );
-    }
     if runtime_shell.pokegear_page == PokegearPage::Map {
         let region = visible_pokegear_region(snapshot)?;
-        let tile_palettes = snapshot
-            .presentation
-            .pokegear_town_map_palette_map
-            .get("town_map")
-            .context("compiled pack has no Town Map palette assignment")?;
         let frame = town_map_frame_for_art(
             rendered_art,
             asset_root,
             region,
             snapshot.trainer.player_gender,
-            tile_palettes,
+            town_tile_palettes,
+            pokegear_tile_palettes,
             images,
         )
         .with_context(|| {
@@ -3124,67 +3111,203 @@ fn spawn_field_pokegear_screen(
             images,
         )?;
         let landmarks = &snapshot.presentation.pokegear_landmarks.landmarks;
-        let selected = runtime_shell.pokegear_cursor;
         let landmark = selected_pokegear_landmark(snapshot, runtime_shell.pokegear_cursor)?;
-        let (x, y) = battle_hud_tile_origin(9.0, 0.0);
-        spawn_field_command_bitmap_text(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            &compact_scene_label(&landmark.name.replace('\n', " "), 11),
-            x,
-            y,
-            3.8,
-        );
-        for index in visible_pokegear_landmark_indices(snapshot)? {
-            let landmark = &landmarks[index];
-            let x = (landmark.x as f32 - 8.0).clamp(0.0, 159.0);
-            let y = (landmark.y as f32 - 16.0).clamp(0.0, 143.0);
-            let is_current = snapshot
-                .presentation
-                .pokegear_landmarks
-                .map_to_landmark
-                .get(&snapshot.overworld.map_name)
-                .is_some_and(|id| id == &landmark.constant);
-            let is_selected = index == selected;
-            commands.spawn((
-                SpriteBundle {
-                    sprite: Sprite {
-                        color: if is_selected {
-                            Color::srgb(0.95, 0.12, 0.12)
-                        } else if is_current {
-                            Color::srgb(0.15, 0.35, 0.95)
-                        } else {
-                            Color::srgb(0.35, 0.55, 0.25)
-                        },
-                        custom_size: Some(Vec2::splat(if is_selected { 5.0 } else { 2.0 })),
-                        ..default()
-                    },
-                    transform: Transform::from_xyz(PLAYFIELD_LEFT + x, PLAYFIELD_TOP - y, 3.7),
-                    ..default()
-                },
-                FieldCommandMarker,
-            ));
-        }
-    }
-    if runtime_shell.pokegear_page != PokegearPage::Map {
-        let entries = visible_pokegear_menu_entries(snapshot, runtime_shell)?;
-        for (index, line) in entries.iter().take(10).enumerate() {
-            let (x, y) = battle_hud_tile_origin(1.0, 4.0 + index as f32);
+        for (row, line) in landmark.name.split('\n').take(2).enumerate() {
+            let (x, y) = battle_hud_tile_origin(9.0, row as f32);
             spawn_field_command_bitmap_text(
                 commands,
                 rendered_art,
                 asset_root,
                 images,
-                &compact_scene_label(line, 18),
+                &line.chars().take(11).collect::<String>(),
                 x,
                 y,
                 3.8,
             );
         }
+        let current_constant = snapshot
+            .presentation
+            .pokegear_landmarks
+            .map_to_landmark
+            .get(&snapshot.overworld.map_name)
+            .with_context(|| {
+                format!(
+                    "active map {} has no compiled Pokégear landmark mapping",
+                    snapshot.overworld.map_name
+                )
+            })?;
+        let current = landmarks
+            .iter()
+            .find(|entry| entry.constant == *current_constant)
+            .with_context(|| format!("current Pokégear landmark {current_constant} is missing"))?;
+        spawn_town_map_markers(commands, current, landmark);
+    }
+    if runtime_shell.pokegear_page != PokegearPage::Map {
+        spawn_non_map_pokegear_content(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        )?;
     }
     Ok(())
+}
+
+fn spawn_non_map_pokegear_content(
+    commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let entries = visible_pokegear_menu_entries(snapshot, runtime_shell)?;
+    let mut spawn = |text: &str, tile_x: f32, tile_y: f32| {
+        let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            text,
+            x,
+            y,
+            3.8,
+        );
+    };
+    match runtime_shell.pokegear_page {
+        PokegearPage::Clock => {
+            spawn(" SWITCH>", 12.0, 1.0);
+            if let Some(day) = entries.first() {
+                spawn(&day.chars().take(14).collect::<String>(), 6.0, 6.0);
+            }
+            if let Some(time) = entries.get(1) {
+                spawn(&time.chars().take(14).collect::<String>(), 6.0, 8.0);
+            }
+            spawn(&entries.join(" ").chars().take(18).collect::<String>(), 1.0, 13.0);
+        }
+        PokegearPage::Phone => {
+            for (index, line) in entries.iter().take(7).enumerate() {
+                spawn(
+                    &line.chars().take(16).collect::<String>(),
+                    1.0,
+                    4.0 + index as f32,
+                );
+            }
+            let status = entries
+                .iter()
+                .rev()
+                .find(|line| line.contains("SERVICE") || line.contains("CALL"))
+                .or_else(|| entries.first())
+                .map(|line| line.trim_start_matches([' ', '>']))
+                .unwrap_or("NO PHONE NUMBERS");
+            spawn(&status.chars().take(18).collect::<String>(), 1.0, 13.0);
+        }
+        PokegearPage::Radio => {
+            let heading = entries
+                .first()
+                .map(|line| line.strip_prefix("RADIO  ").unwrap_or(line))
+                .unwrap_or("NO SIGNAL");
+            spawn(&heading.chars().take(17).collect::<String>(), 2.0, 9.0);
+            for (index, line) in entries.iter().skip(1).take(4).enumerate() {
+                spawn(
+                    &line.chars().take(18).collect::<String>(),
+                    1.0,
+                    13.0 + index as f32,
+                );
+            }
+            if entries.len() == 1 {
+                spawn(&heading.chars().take(18).collect::<String>(), 1.0, 13.0);
+            }
+        }
+        PokegearPage::Map => {}
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TownMapMarkerKind {
+    Player,
+    Cursor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TownMapMarkerRect {
+    kind: TownMapMarkerKind,
+    center: Vec2,
+    size: Vec2,
+}
+
+fn town_map_marker_rects(
+    player: &crate::core::models::PokegearLandmark,
+    cursor: &crate::core::models::PokegearLandmark,
+) -> Vec<TownMapMarkerRect> {
+    let project = |landmark: &crate::core::models::PokegearLandmark| {
+        Vec2::new(landmark.x as f32 - 8.0, landmark.y as f32 - 16.0)
+    };
+    let player = project(player);
+    let cursor = project(cursor);
+    let mut rects = Vec::with_capacity(13);
+    for (y, width) in [(-2.0, 3.0), (-1.0, 5.0), (0.0, 7.0), (1.0, 5.0), (2.0, 3.0)] {
+        rects.push(TownMapMarkerRect {
+            kind: TownMapMarkerKind::Player,
+            center: player + Vec2::new(0.0, y),
+            size: Vec2::new(width, 1.0),
+        });
+    }
+    for (offset, size) in [
+        (Vec2::new(-4.5, -7.0), Vec2::new(7.0, 2.0)),
+        (Vec2::new(4.5, -7.0), Vec2::new(7.0, 2.0)),
+        (Vec2::new(-7.0, -3.5), Vec2::new(2.0, 5.0)),
+        (Vec2::new(7.0, -3.5), Vec2::new(2.0, 5.0)),
+        (Vec2::new(-7.0, 3.5), Vec2::new(2.0, 5.0)),
+        (Vec2::new(7.0, 3.5), Vec2::new(2.0, 5.0)),
+        (Vec2::new(-4.5, 7.0), Vec2::new(7.0, 2.0)),
+        (Vec2::new(4.5, 7.0), Vec2::new(7.0, 2.0)),
+    ] {
+        rects.push(TownMapMarkerRect {
+            kind: TownMapMarkerKind::Cursor,
+            center: cursor + offset,
+            size,
+        });
+    }
+    rects
+}
+
+fn spawn_town_map_markers(
+    commands: &mut Commands,
+    player: &crate::core::models::PokegearLandmark,
+    cursor: &crate::core::models::PokegearLandmark,
+) {
+    let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+    for rect in town_map_marker_rects(player, cursor) {
+        let color = match rect.kind {
+            TownMapMarkerKind::Player => Color::srgb(224.0 / 255.0, 0.0, 64.0 / 255.0),
+            TownMapMarkerKind::Cursor => Color::BLACK,
+        };
+        let z = match rect.kind {
+            TownMapMarkerKind::Player => 3.65,
+            TownMapMarkerKind::Cursor => 3.7,
+        };
+        commands.spawn((
+            SpriteBundle {
+                sprite: Sprite {
+                    color,
+                    custom_size: Some(rect.size * scale),
+                    ..default()
+                },
+                transform: Transform::from_xyz(
+                    PLAYFIELD_LEFT + rect.center.x * scale,
+                    PLAYFIELD_TOP - rect.center.y * scale,
+                    z,
+                ),
+                ..default()
+            },
+            FieldCommandMarker,
+        ));
+    }
 }
 
 /// Render the same 20x18 Johto tilemap and palette-selected town-map tiles
@@ -3616,63 +3739,39 @@ fn spawn_field_pack_screen(
         3.4,
         images,
     )?;
-    spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
+    spawn_field_notice(
+        commands,
+        snapshot,
+        runtime_shell,
+        rendered_art,
+        asset_root,
+        images,
+    )?;
     Ok(())
 }
 
 fn spawn_field_notice(
     commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
-) {
-    if let Some(notice) = runtime_shell.field_notice.as_deref() {
-        let visible_notice = visible_revealed_shell_notice_text(runtime_shell, notice);
-        spawn_battle_window(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            1.0,
-            10.0,
-            18.0,
-            8.0,
-            4.5,
-        );
-        for (index, line) in wrap_boot_text_for_box(&visible_notice, 16, 6)
-            .iter()
-            .enumerate()
-        {
-            let (x, y) = battle_hud_tile_origin(2.0, 11.0 + index as f32);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                line,
-                x,
-                y,
-                4.8,
-            );
-        }
-        if visible_field_text_reveal_is_complete_for_text(runtime_shell, notice)
-            && visible_field_notice_uses_prompt_arrow(runtime_shell)
-            && runtime_shell.lcd_animation_frame & (1 << 4) != 0
-        {
-            let (x, y) = battle_hud_tile_origin(18.0, 16.0);
-            spawn_field_command_bitmap_text(
-                commands,
-                rendered_art,
-                asset_root,
-                images,
-                "▼",
-                x,
-                y,
-                4.8,
-            );
-        }
+) -> Result<()> {
+    if runtime_shell.field_notice.is_none() {
+        return Ok(());
     }
+    // The ASM reaches field notices through OpenText + MapTextbox. Reuse the
+    // canonical 20x6 presenter instead of drawing an invented 18x8 slab.
+    spawn_scene_dialog_text_box(commands, rendered_art, asset_root, images, 4.0);
+    spawn_scene_dialog_text_content(
+        commands,
+        snapshot,
+        runtime_shell,
+        rendered_art,
+        asset_root,
+        images,
+    )
 }
 
 fn spawn_field_party_summary_screen(
@@ -4737,7 +4836,14 @@ fn spawn_scene_dialog(
         return Ok(());
     }
     if runtime_shell.field_notice.is_some() {
-        spawn_field_notice(commands, runtime_shell, rendered_art, asset_root, images);
+        spawn_field_notice(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        )?;
         return Ok(());
     }
     if let Some(choice) = runtime_shell.pending_name_choice.as_ref() {
@@ -6917,6 +7023,20 @@ fn field_dialogue_prompt_arrow_visible(
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
 ) -> bool {
+    if runtime_shell.field_notice.is_some() {
+        let Some(pages) = visible_field_dialog_pages(snapshot, runtime_shell) else {
+            return false;
+        };
+        let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
+            return false;
+        };
+        let page_index = reveal.page_index.min(pages.len().saturating_sub(1));
+        return reveal.text == pages.join("\u{1e}")
+            && visible_field_text_reveal_is_complete(reveal, &pages[page_index])
+            && (page_index + 1 < pages.len()
+                || visible_field_notice_uses_prompt_arrow(runtime_shell))
+            && runtime_shell.lcd_animation_frame & (1 << 4) != 0;
+    }
     snapshot.ui.pending_text_wait.is_some()
         && runtime_shell
             .shell
@@ -8497,14 +8617,17 @@ fn dialog_glyph_key(x: f32, y: f32, index: usize) -> u64 {
     (x << 32) ^ (y << 8) ^ index as u64
 }
 
-/// Update the retained glyph sprites when the dialog's layout is unchanged.
-/// Returning false asks the caller to use the normal rebuild path (for
-/// example when a second line appears or a yes/no window is opened).
+/// Reconcile changing dialog tiles while retaining the textbox and every
+/// glyph entity whose tile position remains occupied. Returning false asks
+/// the caller to use the normal rebuild path when the desired content cannot
+/// be derived.
 fn update_scene_dialog_text_content_in_place<F: QueryFilter>(
+    commands: &mut Commands,
     snapshot: &RuntimeShellSnapshot,
     runtime_shell: &BevyRuntimeShell,
     glyphs: &mut Query<
         (
+            Entity,
             &DialogGlyphMarker,
             &mut Handle<Image>,
             &mut Transform,
@@ -8583,23 +8706,40 @@ fn update_scene_dialog_text_content_in_place<F: QueryFilter>(
             ));
         }
     }
-    let mut existing = glyphs.iter_mut().collect::<Vec<_>>();
-    if existing.len() != desired.len() {
-        return false;
-    }
-    existing.sort_by_key(|(marker, _, _, _)| marker.key);
-    desired.sort_by_key(|(key, _, _, _)| *key);
-    for ((marker, mut texture, mut transform, mut sprite), (key, handle, size, next_transform)) in
-        existing.into_iter().zip(desired)
-    {
-        if marker.key != key {
-            return false;
-        }
+    // ASM PlaceString writes one tile and leaves every previously printed
+    // tile alone. Reconcile by tile identity so a growing typewriter line
+    // does the same. Rebuilding all glyph entities whenever the count changed
+    // exposed deferred despawn/spawn frames to the renderer, producing stale
+    // random-looking text and destroying the intended letter cadence.
+    let mut desired = desired
+        .into_iter()
+        .map(|entry| (entry.0, entry))
+        .collect::<HashMap<_, _>>();
+    for (entity, marker, mut texture, mut transform, mut sprite) in glyphs.iter_mut() {
+        let Some((_, handle, size, next_transform)) = desired.remove(&marker.key) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
         if texture.id() != handle.id() {
             *texture = handle;
         }
         *transform = next_transform;
         sprite.custom_size = Some(size);
+    }
+    for (key, handle, size, transform) in desired.into_values() {
+        commands.spawn((
+            SpriteBundle {
+                texture: handle,
+                sprite: Sprite {
+                    custom_size: Some(size),
+                    ..default()
+                },
+                transform,
+                ..default()
+            },
+            SceneDialogMarker,
+            DialogGlyphMarker { key },
+        ));
     }
     true
 }
@@ -8619,6 +8759,13 @@ const NAME_ENTRY_BORDER_TILE: u8 = 0x60;
 const NAME_ENTRY_SPACE_TILE: u8 = 0x7f;
 const NAME_ENTRY_UNDERLINE_TILE: u8 = 0xf2;
 const NAME_ENTRY_MIDDLE_LINE_TILE: u8 = 0xeb;
+// ASM: SCGB_DIPLOMA loads palette 0 from gfx/diploma/diploma.pal.
+const NAME_ENTRY_BG_PALETTE: [[u8; 3]; 4] = [
+    [222, 255, 222],
+    [173, 173, 173],
+    [107, 107, 107],
+    [0, 0, 0],
+];
 const NAME_ENTRY_LETTER_X_OFFSETS: [i16; 9] =
     [0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
 const NAME_ENTRY_CASE_ROW_X_OFFSETS: [i16; 9] =
@@ -8657,31 +8804,40 @@ fn load_name_entry_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
-    let font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
+    let mut font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode naming screen font PNG")?
         .to_rgba8();
-    let font_extra = crate::open_runtime_image(assets.join("gfx/font/font_extra.png"))
+    let mut font_extra = crate::open_runtime_image(assets.join("gfx/font/font_extra.png"))
         .context("decode naming screen extra-font PNG")?
         .to_rgba8();
     let cursor = crate::open_runtime_image(assets.join("gfx/naming_screen/cursor.png"))
         .context("decode naming screen cursor PNG")?
         .to_rgba8();
-    let border = crate::open_runtime_image(assets.join("gfx/naming_screen/border.png"))
+    let mut border = crate::open_runtime_image(assets.join("gfx/naming_screen/border.png"))
         .context("decode naming screen border PNG")?
         .to_rgba8();
-    let underline = crate::open_runtime_image(assets.join("gfx/naming_screen/underline.png"))
+    let mut underline = crate::open_runtime_image(assets.join("gfx/naming_screen/underline.png"))
         .context("decode naming screen underline PNG")?
         .to_rgba8();
-    let middle_line = crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
+    let mut middle_line = crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
         .context("decode naming screen middle-line PNG")?
         .to_rgba8();
+
+    for image in [&mut font, &mut font_extra, &mut border, &mut underline, &mut middle_line] {
+        apply_name_entry_background_palette(image);
+    }
 
     let tilemap = build_name_entry_tilemap(input)?;
     let width = NAME_ENTRY_SCREEN_TILE_WIDTH * SOURCE_TILE_SIZE;
     let height = NAME_ENTRY_SCREEN_TILE_HEIGHT * SOURCE_TILE_SIZE;
-    let mut data = vec![255_u8; width * height * 4];
+    let mut data = vec![0_u8; width * height * 4];
     for pixel in data.chunks_exact_mut(4) {
-        pixel[3] = 255;
+        pixel.copy_from_slice(&[
+            NAME_ENTRY_BG_PALETTE[0][0],
+            NAME_ENTRY_BG_PALETTE[0][1],
+            NAME_ENTRY_BG_PALETTE[0][2],
+            255,
+        ]);
     }
 
     for (tile_y, row) in tilemap.iter().enumerate() {
@@ -8717,6 +8873,19 @@ fn load_name_entry_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
+}
+
+fn apply_name_entry_background_palette(image: &mut image::RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let grayscale = if pixel[3] == 0 {
+            255
+        } else {
+            ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3) as u8
+        };
+        let palette_index = usize::from(((255_u16 - u16::from(grayscale) + 42) / 85).min(3));
+        let color = NAME_ENTRY_BG_PALETTE[palette_index];
+        *pixel = image::Rgba([color[0], color[1], color[2], 255]);
+    }
 }
 
 fn build_name_entry_tilemap(input: &PendingNameInput) -> Result<Vec<Vec<u8>>> {
@@ -9361,7 +9530,7 @@ fn visible_field_dialog_pages(
     runtime_shell: &BevyRuntimeShell,
 ) -> Option<Vec<String>> {
     if let Some(notice) = runtime_shell.field_notice.as_ref() {
-        return Some(vec![notice.clone()]);
+        return Some(notice.split("\n\n").map(str::to_owned).collect());
     }
     if let Some(notice) = runtime_shell.pc_notice.as_ref() {
         return Some(vec![notice.clone()]);
@@ -9481,7 +9650,11 @@ fn visible_field_dialog_text(
 
 fn visible_revealed_field_dialog_text(runtime_shell: &BevyRuntimeShell, full_text: &str) -> String {
     let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
-        return full_text.to_string();
+        // Core can publish the complete text body one schedule stage before
+        // the presentation system creates its typewriter state. Rendering
+        // the body during that gap flashes the finished page, then rewinds to
+        // the first character on the following frame.
+        return String::new();
     };
     full_text.chars().take(reveal.visible_chars).collect()
 }
@@ -9570,26 +9743,39 @@ fn tick_visible_field_text_reveal(
             return Ok(false);
         }
         let changed = runtime_shell.field_text_reveal.take().is_some();
+        log_visible_dialogue_close(runtime_shell);
         return Ok(changed);
     };
     let text_identity = pages.join("\u{1e}");
+    {
+        let reveal = runtime_shell
+            .field_text_reveal
+            .get_or_insert_with(|| VisibleFieldTextReveal {
+                text: text_identity.clone(),
+                page_index: 0,
+                visible_chars: 0,
+                frames_until_next_char: 0,
+            });
+        if reveal.text != text_identity {
+            *reveal = VisibleFieldTextReveal {
+                text: text_identity,
+                page_index: 0,
+                visible_chars: 0,
+                frames_until_next_char: 0,
+            };
+        }
+        reveal.page_index = reveal.page_index.min(pages.len().saturating_sub(1));
+    }
+    let page_index = runtime_shell
+        .field_text_reveal
+        .as_ref()
+        .context("field text reveal disappeared after initialization")?
+        .page_index;
+    log_visible_dialogue_page(runtime_shell, &snapshot, &pages, page_index);
     let reveal = runtime_shell
         .field_text_reveal
-        .get_or_insert_with(|| VisibleFieldTextReveal {
-            text: text_identity.clone(),
-            page_index: 0,
-            visible_chars: 0,
-            frames_until_next_char: 0,
-        });
-    if reveal.text != text_identity {
-        *reveal = VisibleFieldTextReveal {
-            text: text_identity,
-            page_index: 0,
-            visible_chars: 0,
-            frames_until_next_char: 0,
-        };
-    }
-    reveal.page_index = reveal.page_index.min(pages.len().saturating_sub(1));
+        .as_mut()
+        .context("field text reveal disappeared before printing")?;
     let full_text = &pages[reveal.page_index];
     let text_len = full_text.chars().count();
     if snapshot.trainer.options.no_text_scroll {
@@ -9616,6 +9802,67 @@ fn tick_visible_field_text_reveal(
     reveal.visible_chars = reveal.visible_chars.saturating_add(1).min(text_len);
     reveal.frames_until_next_char = frames_per_char.saturating_sub(1);
     Ok(true)
+}
+
+fn log_visible_dialogue_page(
+    runtime_shell: &mut BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+    pages: &[String],
+    page_index: usize,
+) {
+    let label = snapshot
+        .ui
+        .text
+        .as_ref()
+        .map(|text| text.label.clone())
+        .unwrap_or_else(|| "field-notice".to_string());
+    let identity = (label.clone(), page_index);
+    if runtime_shell.dialogue_log_identity.as_ref() == Some(&identity) {
+        return;
+    }
+    runtime_shell.dialogue_log_identity = Some(identity);
+    let script = runtime_shell
+        .active_script_cursor
+        .as_ref()
+        .map(|cursor| {
+            format!(
+                "{}:{}",
+                cursor.source_script, cursor.next_command_index
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let text = pages.get(page_index).map(String::as_str).unwrap_or("");
+    let event = format!(
+        "crystal-bevy dialogue frame={} event=show label={} page={}/{} text={:?} script={}",
+        runtime_shell.lcd_animation_frame,
+        label,
+        page_index + 1,
+        pages.len(),
+        text,
+        script,
+    );
+    eprintln!("{event}");
+    runtime_shell.dialogue_log_events.push_back(event);
+    if runtime_shell.dialogue_log_events.len() > 4096 {
+        runtime_shell.dialogue_log_events.pop_front();
+    }
+}
+
+fn log_visible_dialogue_close(runtime_shell: &mut BevyRuntimeShell) {
+    let Some((label, page_index)) = runtime_shell.dialogue_log_identity.take() else {
+        return;
+    };
+    let event = format!(
+        "crystal-bevy dialogue frame={} event=close label={} page={}",
+        runtime_shell.lcd_animation_frame,
+        label,
+        page_index + 1,
+    );
+    eprintln!("{event}");
+    runtime_shell.dialogue_log_events.push_back(event);
+    if runtime_shell.dialogue_log_events.len() > 4096 {
+        runtime_shell.dialogue_log_events.pop_front();
+    }
 }
 
 fn advance_visible_completed_field_text_page(

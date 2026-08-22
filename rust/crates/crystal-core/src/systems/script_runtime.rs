@@ -1417,6 +1417,8 @@ fn apply_runtime_effect(
                 .ok_or_else(|| ScriptRuntimeCommandError::MissingAccumulator {
                     command: command.command.clone(),
                 })?;
+            state.script_runtime.text_window_open = true;
+            state.script_runtime.active_text_label = Some(text_label.clone());
             state.script_runtime.pending_text_label = Some(text_label);
         }
         "halloffame" => record_hall_of_fame(

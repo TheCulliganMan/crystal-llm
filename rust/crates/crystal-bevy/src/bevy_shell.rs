@@ -21,7 +21,7 @@ use bevy::render::texture::ImageSampler;
 use bevy::render::view::screenshot::ScreenshotManager;
 #[cfg(feature = "location-tester")]
 use bevy::window::PrimaryWindow;
-use bevy::window::{PresentMode, WindowResolution};
+use bevy::window::{PresentMode, WindowFocused, WindowResolution};
 use bevy::winit::{UpdateMode, WinitSettings};
 use chrono::{Datelike, Local as ChronoLocal, Timelike};
 use crystal_assets::{
@@ -640,6 +640,8 @@ struct BevyRuntimeShell {
     pending_plain_battle_map_reload: bool,
     last_overworld_input: Option<VisibleOverworldInputRecord>,
     overworld_interaction_consumed_a: bool,
+    field_text_consumed_a: bool,
+    field_text_consumed_b: bool,
     // Authoritative movement commits at a tile boundary. Retain its previous
     // tile so presentation can cross that boundary over real LCD frames.
     player_walk_from: Option<TilePosition>,
@@ -677,6 +679,7 @@ struct BevyRuntimeShell {
     overworld_held_directions: VecDeque<GameButton>,
     overworld_buffered_direction: Option<GameButton>,
     pending_overworld_direction_press: Option<GameButton>,
+    pending_ui_button_presses: VecDeque<KeyCode>,
     ui_held_direction: Option<GameButton>,
     ui_direction_repeat_ticks: u8,
     recent_overworld_inputs: VecDeque<VisibleOverworldInputRecord>,
@@ -721,6 +724,14 @@ struct BevyRuntimeShell {
     pending_poison_blackout: bool,
     visible_walk_warp_phase: Option<VisibleWalkWarpPhase>,
     field_text_reveal: Option<VisibleFieldTextReveal>,
+    /// Last fully printed field-text page whose glyph update was accepted by
+    /// the Bevy renderer. Autonomous script fences must not replace a page
+    /// until this identity has been acknowledged.
+    rendered_field_text_identity: Option<(String, usize)>,
+    dialogue_log_identity: Option<(String, usize)>,
+    dialogue_log_events: VecDeque<String>,
+    movement_log_events: VecDeque<String>,
+    input_log_events: VecDeque<String>,
     selected_player_gender: Option<VisiblePlayerGender>,
     pending_name_input: Option<PendingNameInput>,
     pending_mail_input: Option<PendingMailInput>,
@@ -1222,6 +1233,14 @@ impl NativeAudioBackend {
         }
         sink.play();
         if matches!(command.kind, ModpackAudioKind::Music) {
+            eprintln!(
+                "crystal-bevy audio started music {} frames={} sample_rate={} duration_ms={} dispatch_ms={}",
+                command.audio_id,
+                frame_count,
+                sample_rate,
+                playback_duration.as_millis(),
+                dispatch_started_at.elapsed().as_millis()
+            );
             self.music_sink = Some(sink);
         } else {
             let started_at = Instant::now();
@@ -3190,6 +3209,13 @@ impl RuntimeTickTimer {
         self.finished_ticks > 0
     }
 
+    fn presentation_subframe(&self) -> f32 {
+        if self.step_seconds <= 0.0 {
+            return 0.0;
+        }
+        (self.accumulated_seconds / self.step_seconds).clamp(0.0, 1.0) as f32
+    }
+
     fn stage_presentation_ticks(&mut self, ticks: u32) {
         // This is a same-update handoff from the authoritative frame system
         // to the modal/hotkey system. Overwrite instead of accumulating so a
@@ -3321,6 +3347,11 @@ struct RenderedViewport {
     visual_world_texture: Option<Handle<Image>>,
     #[cfg(feature = "voxel-view")]
     visual_world_grid_size: UVec2,
+    /// Whether the retained optional-renderer data was built for an active
+    /// 2.5D view. A feature-enabled binary normally runs in classic mode and
+    /// must not pay to compose the 84x82 terrain source on every camera step.
+    #[cfg(feature = "voxel-view")]
+    visual_world_enabled: bool,
     viewport_origin: Option<(i16, i16)>,
     /// The viewport origin shown immediately before a committed walking step.
     /// Retaining it lets the renderer scroll the replacement texture over the
@@ -4316,6 +4347,10 @@ pub fn run_bevy_shell(
         }))
         .add_plugins(crystal_render_api::VisualWorldRenderPlugin)
         .add_systems(Startup, setup_shell_view)
+        .add_systems(
+            Update,
+            release_input_on_focus_loss.before(apply_keyboard_input),
+        )
         .add_systems(Update, apply_keyboard_input)
         .add_systems(Update, apply_runtime_hotkeys.after(apply_keyboard_input))
         .add_systems(
@@ -5645,7 +5680,8 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
                 let retained_transient_audio = runtime_shell.transient_audio_playing;
                 runtime_shell.transient_audio_playing = false;
                 let presentation = runtime_shell.shell.presentation_snapshot()?;
-                let advanced = advance_visible_wait_sfx_boundary(runtime_shell, &presentation)?;
+                let advanced =
+                    advance_visible_wait_sfx_boundary(runtime_shell, &presentation, false)?;
                 retained_audio.append(&mut runtime_shell.pending_audio);
                 runtime_shell.pending_audio = retained_audio;
                 runtime_shell.transient_audio_playing = retained_transient_audio;
@@ -5993,6 +6029,8 @@ fn initialize_bevy_runtime_shell(
         pending_plain_battle_map_reload: false,
         last_overworld_input: None,
         overworld_interaction_consumed_a: false,
+        field_text_consumed_a: false,
+        field_text_consumed_b: false,
         player_walk_from: None,
         player_walk_frame_ticks: 0,
         player_walk_total_ticks: WALK_FRAME_HOLD_TICKS,
@@ -6020,6 +6058,7 @@ fn initialize_bevy_runtime_shell(
         overworld_held_directions: VecDeque::new(),
         overworld_buffered_direction: None,
         pending_overworld_direction_press: None,
+        pending_ui_button_presses: VecDeque::new(),
         ui_held_direction: None,
         ui_direction_repeat_ticks: 0,
         recent_overworld_inputs: VecDeque::new(),
@@ -6079,6 +6118,11 @@ fn initialize_bevy_runtime_shell(
         pending_poison_blackout: false,
         visible_walk_warp_phase: None,
         field_text_reveal: None,
+        rendered_field_text_identity: None,
+        dialogue_log_identity: None,
+        dialogue_log_events: VecDeque::new(),
+        movement_log_events: VecDeque::new(),
+        input_log_events: VecDeque::new(),
         selected_player_gender: None,
         pending_name_input: None,
         pending_mail_input: None,

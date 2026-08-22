@@ -150,6 +150,23 @@ fn apply_keyboard_input(
     mut runtime_shell: ResMut<BevyRuntimeShell>,
     mut timer: ResMut<RuntimeTickTimer>,
 ) {
+    runtime_shell.field_text_consumed_a = false;
+    runtime_shell.field_text_consumed_b = false;
+    log_visible_key_presses(&mut runtime_shell, &keys);
+    for key in [
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+        KeyCode::ArrowRight,
+        KeyCode::KeyZ,
+        KeyCode::KeyX,
+        KeyCode::Enter,
+        KeyCode::ShiftRight,
+    ] {
+        if keys.just_pressed(key) && !runtime_shell.pending_ui_button_presses.contains(&key) {
+            runtime_shell.pending_ui_button_presses.push_back(key);
+        }
+    }
     timer.tick(time.delta_seconds_f64());
     let elapsed_vblanks = timer.take_vblanks();
     let elapsed_input_ticks = timer.take_ticks();
@@ -168,6 +185,29 @@ fn apply_keyboard_input(
             runtime_shell.pending_overworld_direction_press = Some(direction);
         }
         return;
+    }
+    // The host can present frames faster than Crystal's input cadence. Keep
+    // every physical button edge until the next authoritative input tick;
+    // dropping these made dialogue and menus respond only intermittently.
+    let mut keys = (*keys).clone();
+    for key in runtime_shell.pending_ui_button_presses.drain(..) {
+        if !keys.just_pressed(key) {
+            keys.press(key);
+        }
+    }
+    if (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyX))
+        // Input ownership must use authoritative state. A retained render
+        // scene may still contain the just-closed textbox while an actor
+        // finishes moving; letting that stale frame claim A strands the
+        // following script command indefinitely.
+        && let Ok(snapshot) = runtime_shell.shell.snapshot()
+        && snapshot.ui.text_window_open
+        && snapshot.ui.text.is_some()
+        && runtime_shell.field_text_reveal.is_some()
+        && !visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot)
+    {
+        runtime_shell.field_text_consumed_a = keys.just_pressed(KeyCode::KeyZ);
+        runtime_shell.field_text_consumed_b = keys.just_pressed(KeyCode::KeyX);
     }
     let pending_direction_press = runtime_shell.pending_overworld_direction_press.take();
     // GameTimer is a VBlank hook, not an overworld-input side effect. Run it
@@ -1061,14 +1101,28 @@ fn apply_keyboard_input(
                 return;
             }
         }
+        let completed_text_identity = runtime_shell
+            .shell
+            .presentation_snapshot()
+            .ok()
+            .and_then(|snapshot| {
+                visible_field_dialog_pages(&snapshot, &runtime_shell)?;
+                let reveal = runtime_shell.field_text_reveal.as_ref()?;
+                visible_field_dialogue_is_entirely_consumed(&runtime_shell, &snapshot).then(|| {
+                    (reveal.text.clone(), reveal.page_index)
+                })
+            });
+        let completed_text_was_presented = completed_text_identity.as_ref().is_none_or(|identity| {
+            runtime_shell.rendered_field_text_identity.as_ref() == Some(identity)
+        });
         // `waitsfx` is an autonomous ASM sequencing fence. Poll it from the
         // frame loop so the script resumes as soon as the transient channel
         // finishes; requiring an unrelated A/B press leaves item rewards and
         // other fanfares parked forever on their preceding textbox.
-        if runtime_shell.visible_wait_sfx_boundary {
+        if runtime_shell.visible_wait_sfx_boundary && completed_text_was_presented {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot) => {
-                    match advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot) {
+                    match advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, true) {
                         Ok(true) => return,
                         Ok(false) => {}
                         Err(error) => {
@@ -1101,6 +1155,11 @@ fn apply_keyboard_input(
             })
             .is_some_and(|snapshot| snapshot.script_events.pending_text_label.is_some());
         if auto_continue_writetext {
+            // One physical edge belongs to one text state. If this frame
+            // finishes PrintText, do not let the hotkey system reuse the edge
+            // against the wait/prompt published by the resumed script.
+            runtime_shell.field_text_consumed_a |= keys.just_pressed(KeyCode::KeyZ);
+            runtime_shell.field_text_consumed_b |= keys.just_pressed(KeyCode::KeyX);
             if let Err(error) = advance_visible_text_label(&mut runtime_shell) {
                 record_visible_runtime_error(&mut runtime_shell, &error);
                 runtime_shell.last_error = Some(error.to_string());
@@ -1237,12 +1296,27 @@ fn apply_keyboard_input(
                     return;
                 }
             };
+            if visible_field_dialog_pages(&field_snapshot, &runtime_shell).is_none()
+                && runtime_shell.visible_script_movement_scene.is_none()
+            {
+                // The authoritative textbox and any retained movement frame
+                // are both gone. Release the presentation-only printer now,
+                // even while the script cursor continues into later commands.
+                // Otherwise the stale printer captures every subsequent A/B
+                // edge and strands commands such as disappear/end forever.
+                runtime_shell.field_text_reveal = None;
+                runtime_shell.rendered_field_text_identity = None;
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+            } else {
             let auto_continue =
                 visible_field_dialogue_is_entirely_consumed(&runtime_shell, &field_snapshot)
                     && field_snapshot.ui.pending_text_wait.is_none()
                     && field_snapshot.ui.pending_yes_no.is_none()
+                    && !visible_non_text_player_boundary(&runtime_shell, &field_snapshot)
                     && runtime_shell.active_script_cursor.is_some();
             if auto_continue {
+                runtime_shell.field_text_consumed_a |= keys.just_pressed(KeyCode::KeyZ);
+                runtime_shell.field_text_consumed_b |= keys.just_pressed(KeyCode::KeyX);
                 if let Err(error) = advance_visible_script_until_player_boundary(&mut runtime_shell)
                 {
                     record_visible_runtime_error(&mut runtime_shell, &error);
@@ -1250,6 +1324,7 @@ fn apply_keyboard_input(
                 }
             }
             return;
+            }
         }
     } else if runtime_shell.active_script_cursor.is_none()
         && runtime_shell.field_text_reveal.take().is_some()
@@ -2133,6 +2208,28 @@ fn apply_keyboard_input(
     }
 }
 
+fn release_input_on_focus_loss(
+    mut focus_events: EventReader<WindowFocused>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut runtime_shell: ResMut<BevyRuntimeShell>,
+) {
+    if !focus_events.read().any(|event| !event.focused) {
+        return;
+    }
+    reset_keyboard_after_focus_loss(&mut keys);
+    runtime_shell.pending_overworld_direction_press = None;
+    runtime_shell.pending_ui_button_presses.clear();
+    runtime_shell.ui_held_direction = None;
+    runtime_shell.ui_direction_repeat_ticks = 0;
+    runtime_shell.overworld_interaction_consumed_a = false;
+    runtime_shell.field_text_consumed_a = false;
+    runtime_shell.field_text_consumed_b = false;
+}
+
+fn reset_keyboard_after_focus_loss(keys: &mut ButtonInput<KeyCode>) {
+    keys.reset_all();
+}
+
 fn overworld_frame_reaches_presentation_boundary(frame: &crate::RuntimeOverworldFrame) -> bool {
     frame.step_events.as_ref().is_some_and(|events| {
         events.repel_expired.is_some()
@@ -2507,6 +2604,17 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
                     runtime_shell.visible_player_sprite_y_offset = movement.stationary_y_offset;
                 }
             }
+            let completed_object = runtime_shell
+                .visible_script_movement
+                .as_ref()
+                .map(|movement| movement.object_id.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            log_visible_movement_event(
+                runtime_shell,
+                "end",
+                &completed_object,
+                "retained movement scene released".to_string(),
+            );
             runtime_shell.visible_script_movement = None;
             runtime_shell.visible_script_movement_scene = None;
             runtime_shell.player_walk_from = None;
@@ -2678,6 +2786,15 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
                 update_facing,
                 standing_frame,
             } => {
+                log_visible_movement_event(
+                    runtime_shell,
+                    "step",
+                    &object_id,
+                    format!(
+                        "from=({}, {}) to=({}, {}) direction={direction:?} duration={duration} jump={jump}",
+                        from.x, from.y, to.x, to.y,
+                    ),
+                );
                 let leader_stride = u8::try_from(
                     (i32::from(to.x) - i32::from(from.x))
                         .unsigned_abs()
@@ -2736,6 +2853,109 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(true);
             }
+        }
+    }
+}
+
+fn log_visible_movement_event(
+    runtime_shell: &mut BevyRuntimeShell,
+    event_kind: &str,
+    object_id: &str,
+    detail: String,
+) {
+    let dialogue = runtime_shell
+        .visible_script_movement_scene
+        .as_deref()
+        .cloned()
+        .or_else(|| runtime_shell.shell.snapshot().ok())
+        .and_then(|snapshot| snapshot.ui.text.map(|text| text.label))
+        .unwrap_or_else(|| "none".to_string());
+    let script = runtime_shell
+        .active_script_cursor
+        .as_ref()
+        .map(|cursor| format!("{}:{}", cursor.source_script, cursor.next_command_index))
+        .unwrap_or_else(|| "none".to_string());
+    let event = format!(
+        "crystal-bevy movement frame={} event={} object={} dialogue={} script={} {}",
+        runtime_shell.lcd_animation_frame, event_kind, object_id, dialogue, script, detail,
+    );
+    eprintln!("{event}");
+    runtime_shell.movement_log_events.push_back(event);
+    if runtime_shell.movement_log_events.len() > 4096 {
+        runtime_shell.movement_log_events.pop_front();
+    }
+}
+
+fn log_visible_key_presses(
+    runtime_shell: &mut BevyRuntimeShell,
+    keys: &ButtonInput<KeyCode>,
+) {
+    let pressed = [
+        (KeyCode::ArrowUp, "UP"),
+        (KeyCode::ArrowDown, "DOWN"),
+        (KeyCode::ArrowLeft, "LEFT"),
+        (KeyCode::ArrowRight, "RIGHT"),
+        (KeyCode::KeyZ, "A"),
+        (KeyCode::KeyX, "B"),
+        (KeyCode::Enter, "START"),
+        (KeyCode::ShiftRight, "SELECT"),
+    ]
+    .into_iter()
+    .filter_map(|(key, name)| keys.just_pressed(key).then_some(name))
+    .collect::<Vec<_>>();
+    if pressed.is_empty() {
+        return;
+    }
+    let snapshot = runtime_shell.shell.snapshot().ok();
+    let map = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.overworld.map_name.as_str())
+        .unwrap_or("unknown");
+    let tile = snapshot.as_ref().map(|snapshot| snapshot.overworld.tile);
+    let dialogue = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.ui.text.as_ref().map(|text| text.label.as_str()))
+        .unwrap_or("none");
+    let page = runtime_shell
+        .dialogue_log_identity
+        .as_ref()
+        .filter(|(label, _)| label == dialogue)
+        .map(|(_, page_index)| page_index + 1);
+    let owner = if runtime_shell.pending_day_of_week.is_some() {
+        "weekday"
+    } else if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.ui.pending_yes_no.is_some())
+    {
+        "yes-no"
+    } else if dialogue != "none" {
+        "dialogue"
+    } else if runtime_shell.active_script_cursor.is_some() {
+        "script"
+    } else {
+        "overworld"
+    };
+    let script = runtime_shell
+        .active_script_cursor
+        .as_ref()
+        .map(|cursor| format!("{}:{}", cursor.source_script, cursor.next_command_index))
+        .unwrap_or_else(|| "none".to_string());
+    for key in pressed {
+        let event = format!(
+            "crystal-bevy input frame={} key={} owner={} map={} tile={:?} dialogue={} page={:?} script={}",
+            runtime_shell.lcd_animation_frame,
+            key,
+            owner,
+            map,
+            tile,
+            dialogue,
+            page,
+            script,
+        );
+        eprintln!("{event}");
+        runtime_shell.input_log_events.push_back(event);
+        if runtime_shell.input_log_events.len() > 4096 {
+            runtime_shell.input_log_events.pop_front();
         }
     }
 }
@@ -3711,7 +3931,10 @@ fn apply_visible_runtime_controls(
     }
     let overworld_interaction_consumed_this_press =
         std::mem::take(&mut runtime_shell.overworld_interaction_consumed_a);
-    if keys.just_pressed(KeyCode::KeyZ) && plain_input && !overworld_interaction_consumed_this_press
+    if keys.just_pressed(KeyCode::KeyZ)
+        && plain_input
+        && !overworld_interaction_consumed_this_press
+        && !runtime_shell.field_text_consumed_a
     {
         match has_visible_shell_a_action(runtime_shell) {
             Ok(true) => run_bevy_action(runtime_shell, press_visible_a_button),
@@ -3727,7 +3950,7 @@ fn apply_visible_runtime_controls(
             run_bevy_action(runtime_shell, press_visible_select_button);
         }
     }
-    if keys.just_pressed(KeyCode::KeyX) && plain_input {
+    if keys.just_pressed(KeyCode::KeyX) && plain_input && !runtime_shell.field_text_consumed_b {
         if has_visible_shell_b_action(runtime_shell) {
             run_bevy_action(runtime_shell, press_visible_b_button);
         }
@@ -3993,7 +4216,14 @@ fn visible_player_boundary(
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
     runtime_shell.field_text_reveal.is_some()
-        || runtime_shell
+        || visible_non_text_player_boundary(runtime_shell, snapshot)
+}
+
+fn visible_non_text_player_boundary(
+    runtime_shell: &BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) -> bool {
+    runtime_shell
             .visible_script_delay_frames
             .is_some_and(|frames| frames > 0)
         || runtime_shell
@@ -4973,7 +5203,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     // ComeHomeForDSTText had not printed yet.
     let snapshot = runtime_shell.shell.snapshot()?;
     let presentation_snapshot = runtime_shell.shell.presentation_snapshot()?;
-    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot)? {
+    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot, true)? {
         return Ok(());
     }
     if runtime_shell.pack_toss.is_some() {
@@ -5190,11 +5420,13 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     // A/B accelerate the active printer to one character per frame;
     // they do not reveal a whole page atomically. Only a completed page may
     // advance the script, matching PrintLetterDelay and TypeScript main.
-    if !visible_field_dialogue_is_fully_revealed(runtime_shell, &presentation_snapshot) {
-        return Ok(());
-    }
-    if advance_visible_completed_field_text_page(runtime_shell, &presentation_snapshot)? {
-        return Ok(());
+    if visible_field_dialog_pages(&presentation_snapshot, runtime_shell).is_some() {
+        if !visible_field_dialogue_is_fully_revealed(runtime_shell, &presentation_snapshot) {
+            return Ok(());
+        }
+        if advance_visible_completed_field_text_page(runtime_shell, &presentation_snapshot)? {
+            return Ok(());
+        }
     }
     if runtime_shell.pending_phone_prompt.is_some() {
         return confirm_visible_phone_prompt(runtime_shell);
@@ -5241,17 +5473,22 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if advance_visible_next_pending_script_request(runtime_shell, &snapshot)? {
         return Ok(());
     };
-    if snapshot.ui.text_window_open {
-        return close_visible_text_window(runtime_shell);
-    }
     if snapshot.ui.window_open {
         return close_active_runtime_surface(runtime_shell);
     }
     if snapshot.ui.active_pokemon_picture.is_some() {
         return close_visible_pokemon_picture(runtime_shell);
     }
+    // An open textbox does not imply that the script asked to close it. Once
+    // PrintText's pending label is consumed, execute the authored successor
+    // (`promptbutton`, `waitbutton`, `yesorno`, or the next command) before
+    // considering any host-side text close. Explicit non-text surfaces above
+    // still own their canonical close boundary.
     if runtime_shell.active_script_cursor.is_some() {
         return execute_visible_active_script_step(runtime_shell);
+    }
+    if snapshot.ui.text_window_open {
+        return close_visible_text_window(runtime_shell);
     }
     if !snapshot.script_events.command_queue.is_empty() {
         return execute_next_visible_queued_script_command(runtime_shell);
@@ -6060,7 +6297,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     // As with A, B must not resolve a prompt using a stale rendered text body.
     let snapshot = runtime_shell.shell.snapshot()?;
     let presentation_snapshot = runtime_shell.shell.presentation_snapshot()?;
-    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot)? {
+    if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot, true)? {
         return Ok(());
     }
     if snapshot.ui.pending_yes_no.is_some() {
@@ -6116,7 +6353,9 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.player_pc_action_cursor.is_some() {
         return close_visible_player_pc(runtime_shell);
     }
-    if runtime_shell.field_text_reveal.is_some() {
+    if runtime_shell.field_text_reveal.is_some()
+        && visible_field_dialog_pages(&presentation_snapshot, runtime_shell).is_some()
+    {
         // JoyTextDelay, JoyWaitAorB, and PromptButton all accept PAD_A or
         // PAD_B. Higher-priority YES/NO, selection, and cancelable modal
         // surfaces have already handled B above this ordinary text boundary.
@@ -8582,6 +8821,7 @@ fn continue_visible_script_after_prompt(runtime_shell: &mut BevyRuntimeShell) ->
 fn advance_visible_wait_sfx_boundary(
     runtime_shell: &mut BevyRuntimeShell,
     presentation_snapshot: &RuntimeShellSnapshot,
+    require_rendered_text: bool,
 ) -> Result<bool> {
     if !runtime_shell.visible_wait_sfx_boundary {
         return Ok(false);
@@ -8592,6 +8832,17 @@ fn advance_visible_wait_sfx_boundary(
         }
         if advance_visible_completed_field_text_page(runtime_shell, presentation_snapshot)? {
             return Ok(true);
+        }
+        if require_rendered_text
+            && visible_field_dialogue_is_entirely_consumed(runtime_shell, presentation_snapshot)
+        {
+            let Some(reveal) = runtime_shell.field_text_reveal.as_ref() else {
+                return Ok(true);
+            };
+            let completed_identity = (reveal.text.clone(), reveal.page_index);
+            if runtime_shell.rendered_field_text_identity.as_ref() != Some(&completed_identity) {
+                return Ok(true);
+            }
         }
     }
     drain_visible_audio_events(runtime_shell)?;

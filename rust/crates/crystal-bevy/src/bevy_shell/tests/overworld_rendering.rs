@@ -496,6 +496,37 @@ fn textbox_frame_ids_cover_every_saved_option() {
 }
 
 #[test]
+fn field_dialog_fast_path_rejects_an_orphaned_yes_no_window() {
+    let field_frame_tiles = battle_window_frame_tile_count(
+        FIELD_TEXT_BOX_WIDTH_TILES as usize,
+        FIELD_TEXT_BOX_HEIGHT_TILES as usize,
+    );
+    let yes_no_frame_tiles = battle_window_frame_tile_count(
+        FIELD_YES_NO_WIDTH_TILES as usize,
+        FIELD_YES_NO_HEIGHT_TILES as usize,
+    );
+
+    assert!(retained_field_dialog_structure_matches(
+        1,
+        field_frame_tiles,
+        false,
+        false,
+    ));
+    assert!(retained_field_dialog_structure_matches(
+        1,
+        field_frame_tiles + yes_no_frame_tiles,
+        true,
+        true,
+    ));
+    assert!(!retained_field_dialog_structure_matches(
+        1,
+        field_frame_tiles + yes_no_frame_tiles,
+        false,
+        false,
+    ));
+}
+
+#[test]
 fn field_dialogue_wraps_to_the_asm_eighteen_character_baseline() {
     assert_eq!(
         wrap_scene_dialog_line(
@@ -566,6 +597,18 @@ fn catch_up_draws_the_same_walk_subtile_as_typescript() {
 
     assert_eq!(two_ticks.0 - one_tick.0, (settled.0 - origin.0) / 8.0);
     assert_eq!(two_ticks.1, one_tick.1);
+}
+
+#[test]
+fn host_frames_interpolate_between_authoritative_walk_ticks() {
+    let at_tick = visible_movement_progress_with_subframe(7, 8, 0.0);
+    let halfway_to_next_tick = visible_movement_progress_with_subframe(7, 8, 0.5);
+    let at_next_tick = visible_movement_progress_with_subframe(6, 8, 0.0);
+
+    assert!(at_tick < halfway_to_next_tick);
+    assert!(halfway_to_next_tick < at_next_tick);
+    assert_eq!(halfway_to_next_tick, (at_tick + at_next_tick) * 0.5);
+    assert_eq!(visible_movement_progress_with_subframe(0, 8, 0.5), 1.0);
 }
 
 #[test]
@@ -1283,6 +1326,7 @@ fn positive_and_negative_full_tile_camera_scroll_never_expose_clear_color() {
                     visible_overworld_camera_offset(
                         world.resource::<RenderedViewport>(),
                         world.resource::<BevyRuntimeShell>(),
+                        0.0,
                     ),
                     world.resource::<BevyRuntimeShell>().player_walk_frame_ticks,
                 )

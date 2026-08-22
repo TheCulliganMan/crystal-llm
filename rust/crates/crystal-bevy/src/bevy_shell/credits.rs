@@ -3350,6 +3350,7 @@ fn close_active_runtime_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<
             runtime_shell.shell.set_script_runtime_accumulator("0")?;
         }
         let close = runtime_shell.shell.close_active_menu()?;
+        mark_runtime_snapshot_dirty(runtime_shell);
         reset_visible_selection_cursors(runtime_shell);
         runtime_shell.last_audio_events.push(format!(
             "closed menu {} {:?}",
@@ -3365,6 +3366,7 @@ fn close_active_runtime_surface(runtime_shell: &mut BevyRuntimeShell) -> Result<
     if snapshot.ui.window_open {
         record_visible_runtime_action(runtime_shell, "ui:runtime_window:close")?;
         let close = runtime_shell.shell.close_runtime_window()?;
+        mark_runtime_snapshot_dirty(runtime_shell);
         runtime_shell
             .last_audio_events
             .push(format!("closed runtime window {:?}", close.state_checksum));

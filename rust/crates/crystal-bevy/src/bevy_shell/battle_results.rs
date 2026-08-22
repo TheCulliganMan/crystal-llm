@@ -819,6 +819,17 @@ fn execute_visible_active_script_step(runtime_shell: &mut BevyRuntimeShell) -> R
             .is_empty()
         || !boundary_snapshot.script_events.pending_emotes.is_empty()
     {
+        if std::env::var_os("CRYSTAL_SCRIPT_TRACE").is_some() {
+            eprintln!(
+                "visible_script_trace blocked script={} index={} text={:?} delays={:?} earthquakes={:?} emotes={:?}",
+                cursor.source_script,
+                cursor.next_command_index,
+                boundary_snapshot.script_events.pending_text_label,
+                boundary_snapshot.script_events.pending_delays,
+                boundary_snapshot.script_events.pending_earthquakes,
+                boundary_snapshot.script_events.pending_emotes,
+            );
+        }
         // These commands are synchronous ASM presentation boundaries. Keep
         // the invariant at the executor itself so alternate continuation
         // paths cannot run the cursor beyond an unpresented label or timer.
@@ -1204,6 +1215,7 @@ fn integrate_visible_compiled_script_run(
             scene.ui.pending_yes_no = None;
             scene.ui.pending_text_wait = None;
             scene.script_events.text_window_open = false;
+            scene.script_events.active_text_label = None;
             scene.script_events.pending_text_label = None;
             scene.script_events.pending_text_wait = None;
             scene.script_events.pending_yes_no = None;
@@ -1514,6 +1526,11 @@ fn integrate_visible_script_mutation_outcome(
             set_shell_action_status(runtime_shell, "VARIABLE");
         }
         RuntimeMutationResult::ScriptRuntimeApplied(command, runtime) => {
+            // Commands such as getmonname/getitemname mutate the named text
+            // buffers consumed by the very next writetext. Keeping the cached
+            // presentation snapshot here rendered that following page with
+            // an empty buffer even though authoritative core state was right.
+            mark_runtime_snapshot_dirty(runtime_shell);
             runtime_shell.last_audio_events.push(format!(
                 "script runtime {} args={:?} outcome={:?}",
                 command.command, command.args, runtime
@@ -1926,6 +1943,34 @@ fn begin_visible_script_movement(
             movement.tile.y
         );
     }
+    if runtime_shell
+        .shell
+        .snapshot()?
+        .ui
+        .text
+        .is_none()
+    {
+        // Script movement can become the next presentation boundary before
+        // the ordinary text-printer tick runs again. Record the textbox
+        // disappearing now so diagnostics describe the frame the player
+        // actually sees, not the frame after the movement finishes.
+        log_visible_dialogue_close(runtime_shell);
+    }
+    log_visible_movement_event(
+        runtime_shell,
+        "start",
+        &movement.object_id,
+        format!(
+            "movement={} from=({}, {}) to=({}, {}) steps={} program={:?}",
+            movement.movement,
+            movement.previous_tile.x,
+            movement.previous_tile.y,
+            movement.tile.x,
+            movement.tile.y,
+            movement.steps_applied,
+            movement.executed_steps,
+        ),
+    );
     if runtime_shell.visible_script_movement.is_some() {
         let current_object = runtime_shell
             .visible_script_movement

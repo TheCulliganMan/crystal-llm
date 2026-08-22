@@ -1102,6 +1102,80 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
     assert!(!rendered.contains('"'));
 }
 
+fn assert_rendered_field_dialogue_page(world: &mut World, expected_page: &str) {
+    let expected_rows = expected_page.lines().collect::<Vec<_>>();
+    assert!(
+        world
+            .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
+            .iter(world)
+            .next()
+            .is_some(),
+        "the rendered frame has dialogue glyphs without the textbox surface"
+    );
+    let expected = {
+        let rendered_art = world.resource::<RenderedTilesetArt>();
+        let font = rendered_art
+            .font_cache
+            .as_ref()
+            .expect("rendered dialogue must have loaded the bitmap font");
+        expected_rows
+            .iter()
+            .enumerate()
+            .flat_map(|(row_index, line)| {
+                let (x, y) = battle_hud_tile_origin(
+                    FIELD_TEXT_BOX_TEXT_LEFT_TILE,
+                    FIELD_TEXT_BOX_TEXT_TOP_TILE
+                        + row_index as f32 * FIELD_TEXT_BOX_ROW_SPACING_TILES,
+                );
+                normalize_bitmap_font_text(line)
+                    .chars()
+                    .enumerate()
+                    .map(move |(glyph_index, ch)| {
+                        let frame = font
+                            .glyphs
+                            .get(&ch)
+                            .or_else(|| font.glyphs.get(&'?'))
+                            .expect("rendered font must contain the fallback glyph");
+                        (
+                            dialog_glyph_key(x, y, glyph_index),
+                            format!("{:?}", frame.handle.id()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_y = expected_rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, _)| {
+            battle_hud_tile_origin(
+                FIELD_TEXT_BOX_TEXT_LEFT_TILE,
+                FIELD_TEXT_BOX_TEXT_TOP_TILE
+                    + row_index as f32 * FIELD_TEXT_BOX_ROW_SPACING_TILES,
+            )
+            .1
+        })
+        .collect::<Vec<_>>();
+    let mut actual = world
+        .query::<(&DialogGlyphMarker, &Handle<Image>, &Transform)>()
+        .iter(world)
+        .filter(|(_, _, transform)| {
+            expected_y
+                .iter()
+                .any(|expected| (transform.translation.y - expected).abs() < f32::EPSILON)
+        })
+        .map(|(marker, texture, _)| (marker.key, format!("{:?}", texture.id())))
+        .collect::<Vec<_>>();
+    let mut expected = expected;
+    actual.sort();
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "the actual Bevy glyph sprites do not encode the active dialogue page {expected_page:?}"
+    );
+}
+
 #[test]
 fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1168,6 +1242,7 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     let mut seen_labels = Vec::new();
     let mut dialogue_activations = Vec::new();
     let mut dialogue_pages = Vec::new();
+    let mut rendered_dialogue_pages = Vec::new();
     let mut previous_visible_label = None;
     let mut saw_rendered_mom_text = false;
     let mut saw_rendered_yes_no = false;
@@ -1188,19 +1263,27 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     let mut previous_progress_signature = None;
     let mut previous_semantic_trace = None;
     let mut stationary_script_frames = 0usize;
-    let mut saw_dst_question = false;
     let mut saw_exact_received_pokegear_text = false;
     let mut saw_item_reward_sound = false;
     let mut saw_reward_waitsfx_complete_without_input = false;
     let mut saw_final_phone_text = false;
     let mut final_phone_text_closed = false;
     let mut saw_authored_mom_return = false;
+    let mut rendered_mom_departure_x = Vec::new();
     let mut proved_hidden_yes_no_ignores_direction = false;
     let mut proved_start_ignored_during_mom_dialogue = false;
     let mut proved_completed_page_does_not_auto_advance = false;
+    let mut proved_weekday_input_is_immediate = false;
+    let mut release_scheduled_a_after_observation = false;
     for frame in 0..1024 {
         mom_frames = frame + 1;
         app.update();
+        if release_scheduled_a_after_observation {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .reset(KeyCode::KeyZ);
+            release_scheduled_a_after_observation = false;
+        }
         peak_live_entities = peak_live_entities.max(app.world().entities().len());
         let shell = app.world().resource::<BevyRuntimeShell>();
         assert_eq!(
@@ -1278,10 +1361,26 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             "Mom script stopped making progress for {stationary_script_frames} frames: {progress_signature}"
         );
         let visible_label = snapshot.ui.text.as_ref().map(|text| text.label.clone());
+        if saw_rendered_mom_text && snapshot.ui.text_window_open {
+            assert!(
+                visible_label.is_some(),
+                "Mom's open textbox lost its active text between script boundaries: cursor={:?} active={:?} last_text_event={:?} wait={:?} yes_no={} movement={:?}",
+                shell.active_script_cursor,
+                shell.shell.session().state.script_runtime.active_text_label,
+                shell.shell.session().state.script_runtime.text_events.last(),
+                snapshot.ui.pending_text_wait,
+                snapshot.ui.pending_yes_no.is_some(),
+                shell.visible_script_movement,
+            );
+        }
         saw_reward_waitsfx_complete_without_input |= saw_exact_received_pokegear_text
             && !shell.visible_wait_sfx_boundary
             && visible_label.as_deref() != Some("ReceivedItemText");
         if visible_label.as_deref() == Some("ReceivedItemText") {
+            assert_eq!(
+                shell.field_notice, None,
+                "ReceiveItemScript must have exactly one presentation owner; a Bevy field notice would duplicate the canonical ReceivedItemText"
+            );
             let pages = visible_field_dialog_pages(&snapshot, shell)
                 .expect("received Pokegear text must render");
             assert_eq!(
@@ -1299,6 +1398,7 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             .last_audio_events
             .iter()
             .any(|event| event.contains("SFX_ITEM"));
+        let mut fully_rendered_page = None;
         if let (Some(label), Some(reveal), Some(pages)) = (
             visible_label.as_ref(),
             shell.field_text_reveal.as_ref(),
@@ -1321,20 +1421,49 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             if dialogue_pages.last() != Some(&visible_page) {
                 dialogue_pages.push(visible_page);
             }
+            if visible_field_text_reveal_is_complete(reveal, &pages[reveal.page_index]) {
+                fully_rendered_page = Some((
+                    (label.clone(), reveal.page_index),
+                    pages[reveal.page_index].clone(),
+                ));
+            }
         }
-        saw_dst_question |= visible_label.as_deref() == Some("IsItDSTText");
         saw_final_phone_text |= visible_label.as_deref() == Some("InstructionsNextText");
         final_phone_text_closed |= saw_final_phone_text
             && visible_label.is_none()
             && !snapshot.ui.text_window_open
             && snapshot.ui.pending_yes_no.is_none();
+        if saw_rendered_mom_text {
+            let rendered_moms = app
+                .world()
+                .iter_entities()
+                .filter_map(|entity| {
+                    entity
+                        .get::<VisibleObjectSprite>()
+                        .filter(|sprite| {
+                            sprite.object_identifier.as_deref()
+                                == Some("PLAYERSHOUSE1F_MOM1")
+                        })
+                        .and_then(|_| entity.get::<Transform>())
+                        .map(|transform| transform.translation.x)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rendered_moms.len(),
+                1,
+                "the actual Bevy frame must contain exactly one Mom sprite, found {rendered_moms:?}"
+            );
+            if final_phone_text_closed {
+                rendered_mom_departure_x.push(rendered_moms[0]);
+            }
+        }
         let mom_movement_active = shell
             .visible_script_movement
             .as_ref()
             .is_some_and(|movement| movement.object_id == "PLAYERSHOUSE1F_MOM1");
         assert!(
-            !(saw_dst_question && !final_phone_text_closed && mom_movement_active),
-            "Mom began her return movement before the complete date/DST/phone dialogue closed; label={visible_label:?} cursor={:?}",
+            !(saw_rendered_mom_text && !final_phone_text_closed && mom_movement_active),
+            "Mom moved again after her dialogue began but before the complete date/DST/phone dialogue closed; label={visible_label:?} cursor={:?}",
             shell.active_script_cursor
         );
         saw_authored_mom_return |= final_phone_text_closed && mom_movement_active;
@@ -1343,8 +1472,23 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         {
             dialogue_activations.push(label.clone());
             previous_visible_label = Some(label);
+        } else if visible_label.is_none() {
+            previous_visible_label = None;
         }
         let pending_yes_no = snapshot.ui.pending_yes_no.is_some();
+        if shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| movement.object_id == "PLAYERSHOUSE1F_MOM1")
+        {
+            assert!(
+                !shell
+                    .visible_script_movement_scene
+                    .as_ref()
+                    .is_some_and(|scene| scene.ui.text_window_open),
+                "Mom's retained movement scene still renders an open textbox"
+            );
+        }
         if was_pending_yes_no && !pending_yes_no {
             saw_yes_no_prompt_cleared = !app
                 .world()
@@ -1523,6 +1667,12 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
                 )
             });
         let _ = shell;
+        if let Some((page_identity, page_text)) = fully_rendered_page
+            && !rendered_dialogue_pages.contains(&page_identity)
+        {
+            assert_rendered_field_dialogue_page(app.world_mut(), &page_text);
+            rendered_dialogue_pages.push(page_identity);
+        }
         if let Some(before) = idle_page_guard_before {
             for _ in 0..30 {
                 app.update();
@@ -1640,8 +1790,70 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
             );
             proved_hidden_yes_no_ignores_direction = true;
         }
-        if !visible_wait_sfx_boundary && !start_guard_already_pressed_a {
+        if pending_day_of_week
+            && !pending_day_confirming
+            && !proved_weekday_input_is_immediate
+        {
+            let selected_before = app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .pending_day_of_week
+                .as_ref()
+                .expect("weekday selection")
+                .selected_day;
+            press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+            let selected_after = app
+                .world()
+                .resource::<BevyRuntimeShell>()
+                .pending_day_of_week
+                .as_ref()
+                .expect("weekday selection after Down")
+                .selected_day;
+            assert_ne!(
+                selected_after, selected_before,
+                "one Down edge must move the weekday selector immediately"
+            );
             press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+            assert!(
+                app.world()
+                    .resource::<BevyRuntimeShell>()
+                    .pending_day_of_week
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.confirming),
+                "one A edge must immediately open weekday YES/NO confirmation"
+            );
+            press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+            assert_eq!(
+                app.world()
+                    .resource::<BevyRuntimeShell>()
+                    .pending_day_of_week
+                    .as_ref()
+                    .map(|prompt| prompt.yes_no_index),
+                Some(1),
+                "one Down edge must immediately select NO"
+            );
+            press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowUp);
+            assert_eq!(
+                app.world()
+                    .resource::<BevyRuntimeShell>()
+                    .pending_day_of_week
+                    .as_ref()
+                    .map(|prompt| prompt.yes_no_index),
+                Some(0),
+                "one Up edge must immediately restore YES"
+            );
+            proved_weekday_input_is_immediate = true;
+            start_guard_already_pressed_a = true;
+        }
+        if !visible_wait_sfx_boundary && !start_guard_already_pressed_a {
+            // Schedule the edge for the next loop iteration so that iteration
+            // observes the exact ECS frame produced by the press. The generic
+            // helper updates internally and used to hide the one complete
+            // ReceivedItemText frame from this rendered-output assertion.
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyZ);
+            release_scheduled_a_after_observation = true;
         }
     }
     let failed_shell = app.world().resource::<BevyRuntimeShell>();
@@ -1717,6 +1929,49 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
         "every one of Mom's 23 ASM-authored pages must become visible exactly once"
     );
     assert_eq!(
+        rendered_dialogue_pages, dialogue_pages,
+        "every semantic Mom page must also appear once as the exact bitmap-glyph sprite sequence sent to Bevy's renderer"
+    );
+    let dialogue_show_events = failed_shell
+        .dialogue_log_events
+        .iter()
+        .filter(|event| event.contains("event=show"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dialogue_show_events.len(),
+        23,
+        "runtime dialogue logging must record each visible Mom page exactly once: {dialogue_show_events:#?}"
+    );
+    assert_eq!(
+        dialogue_show_events
+            .iter()
+            .filter(|event| event.contains("label=ReceivedItemText"))
+            .count(),
+        1,
+        "the Pokegear reward must produce one timed dialogue log entry"
+    );
+    assert!(
+        dialogue_show_events.iter().all(|event| event.contains("frame=")
+            && event.contains("text=")
+            && event.contains("script=")),
+        "every dialogue log must identify when it appeared, what was said, and which script owned it"
+    );
+    assert!(
+        failed_shell.input_log_events.iter().any(|event| {
+            event.contains("key=A")
+                && event.contains("owner=dialogue")
+                && event.contains("dialogue=ElmsLookingForYouText")
+        }),
+        "Mom's visible page advances must record their physical A edges"
+    );
+    assert!(
+        failed_shell
+            .input_log_events
+            .iter()
+            .any(|event| event.contains("key=DOWN") && event.contains("owner=weekday")),
+        "weekday navigation must record its physical direction edge and modal owner"
+    );
+    assert_eq!(
         yes_no_boundaries.len(),
         3,
         "Mom's ASM path has exactly three YesNoBox boundaries; saw {yes_no_boundaries:?}"
@@ -1724,6 +1979,71 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     assert!(
         saw_authored_mom_return,
         "Mom never performed her ASM-authored return movement after the phone dialogue closed"
+    );
+    let mom_movement_events = failed_shell
+        .movement_log_events
+        .iter()
+        .filter(|event| event.contains("object=PLAYERSHOUSE1F_MOM1"))
+        .collect::<Vec<_>>();
+    assert!(
+        !mom_movement_events.is_empty(),
+        "Mom's approach and return movements must produce timed movement diagnostics"
+    );
+    assert_eq!(
+        mom_movement_events
+            .iter()
+            .filter(|event| {
+                event.contains("event=start")
+                    && event.contains("movement=MomWalksBackMovement")
+            })
+            .count(),
+        1,
+        "Mom's authored walk-away movement must start exactly once: {mom_movement_events:#?}"
+    );
+    assert!(
+        mom_movement_events
+            .iter()
+            .all(|event| event.contains("frame=") && event.contains("dialogue=none")),
+        "Mom moved while a dialogue label still owned the rendered textbox: {mom_movement_events:#?}"
+    );
+    let final_dialogue_close = failed_shell
+        .dialogue_log_events
+        .iter()
+        .find(|event| {
+            event.contains("event=close") && event.contains("label=InstructionsNextText")
+        })
+        .expect("final Mom dialogue must log its visible close");
+    let mom_departure = mom_movement_events
+        .iter()
+        .find(|event| event.contains("event=start") && event.contains("movement=MomWalksBackMovement"))
+        .expect("Mom's walk away must have an explicit start log");
+    let event_frame = |event: &str| {
+        event
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("frame="))
+            .expect("timed event must contain a frame")
+            .parse::<u64>()
+            .expect("timed event frame must be numeric")
+    };
+    assert!(
+        event_frame(final_dialogue_close) <= event_frame(mom_departure),
+        "Mom visibly started walking away before the final textbox close was logged: close={final_dialogue_close:?} departure={mom_departure:?}"
+    );
+    assert!(
+        mom_departure.contains("dialogue=none"),
+        "Mom's departure frame still rendered dialogue: {mom_departure}"
+    );
+    assert!(
+        rendered_mom_departure_x
+            .windows(2)
+            .any(|positions| positions[1] < positions[0] - f32::EPSILON),
+        "Mom's rendered sprite never visibly traveled left during her departure: {rendered_mom_departure_x:?}"
+    );
+    assert!(
+        rendered_mom_departure_x
+            .windows(2)
+            .all(|positions| positions[1] <= positions[0] + f32::EPSILON),
+        "Mom's rendered departure snapped right and replayed the walk-away: {rendered_mom_departure_x:?}"
     );
     assert!(
         saw_exact_received_pokegear_text,
@@ -1775,6 +2095,10 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     assert!(
         proved_completed_page_does_not_auto_advance,
         "Mom's test never proved that a fully printed nonfinal page remains blocked without A/B"
+    );
+    assert!(
+        proved_weekday_input_is_immediate,
+        "Mom's test never exercised immediate weekday and YES/NO input"
     );
     assert!(
         saw_yes_no_prompt_cleared,
@@ -2771,8 +3095,8 @@ fn mr_pokemon_visit_prints_every_asm_page_once_then_arms_the_rival_story() {
     assert!(saw_heal_music, "Mr. Pokemon's healing sequence did not play MUSIC_HEAL");
     assert!(saw_waitsfx, "the scene never exposed its authored waitsfx boundaries");
     assert!(
-        observed_delay_frames.contains(&15) && observed_delay_frames.contains(&59),
-        "the visible shell did not execute ASM pause 15 and pause 60 frame-for-frame: {observed_delay_frames:?}"
+        observed_delay_frames.contains(&30) && observed_delay_frames.contains(&120),
+        "the visible shell did not execute ASM pause 15 and pause 60 as their two-frame wrapping counters: {observed_delay_frames:?}"
     );
     assert!(
         proved_oak_page_does_not_auto_advance,
@@ -3030,6 +3354,10 @@ fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
         let (busy, has_text, has_picture, party_nonempty, visible_label, cursor) = {
             let shell = app.world().resource::<BevyRuntimeShell>();
             let snapshot = shell.shell.snapshot().expect("story-boundary snapshot");
+            let presentation = shell
+                .visible_script_movement_scene
+                .as_deref()
+                .unwrap_or(&snapshot);
             (
                 shell.active_script_cursor.is_some()
                     || shell.visible_script_movement.is_some()
@@ -3039,10 +3367,13 @@ fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
                     || shell.shell.has_pending_script_work()
                     || snapshot.ui.text_window_open
                     || snapshot.ui.active_pokemon_picture.is_some(),
-                snapshot.ui.text_window_open,
-                snapshot.ui.active_pokemon_picture.is_some(),
+                presentation.ui.text_window_open
+                    && presentation.ui.text.is_some()
+                    && shell.pending_name_choice.is_none()
+                    && shell.pending_name_input.is_none(),
+                presentation.ui.active_pokemon_picture.is_some(),
                 !snapshot.party.slots.is_empty(),
-                snapshot.ui.text.as_ref().map(|text| text.label.clone()),
+                presentation.ui.text.as_ref().map(|text| text.label.clone()),
                 shell.active_script_cursor.clone(),
             )
         };
@@ -3065,12 +3396,45 @@ fn settle_visible_story_boundary(app: &mut App) -> (bool, bool) {
             previous_label,
         );
         if has_text {
+            let (visible_chars, yes_no_active) = {
+                let shell = app.world().resource::<BevyRuntimeShell>();
+                let snapshot = shell.shell.snapshot().expect("rendered text snapshot");
+                (
+                    shell
+                        .field_text_reveal
+                        .as_ref()
+                        .map_or(0, |reveal| reveal.visible_chars),
+                    scene_dialog_yes_no_active(&snapshot, shell),
+                )
+            };
             let world = app.world_mut();
-            rendered_text |= world
+            let glyph_count = world
                 .query_filtered::<Entity, With<DialogGlyphMarker>>()
                 .iter(world)
-                .next()
-                .is_some();
+                .count();
+            rendered_text |= glyph_count > 0;
+            if visible_chars > 0 {
+                assert!(
+                    glyph_count > 0,
+                    "visible field text has no rendered glyphs after {visible_chars} characters"
+                );
+            }
+            let expected_frame_tiles = battle_window_frame_tile_count(
+                FIELD_TEXT_BOX_WIDTH_TILES as usize,
+                FIELD_TEXT_BOX_HEIGHT_TILES as usize,
+            ) + usize::from(yes_no_active)
+                * battle_window_frame_tile_count(
+                    FIELD_YES_NO_WIDTH_TILES as usize,
+                    FIELD_YES_NO_HEIGHT_TILES as usize,
+                );
+            let frame_tile_count = world
+                .query_filtered::<Entity, With<SceneDialogWindowFrameMarker>>()
+                .iter(world)
+                .count();
+            assert_eq!(
+                frame_tile_count, expected_frame_tiles,
+                "field dialogue retained a stale window frame"
+            );
         }
         if has_picture && !rendered_picture {
             // The script snapshot becomes authoritative before Bevy's render

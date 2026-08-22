@@ -2029,7 +2029,8 @@ fn runtime_applies_script_text_variable_and_control_commands_exactly() {
     );
 
     let mut no_map_state = GameState::default();
-    no_map_state.script_runtime.pending_text_label = Some("RuntimeGreetingText".to_string());
+    no_map_state.script_runtime.text_window_open = true;
+    no_map_state.script_runtime.active_text_label = Some("RuntimeGreetingText".to_string());
     let no_map_error = runtime
         .active_text_snapshot(&no_map_state)
         .expect_err("script text body snapshots require an active map");
@@ -2042,7 +2043,8 @@ fn runtime_applies_script_text_variable_and_control_commands_exactly() {
     );
 
     let mut wrong_map_state = session.state.clone();
-    wrong_map_state.script_runtime.pending_text_label = Some("RuntimeGreetingText".to_string());
+    wrong_map_state.script_runtime.text_window_open = true;
+    wrong_map_state.script_runtime.active_text_label = Some("RuntimeGreetingText".to_string());
     wrong_map_state.overworld = OverworldMemory::Active {
         map_name: "OtherMap".to_string(),
         tile: TilePosition::new(0, 0),

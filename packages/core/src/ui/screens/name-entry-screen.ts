@@ -3,6 +3,7 @@ import type { GameEngineEvent } from "@pokecrystal/core/ui/game-engine";
 import { AudioEngine } from "@pokecrystal/core/engine/systems/audio";
 import { CompositeUI, ScreenUI, isTextUI } from "@pokecrystal/core/ui/screens/screen-types";
 import { getAssetPath } from "@pokecrystal/core/core/paths";
+import { gbc5To8 } from "@pokecrystal/core/core/gbc-colors";
 import {
   GameButton,
   isButtonEvent,
@@ -17,6 +18,26 @@ import { TILE_SIZE } from "@pokecrystal/core/engine/world/tile";
 
 const INITIAL_REPEAT_DELAY_FRAMES = 12;
 const REPEAT_INTERVAL_FRAMES = 4;
+const DIPLOMA_BG_PALETTE = [
+  [27, 31, 27],
+  [21, 21, 21],
+  [13, 13, 13],
+  [0, 0, 0],
+].map(([r, g, b]) => [gbc5To8(r), gbc5To8(g), gbc5To8(b)] as const);
+
+const applyDiplomaBackgroundPalette = (source: Surface): Surface => {
+  const tinted = new gameEngine.Surface(source.get_width(), source.get_height());
+  for (let y = 0; y < source.get_height(); y += 1) {
+    for (let x = 0; x < source.get_width(); x += 1) {
+      const [r, g, b, a] = source.get_at([x, y]);
+      const grayscale = a === 0 ? 255 : Math.round((r + g + b) / 3);
+      const paletteIndex = Math.max(0, Math.min(3, Math.round((255 - grayscale) / 85)));
+      const [pr, pg, pb] = DIPLOMA_BG_PALETTE[paletteIndex];
+      tinted.set_at([x, y], [pr, pg, pb, 255]);
+    }
+  }
+  return tinted;
+};
 
 type NameEntryEvent = GameEngineEvent;
 
@@ -156,7 +177,7 @@ class NamingScreenTileset {
   private loadFontTiles(): void {
     // ASM: engine/menus/naming_screen.asm::LoadNamingScreenGFX (LoadStandardFont/LoadFontsExtra).
     const fontPath = getAssetPath("gfx", "font", "font.png");
-    const fontSurface = this.loadImage(fontPath, "font");
+    const fontSurface = applyDiplomaBackgroundPalette(this.loadImage(fontPath, "font"));
     const tileWidth = TILE_SIZE;
     const tileHeight = TILE_SIZE;
     const tilesPerRow = Math.floor(fontSurface.get_width() / tileWidth);
@@ -195,24 +216,24 @@ class NamingScreenTileset {
     this.specialTiles.cursor_0 = cursorTiles[0];
     this.specialTiles.cursor_1 = cursorTiles[1];
 
-    this.specialTiles.underline = this.loadImage(
+    this.specialTiles.underline = applyDiplomaBackgroundPalette(this.loadImage(
       getAssetPath("gfx", "naming_screen", "underline.png"),
       "underline"
-    );
-    this.specialTiles.middle_line = this.loadImage(
+    ));
+    this.specialTiles.middle_line = applyDiplomaBackgroundPalette(this.loadImage(
       getAssetPath("gfx", "naming_screen", "middle_line.png"),
       "middle_line"
-    );
-    this.specialTiles.border = this.loadImage(
+    ));
+    this.specialTiles.border = applyDiplomaBackgroundPalette(this.loadImage(
       getAssetPath("gfx", "naming_screen", "border.png"),
       "border"
-    );
+    ));
   }
 
   private createTilesList(): void {
     for (let i = 0; i < 256; i += 1) {
       const tile = new gameEngine.Surface(TILE_SIZE, TILE_SIZE);
-      tile.fill([255, 255, 255, 255]);
+      tile.fill([...DIPLOMA_BG_PALETTE[0], 255]);
       this.tiles.push(tile);
     }
 
@@ -246,7 +267,7 @@ class NamingScreenTileset {
     }
 
     const spaceTile = new gameEngine.Surface(TILE_SIZE, TILE_SIZE);
-    spaceTile.fill([255, 255, 255, 255]);
+    spaceTile.fill([...DIPLOMA_BG_PALETTE[0], 255]);
     this.tiles[NamingScreenTileset.SPACE_TILE_INDEX] = spaceTile;
   }
 }

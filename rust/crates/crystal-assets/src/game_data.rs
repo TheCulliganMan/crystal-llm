@@ -2573,6 +2573,11 @@ impl GameDataSet {
         let outcome = core_pickup_script_field_item(state, &self.items, &self.fruit_trees, pickup)
             .map_err(|error| anyhow::anyhow!("pickup script field item: {error:?}"))?;
         session.sync_event_flag_memory(&state.flags);
+        if let FieldItemPickupOutcome::Collected { event_flag, .. } = &outcome {
+            // Item-ball collection is an explicit object removal boundary,
+            // unlike ordinary setevent swaps between alternate loaded NPCs.
+            session.hide_loaded_objects_with_event_flag(event_flag);
+        }
         Ok(outcome)
     }
 
@@ -6972,11 +6977,16 @@ impl GameDataSet {
                             )
                         }
                         RuntimePendingScriptRequestKind::TextLabel => {
-                            RuntimePendingScriptRequest::TextLabel(
+                            let text_label =
                                 state.script_runtime.pending_text_label.take().context(
                                     "cannot take pending text label because none is pending",
-                                )?,
-                            )
+                                )?;
+                            // Completing synchronous PrintText removes only
+                            // its interpreter boundary. The rendered text
+                            // remains the owner of the open box until another
+                            // Write replaces it or CloseText closes it.
+                            state.script_runtime.active_text_label = Some(text_label.clone());
+                            RuntimePendingScriptRequest::TextLabel(text_label)
                         }
                         RuntimePendingScriptRequestKind::TextWait => {
                             let wait =
@@ -6984,6 +6994,7 @@ impl GameDataSet {
                                     "cannot take pending text wait because none is pending",
                                 )?;
                             if script_text_wait_closes_window(&wait.command) {
+                                state.script_runtime.active_text_label = None;
                                 state.script_runtime.pending_text_label = None;
                                 state.script_runtime.text_window_open = false;
                             }
@@ -7287,6 +7298,7 @@ impl GameDataSet {
                     anyhow::bail!("cannot close text window because no text window is open");
                 }
                 state.script_runtime.text_window_open = false;
+                state.script_runtime.active_text_label = None;
                 state.script_runtime.pending_text_label = None;
                 state.script_runtime.pending_text_wait = None;
                 state.script_runtime.pending_yes_no = None;
@@ -11134,6 +11146,8 @@ impl GameDataSet {
         music_ids: &BTreeSet<String>,
     ) -> Result<()> {
         let frame = session.frame;
+        let connection_movement = (map_setup == "MAPSETUP_CONNECTION")
+            .then_some((session.player.facing, session.last_step_direction));
         *session = self.overworld_session_for_traversal(
             destination_map,
             destination_tile,
@@ -11141,6 +11155,15 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
+        if let Some((facing, last_step_direction)) = connection_movement {
+            // ASM EnterMapConnection updates wMapGroup/wMapNumber, the
+            // coordinates, and wOverworldMapAnchor in place. Unlike a warp,
+            // MapSetupScript_Connection never resets the player object or its
+            // direction, so the boundary-crossing step remains one continuous
+            // movement on the destination map.
+            session.player.facing = facing;
+            session.last_step_direction = last_step_direction;
+        }
         clear_transient_map_object_context(state, session);
         reset_map_bike_flags(state)?;
         state.wild_encounter_cooldown = 5;
