@@ -528,15 +528,17 @@ fn confirm_visible_name_choice(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     };
     if runtime_shell.pending_egg_hatch_nickname.is_some() {
         if choice.selected == 0 {
-            let default_name = runtime_shell
+            let species_name = runtime_shell
                 .pending_egg_hatch_nickname
                 .as_ref()
                 .context("egg hatch nickname choice lost its pending Pokemon")?
                 .default_name
                 .clone();
             runtime_shell.pending_name_input = Some(PendingNameInput {
-                label: "NAME YOUR POKéMON?".to_string(),
-                value: default_name,
+                label: visible_pokemon_nickname_label(&species_name),
+                // NamingScreen_InitNameEntry clears the destination buffer;
+                // the species name is display context, not prefilled input.
+                value: String::new(),
                 max_length: 10,
                 cursor_column: 0,
                 cursor_row: 0,
@@ -550,15 +552,15 @@ fn confirm_visible_name_choice(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     }
     if runtime_shell.pending_gift_pokemon_nickname.is_some() {
         if choice.selected == 0 {
-            let default_name = runtime_shell
+            let species_name = runtime_shell
                 .pending_gift_pokemon_nickname
                 .as_ref()
-                .context("gift nickname choice lost its pending gift")?
+                .context("gift nickname choice lost its pending Pokemon")?
                 .default_name
                 .clone();
             runtime_shell.pending_name_input = Some(PendingNameInput {
-                label: "NAME YOUR POKéMON?".to_string(),
-                value: default_name,
+                label: visible_pokemon_nickname_label(&species_name),
+                value: String::new(),
                 max_length: 10,
                 cursor_column: 0,
                 cursor_row: 0,
@@ -572,15 +574,15 @@ fn confirm_visible_name_choice(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     }
     if runtime_shell.pending_standard_capture.is_some() {
         if choice.selected == 0 {
-            let default_name = runtime_shell
+            let species_name = runtime_shell
                 .pending_standard_capture
                 .as_ref()
-                .context("capture nickname choice lost its pending capture")?
+                .context("capture nickname choice lost its pending Pokemon")?
                 .default_name
                 .clone();
             runtime_shell.pending_name_input = Some(PendingNameInput {
-                label: "NAME YOUR POKéMON?".to_string(),
-                value: default_name,
+                label: visible_pokemon_nickname_label(&species_name),
+                value: String::new(),
                 max_length: 10,
                 cursor_column: 0,
                 cursor_row: 0,
@@ -601,6 +603,10 @@ fn confirm_visible_name_choice(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         return open_visible_player_name_input(runtime_shell);
     }
     apply_visible_player_name(runtime_shell, selected)
+}
+
+fn visible_pokemon_nickname_label(species_name: &str) -> String {
+    format!("{species_name}'S\nNICKNAME?")
 }
 
 fn open_visible_player_name_input(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -670,7 +676,15 @@ fn apply_visible_name_input_keys(
         return;
     }
     if keys.just_pressed(KeyCode::Enter) {
-        run_bevy_action(runtime_shell, move_visible_player_name_cursor_to_end);
+        let cursor_is_on_end = runtime_shell.pending_name_input.as_ref().is_some_and(|input| {
+            input.cursor_row == visible_name_input_bottom_row_index()
+                && visible_name_input_bottom_group(input.cursor_column) == 3
+        });
+        if cursor_is_on_end {
+            run_bevy_action(runtime_shell, select_visible_player_name_grid_key);
+        } else {
+            run_bevy_action(runtime_shell, move_visible_player_name_cursor_to_end);
+        }
         return;
     }
 }

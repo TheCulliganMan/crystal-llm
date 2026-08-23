@@ -1543,6 +1543,11 @@ fn visible_sequence_clock_recovers_normal_low_refresh_cadence_without_unbounded_
         MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES,
         "a stalled host frame must not skip an entire visible sequence"
     );
+    assert_eq!(
+        clock.consume_frames(0.0),
+        0,
+        "discarded stall time must not become repeated catch-up bursts"
+    );
 }
 
 #[test]
@@ -1550,6 +1555,23 @@ fn interruption_unfocused_game_window_keeps_presentation_sequences_running() {
     let settings = continuous_game_winit_settings();
     assert_eq!(settings.focused_mode, UpdateMode::Continuous);
     assert_eq!(settings.unfocused_mode, UpdateMode::Continuous);
+}
+
+#[test]
+fn game_window_uses_a_single_frame_low_latency_swapchain() {
+    let window = low_latency_game_window("test".to_string());
+
+    assert_eq!(window.present_mode, PresentMode::AutoVsync);
+    assert_eq!(
+        window.desired_maximum_frame_latency,
+        NonZeroU32::new(1),
+        "the renderer must not queue multiple stale input/presentation frames"
+    );
+}
+
+#[test]
+fn classic_pixel_art_disables_redundant_multisampling() {
+    assert_eq!(classic_pixel_art_msaa(), Msaa::Off);
 }
 
 #[test]
@@ -2042,6 +2064,33 @@ fn screen_fade_reaches_black_in_exactly_eight_gameboy_frames() {
     }
     assert_eq!(fade.elapsed_frames, 8);
     assert_eq!(fade.alpha, 255);
+}
+
+#[test]
+fn screen_fade_preserves_sixty_hz_duration_below_sixty_fps() {
+    let mut fade = VisibleScreenFade::new(ScriptFadeColor::Black, ScriptFadeDirection::Out, 60);
+
+    fade.advance(3.0 * GAME_TICK_SECONDS);
+
+    assert_eq!(fade.elapsed_frames, 3);
+    assert_eq!(fade.alpha, 12);
+
+    let mut stalled = VisibleScreenFade::new(
+        ScriptFadeColor::Black,
+        ScriptFadeDirection::Out,
+        1_000,
+    );
+    stalled.advance(2.0);
+    assert_eq!(
+        stalled.elapsed_frames,
+        MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as u16
+    );
+    stalled.advance(0.0);
+    assert_eq!(
+        stalled.elapsed_frames,
+        MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as u16,
+        "a fade must not replay discarded stall time on later host updates"
+    );
 }
 
 #[test]

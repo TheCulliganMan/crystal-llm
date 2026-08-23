@@ -421,6 +421,30 @@ fn scrolling_map_composite_carries_one_runtime_tile_beyond_every_lcd_edge() {
 }
 
 #[test]
+fn scrolling_character_culling_carries_the_same_edge_halo_as_the_map() {
+    for (x, y) in [
+        (-CLASSIC_SCROLL_HALO_TILES, 0),
+        (VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES - 1, 0),
+        (0, -CLASSIC_SCROLL_HALO_TILES),
+        (0, VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES - 1),
+    ] {
+        assert!(
+            overworld_object_in_scroll_region(x, y),
+            "an edge character at ({x}, {y}) must exist before camera scrolling reveals it"
+        );
+    }
+
+    assert!(!overworld_object_in_scroll_region(
+        -CLASSIC_SCROLL_HALO_TILES - 1,
+        0
+    ));
+    assert!(!overworld_object_in_scroll_region(
+        VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES,
+        0
+    ));
+}
+
+#[test]
 fn bitmap_font_art_loads_runtime_menu_glyphs() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -609,6 +633,33 @@ fn host_frames_interpolate_between_authoritative_walk_ticks() {
     assert!(halfway_to_next_tick < at_next_tick);
     assert_eq!(halfway_to_next_tick, (at_tick + at_next_tick) * 0.5);
     assert_eq!(visible_movement_progress_with_subframe(0, 8, 0.5), 1.0);
+}
+
+#[test]
+fn consecutive_high_refresh_steps_have_no_terminal_hold_or_boundary_jump() {
+    let mut positions = Vec::new();
+    for step in 0..2 {
+        for remaining in (1..=WALK_FRAME_HOLD_TICKS).rev() {
+            for subframe in [0.0, 0.5] {
+                positions.push(
+                    step as f32
+                        + visible_movement_progress_with_subframe(
+                            remaining,
+                            WALK_FRAME_HOLD_TICKS,
+                            subframe,
+                        ),
+                );
+            }
+        }
+    }
+
+    let expected_delta = 0.5 / f32::from(WALK_FRAME_HOLD_TICKS);
+    for pair in positions.windows(2) {
+        assert!(
+            ((pair[1] - pair[0]) - expected_delta).abs() < f32::EPSILON,
+            "held movement must advance uniformly across tile boundaries: {positions:?}",
+        );
+    }
 }
 
 #[test]
@@ -1102,41 +1153,6 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         .tile;
     let viewport_surfaces = retained_map_surface_pair(app.world_mut());
     let image_count = app.world().resource::<Assets<Image>>().len();
-    let (backing_base, backing_priority, initial_base_pixels, initial_priority_pixels) = {
-        let world = app.world();
-        let rendered = world.resource::<RenderedViewport>();
-        let backing_base = rendered
-            .map_backing_texture
-            .clone()
-            .expect("walking renderer must retain a distinct base backing image");
-        let backing_priority = rendered
-            .map_backing_priority_texture
-            .clone()
-            .expect("walking renderer must retain a distinct priority backing image");
-        assert_ne!(
-            backing_base, viewport_surfaces.base_texture,
-            "the previous base viewport must not alias the mutable front image"
-        );
-        assert_ne!(
-            backing_priority, viewport_surfaces.priority_texture,
-            "the previous priority viewport must not alias the mutable front image"
-        );
-        let images = world.resource::<Assets<Image>>();
-        (
-            backing_base,
-            backing_priority,
-            images
-                .get(&viewport_surfaces.base_texture)
-                .expect("initial front base image")
-                .data
-                .clone(),
-            images
-                .get(&viewport_surfaces.priority_texture)
-                .expect("initial front priority image")
-                .data
-                .clone(),
-        )
-    };
 
     app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 16;
     for _ in 0..16 {
@@ -1162,23 +1178,6 @@ fn live_walk_retains_the_viewport_texture_and_updates_every_lcd_frame() {
         WALK_FRAME_HOLD_TICKS,
         "fixture must execute an authoritative walking step"
     );
-    {
-        let images = app.world().resource::<Assets<Image>>();
-        assert_eq!(
-            images.get(&backing_base).expect("retained base backing").data,
-            initial_base_pixels,
-            "recomposing the destination viewport must not mutate the retained source base through an aliased handle"
-        );
-        assert_eq!(
-            images
-                .get(&backing_priority)
-                .expect("retained priority backing")
-                .data,
-            initial_priority_pixels,
-            "recomposing the destination viewport must not mutate the retained source priority through an aliased handle"
-        );
-    }
-
     let mut player_x_positions = Vec::new();
     let mut base_map_positions = Vec::new();
     let mut priority_map_positions = Vec::new();

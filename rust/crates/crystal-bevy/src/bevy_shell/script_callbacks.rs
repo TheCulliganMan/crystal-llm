@@ -50,8 +50,16 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
         runtime_shell.visible_blackout_phase
     {
         if frames_remaining > 0 {
+            let elapsed_frames = if let Some(fade) = runtime_shell.screen_fade.as_mut() {
+                take_visible_sequence_frames(
+                    &mut fade.accumulated_seconds,
+                    time.delta_seconds(),
+                )
+            } else {
+                1
+            };
             runtime_shell.visible_blackout_phase = Some(VisibleBlackoutPhase::WhiteHold {
-                frames_remaining: frames_remaining - 1,
+                frames_remaining: frames_remaining.saturating_sub(elapsed_frames as u8),
             });
             return;
         }
@@ -72,11 +80,13 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
     let blackout_phase = runtime_shell.visible_blackout_phase;
     let walk_warp_phase = runtime_shell.visible_walk_warp_phase;
     if let Some(fade) = runtime_shell.screen_fade.as_mut() {
-        // A stalled host frame must never fast-forward a Game Boy fade.  The
-        // original advances one palette step per frame; limiting the input
-        // here also prevents the black overlay from snapping through and
-        // exposing intermediate half-rendered surfaces after a hiccup.
-        fade.advance(time.delta_seconds().min(GAME_TICK_SECONDS));
+        // Keep fades on the same bounded 60 Hz presentation clock as every
+        // other retained animation. This preserves their wall-clock duration
+        // at 20-30 Hz without allowing a long stall to skip the whole scene.
+        fade.advance(
+            time.delta_seconds()
+                .min(GAME_TICK_SECONDS * MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as f32),
+        );
         if fade.elapsed_frames >= fade.total_frames {
             if walk_warp_phase == Some(VisibleWalkWarpPhase::FadeOut) {
                 // MAPSETUP_DOOR exposes the loaded destination beneath the

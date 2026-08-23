@@ -149,6 +149,14 @@ fn advance_visible_battle_transition(runtime_shell: &mut BevyRuntimeShell) {
     let Some(transition) = runtime_shell.visible_battle_transition.as_mut() else {
         return;
     };
+    transition.frame = transition.frame.saturating_add(1);
+    if transition.frame >= visible_battle_transition_total_frames(transition) {
+        runtime_shell.visible_battle_transition = None;
+    }
+    mark_runtime_snapshot_dirty(runtime_shell);
+}
+
+fn visible_battle_transition_total_frames(transition: &VisibleBattleTransition) -> u16 {
     let prefix_frames = if transition.trainer_battle { 4 } else { 3 };
     let (between_frames, outro_frames, finish_frames) =
         match (transition.cave_environment, transition.stronger_enemy) {
@@ -160,14 +168,12 @@ fn advance_visible_battle_transition(runtime_shell: &mut BevyRuntimeShell) {
             (false, false) => (2, 61, 4),
             (false, true) => (2, 21, 1),
         };
-    transition.frame = transition.frame.saturating_add(1);
-    let flash_frames = 75;
-    if transition.frame
-        >= prefix_frames + flash_frames + between_frames + outro_frames + finish_frames
-    {
-        runtime_shell.visible_battle_transition = None;
-    }
-    mark_runtime_snapshot_dirty(runtime_shell);
+    prefix_frames + 75 + between_frames + outro_frames + finish_frames
+}
+
+fn visible_battle_transition_is_terminal(transition: &VisibleBattleTransition) -> bool {
+    transition.frame.saturating_add(1)
+        >= visible_battle_transition_total_frames(transition)
 }
 
 fn spawn_visible_battle_transition(
@@ -8389,6 +8395,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_mom_bank.hash(&mut hasher);
     runtime_shell.pokedex_cursor.hash(&mut hasher);
     runtime_shell.pokegear_menu_open.hash(&mut hasher);
+    runtime_shell.pokegear_standalone_map.hash(&mut hasher);
     runtime_shell.pokegear_cursor.hash(&mut hasher);
     runtime_shell.pokegear_phone_cursor.hash(&mut hasher);
     runtime_shell.pokegear_phone_status.hash(&mut hasher);
@@ -8829,10 +8836,8 @@ fn update_overworld_sprite_positions(
                     .or_else(|| object_walk_from.get(object_id).copied())
             });
             [destination, origin].into_iter().flatten().any(|tile| {
-                runtime_event_view_tile(tile, start_x, start_y).is_some_and(|(x, y)| {
-                    (0..VIEWPORT_TILES_X).contains(&x)
-                        && (0..VIEWPORT_TILES_Y).contains(&y)
-                })
+                runtime_event_view_tile(tile, start_x, start_y)
+                    .is_some_and(|(x, y)| overworld_object_in_scroll_region(x, y))
             })
         })
         .count();
@@ -8871,13 +8876,10 @@ fn update_overworld_sprite_positions(
                         .copied()
                 })
         });
-        let destination_visible = (0..VIEWPORT_TILES_X).contains(&view_x)
-            && (0..VIEWPORT_TILES_Y).contains(&view_y);
+        let destination_visible = overworld_object_in_scroll_region(view_x, view_y);
         let origin_visible = walking_from
             .and_then(|from| runtime_event_view_tile(from, start_x, start_y))
-            .is_some_and(|(x, y)| {
-                (0..VIEWPORT_TILES_X).contains(&x) && (0..VIEWPORT_TILES_Y).contains(&y)
-            });
+            .is_some_and(|(x, y)| overworld_object_in_scroll_region(x, y));
         if !destination_visible && !origin_visible {
             continue;
         }
@@ -9161,7 +9163,7 @@ fn overworld_walk_camera_offset_for_duration(
         rendered,
         frames_remaining,
         total_frames,
-        0.0,
+        1.0,
     )
 }
 
@@ -9180,11 +9182,10 @@ fn overworld_walk_camera_offset_for_duration_with_subframe(
     if frames_remaining == 0 {
         return Vec2::ZERO;
     }
-    // TypeScript advances player_px_* before drawing each walking frame. The
-    // first visible frame is already one movement increment from the source,
-    // and the last active frame is on the destination. Retaining an extra
-    // zero-progress frame makes the map and actors appear to skate behind the
-    // authoritative movement.
+    // Smooth presentation samples the interval leading into the next LCD
+    // tick. Sampling the already-advanced endpoint here creates a terminal
+    // half-frame hold followed by a double-sized jump when held movement
+    // starts the next tile.
     let remaining = 1.0
         - visible_movement_progress_with_subframe(
             frames_remaining,
@@ -9264,7 +9265,7 @@ fn visible_player_playfield_position_for_duration(
         from,
         frames_remaining,
         total_frames,
-        0.0,
+        1.0,
         start_x,
         start_y,
     )
@@ -9290,8 +9291,9 @@ fn visible_player_playfield_position_for_duration_with_subframe(
     // Crystal scrolls the player in from offscreen over the complete step.
     let (from_view_x, from_view_y) = runtime_event_view_tile(from, start_x, start_y)?;
     let from = render_tile_playfield_position(from_view_x, from_view_y);
-    // Match TypeScript's tick order: movement pixels advance before drawing.
-    // Active walk frames therefore cover 1/total through total/total.
+    // Render continuously from the position before this authoritative tick
+    // toward the next one. The discrete helper below still preserves
+    // TypeScript's exact advance-before-draw samples for scripts and tests.
     let progress = visible_movement_progress_with_subframe(
         frames_remaining,
         total_frames,
@@ -9304,7 +9306,15 @@ fn visible_player_playfield_position_for_duration_with_subframe(
 }
 
 fn visible_movement_progress(frames_remaining: u8, total_frames: u8) -> f32 {
-    visible_movement_progress_with_subframe(frames_remaining, total_frames, 0.0)
+    let total_frames = total_frames.max(1);
+    if frames_remaining == 0 {
+        return 1.0;
+    }
+    f32::from(
+        total_frames
+            .saturating_sub(frames_remaining.min(total_frames))
+            .saturating_add(1),
+    ) / f32::from(total_frames)
 }
 
 fn visible_movement_progress_with_subframe(
@@ -9316,11 +9326,8 @@ fn visible_movement_progress_with_subframe(
     if frames_remaining == 0 {
         return 1.0;
     }
-    let completed_frames = f32::from(
-        total_frames
-            .saturating_sub(frames_remaining.min(total_frames))
-            .saturating_add(1),
-    );
+    let completed_frames =
+        f32::from(total_frames.saturating_sub(frames_remaining.min(total_frames)));
     ((completed_frames + movement_subframe.clamp(0.0, 1.0)) / f32::from(total_frames))
         .min(1.0)
 }

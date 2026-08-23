@@ -2450,6 +2450,7 @@ fn activate_visible_special_routine_boundary(
         SpecialRoutineEffect::OverworldTownMap { .. } => {
             open_visible_pokegear_menu(runtime_shell)?;
             runtime_shell.pokegear_page = PokegearPage::Map;
+            runtime_shell.pokegear_standalone_map = true;
             let snapshot = runtime_shell.shell.snapshot()?;
             let region_indices = visible_pokegear_landmark_indices(&snapshot)?;
             let current_landmark = snapshot

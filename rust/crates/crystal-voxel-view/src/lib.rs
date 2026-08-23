@@ -270,6 +270,13 @@ fn should_start_terrain_build(
     cached_key != Some(next_key) && queued_key.is_none()
 }
 
+fn must_validate_static_frame(
+    validated_key: Option<&TerrainCacheKey>,
+    frame: &VisualWorldFrame,
+) -> bool {
+    validated_key != Some(&TerrainCacheKey::from_frame(frame))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerrainSyncState {
     Ready,
@@ -417,6 +424,7 @@ fn sync_voxel_view(
     settings: Res<VoxelViewSettings>,
     mut status: ResMut<VoxelViewStatus>,
     mut last_failure: Local<Option<String>>,
+    mut validated_frame_key: Local<Option<TerrainCacheKey>>,
     mut commands: Commands,
     scene: Res<VoxelScene>,
     mut terrain_cache: ResMut<TerrainRevisionCache>,
@@ -458,7 +466,9 @@ fn sync_voxel_view(
         Some("disabled")
     } else if !frame.active {
         Some("waiting for an active world frame")
-    } else if frame.validate().is_err() {
+    } else if must_validate_static_frame(validated_frame_key.as_ref(), &frame)
+        && frame.validate().is_err()
+    {
         Some("world frame validation failed")
     } else if !supports_frame_profile(&frame) {
         Some("world frame is not supported by the visual profile")
@@ -467,6 +477,13 @@ fn sync_voxel_view(
     } else {
         None
     };
+    if failure.is_none() {
+        // Terrain geometry and tile identities are immutable for a published
+        // revision. Movement republishes only center/actor transforms, so do
+        // not rebuild the validation hash set and scan thousands of terrain
+        // cells on every display refresh.
+        *validated_frame_key = Some(TerrainCacheKey::from_frame(&frame));
+    }
     let valid = failure.is_none();
     let output_ready = set_output_active(&scene, valid, &mut cameras, &frame);
     if valid && !output_ready {
@@ -574,20 +591,45 @@ fn set_output_active(
         camera_ready = true;
         // The direct world camera is active only for a complete validated
         // frame; otherwise the untouched classic layer remains authoritative.
-        camera.is_active = active;
+        if camera.is_active != active {
+            camera.is_active = active;
+        }
         if active {
-            camera.clear_color = ClearColorConfig::Custom(voxel_clear_color(frame));
+            let next_clear_color = voxel_clear_color(frame);
+            let clear_color_changed = !matches!(
+                camera.clear_color,
+                ClearColorConfig::Custom(current) if current == next_clear_color
+            );
+            if clear_color_changed {
+                camera.clear_color = ClearColorConfig::Custom(next_clear_color);
+            }
             let pose = camera_pose(frame.viewport_size);
-            *transform = pose.transform();
-            *projection = Projection::Perspective(PerspectiveProjection {
-                fov: pose.vertical_fov_radians,
-                near: pose.near,
-                far: pose.far,
-                ..default()
-            });
+            let next_transform = pose.transform();
+            if *transform != next_transform {
+                *transform = next_transform;
+            }
+            if voxel_projection_needs_update(&projection, pose) {
+                *projection = Projection::Perspective(PerspectiveProjection {
+                    fov: pose.vertical_fov_radians,
+                    near: pose.near,
+                    far: pose.far,
+                    ..default()
+                });
+            }
         }
     }
     camera_ready
+}
+
+fn voxel_projection_needs_update(projection: &Projection, pose: VoxelCameraPose) -> bool {
+    match projection {
+        Projection::Perspective(current) => {
+            current.fov != pose.vertical_fov_radians
+                || current.near != pose.near
+                || current.far != pose.far
+        }
+        Projection::Orthographic(_) => true,
+    }
 }
 
 fn voxel_clear_color(frame: &VisualWorldFrame) -> Color {
@@ -930,10 +972,18 @@ fn sync_actor_cards(
                 mut current_material,
             )) = actor_entities.get_mut(entity)
         {
-            *current_transform = transform;
-            *visibility = Visibility::Visible;
-            *current_mesh = mesh;
-            *current_material = material;
+            if *current_transform != transform {
+                *current_transform = transform;
+            }
+            if *visibility != Visibility::Visible {
+                *visibility = Visibility::Visible;
+            }
+            if *current_mesh != mesh {
+                *current_mesh = mesh;
+            }
+            if *current_material != material {
+                *current_material = material;
+            }
             continue;
         }
 
@@ -1072,9 +1122,15 @@ fn sync_player_silhouette(
         && let Ok((mut current_transform, mut visibility, mut current_material)) =
             entities.get_mut(entity)
     {
-        *current_transform = transform;
-        *visibility = Visibility::Visible;
-        *current_material = material;
+        if *current_transform != transform {
+            *current_transform = transform;
+        }
+        if *visibility != Visibility::Visible {
+            *visibility = Visibility::Visible;
+        }
+        if *current_material != material {
+            *current_material = material;
+        }
         return;
     }
     cache.entity = Some(
@@ -1318,6 +1374,41 @@ mod renderer_tests {
             !should_start_terrain_build(Some(&cached), Some(&queued), &latest_movement),
             "a newer walking viewport must not replace work already running on the compute pool"
         );
+    }
+
+    #[test]
+    fn transform_only_frames_do_not_rescan_the_static_terrain_grid() {
+        let mut frame = VisualWorldFrame {
+            terrain_revision: 42,
+            viewport_size: Vec2::new(160.0, 144.0),
+            tile_size: Vec2::splat(8.0),
+            grid_size: UVec2::new(84, 82),
+            ..default()
+        };
+        let validated = TerrainCacheKey::from_frame(&frame);
+
+        frame.center = Vec2::new(3.5, -1.25);
+        assert!(
+            !must_validate_static_frame(Some(&validated), &frame),
+            "camera interpolation must not rescan unchanged terrain"
+        );
+        frame.terrain_revision += 1;
+        assert!(must_validate_static_frame(Some(&validated), &frame));
+    }
+
+    #[test]
+    fn movement_does_not_reset_an_unchanged_camera_projection() {
+        let pose = camera_pose(Vec2::new(640.0, 576.0));
+        let projection = Projection::Perspective(PerspectiveProjection {
+            fov: pose.vertical_fov_radians,
+            near: pose.near,
+            far: pose.far,
+            // The window system owns this runtime-computed field. Movement
+            // must not replace it with PerspectiveProjection::default().
+            aspect_ratio: 640.0 / 576.0,
+        });
+
+        assert!(!voxel_projection_needs_update(&projection, pose));
     }
 
     #[test]

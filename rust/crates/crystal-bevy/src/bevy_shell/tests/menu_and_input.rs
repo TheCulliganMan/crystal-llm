@@ -402,26 +402,26 @@ fn select_without_a_registered_item_opens_the_exact_asm_textbox() {
     let expected = visible_asm_text(&snapshot, "_MayRegisterItemText")
         .expect("compiled SelectMenu no-registration text");
 
-    apply_visible_shell_smoke_frame(&mut runtime_shell, &[GameButton::Select])
-        .expect("Select dispatches through the overworld input path");
-
-    assert_eq!(runtime_shell.field_notice.as_deref(), Some(expected.as_str()));
-    assert!(runtime_shell.field_notice_scene.is_some());
-    let notice_snapshot = runtime_shell
-        .shell
-        .snapshot()
-        .expect("snapshot with SelectMenu notice");
-    assert_eq!(
-        visible_field_dialog_pages(&notice_snapshot, &runtime_shell),
-        Some(vec![
-            "An item in your\nPACK may be".to_string(),
-            "registered for use\non SELECT Button.".to_string(),
-        ]),
-        "ASM `para` must retain its MapTextbox page boundary"
-    );
-
     let mut app = integrated_shell_test_app(runtime_shell);
     app.update();
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ShiftRight);
+    {
+        let shell = app.world().resource::<BevyRuntimeShell>();
+        assert_eq!(shell.field_notice.as_deref(), Some(expected.as_str()));
+        assert!(shell.field_notice_scene.is_some());
+        let notice_snapshot = shell
+            .shell
+            .snapshot()
+            .expect("snapshot with SelectMenu notice");
+        assert_eq!(
+            visible_field_dialog_pages(&notice_snapshot, shell),
+            Some(vec![
+                "An item in your\nPACK may be".to_string(),
+                "registered for use\non SELECT Button.".to_string(),
+            ]),
+            "ASM `para` must retain its MapTextbox page boundary"
+        );
+    }
     {
         let world = app.world_mut();
         let background = world
@@ -436,6 +436,19 @@ fn select_without_a_registered_item_opens_the_exact_asm_textbox() {
                 TILE_SIZE * (FIELD_TEXT_BOX_HEIGHT_TILES - 2.0),
             )),
             "SelectMenu must use Crystal's canonical 20x6 MapTextbox"
+        );
+    }
+
+    app.update();
+    {
+        let world = app.world_mut();
+        assert!(
+            world
+                .query_filtered::<Entity, With<DialogGlyphMarker>>()
+                .iter(world)
+                .next()
+                .is_some(),
+            "SelectMenu text must render when its typewriter reveals the first glyph"
         );
     }
 
@@ -623,6 +636,26 @@ fn pokegear_only_shows_transcripts_for_stations_that_have_them() {
     assert!(visible_map_radio_transcript("POKEMON_MUSIC").is_empty());
     assert!(visible_map_radio_transcript("BUENAS_PASSWORD").is_empty());
     assert!(visible_map_radio_transcript("POKE_FLUTE_RADIO").is_empty());
+}
+
+#[test]
+fn standalone_town_map_uses_asm_cursor_direction_and_cannot_change_pages() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    runtime_shell.pokegear_menu_open = true;
+    runtime_shell.pokegear_standalone_map = true;
+    runtime_shell.pokegear_page = PokegearPage::Map;
+    let snapshot = runtime_shell.shell.snapshot().expect("Town Map snapshot");
+    let indices = visible_pokegear_landmark_indices(&snapshot).expect("active region landmarks");
+    assert!(indices.len() > 1);
+    runtime_shell.pokegear_cursor = indices[0];
+
+    move_visible_pokegear_cursor(&mut runtime_shell, -1).expect("Town Map Up");
+    assert_eq!(runtime_shell.pokegear_cursor, indices[1]);
+
+    move_visible_primary_cursor_left(&mut runtime_shell).expect("Town Map Left is ignored");
+    assert_eq!(runtime_shell.pokegear_page, PokegearPage::Map);
+    move_visible_primary_cursor_right(&mut runtime_shell).expect("Town Map Right is ignored");
+    assert_eq!(runtime_shell.pokegear_page, PokegearPage::Map);
 }
 
 #[test]

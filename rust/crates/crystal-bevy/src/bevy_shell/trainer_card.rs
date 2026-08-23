@@ -597,6 +597,7 @@ fn open_visible_pokegear_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         );
     }
     runtime_shell.pokegear_menu_open = true;
+    runtime_shell.pokegear_standalone_map = false;
     runtime_shell.pokegear_phone_status = None;
     runtime_shell.pokegear_page = PokegearPage::Clock;
     runtime_shell.pokegear_radio_station = None;
@@ -624,6 +625,7 @@ fn close_visible_pokegear_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     exit_visible_pokegear_radio(runtime_shell)?;
     runtime_shell.pokegear_phone_call = None;
     runtime_shell.pokegear_menu_open = false;
+    runtime_shell.pokegear_standalone_map = false;
     runtime_shell.pokegear_phone_status = None;
     runtime_shell.pokegear_page = PokegearPage::Clock;
     runtime_shell.pokegear_radio_station = None;
@@ -705,6 +707,13 @@ fn move_visible_pokegear_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isi
                 runtime_shell.pokegear_cursor
             )
         })?;
+    // _TownMap increments the landmark on Up and decrements it on Down,
+    // opposite the portable Pokégear list convention used by this handler.
+    let delta = if runtime_shell.pokegear_standalone_map {
+        -delta
+    } else {
+        delta
+    };
     let next_position = wrapped_index(current_position, region_indices.len(), delta);
     let next = region_indices[next_position];
     runtime_shell.pokegear_cursor = next;
@@ -4164,6 +4173,9 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
         return shift_visible_field_pack_pocket(runtime_shell, -1);
     }
     if runtime_shell.pokegear_menu_open {
+        if runtime_shell.pokegear_standalone_map {
+            return Ok(());
+        }
         return cycle_visible_pokegear_page(runtime_shell, -1);
     }
     if runtime_shell.pokedex_menu_open {
@@ -4401,6 +4413,9 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
         return shift_visible_field_pack_pocket(runtime_shell, 1);
     }
     if runtime_shell.pokegear_menu_open {
+        if runtime_shell.pokegear_standalone_map {
+            return Ok(());
+        }
         return cycle_visible_pokegear_page(runtime_shell, 1);
     }
     if runtime_shell.pokedex_menu_open {

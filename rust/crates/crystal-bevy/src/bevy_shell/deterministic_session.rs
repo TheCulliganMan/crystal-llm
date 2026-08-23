@@ -364,7 +364,9 @@ fn apply_keyboard_input(
     let mut field_object_effect_advanced = false;
     let field_notice_effect_finished = if runtime_shell.field_notice.is_none() {
         if let Some(frames) = runtime_shell.pending_field_notice_effect_frames {
-            let frames = frames.saturating_sub(1);
+            let frames = frames.saturating_sub(
+                elapsed_input_ticks.min(u32::from(u8::MAX)) as u8,
+            );
             runtime_shell.pending_field_notice_effect_frames = Some(frames);
             if let Some(cut) = runtime_shell.visible_cut_animation.as_mut() {
                 cut.frame = 32_u8.saturating_sub(frames);
@@ -379,9 +381,10 @@ fn apply_keyboard_input(
                 field_object_effect_advanced = true;
             }
             if let Some(flash) = runtime_shell.visible_flash_animation.as_mut() {
+                let previous_frame = flash.frame;
                 flash.frame = 16_u8.saturating_sub(frames);
                 field_object_effect_advanced = true;
-                if flash.frame == 8 {
+                if previous_frame < 8 && flash.frame >= 8 {
                     runtime_shell.field_notice_scene = None;
                 }
             }
@@ -416,8 +419,13 @@ fn apply_keyboard_input(
         }
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if runtime_shell.field_notice.is_none() {
-        if let Some(animation) = runtime_shell.visible_waterfall_animation {
+    if runtime_shell.field_notice.is_none()
+        && runtime_shell.visible_waterfall_animation.is_some()
+    {
+        for _ in 0..elapsed_input_ticks {
+            let Some(animation) = runtime_shell.visible_waterfall_animation else {
+                break;
+            };
             let Some(total_frames) = animation.steps.checked_mul(4) else {
                 let error = anyhow::anyhow!(
                     "WATERFALL visual duration overflows for {} steps",
@@ -507,10 +515,14 @@ fn apply_keyboard_input(
                 }
             }
             mark_runtime_snapshot_dirty(&mut runtime_shell);
-            return;
         }
+        return;
     }
-    if let Some(animation) = runtime_shell.visible_fly_animation {
+    if runtime_shell.visible_fly_animation.is_some() {
+        for _ in 0..elapsed_input_ticks {
+            let Some(animation) = runtime_shell.visible_fly_animation else {
+                break;
+            };
         let counter = match animation.phase {
             VisibleFlyAnimationPhase::From => 128_u8.saturating_sub(animation.frame),
             VisibleFlyAnimationPhase::To => 64_u8.saturating_sub(animation.frame),
@@ -575,13 +587,22 @@ fn apply_keyboard_input(
             }
         }
         mark_runtime_snapshot_dirty(&mut runtime_shell);
+        }
         return;
     }
     if runtime_shell
         .visible_fishing_animation
         .is_some_and(|animation| animation.phase != VisibleFishingPhase::AwaitText)
     {
-        advance_visible_fishing_animation(&mut runtime_shell);
+        for _ in 0..elapsed_input_ticks {
+            if !runtime_shell
+                .visible_fishing_animation
+                .is_some_and(|animation| animation.phase != VisibleFishingPhase::AwaitText)
+            {
+                break;
+            }
+            advance_visible_fishing_animation(&mut runtime_shell);
+        }
         return;
     }
     if runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
@@ -593,17 +614,41 @@ fn apply_keyboard_input(
         ) || (hatch.phase == VisibleEggHatchPhase::Reveal
             && runtime_shell.visible_frontpic_animation.is_none())
     }) {
-        if let Err(error) = advance_visible_egg_hatch(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        for _ in 0..elapsed_input_ticks {
+            let owns_frame = runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
+                matches!(
+                    hatch.phase,
+                    VisibleEggHatchPhase::EggHold
+                        | VisibleEggHatchPhase::Wobble
+                        | VisibleEggHatchPhase::Shell
+                ) || (hatch.phase == VisibleEggHatchPhase::Reveal
+                    && runtime_shell.visible_frontpic_animation.is_none())
+            });
+            if !owns_frame {
+                break;
+            }
+            if let Err(error) = advance_visible_egg_hatch(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
         }
         return;
     }
-    if advance_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+    if runtime_shell
+        .visible_item_ball_notice
+        .as_ref()
+        .is_some_and(|notice| matches!(notice.phase, VisibleItemBallPhase::FanfarePause { .. }))
+    {
+        for _ in 0..elapsed_input_ticks {
+            if !advance_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+                break;
+            }
+        }
         return;
     }
     if let Some(frame) = runtime_shell.visible_diploma.as_mut() {
-        *frame = frame.wrapping_add(1);
+        *frame = frame.wrapping_add(elapsed_input_ticks as u8);
         mark_runtime_snapshot_dirty(&mut runtime_shell);
         return;
     }
@@ -617,9 +662,25 @@ fn apply_keyboard_input(
             )
         })
     {
-        if let Err(error) = advance_visible_slot_machine_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        for _ in 0..elapsed_input_ticks {
+            let owns_frame = runtime_shell
+                .visible_slot_machine
+                .as_ref()
+                .is_some_and(|machine| {
+                    !matches!(
+                        machine.animation,
+                        VisibleSlotMachineAnimation::None
+                            | VisibleSlotMachineAnimation::AwaitResult
+                    )
+                });
+            if !owns_frame {
+                break;
+            }
+            if let Err(error) = advance_visible_slot_machine_animation(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
         }
         return;
     }
@@ -642,23 +703,69 @@ fn apply_keyboard_input(
             )
         })
     {
-        if let Err(error) = advance_visible_card_flip_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        let timed = runtime_shell.visible_card_flip.as_ref().is_some_and(|game| {
+            matches!(
+                game.animation,
+                VisibleCardFlipAnimation::Deal { .. }
+                    | VisibleCardFlipAnimation::Cycle { .. }
+                    | VisibleCardFlipAnimation::SelectFlash { .. }
+                    | VisibleCardFlipAnimation::Payout { .. }
+            )
+        });
+        let frame_budget = if timed { elapsed_input_ticks } else { 1 };
+        for _ in 0..frame_budget {
+            if let Err(error) = advance_visible_card_flip_animation(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
+            if timed
+                && !runtime_shell.visible_card_flip.as_ref().is_some_and(|game| {
+                    matches!(
+                        game.animation,
+                        VisibleCardFlipAnimation::Deal { .. }
+                            | VisibleCardFlipAnimation::Cycle { .. }
+                            | VisibleCardFlipAnimation::SelectFlash { .. }
+                            | VisibleCardFlipAnimation::Payout { .. }
+                    )
+                })
+            {
+                break;
+            }
         }
         return;
     }
     if runtime_shell.visible_heal_machine.is_some() {
-        if let Err(error) = advance_visible_heal_machine(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        for _ in 0..elapsed_input_ticks {
+            if let Err(error) = advance_visible_heal_machine(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
+            if runtime_shell
+                .visible_heal_machine
+                .as_ref()
+                .is_none_or(visible_heal_machine_is_terminal)
+            {
+                break;
+            }
         }
         return;
     }
     if runtime_shell.visible_magnet_train.is_some() {
-        if let Err(error) = advance_visible_magnet_train(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        for _ in 0..elapsed_input_ticks {
+            if let Err(error) = advance_visible_magnet_train(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
+            if runtime_shell
+                .visible_magnet_train
+                .as_ref()
+                .is_none_or(|animation| animation.phase >= 7 && animation.arrival_sfx_played)
+            {
+                break;
+            }
         }
         return;
     }
@@ -674,55 +781,40 @@ fn apply_keyboard_input(
                 return;
             }
         } else {
-            advance_visible_battle_transition(&mut runtime_shell);
+            // Transition drawing can be one of the most expensive retained
+            // LCD surfaces (the cave sine wave composes every scanline). A
+            // slow host update may therefore contain several elapsed Game
+            // Boy frames. Consume the complete bounded tick budget so that
+            // rendering cost cannot stretch battle entry or make its motion
+            // alternate between stalls and single-frame steps.
+            for _ in 0..elapsed_input_ticks {
+                advance_visible_battle_transition(&mut runtime_shell);
+                if runtime_shell
+                    .visible_battle_transition
+                    .as_ref()
+                    .is_none_or(visible_battle_transition_is_terminal)
+                {
+                    break;
+                }
+            }
             return;
         }
     }
-    if runtime_shell.visible_frontpic_animation.is_some() {
-        if let Err(error) = advance_visible_frontpic_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-            runtime_shell.visible_frontpic_animation = None;
+    if visible_battle_animation_owns_frame(&runtime_shell) {
+        for _ in 0..elapsed_input_ticks {
+            if !visible_battle_animation_owns_frame(&runtime_shell) {
+                break;
+            }
+            if let Err(error) = advance_visible_battle_animation_frame(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                runtime_shell.visible_frontpic_animation = None;
+                break;
+            }
         }
-        // AnimateFrontpic owns the complete frame in Crystal. Even when the
-        // final command lands this tick, do not also advance battle logic or
-        // accept a command-menu input beneath the sprite animation.
-        return;
-    }
-    if runtime_shell
-        .visible_capture_animation
-        .as_ref()
-        .is_some_and(|animation| animation.started)
-    {
-        if let Err(error) = advance_visible_capture_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-        }
-        return;
-    }
-    if runtime_shell
-        .visible_move_animations
-        .front()
-        .is_some_and(|animation| animation.started)
-    {
-        if let Err(error) = advance_visible_move_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-        }
-        return;
-    }
-    if runtime_shell.visible_send_out_animation.is_some() {
-        if let Err(error) = advance_visible_send_out_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-        }
-        return;
-    }
-    if runtime_shell.visible_trainer_exit_animation.is_some() {
-        if let Err(error) = advance_visible_trainer_exit_animation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
-        }
+        // Battle presentation owns the complete host update even when its
+        // final animation frame lands during catch-up. Do not leak a buffered
+        // command into the newly revealed battle menu.
         return;
     }
     if runtime_shell
@@ -734,40 +826,42 @@ fn apply_keyboard_input(
     if runtime_shell.visible_walk_warp_phase.is_some() {
         return;
     }
-    if let Some(jump) = runtime_shell.visible_ledge_jump.as_mut() {
-        if jump.frame < 15 {
-            jump.frame += 1;
-        } else {
-            runtime_shell.visible_ledge_jump = None;
-            let overworld = &mut runtime_shell.shell.session_mut().overworld;
-            overworld.player_last_runtime_tile = None;
-            overworld.player_last_tile_occupied_until_frame = 0;
-            mark_runtime_snapshot_dirty(&mut runtime_shell);
-        }
-    }
-    // A ledge jump is two chained eight-frame steps. Core reports the final
-    // landing tile atomically, but its grass effect belongs to the second
-    // step and must not age during the takeoff half.
-    let landing_grass_not_started = runtime_shell
-        .visible_ledge_jump
-        .is_some_and(|jump| jump.frame <= WALK_FRAME_HOLD_TICKS);
-    if let Some(rustle) = runtime_shell.visible_grass_rustle.as_mut() {
-        if !landing_grass_not_started {
-            rustle.age = rustle.age.saturating_add(1);
-            rustle.frames_remaining = rustle.frames_remaining.saturating_sub(1);
-            if rustle.frames_remaining == 0 {
-                runtime_shell.visible_grass_rustle = None;
+    for _ in 0..elapsed_input_ticks {
+        if let Some(jump) = runtime_shell.visible_ledge_jump.as_mut() {
+            if jump.frame < 15 {
+                jump.frame += 1;
+            } else {
+                runtime_shell.visible_ledge_jump = None;
+                let overworld = &mut runtime_shell.shell.session_mut().overworld;
+                overworld.player_last_runtime_tile = None;
+                overworld.player_last_tile_occupied_until_frame = 0;
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
             }
         }
-        mark_runtime_snapshot_dirty(&mut runtime_shell);
-    }
-    if let Some(dust) = runtime_shell.visible_strength_boulder_dust.as_mut() {
-        dust.age = dust.age.saturating_add(1);
-        dust.frames_remaining = dust.frames_remaining.saturating_sub(1);
-        if dust.frames_remaining == 0 {
-            runtime_shell.visible_strength_boulder_dust = None;
+        // A ledge jump is two chained eight-frame steps. Core reports the
+        // final landing tile atomically, but its grass effect belongs to the
+        // second step and must not age during the takeoff half.
+        let landing_grass_not_started = runtime_shell
+            .visible_ledge_jump
+            .is_some_and(|jump| jump.frame <= WALK_FRAME_HOLD_TICKS);
+        if let Some(rustle) = runtime_shell.visible_grass_rustle.as_mut() {
+            if !landing_grass_not_started {
+                rustle.age = rustle.age.saturating_add(1);
+                rustle.frames_remaining = rustle.frames_remaining.saturating_sub(1);
+                if rustle.frames_remaining == 0 {
+                    runtime_shell.visible_grass_rustle = None;
+                }
+            }
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
-        mark_runtime_snapshot_dirty(&mut runtime_shell);
+        if let Some(dust) = runtime_shell.visible_strength_boulder_dust.as_mut() {
+            dust.age = dust.age.saturating_add(1);
+            dust.frames_remaining = dust.frames_remaining.saturating_sub(1);
+            if dust.frames_remaining == 0 {
+                runtime_shell.visible_strength_boulder_dust = None;
+            }
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
+        }
     }
     if runtime_shell.visible_script_movement.is_some() {
         let mut movement_still_active = false;
@@ -801,11 +895,18 @@ fn apply_keyboard_input(
     {
         match runtime_shell.shell.presentation_snapshot() {
             Ok(snapshot) => {
-                if advance_visible_battle_text_reveal(
-                    &mut runtime_shell,
-                    &snapshot,
-                    text_acceleration_requested,
-                ) {
+                let mut changed = false;
+                for _ in 0..elapsed_input_ticks {
+                    if !advance_visible_battle_text_reveal(
+                        &mut runtime_shell,
+                        &snapshot,
+                        text_acceleration_requested,
+                    ) {
+                        break;
+                    }
+                    changed = true;
+                }
+                if changed {
                     mark_runtime_snapshot_dirty(&mut runtime_shell);
                 }
             }
@@ -818,7 +919,14 @@ fn apply_keyboard_input(
     } else if runtime_shell.battle_text_reveal.take().is_some() {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if let Some(tween) = runtime_shell.battle_hp_tween.as_mut() {
+    let mut hp_pixels_changed = false;
+    for _ in 0..elapsed_input_ticks {
+        let Some(tween) = runtime_shell.battle_hp_tween.as_mut() else {
+            break;
+        };
+        if !visible_battle_hp_tween_active(tween) {
+            break;
+        }
         let player_changed = advance_visible_hp_pixels(
             &mut tween.player_pixels,
             tween.player_target_pixels,
@@ -832,9 +940,10 @@ fn apply_keyboard_input(
             tween.enemy_target_pixels,
             &mut tween.enemy_frames_until_step,
         );
-        if player_changed || enemy_changed {
-            mark_runtime_snapshot_dirty(&mut runtime_shell);
-        }
+        hp_pixels_changed |= player_changed || enemy_changed;
+    }
+    if hp_pixels_changed {
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     let hp_tween_active = runtime_shell
         .battle_hp_tween
@@ -858,12 +967,13 @@ fn apply_keyboard_input(
         // prevents a hidden cursor from moving beneath the retained HUD.
         return;
     }
-    let mut exp_segment_finished = false;
-    let mut exp_animation_finished = false;
-    let mut exp_pixels_changed = false;
-    if let Some(tween) = runtime_shell.battle_exp_tween.as_mut()
-        && tween.started
-    {
+    for _ in 0..elapsed_input_ticks {
+        let mut exp_segment_finished = false;
+        let mut exp_animation_finished = false;
+        let mut exp_pixels_changed = false;
+        if let Some(tween) = runtime_shell.battle_exp_tween.as_mut()
+            && tween.started
+        {
         if tween.frames_until_step > 0 {
             tween.frames_until_step -= 1;
         } else if tween.pixels < tween.target_pixels {
@@ -893,11 +1003,11 @@ fn apply_keyboard_input(
             }
             tween.started = false;
         }
-    }
-    if exp_pixels_changed {
-        mark_runtime_snapshot_dirty(&mut runtime_shell);
-    }
-    if exp_segment_finished {
+        }
+        if exp_pixels_changed {
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
+        }
+        if exp_segment_finished {
         if let Err(error) =
             queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_HIT_END_OF_EXP_BAR")
         {
@@ -915,8 +1025,8 @@ fn apply_keyboard_input(
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
         }
-    }
-    if exp_animation_finished {
+        }
+        if exp_animation_finished {
         runtime_shell.battle_exp_tween = runtime_shell.pending_battle_exp_tweens.pop_front();
         if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
             && stats.triggered
@@ -941,15 +1051,18 @@ fn apply_keyboard_input(
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
         }
-    }
-    if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
-        && stats.active
-        && stats.frames_before_input > 0
-    {
-        stats.frames_before_input -= 1;
+        }
+        if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
+            && stats.active
+            && stats.frames_before_input > 0
+        {
+            stats.frames_before_input -= 1;
+        }
     }
     if let Some(frames) = runtime_shell.visible_script_delay_frames.as_mut() {
-        *frames = frames.saturating_sub(1);
+        *frames = frames.saturating_sub(
+            elapsed_input_ticks.min(u32::from(u16::MAX)) as u16,
+        );
     }
     if runtime_shell.visible_script_delay_frames == Some(0) {
         if let Err(error) = drain_visible_delays(&mut runtime_shell) {
@@ -959,9 +1072,15 @@ fn apply_keyboard_input(
         return;
     }
     if runtime_shell.visible_special_text_pause_frames.is_some() {
-        if let Err(error) = advance_visible_special_text_pause(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(format!("{error:#}"));
+        for _ in 0..elapsed_input_ticks {
+            if runtime_shell.visible_special_text_pause_frames.is_none() {
+                break;
+            }
+            if let Err(error) = advance_visible_special_text_pause(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(format!("{error:#}"));
+                break;
+            }
         }
         return;
     }
@@ -970,9 +1089,19 @@ fn apply_keyboard_input(
         .as_ref()
         .is_some_and(|prompt| prompt.closing_frames.is_some())
     {
-        if let Err(error) = advance_visible_remember_password_prompt(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(format!("{error:#}"));
+        for _ in 0..elapsed_input_ticks {
+            if !runtime_shell
+                .pending_remember_password
+                .as_ref()
+                .is_some_and(|prompt| prompt.closing_frames.is_some())
+            {
+                break;
+            }
+            if let Err(error) = advance_visible_remember_password_prompt(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(format!("{error:#}"));
+                break;
+            }
         }
         return;
     }
@@ -985,7 +1114,9 @@ fn apply_keyboard_input(
     let field_travel_delay_finished = if field_travel_text_complete
         && let Some(frames) = runtime_shell.pending_field_travel_delay_frames.as_mut()
     {
-        *frames = frames.saturating_sub(1);
+        *frames = frames.saturating_sub(
+            elapsed_input_ticks.min(u32::from(u16::MAX)) as u16,
+        );
         *frames == 0
     } else {
         false
@@ -1017,18 +1148,26 @@ fn apply_keyboard_input(
     }
     runtime_shell.poison_flash_frames_remaining = runtime_shell
         .poison_flash_frames_remaining
-        .saturating_sub(1);
+        .saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
     if let Some(sign) = runtime_shell.visible_map_name_sign.as_mut() {
-        sign.frames_remaining = sign.frames_remaining.saturating_sub(1);
+        sign.frames_remaining = sign.frames_remaining.saturating_sub(
+            elapsed_input_ticks.min(u32::from(u8::MAX)) as u8,
+        );
         if sign.frames_remaining == 0 {
             runtime_shell.visible_map_name_sign = None;
             mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
     }
     if runtime_shell.pending_trainer_sight.is_some() {
-        if let Err(error) = advance_visible_trainer_sight_cutscene(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-            runtime_shell.last_error = Some(error.to_string());
+        for _ in 0..elapsed_input_ticks {
+            if runtime_shell.pending_trainer_sight.is_none() {
+                break;
+            }
+            if let Err(error) = advance_visible_trainer_sight_cutscene(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(error.to_string());
+                break;
+            }
         }
         return;
     }
@@ -1063,7 +1202,12 @@ fn apply_keyboard_input(
         return;
     }
     if runtime_shell.credits_screen.is_some() {
-        tick_visible_credits_screen(&mut runtime_shell);
+        for _ in 0..elapsed_input_ticks {
+            if runtime_shell.credits_screen.is_none() {
+                break;
+            }
+            tick_visible_credits_screen(&mut runtime_shell);
+        }
         return;
     }
     if runtime_shell.pending_delete_save.is_some() {
@@ -1092,14 +1236,20 @@ fn apply_keyboard_input(
         || runtime_shell.pc_notice.is_some()
         || runtime_shell.visible_wait_sfx_boundary
     {
-        match tick_visible_field_text_reveal(&mut runtime_shell, text_acceleration_requested) {
-            Ok(true) => mark_runtime_presentation_dirty(&mut runtime_shell),
-            Ok(false) => {}
-            Err(error) => {
-                record_visible_runtime_error(&mut runtime_shell, &error);
-                runtime_shell.last_error = Some(error.to_string());
-                return;
+        let mut text_changed = false;
+        for _ in 0..elapsed_input_ticks {
+            match tick_visible_field_text_reveal(&mut runtime_shell, text_acceleration_requested) {
+                Ok(true) => text_changed = true,
+                Ok(false) => break,
+                Err(error) => {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
+                }
             }
+        }
+        if text_changed {
+            mark_runtime_presentation_dirty(&mut runtime_shell);
         }
         let completed_text_identity = runtime_shell
             .shell
@@ -2358,6 +2508,47 @@ fn advance_visible_trainer_sight_cutscene(runtime_shell: &mut BevyRuntimeShell) 
     Ok(())
 }
 
+fn visible_battle_animation_owns_frame(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.visible_frontpic_animation.is_some()
+        || runtime_shell
+            .visible_capture_animation
+            .as_ref()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell.visible_send_out_animation.is_some()
+        || runtime_shell.visible_trainer_exit_animation.is_some()
+}
+
+fn advance_visible_battle_animation_frame(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    if runtime_shell.visible_frontpic_animation.is_some() {
+        return advance_visible_frontpic_animation(runtime_shell);
+    }
+    if runtime_shell
+        .visible_capture_animation
+        .as_ref()
+        .is_some_and(|animation| animation.started)
+    {
+        return advance_visible_capture_animation(runtime_shell);
+    }
+    if runtime_shell
+        .visible_move_animations
+        .front()
+        .is_some_and(|animation| animation.started)
+    {
+        return advance_visible_move_animation(runtime_shell);
+    }
+    if runtime_shell.visible_send_out_animation.is_some() {
+        return advance_visible_send_out_animation(runtime_shell);
+    }
+    if runtime_shell.visible_trainer_exit_animation.is_some() {
+        return advance_visible_trainer_exit_animation(runtime_shell);
+    }
+    Ok(())
+}
+
 fn next_player_walk_stride(_remaining_ticks: u8, current_stride: bool) -> bool {
     // TypeScript primes one entry of [standing, step, standing, mirrored step]
     // for each tile. `true` selects an action frame; the separate mirror bit
@@ -2857,6 +3048,16 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
     }
 }
 
+#[cfg(not(test))]
+fn log_visible_movement_event(
+    _runtime_shell: &mut BevyRuntimeShell,
+    _event_kind: &str,
+    _object_id: &str,
+    _detail: String,
+) {
+}
+
+#[cfg(test)]
 fn log_visible_movement_event(
     runtime_shell: &mut BevyRuntimeShell,
     event_kind: &str,
@@ -2886,6 +3087,14 @@ fn log_visible_movement_event(
     }
 }
 
+#[cfg(not(test))]
+fn log_visible_key_presses(
+    _runtime_shell: &mut BevyRuntimeShell,
+    _keys: &ButtonInput<KeyCode>,
+) {
+}
+
+#[cfg(test)]
 fn log_visible_key_presses(
     runtime_shell: &mut BevyRuntimeShell,
     keys: &ButtonInput<KeyCode>,
@@ -2921,7 +3130,11 @@ fn log_visible_key_presses(
         .as_ref()
         .filter(|(label, _)| label == dialogue)
         .map(|(_, page_index)| page_index + 1);
-    let owner = if runtime_shell.pending_day_of_week.is_some() {
+    let owner = if runtime_shell.pending_name_input.is_some() {
+        "name-entry"
+    } else if runtime_shell.pending_name_choice.is_some() {
+        "name-choice"
+    } else if runtime_shell.pending_day_of_week.is_some() {
         "weekday"
     } else if snapshot
         .as_ref()
@@ -8561,6 +8774,10 @@ fn advance_visible_heal_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<
     runtime_shell.visible_heal_machine.as_mut().unwrap().frame += 1;
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
+}
+
+fn visible_heal_machine_is_terminal(animation: &VisibleHealMachine) -> bool {
+    animation.frame >= u16::from(animation.party_count) * 30 + 80
 }
 
 fn queue_visible_heal_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {

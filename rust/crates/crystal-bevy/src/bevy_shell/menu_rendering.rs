@@ -1808,27 +1808,34 @@ fn load_trainer_card_palettes(asset_root: &AssetRoot) -> Result<Vec<Palette>> {
 }
 
 fn load_trainer_card_badge_palette(asset_root: &AssetRoot) -> Result<Palette> {
+    load_named_predef_palette(asset_root, "PREDEFPAL_CGB_BADGE")
+}
+
+fn load_named_predef_palette(asset_root: &AssetRoot, palette_name: &str) -> Result<Palette> {
     let path = asset_root.runtime_assets().join("gfx/sgb/predef.pal");
     let text = crate::read_runtime_asset_to_string(&path)
-        .with_context(|| format!("read Trainer Card badge palette {}", path.display()))?;
+        .with_context(|| format!("read predefined palette {}", path.display()))?;
     let line = text
         .lines()
-        .find(|line| line.contains("; PREDEFPAL_CGB_BADGE"))
-        .with_context(|| format!("{} has no PREDEFPAL_CGB_BADGE entry", path.display()))?;
+        .find(|line| {
+            line.split_once(';')
+                .is_some_and(|(_, comment)| comment.split_whitespace().next() == Some(palette_name))
+        })
+        .with_context(|| format!("{} has no {palette_name} entry", path.display()))?;
     let rgb = line
         .split_once(';')
         .map(|(rgb, _)| rgb)
-        .context("Trainer Card badge palette entry has no comment separator")?
+        .with_context(|| format!("{palette_name} entry has no comment separator"))?
         .trim()
         .strip_prefix("RGB")
-        .context("Trainer Card badge palette entry does not begin with RGB")?;
+        .with_context(|| format!("{palette_name} entry does not begin with RGB"))?;
     let components = rgb
         .split(',')
         .map(|component| component.trim().parse::<u8>())
         .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parse PREDEFPAL_CGB_BADGE components")?;
+        .with_context(|| format!("parse {palette_name} components"))?;
     if components.len() != 12 || components.iter().any(|component| *component > 31) {
-        anyhow::bail!("PREDEFPAL_CGB_BADGE must contain four RGB5 colors, got {components:?}");
+        anyhow::bail!("{palette_name} must contain four RGB5 colors, got {components:?}");
     }
     let mut palette = [[0_u8; 3]; 4];
     for (index, color) in components.chunks_exact(3).enumerate() {
@@ -3812,29 +3819,6 @@ struct RenderEntityQueries<'w, 's> {
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
             Without<LedgeShadowMarker>,
-            Without<PlayfieldMapBackingBase>,
-            Without<PlayfieldMapBackingPriorityAxis>,
-        ),
-    >,
-    map_backing_bases: Query<'w, 's, Entity, With<PlayfieldMapBackingBase>>,
-    map_backing_priorities: Query<
-        'w,
-        's,
-        (
-            &'static PlayfieldMapBackingPriorityAxis,
-            &'static mut Transform,
-            &'static mut Sprite,
-        ),
-        // These exclusions are semantic invariants and make the mutable
-        // transform query provably disjoint to Bevy's runtime validator.
-        (
-            With<PlayfieldMapBackingPriorityAxis>,
-            Without<PlayfieldTile>,
-            Without<PlayfieldMapBackingBase>,
-            Without<PlayerMarker>,
-            Without<VisibleObjectSprite>,
-            Without<DialogGlyphMarker>,
-            Without<LedgeShadowMarker>,
         ),
     >,
     players: Query<'w, 's, Entity, Or<(With<PlayerMarker>, With<PlayerFacingMarker>)>>,
@@ -3927,24 +3911,6 @@ fn set_overworld_map_scroll(
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
             Without<LedgeShadowMarker>,
-            Without<PlayfieldMapBackingBase>,
-            Without<PlayfieldMapBackingPriorityAxis>,
-        ),
-    >,
-    map_backing_priorities: &mut Query<
-        (
-            &PlayfieldMapBackingPriorityAxis,
-            &mut Transform,
-            &mut Sprite,
-        ),
-        (
-            With<PlayfieldMapBackingPriorityAxis>,
-            Without<PlayfieldTile>,
-            Without<PlayfieldMapBackingBase>,
-            Without<PlayerMarker>,
-            Without<VisibleObjectSprite>,
-            Without<DialogGlyphMarker>,
-            Without<LedgeShadowMarker>,
         ),
     >,
     offset: Vec2,
@@ -3961,53 +3927,6 @@ fn set_overworld_map_scroll(
         // in this transform.
         transform.translation.x = offset.x;
         transform.translation.y = offset.y;
-    }
-
-    // The moving front surface carries one complete runtime tile of real map
-    // art beyond every LCD edge. Legacy cropped priority backings sampled the
-    // previous viewport in display-pixel coordinates and produced duplicated
-    // roofs/buildings at the leading edge. Keep those retained entities
-    // hidden; they remain only to preserve stable handles across old saves and
-    // tests while the halo itself supplies both base and priority pixels.
-    for (_, mut transform, mut sprite) in map_backing_priorities.iter_mut() {
-        sprite.rect = None;
-        sprite.custom_size = Some(Vec2::ZERO);
-        transform.translation = Vec3::new(0.0, 0.0, 2.39);
-    }
-}
-
-fn sync_overworld_map_backing_image(
-    source: &Handle<Image>,
-    existing: Option<Handle<Image>>,
-    images: &mut Assets<Image>,
-) -> Option<Handle<Image>> {
-    let source_image = images.get(source)?.clone();
-    if let Some(handle) = existing
-        && handle.id() != source.id()
-    {
-        if let Some(target) = images.get_mut(&handle) {
-            target.clone_from(&source_image);
-        } else {
-            // Preserve the stable asset id already referenced by the backing
-            // entity even if an external asset cleanup removed its value.
-            images.insert(handle.id(), source_image);
-        }
-        return Some(handle);
-    }
-    Some(images.add(source_image))
-}
-
-fn sync_overworld_map_backing(rendered: &mut RenderedViewport, images: &mut Assets<Image>) {
-    if let Some(source) = rendered.map_texture.clone() {
-        rendered.map_backing_texture =
-            sync_overworld_map_backing_image(&source, rendered.map_backing_texture.clone(), images);
-    }
-    if let Some(source) = rendered.map_priority_texture.clone() {
-        rendered.map_backing_priority_texture = sync_overworld_map_backing_image(
-            &source,
-            rendered.map_backing_priority_texture.clone(),
-            images,
-        );
     }
 }
 
@@ -4119,8 +4038,6 @@ fn render_playfield(
         map_base_surfaces,
         map_priority_surfaces,
         mut map_sprites,
-        map_backing_bases,
-        mut map_backing_priorities,
         players,
         mut player_sprites,
         mut ledge_shadows,
@@ -4913,7 +4830,10 @@ fn render_playfield(
         && runtime_shell.pending_day_of_week.is_none()
         && runtime_shell.visible_balance_overlay.is_none()
         && runtime_shell.visible_mom_bank.is_none()
-        && (snapshot.ui.text.is_some() || snapshot.ui.pending_yes_no.is_some());
+        && (snapshot.ui.text.is_some()
+            || snapshot.ui.pending_yes_no.is_some()
+            || runtime_shell.field_notice.is_some()
+            || runtime_shell.pc_notice.is_some());
     if dialog_only_update && rendered.dialog_key != dialog_key {
         let retained_yes_no_prompt = yes_no_prompts.iter().next().is_some();
         let desired_yes_no_prompt = scene_dialog_yes_no_active(&snapshot, &runtime_shell);
@@ -5115,10 +5035,9 @@ fn render_playfield(
         {
             let camera_offset =
                 visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe);
-            set_overworld_map_scroll(&mut map_sprites, &mut map_backing_priorities, camera_offset);
+            set_overworld_map_scroll(&mut map_sprites, camera_offset);
             if camera_offset == Vec2::ZERO {
                 rendered.walk_viewport_origin = None;
-                sync_overworld_map_backing(&mut rendered, &mut images);
             }
             rendered.state_hash = Some(state_hash);
             rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
@@ -5652,6 +5571,7 @@ fn render_playfield(
     );
     let (visual_world_halo, visual_world_tiles_x, visual_world_tiles_y) =
         visual_world_grid_dimensions(visual_world_enabled);
+    #[cfg(any(test, feature = "voxel-view"))]
     let mut visual_tiles = Vec::with_capacity(
         usize::try_from(visual_world_tiles_x * visual_world_tiles_y).unwrap_or_default(),
     );
@@ -5663,6 +5583,7 @@ fn render_playfield(
             0
         },
     );
+    #[cfg(any(test, feature = "voxel-view"))]
     let mut visual_tileset_ids = HashMap::<&str, Arc<str>>::new();
     for visual_y in 0..visual_world_tiles_y {
         for visual_x in 0..visual_world_tiles_x {
@@ -5756,6 +5677,8 @@ fn render_playfield(
                 );
                 return;
             };
+            #[cfg(not(any(test, feature = "voxel-view")))]
+            let _ = source_tile_index;
             if inside_scroll_surface {
                 viewport_tile_handles.push(tile_handle.clone());
             }
@@ -5799,24 +5722,28 @@ fn render_playfield(
             let collision_index = (if sub_y < 2 { 0 } else { 2 }) + if sub_x < 2 { 0 } else { 1 };
             let priority = priority_collision_token(&collision[collision_index])
                 || (foreground_bottom && sub_y >= 1);
-            let visual_tileset_id = visual_tileset_ids
-                .entry(source_tileset.tileset_id.as_str())
-                .or_insert_with(|| Arc::from(source_tileset.tileset_id.as_str()))
-                .clone();
-            visual_tiles.push(crystal_render_api::VisualTile {
-                column: visual_x as u32,
-                row: visual_y as u32,
-                source: crystal_render_api::VisualTileSource {
-                    tileset_id: visual_tileset_id,
-                    metatile_id: block,
-                    subtile_column: u8::try_from(sub_x)
-                        .expect("4x4 metatile column always fits u8"),
-                    subtile_row: u8::try_from(sub_y).expect("4x4 metatile row always fits u8"),
-                    tile_index: u16::from(source_tile_index),
-                },
-                texture: tile_handle.clone(),
-                priority,
-            });
+            #[cfg(any(test, feature = "voxel-view"))]
+            {
+                let visual_tileset_id = visual_tileset_ids
+                    .entry(source_tileset.tileset_id.as_str())
+                    .or_insert_with(|| Arc::from(source_tileset.tileset_id.as_str()))
+                    .clone();
+                visual_tiles.push(crystal_render_api::VisualTile {
+                    column: visual_x as u32,
+                    row: visual_y as u32,
+                    source: crystal_render_api::VisualTileSource {
+                        tileset_id: visual_tileset_id,
+                        metatile_id: block,
+                        subtile_column: u8::try_from(sub_x)
+                            .expect("4x4 metatile column always fits u8"),
+                        subtile_row: u8::try_from(sub_y)
+                            .expect("4x4 metatile row always fits u8"),
+                        tile_index: u16::from(source_tile_index),
+                    },
+                    texture: tile_handle.clone(),
+                    priority,
+                });
+            }
             let priority_spec = if priority {
                 let Some(handle) = tileset_art
                     .cache
@@ -5890,13 +5817,9 @@ fn render_playfield(
         && (runtime_shell.player_walk_frame_ticks > 0
             || runtime_shell.visible_ledge_jump.is_some())
         && previous_viewport_origin != Some((start_x, start_y));
-    if origin_changing_walk {
-        // Capture the complete source viewport before the persistent front
-        // handles are mutated into the destination.  Doing this only when an
-        // origin actually changes avoids copying 640x576 buffers on ordinary
-        // ambient-animation redraws.
-        sync_overworld_map_backing(&mut rendered, &mut images);
-    }
+    // The active base and priority surfaces include a complete four-tile
+    // halo, which covers the largest ordinary camera step without exposing
+    // an edge or requiring a duplicate texture pair.
     // There is exactly one mutable base-layer LCD image. Keeping its handle on
     // the visible entity lets Bevy draw the previous complete viewport until
     // the replacement upload is ready. A former origin cache stored this same
@@ -5950,18 +5873,16 @@ fn render_playfield(
         );
         rendered.visual_world_enabled = visual_world_enabled;
     }
-    rendered.visual_tiles = visual_tiles;
+    #[cfg(any(test, feature = "voxel-view"))]
+    {
+        rendered.visual_tiles = visual_tiles;
+    }
     rendered.viewport_origin = Some((start_x, start_y));
     rendered.walk_viewport_origin = if origin_changing_walk {
         previous_viewport_origin
     } else {
         None
     };
-    // Seed the pair on the first map frame. Later origin changes refresh it
-    // from the complete old front immediately before recomposition above.
-    if rendered.map_backing_texture.is_none() || rendered.map_backing_priority_texture.is_none() {
-        sync_overworld_map_backing(&mut rendered, &mut images);
-    }
     rendered.map_visual_key = Some(map_visual_key);
     rendered.tile_frame_key = Some(tile_frame_key);
     let mut visible_tileset_art_keys = vec![tileset_art_key.clone()];
@@ -6022,7 +5943,7 @@ fn render_playfield(
     runtime_shell.ambient_tileset_animation_schedule = schedule;
     let camera_offset =
         visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe);
-    set_overworld_map_scroll(&mut map_sprites, &mut map_backing_priorities, camera_offset);
+    set_overworld_map_scroll(&mut map_sprites, camera_offset);
     if can_update_positions_in_place
         && tiles.iter().count() == 2
         && update_overworld_sprite_positions(
@@ -6083,48 +6004,6 @@ fn render_playfield(
             PlayfieldPriorityTile,
         ));
     }
-    if map_backing_bases.iter().next().is_none()
-        && let Some(texture) = rendered.map_backing_texture.clone()
-    {
-        commands.spawn((
-            SpriteBundle {
-                texture,
-                sprite: Sprite {
-                    custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
-                    ..default()
-                },
-                // The front base is fully opaque wherever it overlaps.  This
-                // settled copy appears only in the edge uncovered by scroll.
-                transform: Transform::from_xyz(0.0, 0.0, -0.01),
-                ..default()
-            },
-            PlayfieldMapBackingBase,
-        ));
-    }
-    if map_backing_priorities.iter().next().is_none()
-        && let Some(texture) = rendered.map_backing_priority_texture.clone()
-    {
-        for axis in [
-            PlayfieldMapBackingPriorityAxis::X,
-            PlayfieldMapBackingPriorityAxis::Y,
-        ] {
-            commands.spawn((
-                SpriteBundle {
-                    texture: texture.clone(),
-                    sprite: Sprite {
-                        // Hidden while settled. set_overworld_map_scroll
-                        // reveals only the old edge uncovered by movement.
-                        custom_size: Some(Vec2::ZERO),
-                        ..default()
-                    },
-                    transform: Transform::from_xyz(0.0, 0.0, 2.39),
-                    ..default()
-                },
-                axis,
-            ));
-        }
-    }
-
     {
         let mut reconciled_object_entities = std::collections::HashSet::new();
         // `LoadAndSortSprites` in the ASM/TypeScript renderer orders objects by
@@ -6193,13 +6072,10 @@ fn render_playfield(
                     .map(|(_, from)| *from)
                     .or_else(|| runtime_shell.object_walk_from.get(object_id).copied())
             });
-            let destination_visible =
-                (0..VIEWPORT_TILES_X).contains(&view_x) && (0..VIEWPORT_TILES_Y).contains(&view_y);
+            let destination_visible = overworld_object_in_scroll_region(view_x, view_y);
             let origin_visible = walking_from
                 .and_then(|from| runtime_event_view_tile(from, start_x, start_y))
-                .is_some_and(|(x, y)| {
-                    (0..VIEWPORT_TILES_X).contains(&x) && (0..VIEWPORT_TILES_Y).contains(&y)
-                });
+                .is_some_and(|(x, y)| overworld_object_in_scroll_region(x, y));
             if !destination_visible && !origin_visible {
                 continue;
             }

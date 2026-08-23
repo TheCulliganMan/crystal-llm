@@ -25,12 +25,21 @@ export function getLandmarkLabel(label: string): string | undefined {
 }
 
 export function resolveLandmarkText(entry: LandmarkEntry): string {
+  let name: string | undefined;
   const labelValue = entry["label"];
   if (labelValue) {
     const text = getLandmarkLabel(String(labelValue));
     if (text) {
-      return text;
+      name = text;
     }
   }
-  return String(entry["name"] ?? "");
+  name ??= String(entry["name"] ?? "");
+  if (name.length <= 11) {
+    return name;
+  }
+  const split = name.lastIndexOf(" ", 11);
+  if (split < 0) {
+    return `${name.slice(0, 11)}\n${name.slice(11, 22)}`;
+  }
+  return `${name.slice(0, split)}\n${name.slice(split + 1, split + 12)}`;
 }

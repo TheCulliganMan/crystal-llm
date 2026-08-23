@@ -929,7 +929,7 @@ fn retained_map_surface_pair(world: &mut World) -> RetainedMapSurfacePair {
 }
 
 fn assert_opaque_base_surface_covers_camera(world: &mut World) {
-    let mut candidates = {
+    let candidates = {
         let mut bases = world.query_filtered::<
                 (&Handle<Image>, &Sprite, &Transform),
                 (With<PlayfieldTile>, Without<PlayfieldPriorityTile>),
@@ -943,20 +943,6 @@ fn assert_opaque_base_surface_covers_camera(world: &mut World) {
             })
             .collect::<Vec<_>>()
     };
-    {
-        let mut backing = world
-            .query_filtered::<(&Handle<Image>, &Sprite, &Transform), With<PlayfieldMapBackingBase>>(
-            );
-        candidates.extend(
-            backing
-                .iter(world)
-                .filter_map(|(handle, sprite, transform)| {
-                    sprite
-                        .custom_size
-                        .map(|size| (handle.clone(), size, transform.translation.truncate()))
-                }),
-        );
-    }
     let images = world.resource::<Assets<Image>>();
     let viewport_left = -PLAYFIELD_WIDTH * 0.5;
     let viewport_right = PLAYFIELD_WIDTH * 0.5;
@@ -972,7 +958,7 @@ fn assert_opaque_base_surface_covers_camera(world: &mut World) {
                     .get(handle)
                     .is_some_and(|image| image.data.chunks_exact(4).all(|pixel| pixel[3] == 255))
         }),
-        "the live or retained backing base must cover every camera pixel: {candidates:?}"
+        "the live base surface must cover every camera pixel: {candidates:?}"
     );
 }
 

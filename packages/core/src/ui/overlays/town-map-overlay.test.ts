@@ -40,4 +40,33 @@ describe("TownMapOverlay runner coordination", () => {
     overlay.close();
     expect(runner.resume).toHaveBeenCalledTimes(1);
   });
+
+  it("resets the standalone cursor to the player and implements ASM Up/Down/B controls", () => {
+    const gameState = createInitialGameState();
+    const overlay = new TownMapOverlay({} as unknown, gameState, {
+      lock_movement: jest.fn(),
+      unlock_movement: jest.fn(),
+    });
+    const stateMachine = (overlay as any).stateMachine;
+    stateMachine.refresh = jest.fn();
+    stateMachine.resetMapCursorToPlayer = jest.fn();
+    stateMachine.moveMapCursor = jest.fn();
+    (overlay as any).renderMapSurface = jest.fn();
+
+    overlay.show();
+
+    expect(stateMachine.resetMapCursorToPlayer).toHaveBeenCalledTimes(1);
+    expect(overlay.handle_input({ type: "keydown", direction: "up", is_press: true })).toBe(true);
+    expect(stateMachine.moveMapCursor).toHaveBeenCalledWith(1);
+    expect(overlay.visible).toBe(true);
+
+    overlay.handle_input({ type: "keydown", direction: "down", is_press: true });
+    expect(stateMachine.moveMapCursor).toHaveBeenCalledWith(-1);
+
+    overlay.handle_input({ type: "keydown", button: "a", is_press: true });
+    expect(overlay.visible).toBe(true);
+
+    overlay.handle_input({ type: "keydown", button: "b", is_press: true });
+    expect(overlay.visible).toBe(false);
+  });
 });

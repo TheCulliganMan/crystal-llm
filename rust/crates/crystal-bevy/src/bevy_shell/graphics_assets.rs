@@ -356,6 +356,17 @@ fn runtime_event_view_tile(tile: TilePosition, start_x: i16, start_y: i16) -> Op
     ))
 }
 
+fn overworld_object_in_scroll_region(view_x: i16, view_y: i16) -> bool {
+    // The map surface carries one runtime tile beyond the LCD so a camera
+    // step can reveal it continuously. Keep character OAM in that same region;
+    // culling against only the settled LCD made edge characters appear or
+    // disappear as a complete sprite at the end of the scroll.
+    (-CLASSIC_SCROLL_HALO_TILES..VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES)
+        .contains(&view_x)
+        && (-CLASSIC_SCROLL_HALO_TILES..VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES)
+            .contains(&view_y)
+}
+
 fn runtime_tile_playfield_position(
     tile: TilePosition,
     start_x: i16,

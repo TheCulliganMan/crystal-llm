@@ -11,6 +11,7 @@ import { joinPath } from "../../core/path-utils";
 import { TilemapSurface } from "../tilemap-surface";
 import { Surface } from "../surface";
 import { gbc5To8 } from "../../core/gbc-colors";
+import { NpcPaletteManager } from "../../engine/world/overworld/palette";
 
 const { PNG } = require("pngjs") as any;
 
@@ -503,6 +504,7 @@ export class PokegearBackground {
   private readonly banks = new Map<PlayerGender, TileBank>();
   private readonly fontTileCache = new Map<string, Record<number, Surface>>();
   private readonly playerIconCache = new Map<PlayerGender, Surface[]>();
+  private readonly npcPaletteManager = new NpcPaletteManager();
   private frameTileLevels: number[][] | null = null;
   private spaceTileLevels: number[] | null = null;
   private fontTileLevels: number[][] | null = null;
@@ -570,6 +572,26 @@ export class PokegearBackground {
 
   spriteTiles(): Surface[] {
     return this.spriteTileSet;
+  }
+
+  playerIconSurface(timeOfDay?: string | null): Surface {
+    const sourceTiles = this.playerIconTiles(this.gender).slice(0, 4);
+    this.verifyPlayerIconLength(this.playerIconTiles(this.gender));
+    const paletteId = this.gender === PlayerGender.FEMALE ? 1 : 0;
+    const palette = this.npcPaletteManager.palette(paletteId, timeOfDay);
+    const icon = new Surface(16, 16);
+    sourceTiles.forEach((tile, tileIndex) => {
+      const tileX = (tileIndex % 2) * TILE_SIZE;
+      const tileY = Math.floor(tileIndex / 2) * TILE_SIZE;
+      for (let y = 0; y < TILE_SIZE; y += 1) {
+        for (let x = 0; x < TILE_SIZE; x += 1) {
+          const level = Math.max(0, Math.min(3, Math.round(tile.getAt(x, y)[0] / 85)));
+          const [r, g, b] = palette[level];
+          icon.setAt(tileX + x, tileY + y, [r, g, b, level === 0 ? 0 : 255]);
+        }
+      }
+    });
+    return icon;
   }
 
   windowFillColor(): [number, number, number] {

@@ -198,6 +198,16 @@ export class PokegearStateMachine {
     this.gameState.wram.pokegear_map_cursor_landmark = this.cursorLandmarkId;
   }
 
+  resetMapCursorToPlayer(): void {
+    const index = this.mapLandmarkIds.indexOf(this.playerLandmarkId);
+    if (index < 0) {
+      return;
+    }
+    this.mapIndex = index;
+    this.cursorLandmarkId = this.playerLandmarkId;
+    this.gameState.wram.pokegear_map_cursor_landmark = this.cursorLandmarkId;
+  }
+
   get phoneNumbers(): string[] {
     return [...this.gameState.sram.phone_numbers];
   }

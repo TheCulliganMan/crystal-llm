@@ -2458,20 +2458,68 @@ fn givepoke_enters_nickname_prompt_without_an_invented_gift_selection() {
     );
 
     confirm_visible_name_choice(&mut runtime_shell).expect("accept nickname prompt");
-    runtime_shell
+    let name_input = runtime_shell
         .pending_name_input
         .as_mut()
-        .expect("starter naming screen")
-        .value = "EMBER".to_string();
-    confirm_visible_player_name_input(&mut runtime_shell).expect("commit starter nickname");
+        .expect("starter naming screen");
+    assert_eq!(
+        name_input.value, "",
+        "the ASM naming screen clears the nickname destination instead of prefilling the species"
+    );
+    assert_eq!(name_input.label, "CYNDAQUIL'S\nNICKNAME?");
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+    {
+        let world = app.world_mut();
+        let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
+        assert_eq!(presenters.iter(world).count(), 1, "starter naming LCD did not render");
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .pending_name_input
+            .as_ref()
+            .map(|input| input.value.as_str()),
+        Some("AA"),
+        "the live naming screen must accept the shown two-letter nickname"
+    );
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        let input = runtime_shell
+            .pending_name_input
+            .as_ref()
+            .expect("starter naming screen after Start");
+        assert_eq!(
+            (input.cursor_column, input.cursor_row),
+            (8, visible_name_input_bottom_row_index()),
+            "Start must move the cursor to END"
+        );
+    }
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    app.update();
+    app.update();
 
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
     let snapshot = runtime_shell
         .shell
         .snapshot()
         .expect("named starter snapshot");
     assert_eq!(snapshot.party.slots.len(), 1);
-    assert_eq!(snapshot.party.slots[0].pokemon.nickname, "EMBER");
+    assert_eq!(snapshot.party.slots[0].pokemon.nickname, "AA");
     assert!(runtime_shell.pending_gift_pokemon_nickname.is_none());
+    {
+        let world = app.world_mut();
+        let mut presenters = world.query_filtered::<Entity, With<VisibleIntroSurface>>();
+        assert_eq!(
+            presenters.iter(world).count(),
+            0,
+            "the naming LCD remained over the script after nickname confirmation"
+        );
+    }
 }
 
 #[test]

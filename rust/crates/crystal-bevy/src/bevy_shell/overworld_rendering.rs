@@ -3089,10 +3089,18 @@ fn spawn_field_pokegear_screen(
             snapshot.trainer.player_gender,
             town_tile_palettes,
             pokegear_tile_palettes,
+            runtime_shell.pokegear_standalone_map,
             images,
         )
         .with_context(|| {
-            let key = (region.to_ascii_lowercase(), snapshot.trainer.player_gender);
+            let key = (
+                format!(
+                    "{}:{}",
+                    if runtime_shell.pokegear_standalone_map { "standalone" } else { "pokegear" },
+                    region.to_ascii_lowercase()
+                ),
+                snapshot.trainer.player_gender,
+            );
             format!(
                 "render Town Map: {}",
                 rendered_art
@@ -3112,14 +3120,17 @@ fn spawn_field_pokegear_screen(
         )?;
         let landmarks = &snapshot.presentation.pokegear_landmarks.landmarks;
         let landmark = selected_pokegear_landmark(snapshot, runtime_shell.pokegear_cursor)?;
-        for (row, line) in landmark.name.split('\n').take(2).enumerate() {
+        for (row, line) in town_map_label_lines(&landmark.name).iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
             let (x, y) = battle_hud_tile_origin(9.0, row as f32);
             spawn_field_command_bitmap_text(
                 commands,
                 rendered_art,
                 asset_root,
                 images,
-                &line.chars().take(11).collect::<String>(),
+                line,
                 x,
                 y,
                 3.8,
@@ -3140,7 +3151,15 @@ fn spawn_field_pokegear_screen(
             .iter()
             .find(|entry| entry.constant == *current_constant)
             .with_context(|| format!("current Pokégear landmark {current_constant} is missing"))?;
-        spawn_town_map_markers(commands, current, landmark);
+        spawn_town_map_markers(
+            commands,
+            snapshot,
+            rendered_art,
+            asset_root,
+            images,
+            current,
+            landmark,
+        )?;
     }
     if runtime_shell.pokegear_page != PokegearPage::Map {
         spawn_non_map_pokegear_content(
@@ -3233,6 +3252,23 @@ enum TownMapMarkerKind {
     Cursor,
 }
 
+fn town_map_label_lines(name: &str) -> [String; 2] {
+    let name = name.trim();
+    if name.chars().count() <= 11 {
+        return [name.to_string(), String::new()];
+    }
+    let split = name
+        .char_indices()
+        .filter(|(index, character)| *character == ' ' && *index <= 11)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or_else(|| name.char_indices().nth(11).map_or(name.len(), |(index, _)| index));
+    [
+        name[..split].trim().to_string(),
+        name[split..].trim().chars().take(11).collect(),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TownMapMarkerRect {
     kind: TownMapMarkerKind,
@@ -3241,22 +3277,14 @@ struct TownMapMarkerRect {
 }
 
 fn town_map_marker_rects(
-    player: &crate::core::models::PokegearLandmark,
+    _player: &crate::core::models::PokegearLandmark,
     cursor: &crate::core::models::PokegearLandmark,
 ) -> Vec<TownMapMarkerRect> {
     let project = |landmark: &crate::core::models::PokegearLandmark| {
         Vec2::new(landmark.x as f32 - 8.0, landmark.y as f32 - 16.0)
     };
-    let player = project(player);
     let cursor = project(cursor);
-    let mut rects = Vec::with_capacity(13);
-    for (y, width) in [(-2.0, 3.0), (-1.0, 5.0), (0.0, 7.0), (1.0, 5.0), (2.0, 3.0)] {
-        rects.push(TownMapMarkerRect {
-            kind: TownMapMarkerKind::Player,
-            center: player + Vec2::new(0.0, y),
-            size: Vec2::new(width, 1.0),
-        });
-    }
+    let mut rects = Vec::with_capacity(8);
     for (offset, size) in [
         (Vec2::new(-4.5, -7.0), Vec2::new(7.0, 2.0)),
         (Vec2::new(4.5, -7.0), Vec2::new(7.0, 2.0)),
@@ -3278,13 +3306,56 @@ fn town_map_marker_rects(
 
 fn spawn_town_map_markers(
     commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
     player: &crate::core::models::PokegearLandmark,
     cursor: &crate::core::models::PokegearLandmark,
-) {
+) -> Result<()> {
     let scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+    let player_center = Vec2::new(player.x as f32 - 8.0, player.y as f32 - 16.0);
+    let female = snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE;
+    let (sprite_id, sprite_token) = if female {
+        ("kris", "SPRITE_KRIS")
+    } else {
+        ("chris", "SPRITE_CHRIS")
+    };
+    let palette_id = resolve_visible_object_palette(
+        sprite_token,
+        snapshot.trainer.player_palette_id,
+        &snapshot.presentation.sprite_palette_defaults,
+    );
+    let player_frame = sprite_frame_for_art(
+        rendered_art,
+        asset_root,
+        sprite_id,
+        palette_id,
+        snapshot.progression.time.time_of_day.as_key(),
+        Direction::Down,
+        false,
+        images,
+    )
+    .with_context(|| format!("render Town Map player sprite {sprite_id}"))?;
+    commands.spawn((
+        SpriteBundle {
+            texture: player_frame.handle,
+            sprite: Sprite {
+                custom_size: Some(player_frame.size * scale),
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                PLAYFIELD_LEFT + player_center.x * scale,
+                PLAYFIELD_TOP - player_center.y * scale,
+                3.65,
+            ),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
     for rect in town_map_marker_rects(player, cursor) {
         let color = match rect.kind {
-            TownMapMarkerKind::Player => Color::srgb(224.0 / 255.0, 0.0, 64.0 / 255.0),
+            TownMapMarkerKind::Player => unreachable!("player uses the authored sprite"),
             TownMapMarkerKind::Cursor => Color::BLACK,
         };
         let z = match rect.kind {
@@ -3308,6 +3379,7 @@ fn spawn_town_map_markers(
             FieldCommandMarker,
         ));
     }
+    Ok(())
 }
 
 /// Render the same 20x18 Johto tilemap and palette-selected town-map tiles
@@ -8759,13 +8831,6 @@ const NAME_ENTRY_BORDER_TILE: u8 = 0x60;
 const NAME_ENTRY_SPACE_TILE: u8 = 0x7f;
 const NAME_ENTRY_UNDERLINE_TILE: u8 = 0xf2;
 const NAME_ENTRY_MIDDLE_LINE_TILE: u8 = 0xeb;
-// ASM: SCGB_DIPLOMA loads palette 0 from gfx/diploma/diploma.pal.
-const NAME_ENTRY_BG_PALETTE: [[u8; 3]; 4] = [
-    [222, 255, 222],
-    [173, 173, 173],
-    [107, 107, 107],
-    [0, 0, 0],
-];
 const NAME_ENTRY_LETTER_X_OFFSETS: [i16; 9] =
     [0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
 const NAME_ENTRY_CASE_ROW_X_OFFSETS: [i16; 9] =
@@ -8804,6 +8869,10 @@ fn load_name_entry_frame(
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     let assets = asset_root.runtime_assets();
+    // GetSGBLayout(SCGB_DIPLOMA) first copies DiplomaPalettes, then
+    // _CGB_Diploma::CopyFourPalettes overwrites BG palette 0 with the
+    // PREDEFPAL_DIPLOMA row used by every un-attributed naming-screen tile.
+    let background_palette = load_named_predef_palette(asset_root, "PREDEFPAL_DIPLOMA")?;
     let mut font = crate::open_runtime_image(assets.join("gfx/font/font.png"))
         .context("decode naming screen font PNG")?
         .to_rgba8();
@@ -8824,7 +8893,7 @@ fn load_name_entry_frame(
         .to_rgba8();
 
     for image in [&mut font, &mut font_extra, &mut border, &mut underline, &mut middle_line] {
-        apply_name_entry_background_palette(image);
+        apply_name_entry_background_palette(image, &background_palette);
     }
 
     let tilemap = build_name_entry_tilemap(input)?;
@@ -8833,9 +8902,9 @@ fn load_name_entry_frame(
     let mut data = vec![0_u8; width * height * 4];
     for pixel in data.chunks_exact_mut(4) {
         pixel.copy_from_slice(&[
-            NAME_ENTRY_BG_PALETTE[0][0],
-            NAME_ENTRY_BG_PALETTE[0][1],
-            NAME_ENTRY_BG_PALETTE[0][2],
+            background_palette[0][0],
+            background_palette[0][1],
+            background_palette[0][2],
             255,
         ]);
     }
@@ -8875,7 +8944,7 @@ fn load_name_entry_frame(
     })
 }
 
-fn apply_name_entry_background_palette(image: &mut image::RgbaImage) {
+fn apply_name_entry_background_palette(image: &mut image::RgbaImage, palette: &Palette) {
     for pixel in image.pixels_mut() {
         let grayscale = if pixel[3] == 0 {
             255
@@ -8883,7 +8952,7 @@ fn apply_name_entry_background_palette(image: &mut image::RgbaImage) {
             ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3) as u8
         };
         let palette_index = usize::from(((255_u16 - u16::from(grayscale) + 42) / 85).min(3));
-        let color = NAME_ENTRY_BG_PALETTE[palette_index];
+        let color = palette[palette_index];
         *pixel = image::Rgba([color[0], color[1], color[2], 255]);
     }
 }
@@ -8896,12 +8965,17 @@ fn build_name_entry_tilemap(input: &PendingNameInput) -> Result<Vec<Vec<u8>>> {
     clear_name_entry_box(&mut tilemap, 1, 1, 18, 6);
     clear_name_entry_box(&mut tilemap, 1, 8, 18, 7);
     clear_name_entry_box(&mut tilemap, 1, 16, 18, 1);
-    write_name_entry_string(
-        &mut tilemap,
-        &input.label.to_uppercase(),
-        NAME_ENTRY_NAME_X,
-        2,
-    )?;
+    for (line_index, line) in input.label.lines().take(2).enumerate() {
+        let line_y = 2 + line_index * 2;
+        let line_width = tokenize_name_entry_string(line).len();
+        if line_width > NAME_ENTRY_SCREEN_TILE_WIDTH - NAME_ENTRY_NAME_X {
+            anyhow::bail!(
+                "naming-screen heading line {line:?} is {line_width} tiles wide, maximum is {}",
+                NAME_ENTRY_SCREEN_TILE_WIDTH - NAME_ENTRY_NAME_X
+            );
+        }
+        write_name_entry_string(&mut tilemap, line, NAME_ENTRY_NAME_X, line_y)?;
+    }
 
     let mut name_tiles = vec![NAME_ENTRY_MIDDLE_LINE_TILE; input.max_length];
     if !name_tiles.is_empty() {

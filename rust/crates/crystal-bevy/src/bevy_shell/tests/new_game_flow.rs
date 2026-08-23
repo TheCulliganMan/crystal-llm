@@ -872,8 +872,8 @@ fn player_name_entry_renders_real_naming_screen_assets() {
     assert_eq!(image.texture_descriptor.size.height, 144);
     assert_eq!(frame.size, Vec2::new(160.0, 144.0));
     assert_eq!(name_entry_screen_center(), Vec3::ZERO);
-    assert_eq!(&image.data[0..4], &[222, 255, 222, 255]);
-    assert_eq!(&image.data[(161 * 4)..(162 * 4)], &[107, 107, 107, 255]);
+    assert_eq!(&image.data[0..4], &[255, 255, 255, 255]);
+    assert_eq!(&image.data[(161 * 4)..(162 * 4)], &[132, 115, 156, 255]);
     assert_opaque_nonblack_lcd_pixels(&image.data, "name entry");
     assert!(
         image
@@ -886,6 +886,34 @@ fn player_name_entry_renders_real_naming_screen_assets() {
         image.data.chunks_exact(4).all(|pixel| pixel[3] == 255),
         "naming screen must be fully opaque so the overworld cannot bleed through UI"
     );
+}
+
+#[test]
+fn pokemon_name_entry_uses_the_two_line_asm_heading_without_clipping() {
+    let input = PendingNameInput {
+        label: visible_pokemon_nickname_label("CYNDAQUIL"),
+        value: "AA".to_string(),
+        max_length: 10,
+        cursor_column: 0,
+        cursor_row: 0,
+        case: NameInputCase::Upper,
+    };
+
+    let tilemap = build_name_entry_tilemap(&input).expect("build Pokemon nickname tilemap");
+    for (row, expected) in [(2, "CYNDAQUIL'S"), (4, "NICKNAME?")] {
+        for (offset, token) in tokenize_name_entry_string(expected).iter().enumerate() {
+            assert_eq!(
+                tilemap[row][NAME_ENTRY_NAME_X + offset],
+                name_entry_token_tile(token).expect("heading glyph"),
+                "wrong heading tile for {token:?} at row {row}"
+            );
+        }
+        assert_eq!(
+            tilemap[row][NAME_ENTRY_NAME_X + tokenize_name_entry_string(expected).len()],
+            0,
+            "heading must terminate inside the cleared name box"
+        );
+    }
 }
 
 #[test]

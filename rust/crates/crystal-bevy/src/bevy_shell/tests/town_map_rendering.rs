@@ -21,13 +21,7 @@ fn town_map_markers_project_oam_coordinates_at_full_lcd_scale() {
 
     let rects = town_map_marker_rects(&player, &cursor);
 
-    assert_eq!(
-        rects
-            .iter()
-            .filter(|rect| rect.kind == TownMapMarkerKind::Player)
-            .count(),
-        5
-    );
+    assert_eq!(rects.iter().filter(|rect| rect.kind == TownMapMarkerKind::Player).count(), 0);
     assert_eq!(
         rects
             .iter()
@@ -35,11 +29,27 @@ fn town_map_markers_project_oam_coordinates_at_full_lcd_scale() {
             .count(),
         8
     );
-    assert_eq!(rects[2].center, Vec2::new(32.0, 40.0));
-    assert_eq!(rects[2].size, Vec2::new(7.0, 1.0));
-    assert_eq!(rects[5].center, Vec2::new(75.5, 73.0));
-    assert_eq!(rects[5].size, Vec2::new(7.0, 2.0));
+    assert_eq!(rects[0].center, Vec2::new(75.5, 73.0));
+    assert_eq!(rects[0].size, Vec2::new(7.0, 2.0));
     assert_eq!(TILE_SIZE / SOURCE_TILE_SIZE as f32, 4.0);
+}
+
+#[test]
+fn town_map_labels_wrap_at_the_asm_panel_width() {
+    assert_eq!(town_map_label_lines("NATIONAL PARK"), ["NATIONAL", "PARK"]);
+    assert_eq!(town_map_label_lines("NEW BARK TOWN"), ["NEW BARK", "TOWN"]);
+    assert_eq!(town_map_label_lines("ROUTE 29"), ["ROUTE 29", ""]);
+}
+
+#[test]
+fn standalone_town_map_frame_matches_the_asm_header_tiles() {
+    let mut tilemap = vec![0; 20 * 18];
+    apply_standalone_town_map_frame(&mut tilemap);
+
+    assert_eq!(&tilemap[..8], &[0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x17]);
+    assert_eq!(tilemap[20 + 7], 0x16);
+    assert_eq!(tilemap[40 + 7], 0x26);
+    assert_eq!(&tilemap[40 + 8..40 + 20], &[0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x17]);
 }
 
 #[test]
@@ -70,7 +80,7 @@ fn town_map_frame_reserves_the_two_row_landmark_label_panel() {
     let pokegear = tokens("pokegear");
     let mut images = Assets::<Image>::default();
 
-    let frame = load_town_map_frame(&asset_root, "johto", 0, &town, &pokegear, &mut images)
+    let frame = load_town_map_frame(&asset_root, "johto", 0, &town, &pokegear, false, &mut images)
         .expect("render Johto Town Map");
     let image = images.get(&frame.handle).expect("Town Map image");
     let pixel = |x: usize, y: usize| {

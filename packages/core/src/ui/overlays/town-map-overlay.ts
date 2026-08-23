@@ -3,7 +3,8 @@ import { LandmarkEntry } from "@pokecrystal/assets/content/pokegear";
 import { PlayerGender } from "@pokecrystal/core/core/enums";
 import { GameState } from "@pokecrystal/core/core/state";
 import { Event, EventManager } from "@pokecrystal/core/engine/events/events";
-import { KeyEvent, isCancelEvent, isConfirmEvent } from "@pokecrystal/core/input/buttons";
+import { KeyEvent, isCancelEvent, isKeyDownEvent } from "@pokecrystal/core/input/buttons";
+import { mapKeyToDirection } from "@pokecrystal/core/input/controls";
 import { PokegearBackground } from "@pokecrystal/core/ui/menus/pokegear-bg";
 import { PokegearCard, PokegearStateMachine } from "@pokecrystal/core/ui/menus/pokegear-state";
 import { resolveLandmarkText } from "@pokecrystal/core/ui/menus/pokegear-labels";
@@ -46,33 +47,6 @@ const toGameEngineSurface = (surface: UiSurface): Surface => {
   }
   context.putImageData(surface.getImageData(), 0, 0);
   return target;
-};
-
-const drawCircle = (
-  surface: UiSurface,
-  color: [number, number, number],
-  center: [number, number],
-  radius: number,
-  width = 0,
-): void => {
-  const [cx, cy] = center;
-  const r2 = radius * radius;
-  const inner = Math.max(0, radius - width);
-  const inner2 = inner * inner;
-  for (let y = cy - radius; y <= cy + radius; y += 1) {
-    for (let x = cx - radius; x <= cx + radius; x += 1) {
-      const dx = x - cx;
-      const dy = y - cy;
-      const dist2 = dx * dx + dy * dy;
-      if (dist2 > r2) {
-        continue;
-      }
-      if (width > 0 && dist2 < inner2) {
-        continue;
-      }
-      surface.setAt(x, y, [color[0], color[1], color[2], 255]);
-    }
-  }
 };
 
 export class TownMapOverlay {
@@ -139,6 +113,7 @@ export class TownMapOverlay {
     }
     this.ensureGenderAssets();
     this.stateMachine.refresh();
+    this.stateMachine.resetMapCursorToPlayer();
     this.renderMapSurface();
     const runner = event.data.runner ?? null;
     this.captureRunner(runner);
@@ -152,6 +127,7 @@ export class TownMapOverlay {
     }
     this.ensureGenderAssets();
     this.stateMachine.refresh();
+    this.stateMachine.resetMapCursorToPlayer();
     this.renderMapSurface();
     this.captureRunner(runner);
     this.lockMovement();
@@ -166,6 +142,7 @@ export class TownMapOverlay {
     const tilemap = new TilemapSurface();
     const tiles = this.background.tilemapForCard(PokegearCard.MAP, this.stateMachine.mapRegion);
     tilemap.loadTiles(tiles);
+    this.applyStandaloneFrame(tilemap);
     const label = resolveLandmarkText(this.stateMachine.mapCursorEntry as LandmarkEntry);
     this.writeMapLabel(tilemap, label);
 
@@ -194,10 +171,21 @@ export class TownMapOverlay {
     }
   }
 
+  private applyStandaloneFrame(tilemap: TilemapSurface): void {
+    tilemap.fillRect(1, 0, 6, 1, 0x07);
+    tilemap.setTile(0, 0, 0x06);
+    tilemap.setTile(7, 0, 0x17);
+    tilemap.setTile(7, 1, 0x16);
+    tilemap.setTile(7, 2, 0x26);
+    tilemap.fillRect(8, 2, 11, 1, 0x07);
+    tilemap.setTile(19, 2, 0x17);
+  }
+
   private drawMarkerDots(surface: UiSurface): void {
     const playerEntry = this.stateMachine.mapPlayerEntry;
     const [playerX, playerY] = this.project(playerEntry);
-    drawCircle(surface, [224, 0, 64], [playerX, playerY], 3);
+    const playerIcon = this.background.playerIconSurface(String(this.gameState.wram.time_of_day ?? "day"));
+    surface.blit(playerIcon, [playerX - 8, playerY - 8]);
 
     const cursorEntry = this.stateMachine.mapCursorEntry;
     const [cursorX, cursorY] = this.project(cursorEntry);
@@ -212,9 +200,20 @@ export class TownMapOverlay {
     if (!this.visibleFlag) {
       return false;
     }
-    if (isConfirmEvent(event) || isCancelEvent(event)) {
+    if (!isKeyDownEvent(event)) {
+      return true;
+    }
+    if (isCancelEvent(event)) {
       this.close();
       return true;
+    }
+    const direction = mapKeyToDirection(event.direction ?? event.code ?? event.key ?? null);
+    if (direction === "up") {
+      this.stateMachine.moveMapCursor(1);
+      this.renderMapSurface();
+    } else if (direction === "down") {
+      this.stateMachine.moveMapCursor(-1);
+      this.renderMapSurface();
     }
     return true;
   }

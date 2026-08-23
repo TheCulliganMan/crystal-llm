@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
@@ -789,6 +790,7 @@ struct BevyRuntimeShell {
     pokedex_scripted_entry: bool,
     pokedex_cursor: usize,
     pokegear_menu_open: bool,
+    pokegear_standalone_map: bool,
     pokegear_cursor: usize,
     pokegear_phone_cursor: usize,
     pokegear_phone_status: Option<String>,
@@ -1458,6 +1460,31 @@ fn continuous_game_winit_settings() -> WinitSettings {
         focused_mode: UpdateMode::Continuous,
         unfocused_mode: UpdateMode::Continuous,
     }
+}
+
+fn low_latency_game_window(title: String) -> Window {
+    Window {
+        title,
+        resolution: WindowResolution::new(640.0, 576.0),
+        // Let the backend select its best synchronized presentation mode
+        // instead of forcing the roughly three-frame FIFO queue. Limit the
+        // swapchain to one queued frame so input and interpolated transforms
+        // reach the display on the next refresh rather than several refreshes
+        // later.
+        present_mode: PresentMode::AutoVsync,
+        desired_maximum_frame_latency: NonZeroU32::new(1),
+        // The game is a fixed 160x144 LCD presentation at 4x. A resizable
+        // window exposes non-Game-Boy space and breaks the integer scale.
+        resizable: false,
+        ..default()
+    }
+}
+
+const fn classic_pixel_art_msaa() -> Msaa {
+    // Every classic surface is nearest-sampled pixel art aligned to the LCD
+    // coordinate system. Multisampling cannot improve those hard texel edges;
+    // it only shades and resolves the complete 640x576 frame four times.
+    Msaa::Off
 }
 
 fn visible_effect_frames_after_ticks(frames_remaining: u16, elapsed_ticks: u32) -> u16 {
@@ -3318,9 +3345,8 @@ impl VisibleSequenceTickClock {
         // catch-up loop. Keep a small bounded catch-up so a 20-30 Hz host
         // still displays the original 60 Hz sequence duration, while a long
         // stall cannot fast-forward through an entire fade or page of text.
-        let frames = frames.min(MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES);
         self.accumulated_seconds -= self.step_seconds * frames as f32;
-        frames
+        frames.min(MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES)
     }
 }
 
@@ -3330,15 +3356,10 @@ struct RenderedViewport {
     tile: Option<TilePosition>,
     map_texture: Option<Handle<Image>>,
     map_priority_texture: Option<Handle<Image>>,
-    /// Previous fully-settled viewport.  The live composite moves by up to
-    /// one render tile while the camera catches up to a committed step; this
-    /// stable copy fills the edge that movement exposes instead of allowing
-    /// the window clear colour to show through.
-    map_backing_texture: Option<Handle<Image>>,
-    map_backing_priority_texture: Option<Handle<Image>>,
     /// Read-only presentation metadata for an optional overworld renderer.
     /// These cells describe the same 20x18 source-tile viewport as
     /// `map_texture`; they never participate in collision or movement.
+    #[cfg(any(test, feature = "voxel-view"))]
     visual_tiles: Vec<crystal_render_api::VisualTile>,
     /// Feature-gated terrain surface extending beyond the Game Boy viewport.
     /// It is consumed only by the optional voxel renderer and never displayed
@@ -3715,12 +3736,10 @@ impl VisibleScreenFade {
     }
 
     fn advance(&mut self, delta_seconds: f32) {
-        self.accumulated_seconds += delta_seconds.max(0.0);
-        let frames = (self.accumulated_seconds / GAME_TICK_SECONDS).floor() as u16;
+        let frames = take_visible_sequence_frames(&mut self.accumulated_seconds, delta_seconds);
         if frames == 0 {
             return;
         }
-        self.accumulated_seconds -= GAME_TICK_SECONDS * f32::from(frames);
         self.elapsed_frames = self
             .elapsed_frames
             .saturating_add(frames)
@@ -3738,6 +3757,13 @@ impl VisibleScreenFade {
             };
         }
     }
+}
+
+fn take_visible_sequence_frames(accumulated_seconds: &mut f32, delta_seconds: f32) -> u16 {
+    *accumulated_seconds += delta_seconds.max(0.0);
+    let frames = (*accumulated_seconds / GAME_TICK_SECONDS).floor() as u16;
+    *accumulated_seconds -= GAME_TICK_SECONDS * f32::from(frames);
+    frames.min(MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as u16)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4158,20 +4184,6 @@ struct PlayfieldTile;
 #[derive(Component)]
 struct PlayfieldPriorityTile;
 
-/// Opaque copy of the last settled base viewport, retained behind the live
-/// map while its exact-size 640x576 composite scrolls by one tile.
-#[derive(Component)]
-struct PlayfieldMapBackingBase;
-
-/// Cropped copies of the last settled priority viewport.  Separate axes let
-/// an unusual diagonal origin change expose both edges without drawing stale
-/// priority pixels over the transparent parts of the new viewport.
-#[derive(Component, Clone, Copy)]
-enum PlayfieldMapBackingPriorityAxis {
-    X,
-    Y,
-}
-
 #[derive(Component)]
 struct PlayerMarker;
 
@@ -4317,6 +4329,7 @@ pub fn run_bevy_shell(
     #[cfg(all(not(test), target_arch = "wasm32"))]
     app.insert_non_send_resource(BrowserAudioBackend::new());
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.06)))
+        .insert_resource(classic_pixel_art_msaa())
         .insert_resource(runtime_shell)
         // Oak fades, script emotes, and WaitSFX are Game Boy frame loops.
         // Keep driving them while the host window is unfocused; reactive
@@ -4329,23 +4342,9 @@ pub fn run_bevy_shell(
         .insert_resource(RenderedTilesetArt::default())
         .insert_resource(HudMode::Status)
         .add_plugins(DefaultPlugins.build().set(WindowPlugin {
-            primary_window: Some(Window {
-                title: window_title,
-                resolution: WindowResolution::new(640.0, 576.0),
-                // AutoVsync is allowed to select an uncapped mode on some
-                // macOS backends. FIFO is the explicit blocking/vsync path;
-                // it prevents an idle shell from burning a CPU core while
-                // the runtime still advances at the fixed Game Boy cadence.
-                present_mode: PresentMode::Fifo,
-                // The game is a fixed 160x144 LCD presentation at 4x.  A
-                // resizable host window exposes non-Game-Boy space and makes
-                // pixel scale inconsistent between screens.
-                resizable: false,
-                ..default()
-            }),
+            primary_window: Some(low_latency_game_window(window_title)),
             ..default()
         }))
-        .add_plugins(crystal_render_api::VisualWorldRenderPlugin)
         .add_systems(Startup, setup_shell_view)
         .add_systems(
             Update,
@@ -4424,7 +4423,9 @@ pub fn run_bevy_shell(
         .add_systems(Update, refresh_status_text.after(render_playfield))
         .add_systems(Update, refresh_dialog_text.after(refresh_status_text))
         .add_systems(Update, refresh_battle_text.after(refresh_dialog_text))
-        .add_systems(Update, refresh_shell_panels.after(refresh_battle_text))
+        .add_systems(Update, refresh_shell_panels.after(refresh_battle_text));
+    #[cfg(feature = "voxel-view")]
+    app.add_plugins(crystal_render_api::VisualWorldRenderPlugin)
         .add_systems(
             Update,
             publish_visual_world_frame
@@ -4493,8 +4494,6 @@ fn sync_manual_world_view_layers(
         Entity,
         Or<(
             With<PlayfieldTile>,
-            With<PlayfieldMapBackingBase>,
-            With<PlayfieldMapBackingPriorityAxis>,
             With<PlayerMarker>,
             With<ObjectMarker>,
             With<LedgeShadowMarker>,
@@ -6180,6 +6179,7 @@ fn initialize_bevy_runtime_shell(
         pokedex_scripted_entry: false,
         pokedex_cursor: 0,
         pokegear_menu_open: false,
+        pokegear_standalone_map: false,
         pokegear_cursor: 0,
         pokegear_phone_cursor: 0,
         pokegear_phone_status: None,
@@ -6354,6 +6354,7 @@ include!("bevy_shell/battle_messages.rs");
 include!("bevy_shell/battle_results.rs");
 include!("bevy_shell/battle_entry.rs");
 include!("bevy_shell/menu_rendering.rs");
+#[cfg(any(test, feature = "voxel-view"))]
 include!("bevy_shell/render_mod.rs");
 include!("bevy_shell/overworld_rendering.rs");
 include!("bevy_shell/start_menu.rs");

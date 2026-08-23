@@ -3127,10 +3127,14 @@ fn town_map_frame_for_art(
     player_gender: u8,
     tile_palettes: &[String],
     pokegear_tile_palettes: &[String],
+    standalone: bool,
     images: &mut Assets<Image>,
 ) -> Option<SpriteFrame> {
     let region = if region.eq_ignore_ascii_case("KANTO") { "kanto" } else { "johto" };
-    let key = (region.to_string(), player_gender);
+    let key = (
+        format!("{}:{region}", if standalone { "standalone" } else { "pokegear" }),
+        player_gender,
+    );
     if !rendered_art.town_map_cache.contains_key(&key)
         && !rendered_art.town_map_errors.contains_key(&key)
     {
@@ -3140,6 +3144,7 @@ fn town_map_frame_for_art(
             player_gender,
             tile_palettes,
             pokegear_tile_palettes,
+            standalone,
             images,
         ) {
             Ok(frame) => {
@@ -3159,6 +3164,7 @@ fn load_town_map_frame(
     player_gender: u8,
     tile_palettes: &[String],
     pokegear_tile_palettes: &[String],
+    standalone: bool,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     const WIDTH_TILES: usize = 20;
@@ -3208,6 +3214,9 @@ fn load_town_map_frame(
         tilemap.len(),
         WIDTH_TILES * HEIGHT_TILES
     );
+    if standalone {
+        apply_standalone_town_map_frame(&mut tilemap);
+    }
     let width = WIDTH_TILES * TILE_PIXELS;
     let height = HEIGHT_TILES * TILE_PIXELS;
     let mut data = vec![0_u8; width * height * 4];
@@ -3291,6 +3300,17 @@ fn load_town_map_frame(
         handle: images.add(image),
         size: Vec2::new(width as f32, height as f32),
     })
+}
+
+fn apply_standalone_town_map_frame(tilemap: &mut [u8]) {
+    const WIDTH_TILES: usize = 20;
+    tilemap[0] = 0x06;
+    tilemap[1..7].fill(0x07);
+    tilemap[7] = 0x17;
+    tilemap[WIDTH_TILES + 7] = 0x16;
+    tilemap[2 * WIDTH_TILES + 7] = 0x26;
+    tilemap[2 * WIDTH_TILES + 8..2 * WIDTH_TILES + 19].fill(0x07);
+    tilemap[2 * WIDTH_TILES + 19] = 0x17;
 }
 
 fn pokegear_card_frame_for_art(

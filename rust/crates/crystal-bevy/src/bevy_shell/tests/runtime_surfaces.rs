@@ -263,6 +263,185 @@ fn native_catch_up_journals_one_exact_batched_game_timer_command() {
 }
 
 #[test]
+fn battle_transition_consumes_every_bounded_catch_up_tick() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    runtime_shell.visible_battle_transition = Some(VisibleBattleTransition {
+        frame: 0,
+        stronger_enemy: false,
+        cave_environment: true,
+        trainer_battle: false,
+    });
+    let mut timer = RuntimeTickTimer::new(999.0);
+    timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+    timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(runtime_shell)
+        .insert_resource(native_rtc_source_for_test())
+        .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(timer)
+        .add_systems(Update, apply_keyboard_input);
+
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .visible_battle_transition
+            .expect("battle transition remains active")
+            .frame,
+        MAX_RUNTIME_CATCH_UP_TICKS as u16,
+        "battle entry must retain its 60 Hz duration when rendering falls below 60 FPS"
+    );
+
+    let terminal_frame = {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        let transition = runtime_shell
+            .visible_battle_transition
+            .as_mut()
+            .expect("battle transition remains active");
+        let terminal_frame = visible_battle_transition_total_frames(transition) - 1;
+        transition.frame = terminal_frame - 1;
+        terminal_frame
+    };
+    {
+        let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
+        timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+        timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .visible_battle_transition
+            .expect("terminal black frame must be presented before battle setup")
+            .frame,
+        terminal_frame,
+        "catch-up must not skip the transition's terminal black presentation"
+    );
+}
+
+#[test]
+fn retained_animations_consume_every_bounded_catch_up_tick() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    runtime_shell.visible_fishing_animation = Some(VisibleFishingAnimation {
+        phase: VisibleFishingPhase::Cast,
+        frame: 10,
+        facing_up: false,
+        bite: false,
+        starts_battle: false,
+    });
+    let mut timer = RuntimeTickTimer::new(999.0);
+    timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+    timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(runtime_shell)
+        .insert_resource(native_rtc_source_for_test())
+        .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(timer)
+        .add_systems(Update, apply_keyboard_input);
+
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .visible_fishing_animation
+            .expect("fishing cast remains active")
+            .frame,
+        15
+    );
+
+    {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        runtime_shell.visible_fishing_animation = None;
+        runtime_shell.visible_heal_machine = Some(VisibleHealMachine {
+            kind: 0,
+            party_count: 1,
+            frame: 1,
+        });
+    }
+    {
+        let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
+        timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+        timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .visible_heal_machine
+            .as_ref()
+            .expect("heal animation remains active")
+            .frame,
+        6
+    );
+
+    {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        runtime_shell.visible_heal_machine = None;
+        runtime_shell.battle_hp_tween = Some(VisibleBattleHpTween {
+            player_hp: 10,
+            player_target_hp: 15,
+            player_max_hp: 64,
+            player_pixels: 10,
+            player_target_pixels: 15,
+            player_frames_until_step: 0,
+            enemy_pixels: 20,
+            enemy_target_pixels: 20,
+            enemy_frames_until_step: 0,
+        });
+    }
+    {
+        let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
+        timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+        timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .battle_hp_tween
+            .as_ref()
+            .expect("HP tween remains retained")
+            .player_pixels,
+        13,
+        "the two-frame HP pixel cadence must consume all five elapsed frames"
+    );
+
+    {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        runtime_shell.battle_hp_tween = None;
+        runtime_shell.pending_field_notice_effect_frames = Some(32);
+        runtime_shell.visible_map_name_sign = Some(VisibleMapNameSign {
+            landmark: "TEST".to_string(),
+            label: "TEST".to_string(),
+            frames_remaining: 10,
+        });
+    }
+    {
+        let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
+        timer.finished_vblanks = MAX_RUNTIME_CATCH_UP_TICKS;
+        timer.finished_ticks = MAX_RUNTIME_CATCH_UP_TICKS;
+    }
+    app.update();
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+    assert_eq!(runtime_shell.pending_field_notice_effect_frames, Some(27));
+    assert_eq!(
+        runtime_shell
+            .visible_map_name_sign
+            .as_ref()
+            .expect("map sign remains visible")
+            .frames_remaining,
+        5
+    );
+}
+
+#[test]
 fn modal_early_return_does_not_replay_an_already_consumed_vblank_next_update() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;
@@ -972,7 +1151,7 @@ fn retained_field_fullscreen_ownership_distinguishes_new_game_and_capture_name_c
     runtime_shell.pokedex_detail_open = false;
     assert!(!retained_field_fullscreen_active(&runtime_shell));
     runtime_shell.pending_name_input = Some(PendingNameInput {
-        label: "NAME YOUR POKéMON?".to_string(),
+        label: "SUDOWOODO'S\nNICKNAME?".to_string(),
         value: "".to_string(),
         max_length: 10,
         cursor_column: 0,

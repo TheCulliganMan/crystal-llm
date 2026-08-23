@@ -24,4 +24,18 @@ describe("pokegear-labels", () => {
       })
     ).toBe("TEST PLACE");
   });
+
+  it("preserves the ASM town-map line break", () => {
+    expect(
+      resolveLandmarkText({
+        id: 999,
+        constant: "LANDMARK_TEST",
+        label: "MissingLabel",
+        name: "NATIONAL PARK",
+        x: 0,
+        y: 0,
+        region: "JOHTO",
+      })
+    ).toBe("NATIONAL\nPARK");
+  });
 });
