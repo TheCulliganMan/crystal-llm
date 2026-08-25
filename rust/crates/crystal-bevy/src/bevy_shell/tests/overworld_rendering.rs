@@ -603,10 +603,10 @@ fn held_direction_cycles_standing_and_both_step_frames() {
 }
 
 #[test]
-fn catch_up_draws_the_same_walk_subtile_as_typescript() {
+fn new_walk_step_does_not_consume_ticks_elapsed_before_it_started() {
     assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 0), 8);
-    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 1), 7);
-    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 4), 4);
+    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 1), 8);
+    assert_eq!(visible_new_step_frames_remaining(WALK_FRAME_HOLD_TICKS, 4), 8);
 
     let target = TilePosition { x: 4, y: 2 };
     let from = TilePosition { x: 2, y: 2 };
@@ -621,6 +621,258 @@ fn catch_up_draws_the_same_walk_subtile_as_typescript() {
 
     assert_eq!(two_ticks.0 - one_tick.0, (settled.0 - origin.0) / 8.0);
     assert_eq!(two_ticks.1, one_tick.1);
+}
+
+#[test]
+fn renderer_hitch_never_skips_visible_overworld_walk_substeps() {
+    assert_eq!(visible_walk_ticks_for_host_update(0), 0);
+    assert_eq!(visible_walk_ticks_for_host_update(1), 1);
+    assert_eq!(visible_walk_ticks_for_host_update(4), 1);
+}
+
+#[test]
+fn overworld_walk_advances_one_visible_substep_after_renderer_catch_up() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize renderer catch-up fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 16;
+    for _ in 0..16 {
+        app.update();
+        if app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .player_walk_frame_ticks
+            == WALK_FRAME_HOLD_TICKS
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_walk_frame_ticks,
+        WALK_FRAME_HOLD_TICKS,
+        "fixture must begin an authoritative overworld step"
+    );
+
+    app.world_mut()
+        .resource_mut::<RuntimeTickTimer>()
+        .finished_vblanks = 4;
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .player_walk_frame_ticks,
+        WALK_FRAME_HOLD_TICKS - 1,
+        "four accumulated simulation ticks must not skip four rendered walk positions"
+    );
+}
+
+#[test]
+fn full_redraw_mid_walk_retains_the_active_camera_origin() {
+    let old_origin = Some((4, 2));
+    let new_origin = Some((6, 2));
+
+    assert_eq!(
+        next_walk_viewport_origin(old_origin, None, new_origin, true),
+        old_origin,
+        "the camera scroll begins at the previously rendered origin"
+    );
+    assert_eq!(
+        next_walk_viewport_origin(new_origin, old_origin, new_origin, true),
+        old_origin,
+        "an ambient/full redraw during the step must retain the active scroll origin"
+    );
+    assert_eq!(
+        next_walk_viewport_origin(new_origin, old_origin, new_origin, false),
+        None,
+        "the retained origin clears after movement lands"
+    );
+}
+
+#[test]
+fn forced_full_redraw_does_not_jump_the_walking_player_transform() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize mid-walk redraw fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    app.world_mut().resource_mut::<HeldArrowRightTestFrames>().0 = 16;
+    for _ in 0..16 {
+        app.update();
+        let world = app.world();
+        if world
+            .resource::<RenderedViewport>()
+            .walk_viewport_origin
+            .is_some()
+            && world
+                .resource::<BevyRuntimeShell>()
+                .player_walk_frame_ticks
+                > 1
+        {
+            break;
+        }
+    }
+    assert!(
+        app.world()
+            .resource::<RenderedViewport>()
+            .walk_viewport_origin
+            .is_some(),
+        "fixture must begin a camera-following walk"
+    );
+    let before = {
+        let world = app.world_mut();
+        let mut players = world.query_filtered::<&Transform, With<PlayerMarker>>();
+        players
+            .get_single(world)
+            .expect("player before forced redraw")
+            .translation
+    };
+
+    app.world_mut()
+        .resource_mut::<RenderedViewport>()
+        .shell_render_key = None;
+    app.update();
+
+    let after = {
+        let world = app.world_mut();
+        let mut players = world.query_filtered::<&Transform, With<PlayerMarker>>();
+        players
+            .get_single(world)
+            .expect("player after forced redraw")
+            .translation
+    };
+    let displacement = (after - before).truncate().length();
+    assert!(
+        displacement
+            <= TILE_SIZE * f32::from(METATILE_WIDTH) / f32::from(WALK_FRAME_HOLD_TICKS) * 1.5,
+        "a full redraw skipped visible movement positions: before={before:?} after={after:?} displacement={displacement}"
+    );
+}
+
+#[test]
+fn new_bark_full_width_back_and_forth_has_no_transform_spikes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "NewBarkTown".to_string(),
+            tile_x: 13,
+            tile_y: 6,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize full-width New Bark fixture");
+    let mut app = integrated_shell_test_app(runtime_shell);
+    app.update();
+
+    let mut maximum_displacement = 0.0_f32;
+    for (key, target_x) in [
+        (KeyCode::ArrowRight, 17),
+        (KeyCode::ArrowLeft, 2),
+        (KeyCode::ArrowRight, 17),
+    ] {
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.reset(KeyCode::ArrowLeft);
+            keys.reset(KeyCode::ArrowRight);
+            keys.press(key);
+        }
+        let mut reached_target = false;
+        for _ in 0..240 {
+            let before = {
+                let world = app.world_mut();
+                let mut players = world.query_filtered::<&Transform, With<PlayerMarker>>();
+                players
+                    .get_single(world)
+                    .expect("player before full-width update")
+                    .translation
+            };
+            // Exercise the failure path aggressively: ordinary ambient tile
+            // animation reaches the same full-redraw branch periodically.
+            app.world_mut()
+                .resource_mut::<RenderedViewport>()
+                .shell_render_key = None;
+            app.update();
+            let after = {
+                let world = app.world_mut();
+                let mut players = world.query_filtered::<&Transform, With<PlayerMarker>>();
+                players
+                    .get_single(world)
+                    .expect("player after full-width update")
+                    .translation
+            };
+            maximum_displacement = maximum_displacement.max((after - before).truncate().length());
+
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            let tile = shell
+                .shell
+                .snapshot()
+                .expect("New Bark snapshot")
+                .overworld
+                .tile;
+            reached_target = tile.x == target_x && shell.player_walk_frame_ticks == 0;
+            if reached_target {
+                break;
+            }
+        }
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.reset(KeyCode::ArrowLeft);
+            keys.reset(KeyCode::ArrowRight);
+        }
+        app.update();
+        assert!(reached_target, "{key:?} did not reach New Bark x={target_x}");
+    }
+
+    let maximum_normal_substep =
+        TILE_SIZE * f32::from(METATILE_WIDTH) / f32::from(WALK_FRAME_HOLD_TICKS) * 1.5;
+    assert!(
+        maximum_displacement <= maximum_normal_substep,
+        "full-width New Bark traversal contained a transform spike: maximum={maximum_displacement}, allowed={maximum_normal_substep}"
+    );
 }
 
 #[test]
@@ -1411,6 +1663,14 @@ fn direction_tap_between_game_ticks_rotates_player_on_next_tick() {
         assert_eq!(snapshot.overworld.tile, initial_tile);
         assert_eq!(snapshot.overworld.facing, Direction::Down);
     }
+    let terrain_scans_before_turn = app
+        .world()
+        .resource::<RenderedViewport>()
+        .terrain_scan_count;
+    assert!(
+        terrain_scans_before_turn > 0,
+        "initial rendering must scan terrain"
+    );
     {
         let mut timer = app.world_mut().resource_mut::<RuntimeTickTimer>();
         timer.finished_vblanks = 1;
@@ -1431,6 +1691,21 @@ fn direction_tap_between_game_ticks_rotates_player_on_next_tick() {
         Some(Direction::Up),
         "the latched tap must refresh the retained player sprite"
     );
+    assert_eq!(
+        app.world()
+            .resource::<RenderedViewport>()
+            .terrain_scan_count,
+        terrain_scans_before_turn,
+        "turning in place must update player art without rescanning unchanged terrain"
+    );
+}
+
+#[test]
+fn collision_lookup_uses_canonical_hex_without_heap_formatting() {
+    for (block, expected) in [(0, "00"), (0x0f, "0f"), (0xff, "ff"), (0x100, "100")] {
+        let mut buffer = [0; 4];
+        assert_eq!(tileset_collision_key(block, &mut buffer), expected);
+    }
 }
 
 #[test]

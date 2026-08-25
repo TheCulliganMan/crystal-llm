@@ -3414,6 +3414,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
+        initialize_loaded_object_roster(session, state);
         clear_transient_map_object_context(state, session);
         reset_map_bike_flags(state)?;
         // EnterMap arms wWildEncounterCooldown before running map setup.
@@ -11155,6 +11156,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
+        initialize_loaded_object_roster(session, state);
         if let Some((facing, last_step_direction)) = connection_movement {
             // ASM EnterMapConnection updates wMapGroup/wMapNumber, the
             // coordinates, and wOverworldMapAnchor in place. Unlike a warp,
@@ -11214,6 +11216,7 @@ impl GameDataSet {
         state.bag.tm_hm = initial_tmhm_flags(&self.items);
         apply_initialize_events(&mut state, &self.initialize_events)
             .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        initialize_loaded_object_roster(&mut overworld, &state);
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
@@ -11257,6 +11260,7 @@ impl GameDataSet {
         state.bag.tm_hm = initial_tmhm_flags(&self.items);
         apply_initialize_events(&mut state, &self.initialize_events)
             .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        initialize_loaded_object_roster(&mut overworld, &state);
         // The location tester may enter any map before ordinary story scripts
         // have first written that map's WRAM bytes. A real new game reaches
         // callbacks with cleared WRAM, so seed every exact readmem target used
@@ -11322,6 +11326,7 @@ impl GameDataSet {
         )?;
         overworld.player.facing = facing;
         overworld.player.mode = mode;
+        initialize_loaded_object_roster(&mut overworld, &state);
         self.apply_saved_overworld_overrides(&mut overworld, &state)?;
         let mode = self.map_entry_movement_mode(&state, &overworld, mode)?;
         overworld.player.mode = mode;

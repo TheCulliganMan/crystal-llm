@@ -48,8 +48,27 @@ fn tileset_collision_tokens<'a>(
 ) -> Option<&'a [String]> {
     // Exported ASM metatile ids are canonical lowercase hexadecimal (for
     // example block 15 is keyed as "0f", not decimal "15" or "0F").
-    let key = format!("{block:02x}");
-    tileset.collision.get(&key).map(|tokens| tokens.as_slice())
+    let mut key_buffer = [b'0'; 4];
+    let key = tileset_collision_key(block, &mut key_buffer);
+    tileset.collision.get(key).map(|tokens| tokens.as_slice())
+}
+
+fn tileset_collision_key(block: u16, buffer: &mut [u8; 4]) -> &str {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = block;
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = HEX[usize::from(value & 0x0f)];
+        value >>= 4;
+        if value == 0 {
+            break;
+        }
+    }
+    let digit_start = start;
+    start = start.min(buffer.len() - 2);
+    buffer[start..digit_start].fill(b'0');
+    std::str::from_utf8(&buffer[start..]).expect("hex digits are valid UTF-8")
 }
 
 fn spawn_object_label(
@@ -1839,7 +1858,7 @@ fn render_visible_asm_text_pages(
             || token_body.starts_with("RAM:")
             || token_body.starts_with("DECIMAL:")
         {
-            if let Some(value) = named_buffers.get(buffer_id) {
+            if let Some(value) = visible_named_text_buffer(named_buffers, buffer_id) {
                 resolved.push_str(value);
             }
         } else {
@@ -1870,9 +1889,31 @@ fn render_named_text_buffer(
     named_buffers: &BTreeMap<String, String>,
 ) -> String {
     buffer_id
-        .and_then(|buffer_id| named_buffers.get(buffer_id))
+        .and_then(|buffer_id| visible_named_text_buffer(named_buffers, buffer_id))
         .cloned()
         .unwrap_or_default()
+}
+
+fn visible_named_text_buffer<'a>(
+    named_buffers: &'a BTreeMap<String, String>,
+    buffer_id: &str,
+) -> Option<&'a String> {
+    named_buffers.get(buffer_id).or_else(|| {
+        let alias = match buffer_id {
+            "wStringBuffer1" => "STRING_BUFFER_1",
+            "wStringBuffer2" => "STRING_BUFFER_2",
+            "wStringBuffer3" => "STRING_BUFFER_3",
+            "wStringBuffer4" => "STRING_BUFFER_4",
+            "wStringBuffer5" => "STRING_BUFFER_5",
+            "STRING_BUFFER_1" => "wStringBuffer1",
+            "STRING_BUFFER_2" => "wStringBuffer2",
+            "STRING_BUFFER_3" => "wStringBuffer3",
+            "STRING_BUFFER_4" => "wStringBuffer4",
+            "STRING_BUFFER_5" => "wStringBuffer5",
+            _ => return None,
+        };
+        named_buffers.get(alias)
+    })
 }
 
 fn append_field_overlay(

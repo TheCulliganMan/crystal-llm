@@ -2276,6 +2276,84 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
     );
     let _ = shell;
 
+    // Re-enter immediately after Mom's introduction. Crystal replaces the
+    // moving intro object with the ordinary Mom object on this fresh map load.
+    for _ in 0..96 {
+        let current_map = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .map_name;
+        if current_map == "PlayersHouse1F" {
+            break;
+        }
+        let path = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            collision_path_to_map_warp(&shell.shell.session().overworld, "PLAYERS_HOUSE_1F")
+        };
+        press_visible_direction_until_tile_changes(&mut app, path[0]);
+        settle_visible_story_boundary(&mut app);
+    }
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = shell.shell.snapshot().expect("house re-entry snapshot");
+    assert_eq!(snapshot.overworld.map_name, "PlayersHouse1F");
+    let visible_mom = snapshot
+        .visible_objects
+        .iter()
+        .find(|object| object.script == "MomScript")
+        .and_then(|object| object.object_identifier.as_deref());
+    assert!(
+        visible_mom.is_some(),
+        "Mom's completed-story object must load on re-entry; flags={:?} objects={:?}",
+        snapshot.progression.active_event_flags,
+        shell.shell.session().overworld.objects
+    );
+    let visible_mom = visible_mom.unwrap();
+    assert_eq!(
+        app.world()
+            .iter_entities()
+            .filter_map(|entity| entity.get::<VisibleObjectSprite>())
+            .filter(|sprite| sprite.object_identifier.as_deref() == Some(visible_mom))
+            .count(),
+        1,
+        "Mom's completed-story object must have exactly one rendered sprite"
+    );
+    let _ = shell;
+
+    for _ in 0..96 {
+        let current_map = app
+            .world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .map_name;
+        if current_map == "NewBarkTown" {
+            break;
+        }
+        let path = {
+            let shell = app.world().resource::<BevyRuntimeShell>();
+            collision_path_to_map_warp(&shell.shell.session().overworld, "NEW_BARK_TOWN")
+        };
+        press_visible_direction_until_tile_changes(&mut app, path[0]);
+        settle_visible_story_boundary(&mut app);
+    }
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .shell
+            .snapshot()
+            .unwrap()
+            .overworld
+            .map_name,
+        "NewBarkTown",
+        "live keyboard route did not exit after verifying Mom's re-entry object"
+    );
+
     let mut saw_route_text = false;
     for _ in 0..96 {
         let current_map = app
@@ -2520,6 +2598,71 @@ fn givepoke_enters_nickname_prompt_without_an_invented_gift_selection() {
             "the naming LCD remained over the script after nickname confirmation"
         );
     }
+}
+
+#[test]
+fn declining_starter_nickname_resumes_with_species_name_and_clears_prompt() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = CrystalRuntime::load_from_compiled_pack(
+        &asset_root,
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load compiled pack");
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier,
+            map_name: "ElmsLab".to_string(),
+            tile_x: 5,
+            tile_y: 3,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize Elm's Lab");
+    runtime_shell
+        .shell
+        .set_trainer_identity("CHRIS".to_string(), 1)
+        .expect("set trainer identity");
+    mark_runtime_snapshot_dirty(&mut runtime_shell);
+    let mut app = integrated_shell_test_app(runtime_shell);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    settle_visible_story_boundary(&mut app);
+
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+    let snapshot = runtime_shell
+        .shell
+        .snapshot()
+        .expect("declined nickname snapshot");
+    assert_eq!(snapshot.party.slots[0].pokemon.nickname, "CYNDAQUIL");
+    assert_eq!(
+        snapshot.script_events.named_buffers.get("STRING_BUFFER_3").map(String::as_str),
+        Some("CYNDAQUIL"),
+        "getmonname did not populate the authoritative starter-name buffer"
+    );
+    assert!(runtime_shell.dialogue_log_events.iter().any(|event| {
+        event.contains("label=ReceivedStarterText") && event.contains("CYNDAQUIL")
+    }), "the received-starter page omitted CYNDAQUIL: {:?}", runtime_shell.dialogue_log_events);
+    assert!(runtime_shell.pending_name_choice.is_none());
+    assert!(runtime_shell.pending_gift_pokemon_nickname.is_none());
+    let _ = runtime_shell;
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, With<SceneDialogWindowFrameMarker>>()
+            .iter(world)
+            .count(),
+        0,
+        "the declined nickname prompt left a window frame over the field"
+    );
 }
 
 #[test]

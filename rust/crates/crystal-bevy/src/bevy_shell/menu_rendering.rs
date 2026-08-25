@@ -3930,6 +3930,95 @@ fn set_overworld_map_scroll(
     }
 }
 
+fn update_player_facing_art_in_place(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    effective_time_of_day: &str,
+    tileset_art: &mut RenderedTilesetArt,
+    images: &mut Assets<Image>,
+    player_sprites: &mut Query<
+        (
+            &mut Handle<Image>,
+            &mut Transform,
+            &mut Sprite,
+            &mut PlayerSpriteFrames,
+        ),
+        (
+            With<PlayerMarker>,
+            Without<DialogGlyphMarker>,
+            Without<VisibleIntroSurface>,
+        ),
+    >,
+) -> Result<bool> {
+    if snapshot.overworld_player_hidden {
+        return Ok(false);
+    }
+    let Ok((mut texture, _, mut sprite, mut retained_frames)) =
+        player_sprites.get_single_mut()
+    else {
+        return Ok(false);
+    };
+    let female = snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE;
+    let (sprite_id, sprite_token, palette_override) = match snapshot.overworld.mode {
+        MovementMode::Normal | MovementMode::Skate if female => {
+            ("kris", "SPRITE_KRIS", snapshot.trainer.player_palette_id)
+        }
+        MovementMode::Normal | MovementMode::Skate => {
+            ("chris", "SPRITE_CHRIS", snapshot.trainer.player_palette_id)
+        }
+        MovementMode::Bike if female => (
+            "kris_bike",
+            "SPRITE_KRIS_BIKE",
+            snapshot.trainer.player_palette_id,
+        ),
+        MovementMode::Bike => (
+            "chris_bike",
+            "SPRITE_CHRIS_BIKE",
+            snapshot.trainer.player_palette_id,
+        ),
+        MovementMode::Surf => ("surf", "SPRITE_SURF", 1),
+        MovementMode::SurfPika => ("surfing_pikachu", "SPRITE_SURFING_PIKACHU", 0),
+    };
+    let palette_id = resolve_visible_object_palette(
+        sprite_token,
+        palette_override,
+        &snapshot.presentation.sprite_palette_defaults,
+    );
+    let standing = sprite_frame_for_art(
+        tileset_art,
+        &runtime_shell.asset_root,
+        sprite_id,
+        palette_id,
+        effective_time_of_day,
+        snapshot.overworld.facing,
+        false,
+        images,
+    );
+    let walking = sprite_frame_for_art(
+        tileset_art,
+        &runtime_shell.asset_root,
+        sprite_id,
+        palette_id,
+        effective_time_of_day,
+        snapshot.overworld.facing,
+        true,
+        images,
+    );
+    let Some(standing) = standing else {
+        return Ok(false);
+    };
+    let Some(walking) = walking else {
+        anyhow::bail!("player overworld sprite {sprite_id} has no required action frame");
+    };
+    *texture = standing.handle.clone();
+    sprite.custom_size = Some(standing.size);
+    sprite.flip_x = false;
+    retained_frames.standing = standing.handle;
+    retained_frames.walking = Some(walking.handle);
+    retained_frames.mirror_walking = matches!(snapshot.overworld.facing, Direction::Up | Direction::Down);
+    Ok(true)
+}
+
 fn visible_effective_map_time_of_day<'a>(
     map: &'a crate::RuntimeMapCatalogSnapshot,
     live_time_of_day: &'a str,
@@ -4796,10 +4885,17 @@ fn render_playfield(
     let state_hash = snapshot.visual_state_hash;
     runtime_shell.battle_lcd_animation_active = snapshot.battle.is_some();
     let shell_render_key = battle_animated_shell_render_key(&snapshot, &runtime_shell);
-    let world_key = overworld_render_world_key(&snapshot);
-    let dialog_key = visible_scene_dialog_entries(&snapshot, &runtime_shell)
-        .ok()
-        .map(|entries| {
+    let map_block_identity = visible_map_block_identity(&snapshot);
+    let position_key = overworld_render_position_key(&snapshot);
+    let appearance_key = overworld_render_appearance_key(&snapshot);
+    let world_key = overworld_render_world_key_from_parts(
+        snapshot.overworld.facing,
+        map_block_identity,
+        position_key,
+        appearance_key,
+    );
+    let scene_dialog_entries = visible_scene_dialog_entries(&snapshot, &runtime_shell);
+    let dialog_key = scene_dialog_entries.as_ref().ok().map(|entries| {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             entries.hash(&mut hasher);
             strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "ui:yes-no", 2)
@@ -4948,9 +5044,7 @@ fn render_playfield(
         acknowledge_rendered_field_text(&mut runtime_shell, &snapshot);
         return;
     }
-    if visible_scene_dialog_entries(&snapshot, &runtime_shell)
-        .is_ok_and(|entries| entries.is_empty())
-    {
+    if scene_dialog_entries.is_ok_and(|entries| entries.is_empty()) {
         for entity in scene_dialogs.iter() {
             queue_existing_entity_despawn(&mut commands, &mut queued_despawns, entity);
         }
@@ -5342,7 +5436,7 @@ fn render_playfield(
             // them at runtime. Hash every map that can contribute viewport pixels
             // so the retained 2D surface is recomposed after such a write.
             map.map_name.hash(&mut hasher);
-            visible_map_block_identity(&snapshot).hash(&mut hasher);
+            map_block_identity.hash(&mut hasher);
             map.attributes.tileset_name.hash(&mut hasher);
             tileset_art_key.time_of_day.hash(&mut hasher);
             map.attributes.border_block.hash(&mut hasher);
@@ -5369,9 +5463,6 @@ fn render_playfield(
             }
             hasher.finish()
         };
-    let position_key = overworld_render_position_key(&snapshot);
-    let appearance_key = overworld_render_appearance_key(&snapshot);
-
     // A normal walking step changes the player/NPC transforms and can shift
     // the camera by a tile.  Retain the already-created LCD sprite in both
     // cases: despawning it before a replacement GPU texture is available
@@ -5441,6 +5532,106 @@ fn render_playfield(
         rendered.shell_render_key = Some(shell_render_key);
         return;
     }
+    let ambient_tile_frame_due = runtime_shell.ambient_tileset_animation_active
+        && runtime_shell
+            .ambient_tileset_animation_schedule
+            .iter()
+            .any(|(period, offset)| {
+                runtime_shell.lcd_animation_frame >= *offset
+                    && (runtime_shell.lcd_animation_frame - *offset) % (*period).max(1) == 0
+            });
+    let facing_only_update = !rendered.title_active
+        && rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
+        && rendered.tile == Some(snapshot.overworld.tile)
+        && rendered.viewport_origin == Some((start_x, start_y))
+        && rendered.walk_viewport_origin.is_none()
+        && rendered.map_visual_key == Some(map_visual_key)
+        && rendered.position_key == Some(position_key)
+        && rendered.appearance_key == Some(appearance_key)
+        && rendered.player_sprite_mode == Some(snapshot.overworld.mode)
+        && rendered.player_sprite_facing != Some(snapshot.overworld.facing)
+        && runtime_shell.player_walk_frame_ticks == 0
+        && runtime_shell.visible_ledge_jump.is_none()
+        && runtime_shell.visible_script_movement.is_none()
+        && runtime_shell.visible_grass_rustle.is_none()
+        && runtime_shell.visible_strength_boulder_dust.is_none()
+        && runtime_shell.visible_fly_animation.is_none()
+        && runtime_shell.visible_fishing_animation.is_none()
+        && runtime_shell.visible_overworld_emote.is_none()
+        && snapshot.battle.is_none()
+        && snapshot.ui.text.is_none()
+        && snapshot.ui.pending_yes_no.is_none()
+        && snapshot.ui.menu.is_none()
+        && snapshot.pending_shop.is_none()
+        && snapshot.ui.active_pokemon_picture.is_none()
+        && snapshot.pending_move_learn.is_none()
+        && runtime_shell.start_menu_cursor.is_none()
+        && !runtime_shell.options_menu_open
+        && !runtime_shell.party_menu_open
+        && !runtime_shell.pokedex_menu_open
+        && !runtime_shell.pokegear_menu_open
+        && !runtime_shell.trainer_card_open
+        && !visible_field_pack_is_open(&runtime_shell)
+        && !runtime_shell.save_menu_open
+        && runtime_shell.special_boundary.is_none()
+        && runtime_shell.last_error.is_none()
+        && runtime_shell.pending_name_input.is_none()
+        && runtime_shell.pending_mail_input.is_none()
+        && runtime_shell.pending_name_choice.is_none()
+        && scene_dialogs.iter().next().is_none()
+        && pokemon_pictures.iter().next().is_none()
+        && !ambient_tile_frame_due
+        && !runtime_debug_overlays_enabled();
+    if facing_only_update
+        && update_overworld_sprite_positions(
+            &snapshot,
+            movement_subframe,
+            runtime_shell.visible_ledge_jump,
+            runtime_shell.player_walk_from,
+            runtime_shell.player_walk_frame_ticks,
+            runtime_shell.player_walk_total_ticks,
+            &runtime_shell.object_walk_from,
+            &runtime_shell.object_walk_frame_ticks_by_id,
+            &runtime_shell.object_walk_total_ticks_by_id,
+            runtime_shell.trainer_walk_from.as_ref(),
+            runtime_shell.object_walk_frame_ticks,
+            runtime_shell.object_walk_total_ticks,
+            Vec2::ZERO,
+            start_x,
+            start_y,
+            &mut player_sprites,
+            &mut ledge_shadows,
+            &mut object_sprites,
+        )
+    {
+        match update_player_facing_art_in_place(
+            &snapshot,
+            &runtime_shell,
+            effective_time_of_day,
+            &mut tileset_art,
+            &mut images,
+            &mut player_sprites,
+        ) {
+            Ok(true) => {
+                rendered.tile = Some(snapshot.overworld.tile);
+                rendered.world_key = Some(world_key);
+                rendered.position_key = Some(position_key);
+                rendered.appearance_key = Some(appearance_key);
+                rendered.state_hash = Some(state_hash);
+                rendered.snapshot_revision = Some(runtime_shell.snapshot_revision);
+                rendered.shell_render_key = Some(shell_render_key);
+                rendered.player_sprite_facing = Some(snapshot.overworld.facing);
+                rendered.player_sprite_mode = Some(snapshot.overworld.mode);
+                rendered.player_sprite_walking = Some(false);
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                record_visible_render_error(&mut commands, &mut runtime_shell, error);
+                return;
+            }
+        }
+    }
     if !tileset_art.cache.contains_key(&tileset_art_key) {
         match load_tileset_art(
             &runtime_shell.asset_root,
@@ -5478,6 +5669,16 @@ fn render_playfield(
         );
         return;
     }
+    let mut render_sources = Vec::with_capacity(map.attributes.connections.len() + 1);
+    render_sources.push(ResolvedRenderSource {
+        map,
+        tileset,
+        art_key: tileset_art_key.clone(),
+        origin_x: 0,
+        origin_y: 0,
+        width: i32::from(width),
+        height: i32::from(height),
+    });
     for connection in &map.attributes.connections {
         let Some(target_map) = snapshot
             .maps
@@ -5557,6 +5758,29 @@ fn render_playfield(
             );
             return;
         }
+        let target_width = i32::from(target_map.attributes.width)
+            * i32::from(RENDER_METATILE_WIDTH);
+        let target_height = i32::from(target_map.attributes.height)
+            * i32::from(RENDER_METATILE_WIDTH);
+        let offset = connection
+            .offset
+            .saturating_mul(i32::from(RENDER_METATILE_WIDTH));
+        let (origin_x, origin_y) = match connection.direction.to_ascii_lowercase().as_str() {
+            "north" => (offset, -target_height),
+            "south" => (offset, i32::from(height)),
+            "west" => (-target_width, offset),
+            "east" => (i32::from(width), offset),
+            _ => continue,
+        };
+        render_sources.push(ResolvedRenderSource {
+            map: target_map,
+            tileset: target_tileset,
+            art_key: target_art_key,
+            origin_x,
+            origin_y,
+            width: target_width,
+            height: target_height,
+        });
     }
 
     // Keep the map layer as one retained sprite instead of 360 independent
@@ -5585,6 +5809,10 @@ fn render_playfield(
     );
     #[cfg(any(test, feature = "voxel-view"))]
     let mut visual_tileset_ids = HashMap::<&str, Arc<str>>::new();
+    #[cfg(test)]
+    {
+        rendered.terrain_scan_count = rendered.terrain_scan_count.saturating_add(1);
+    }
     for visual_y in 0..visual_world_tiles_y {
         for visual_x in 0..visual_world_tiles_x {
             let x = visual_x - visual_world_halo;
@@ -5595,42 +5823,15 @@ fn render_playfield(
                 && y < VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES;
             let map_x = i32::from(start_x) + i32::from(x);
             let map_y = i32::from(start_y) + i32::from(y);
-            let (source_map, source_x, source_y) =
-                connection_render_source(&snapshot, map, map_x, map_y)
-                    .unwrap_or((map, map_x, map_y));
-            let Some(source_tileset) = snapshot
-                .tilesets
-                .iter()
-                .find(|candidate| candidate.tileset_id == source_map.attributes.tileset_name)
-            else {
-                record_visible_render_error(
-                    &mut commands,
-                    &mut runtime_shell,
-                    anyhow::anyhow!(
-                        "render source map {} references missing tileset {}",
-                        source_map.map_name,
-                        source_map.attributes.tileset_name,
-                    ),
-                );
-                return;
-            };
-            let source_art_key = TilesetArtKey {
-                tileset_id: source_tileset.tileset_id.clone(),
-                time_of_day: visible_effective_map_time_of_day(
-                    source_map,
-                    live_time_of_day,
-                    flash_active,
-                )
-                .to_string(),
-            };
-            let source_width =
-                i32::from(source_map.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
-            let source_height =
-                i32::from(source_map.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
+            let (source, source_x, source_y) =
+                resolved_render_source_at(&render_sources, map_x, map_y);
+            let source_map = source.map;
+            let source_tileset = source.tileset;
+            let source_art_key = &source.art_key;
             let (block, sub_x, sub_y) = if source_x >= 0
                 && source_y >= 0
-                && source_x < source_width
-                && source_y < source_height
+                && source_x < source.width
+                && source_y < source.height
             {
                 let block_x = source_x.div_euclid(i32::from(RENDER_METATILE_WIDTH));
                 let block_y = source_y.div_euclid(i32::from(RENDER_METATILE_WIDTH));
@@ -5645,7 +5846,7 @@ fn render_playfield(
                 (source_map.attributes.border_block as u16, sub_x, sub_y)
             };
             let Some((source_tile_index, tile_handle)) =
-                tileset_art.cache.get(&source_art_key).and_then(|art| {
+                tileset_art.cache.get(source_art_key).and_then(|art| {
                     let offset = usize::from(block)
                         .checked_mul(METATILE_TILE_COUNT)?
                         .checked_add(sub_y.checked_mul(RENDER_METATILE_WIDTH as usize)?)?
@@ -5747,7 +5948,7 @@ fn render_playfield(
             let priority_spec = if priority {
                 let Some(handle) = tileset_art
                     .cache
-                    .get(&source_art_key)
+                    .get(source_art_key)
                     .and_then(|art| art.priority_tile_handle(block, sub_x, sub_y))
                 else {
                     record_visible_render_error(
@@ -5794,14 +5995,6 @@ fn render_playfield(
         }
         hasher.finish()
     };
-    let ambient_tile_frame_due = runtime_shell.ambient_tileset_animation_active
-        && runtime_shell
-            .ambient_tileset_animation_schedule
-            .iter()
-            .any(|(period, offset)| {
-                runtime_shell.lcd_animation_frame >= *offset
-                    && (runtime_shell.lcd_animation_frame - *offset) % (*period).max(1) == 0
-            });
     let facing_only_redraw = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && previous_viewport_origin == Some((start_x, start_y))
         && rendered.map_visual_key == Some(map_visual_key)
@@ -5813,10 +6006,15 @@ fn render_playfield(
     let retained_texture_content = rendered.map_texture.is_some()
         && rendered.map_priority_texture.is_some()
         && rendered.tile_frame_key == Some(tile_frame_key);
-    let origin_changing_walk = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
+    let active_camera_walk = rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
         && (runtime_shell.player_walk_frame_ticks > 0
-            || runtime_shell.visible_ledge_jump.is_some())
-        && previous_viewport_origin != Some((start_x, start_y));
+            || runtime_shell.visible_ledge_jump.is_some());
+    let next_walk_viewport_origin = next_walk_viewport_origin(
+        previous_viewport_origin,
+        rendered.walk_viewport_origin,
+        Some((start_x, start_y)),
+        active_camera_walk,
+    );
     // The active base and priority surfaces include a complete four-tile
     // halo, which covers the largest ordinary camera step without exposing
     // an edge or requiring a duplicate texture pair.
@@ -5878,11 +6076,7 @@ fn render_playfield(
         rendered.visual_tiles = visual_tiles;
     }
     rendered.viewport_origin = Some((start_x, start_y));
-    rendered.walk_viewport_origin = if origin_changing_walk {
-        previous_viewport_origin
-    } else {
-        None
-    };
+    rendered.walk_viewport_origin = next_walk_viewport_origin;
     rendered.map_visual_key = Some(map_visual_key);
     rendered.tile_frame_key = Some(tile_frame_key);
     let mut visible_tileset_art_keys = vec![tileset_art_key.clone()];
@@ -7362,6 +7556,22 @@ fn render_playfield(
     #[cfg(feature = "voxel-view")]
     {
         rendered.visual_world_enabled = visual_world_enabled;
+    }
+}
+
+fn next_walk_viewport_origin(
+    previous_viewport_origin: Option<(i16, i16)>,
+    active_walk_viewport_origin: Option<(i16, i16)>,
+    next_viewport_origin: Option<(i16, i16)>,
+    walking: bool,
+) -> Option<(i16, i16)> {
+    if !walking {
+        return None;
+    }
+    if previous_viewport_origin != next_viewport_origin {
+        previous_viewport_origin
+    } else {
+        active_walk_viewport_origin
     }
 }
 

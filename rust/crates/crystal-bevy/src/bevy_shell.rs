@@ -20,6 +20,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::texture::ImageSampler;
 #[cfg(feature = "location-tester")]
 use bevy::render::view::screenshot::ScreenshotManager;
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+use bevy::render::{Render, RenderApp, RenderSet};
 #[cfg(feature = "location-tester")]
 use bevy::window::PrimaryWindow;
 use bevy::window::{PresentMode, WindowFocused, WindowResolution};
@@ -3403,6 +3405,8 @@ struct RenderedViewport {
     player_sprite_mode: Option<MovementMode>,
     player_sprite_walking: Option<bool>,
     object_sprite_walking: Option<bool>,
+    #[cfg(test)]
+    terrain_scan_count: u64,
 }
 
 #[derive(Resource, Default)]
@@ -4452,6 +4456,48 @@ pub fn run_bevy_shell(
         Update,
         sync_manual_world_view_layers.after(crystal_render_api::WorldRenderSet::RenderSync),
     );
+    #[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+    app.add_systems(
+        Update,
+        trace_native_overworld_movement
+            .after(crystal_render_api::WorldRenderSet::RenderSync)
+            .after(sync_manual_world_view_layers),
+    );
+    #[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+    if std::env::var_os("CRYSTAL_RENDER_TRACE").is_some()
+        && let Some(render_app) = app.get_sub_app_mut(RenderApp)
+    {
+        render_app
+            .init_resource::<NativeRenderTraceState>()
+            .add_systems(
+                Render,
+                trace_native_render_start.before(RenderSet::ManageViews),
+            )
+            .add_systems(
+                Render,
+                trace_native_render_managed
+                    .after(RenderSet::ManageViews)
+                    .before(RenderSet::Queue),
+            )
+            .add_systems(
+                Render,
+                trace_native_render_queued
+                    .after(RenderSet::PhaseSort)
+                    .before(RenderSet::Prepare),
+            )
+            .add_systems(
+                Render,
+                trace_native_render_prepared
+                    .after(RenderSet::Prepare)
+                    .before(RenderSet::Render),
+            )
+            .add_systems(
+                Render,
+                trace_native_render_presented
+                    .after(RenderSet::Render)
+                    .before(RenderSet::Cleanup),
+            );
+    }
     #[cfg(feature = "location-tester")]
     if let Some(path) = render_test_screenshot.clone() {
         app.insert_resource(RenderTestScreenshot {
@@ -4470,6 +4516,128 @@ pub fn run_bevy_shell(
     }
 
     Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+#[derive(Default)]
+struct NativeMovementTraceState {
+    enabled: Option<bool>,
+    frame: u64,
+    last_at: Option<Instant>,
+    last_player_position: Option<Vec3>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+#[derive(Resource, Default)]
+struct NativeRenderTraceState {
+    frame: u64,
+    started_at: Option<Instant>,
+    managed_at: Option<Instant>,
+    queued_at: Option<Instant>,
+    prepared_at: Option<Instant>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_render_start(mut trace: ResMut<NativeRenderTraceState>) {
+    trace.frame = trace.frame.saturating_add(1);
+    trace.started_at = Some(Instant::now());
+    trace.managed_at = None;
+    trace.queued_at = None;
+    trace.prepared_at = None;
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_render_managed(mut trace: ResMut<NativeRenderTraceState>) {
+    trace.managed_at = Some(Instant::now());
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_render_queued(mut trace: ResMut<NativeRenderTraceState>) {
+    trace.queued_at = Some(Instant::now());
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_render_prepared(mut trace: ResMut<NativeRenderTraceState>) {
+    trace.prepared_at = Some(Instant::now());
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_render_presented(trace: Res<NativeRenderTraceState>) {
+    let (Some(started_at), Some(managed_at), Some(queued_at), Some(prepared_at)) = (
+        trace.started_at,
+        trace.managed_at,
+        trace.queued_at,
+        trace.prepared_at,
+    ) else {
+        return;
+    };
+    let presented_at = Instant::now();
+    eprintln!(
+        "crystal-bevy render_trace frame={} manage_us={} queue_us={} prepare_us={} render_present_us={} total_us={}",
+        trace.frame,
+        managed_at.duration_since(started_at).as_micros(),
+        queued_at.duration_since(managed_at).as_micros(),
+        prepared_at.duration_since(queued_at).as_micros(),
+        presented_at.duration_since(prepared_at).as_micros(),
+        presented_at.duration_since(started_at).as_micros(),
+    );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "voxel-view"))]
+fn trace_native_overworld_movement(
+    runtime_shell: Res<BevyRuntimeShell>,
+    tick_timer: Res<RuntimeTickTimer>,
+    visual_frame: Res<crystal_render_api::VisualWorldFrame>,
+    players: Query<&Transform, With<PlayerMarker>>,
+    mut trace: Local<NativeMovementTraceState>,
+) {
+    let enabled = *trace
+        .enabled
+        .get_or_insert_with(|| std::env::var_os("CRYSTAL_MOVEMENT_TRACE").is_some());
+    if !enabled {
+        return;
+    }
+
+    let now = Instant::now();
+    let host_us = trace
+        .last_at
+        .map_or(0, |last_at| now.duration_since(last_at).as_micros());
+    trace.last_at = Some(now);
+    trace.frame = trace.frame.saturating_add(1);
+
+    let player_position = players
+        .get_single()
+        .ok()
+        .map(|transform| transform.translation);
+    let delta = player_position
+        .zip(trace.last_player_position)
+        .map_or(Vec3::ZERO, |(current, previous)| current - previous);
+    trace.last_player_position = player_position;
+
+    let snapshot = runtime_shell.shell.snapshot().ok();
+    let tile = snapshot.as_ref().map(|snapshot| snapshot.overworld.tile);
+    let facing = snapshot.as_ref().map(|snapshot| snapshot.overworld.facing);
+    let moving = runtime_shell.player_walk_frame_ticks > 0;
+    let voxel_enabled = runtime_shell.shell.snapshot().is_ok() && visual_frame.active;
+    if moving || delta != Vec3::ZERO || host_us >= 25_000 {
+        let position = player_position.unwrap_or(Vec3::ZERO);
+        eprintln!(
+            "crystal-bevy movement_trace frame={} host_us={} voxel_active={} moving={} walk_remaining={} subframe={:.4} tile={:?} facing={:?} player_x={:.3} player_y={:.3} delta_x={:.3} delta_y={:.3} terrain_revision={}",
+            trace.frame,
+            host_us,
+            voxel_enabled,
+            moving,
+            runtime_shell.player_walk_frame_ticks,
+            tick_timer.presentation_subframe(),
+            tile,
+            facing,
+            position.x,
+            position.y,
+            delta.x,
+            delta.y,
+            visual_frame.terrain_revision,
+        );
+    }
 }
 
 #[cfg(feature = "voxel-view")]

@@ -6793,6 +6793,30 @@ fn arrow_key_dispatch_moves_visible_start_menu_cursor() {
 }
 
 #[test]
+fn held_overworld_direction_is_restored_after_warp_navigation_reset() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let mut keys = ButtonInput::<KeyCode>::default();
+    keys.press(KeyCode::ArrowDown);
+    sync_overworld_held_directions(&keys, &mut runtime_shell, false);
+    keys.clear();
+
+    // A stair/door warp resets presentation navigation while the host still
+    // reports the physical key as held. There is no second key-down edge on
+    // the destination map.
+    reset_visible_navigation_state_preserving_held_directions(&mut runtime_shell);
+    assert!(keys.pressed(KeyCode::ArrowDown));
+    assert!(!keys.just_pressed(KeyCode::ArrowDown));
+
+    sync_overworld_held_directions(&keys, &mut runtime_shell, false);
+
+    assert_eq!(
+        runtime_shell.overworld_held_directions,
+        VecDeque::from([GameButton::Down]),
+        "a continuous physical hold must resume overworld walking after the warp"
+    );
+}
+
+#[test]
 fn visible_overworld_normal_inputs_walk_through_bedroom_warp() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

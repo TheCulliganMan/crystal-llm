@@ -5094,10 +5094,14 @@ fn settle_visible_overworld_arrival(
     if reason == "new_game" {
         runtime_shell.shell.set_game_timer_counting(true)?;
     }
-    let connection_continuation = (reason == "map_connection").then(|| {
+    let held_direction_continuation = matches!(reason, "map_connection" | "walk_warp").then(|| {
         (
             runtime_shell.overworld_held_direction,
             runtime_shell.overworld_held_directions.clone(),
+        )
+    });
+    let connection_continuation = (reason == "map_connection").then(|| {
+        (
             runtime_shell.overworld_buffered_direction,
             runtime_shell.player_walk_stride,
             runtime_shell.player_walk_mirror_stride,
@@ -5111,9 +5115,15 @@ fn settle_visible_overworld_arrival(
     if let Some(cursor) = scripted_warp_continuation {
         runtime_shell.active_script_cursor = Some(cursor);
     }
+    if let Some((held_direction, held_directions)) = held_direction_continuation {
+        // Crystal continues sampling the physical D-pad through both seamless
+        // connections and stair/door fades. The latter still resets buffered
+        // turns and walk animation state, but must not require a fresh press.
+        runtime_shell.overworld_held_direction = held_direction;
+        runtime_shell.overworld_held_directions = held_directions;
+        runtime_shell.overworld_direction_repeat_ticks = 0;
+    }
     if let Some((
-        held_direction,
-        held_directions,
         buffered_direction,
         stride,
         mirror_stride,
@@ -5121,12 +5131,8 @@ fn settle_visible_overworld_arrival(
     )) = connection_continuation
     {
         // MAPSETUP_CONNECTION is seamless. Keep the live D-pad arbitration
-        // and the current foot phase across the map boundary; door/warp/fly
-        // arrivals retain the full input reset above.
-        runtime_shell.overworld_held_direction = held_direction;
-        runtime_shell.overworld_held_directions = held_directions;
+        // and the current foot phase across the map boundary.
         runtime_shell.overworld_buffered_direction = buffered_direction;
-        runtime_shell.overworld_direction_repeat_ticks = 0;
         runtime_shell.player_walk_stride = stride;
         runtime_shell.player_walk_mirror_stride = mirror_stride;
         runtime_shell.player_walk_direction_phases = direction_phases;
@@ -5599,6 +5605,16 @@ fn reset_visible_navigation_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.visible_script_movement = None;
     runtime_shell.visible_script_movement_scene = None;
     runtime_shell.recent_overworld_inputs.clear();
+}
+
+fn reset_visible_navigation_state_preserving_held_directions(
+    runtime_shell: &mut BevyRuntimeShell,
+) {
+    let held_direction = runtime_shell.overworld_held_direction;
+    let held_directions = runtime_shell.overworld_held_directions.clone();
+    reset_visible_navigation_state(runtime_shell);
+    runtime_shell.overworld_held_direction = held_direction;
+    runtime_shell.overworld_held_directions = held_directions;
 }
 
 fn reset_visible_map_reload_after_battle(runtime_shell: &mut BevyRuntimeShell, reason: &str) {

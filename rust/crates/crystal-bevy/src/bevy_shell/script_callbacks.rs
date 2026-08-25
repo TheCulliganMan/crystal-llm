@@ -93,7 +93,12 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
                 // white palette before FadeInFromWhite. Scene scripts and map
                 // callbacks resume only after that fade, so their text,
                 // emotes, and audio cannot begin invisibly at full white.
-                reset_visible_navigation_state(&mut runtime_shell);
+                // MAPSETUP_DOOR resets the destination presentation, but the
+                // physical D-pad remains sampled across the fade. Retain its
+                // ordering so a continuous hold resumes without a new edge.
+                reset_visible_navigation_state_preserving_held_directions(
+                    &mut runtime_shell,
+                );
                 if let Err(error) =
                     suppress_visible_map_name_sign_for_current_map(&mut runtime_shell)
                 {

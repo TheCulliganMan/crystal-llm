@@ -352,6 +352,23 @@ fn asm_text_renderer_resolves_exact_text_ram_operand_names() {
 }
 
 #[test]
+fn asm_text_renderer_resolves_source_wram_name_for_canonical_script_buffer() {
+    let named_buffers =
+        BTreeMap::from([("STRING_BUFFER_3".to_string(), "CYNDAQUIL".to_string())]);
+
+    assert_eq!(
+        render_visible_asm_text_pages(
+            "<PLAYER> received\n<RAM:wStringBuffer3>!",
+            &named_buffers,
+            "CHRIS",
+            "RIVAL",
+            0,
+        ),
+        vec!["CHRIS received\nCYNDAQUIL!"]
+    );
+}
+
+#[test]
 fn missing_script_text_buffers_render_blank_instead_of_host_diagnostics() {
     let body = ScriptTextBody {
         label: "MissingRuntimeBufferText".to_string(),

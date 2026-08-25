@@ -9682,10 +9682,21 @@ fn visible_field_dialog_pages(
     }) {
         return None;
     }
+    // Scripted movement retains a presentation snapshot so sprites stay on
+    // their pre-movement LCD until the blocking animation completes. Text
+    // commands can continue after that snapshot was captured, though, and
+    // getmonname/getitemname write buffers consumed by the next writetext.
+    // Resolve those operands from live script RAM, never the retained scene.
+    let named_buffers = &runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .named_buffers;
     let pages = if let Some(asm_text) = &resolved_asm_text {
         render_visible_asm_text_pages(
             asm_text,
-            &snapshot.script_events.named_buffers,
+            named_buffers,
             &snapshot.trainer.player_name,
             visible_rival_name(snapshot),
             snapshot.progression.time.day_of_week,
@@ -9693,7 +9704,7 @@ fn visible_field_dialog_pages(
     } else if let Some(body) = &resolved_body {
         render_visible_script_text_pages(
             body,
-            &snapshot.script_events.named_buffers,
+            named_buffers,
             &snapshot.trainer.player_name,
             visible_rival_name(snapshot),
             snapshot.progression.time.day_of_week,

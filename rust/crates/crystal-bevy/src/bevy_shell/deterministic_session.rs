@@ -315,15 +315,11 @@ fn apply_keyboard_input(
                 .remove(&object_id);
         }
     }
-    // Scripted leader/follower programs must cross each LCD boundary one tick
-    // at a time so catch-up frames can start and advance the following phase.
-    // Bulk-subtracting all elapsed ticks here discarded the remainder at every
-    // step boundary, which made the guide tour visibly pause and then jump.
-    let initial_movement_ticks = if runtime_shell.visible_script_movement.is_some() {
-        1
-    } else {
-        u8::try_from(elapsed_input_ticks).unwrap_or(u8::MAX)
-    };
+    // Presentation must cross each LCD boundary one tick at a time. A slow
+    // renderer update can catch simulation time up in bulk, but consuming all
+    // of those ticks here skips visible walk substeps and makes overworld
+    // movement alternate between smooth motion and sudden jumps.
+    let initial_movement_ticks = visible_walk_ticks_for_host_update(elapsed_input_ticks);
     advance_visible_walk_timers(&mut runtime_shell, initial_movement_ticks);
     if runtime_shell.battle_switch_cursor.is_some() {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
@@ -2556,9 +2552,15 @@ fn next_player_walk_stride(_remaining_ticks: u8, current_stride: bool) -> bool {
     !current_stride
 }
 
-fn visible_new_step_frames_remaining(step_ticks: u8, catch_up_ticks_after_step: u32) -> u8 {
-    let elapsed = u8::try_from(catch_up_ticks_after_step).unwrap_or(u8::MAX);
-    step_ticks.saturating_sub(elapsed)
+fn visible_new_step_frames_remaining(step_ticks: u8, _ticks_elapsed_before_step: u32) -> u8 {
+    // The host accumulator is drained before this authoritative movement is
+    // created. Its remaining catch-up ticks therefore predate the new walk
+    // and must not shorten the interpolation that starts in this update.
+    step_ticks
+}
+
+fn visible_walk_ticks_for_host_update(elapsed_input_ticks: u32) -> u8 {
+    u8::from(elapsed_input_ticks > 0)
 }
 
 fn advance_player_walk_phase(runtime_shell: &mut BevyRuntimeShell, direction: Direction) {

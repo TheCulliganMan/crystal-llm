@@ -1123,6 +1123,61 @@
     }
 
     #[test]
+    fn warp_entry_loads_object_roster_from_current_event_flags() {
+        let source = test_map_module("Outside", "OUTSIDE", None);
+        let mut destination = test_map_module("House", "HOUSE", None);
+        destination.objects = vec![
+            test_object("MOM_INTRO", "EVENT_MOM_INTRO", 1, 0),
+            test_object("MOM_AFTER_INTRO", "EVENT_MOM_AFTER_INTRO", 1, 0),
+        ];
+        let data = GameDataSet {
+            maps: map_payload(vec![source, destination]),
+            runtime_map_metadata: BTreeMap::from([
+                (
+                    "OUTSIDE".to_string(),
+                    test_runtime_map_metadata("OUTSIDE", "Outside"),
+                ),
+                (
+                    "HOUSE".to_string(),
+                    test_runtime_map_metadata("HOUSE", "House"),
+                ),
+            ]),
+            tilesets: BTreeMap::from([("johto".to_string(), test_tileset_definition())]),
+            ..GameDataSet::default()
+        };
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_MOM_INTRO", true)
+            .expect("hide intro Mom");
+        state
+            .flags
+            .set_event_flag("EVENT_MOM_AFTER_INTRO", false)
+            .expect("show ordinary Mom");
+        let mut session = data
+            .overworld_session("Outside", TilePosition::new(0, 0), 0)
+            .expect("outside session");
+
+        data.transition_overworld_session(
+            &mut state,
+            &mut session,
+            "House",
+            TilePosition::new(0, 0),
+            SpawnMemoryUpdate::Preserve,
+            &BTreeSet::new(),
+        )
+        .expect("enter house");
+
+        let visible = session
+            .objects
+            .iter()
+            .filter(|object| session.is_object_visible(object))
+            .filter_map(|object| object.object_identifier.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec!["MOM_AFTER_INTRO"]);
+    }
+
+    #[test]
     fn conditional_background_event_obeys_its_pret_event_flag_gate() {
         let mut module = test_map_module("RocketBase", "ROCKET_BASE", None);
         module.attributes.width = 2;

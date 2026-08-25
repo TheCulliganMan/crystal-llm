@@ -8510,29 +8510,28 @@ fn battle_animated_shell_render_key(
 }
 
 fn overworld_render_world_key(snapshot: &RuntimeShellSnapshot) -> u64 {
+    let map_block_identity = visible_map_block_identity(snapshot);
+    let position_key = overworld_render_position_key(snapshot);
+    let appearance_key = overworld_render_appearance_key(snapshot);
+    overworld_render_world_key_from_parts(
+        snapshot.overworld.facing,
+        map_block_identity,
+        position_key,
+        appearance_key,
+    )
+}
+
+fn overworld_render_world_key_from_parts(
+    facing: Direction,
+    map_block_identity: u64,
+    position_key: u64,
+    appearance_key: u64,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    snapshot.overworld.map_name.hash(&mut hasher);
-    visible_map_block_identity(snapshot).hash(&mut hasher);
-    snapshot.overworld.tile.hash(&mut hasher);
-    snapshot.overworld.facing.hash(&mut hasher);
-    snapshot.trainer.player_gender.hash(&mut hasher);
-    snapshot.trainer.player_palette_id.hash(&mut hasher);
-    for object in &snapshot.visible_objects {
-        object.object_identifier.hash(&mut hasher);
-        object.sprite.hash(&mut hasher);
-        object.pal.hash(&mut hasher);
-        object.spritemovedata.hash(&mut hasher);
-        object.x.hash(&mut hasher);
-        object.y.hash(&mut hasher);
-    }
-    for (object_id, tile) in &snapshot.visible_object_runtime_tiles {
-        object_id.hash(&mut hasher);
-        tile.hash(&mut hasher);
-    }
-    for (object_id, facing) in &snapshot.visible_object_facings {
-        object_id.hash(&mut hasher);
-        facing.hash(&mut hasher);
-    }
+    map_block_identity.hash(&mut hasher);
+    position_key.hash(&mut hasher);
+    appearance_key.hash(&mut hasher);
+    facing.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -8673,11 +8672,13 @@ fn overworld_render_position_key(snapshot: &RuntimeShellSnapshot) -> u64 {
         object.object_identifier.hash(&mut hasher);
         object.x.hash(&mut hasher);
         object.y.hash(&mut hasher);
-        object
-            .object_identifier
-            .as_ref()
-            .and_then(|id| snapshot.visible_object_runtime_tiles.get(id))
-            .hash(&mut hasher);
+    }
+    // Runtime movement state can temporarily outlive its catalog object.
+    // Preserve the old world-key semantics by hashing every authoritative
+    // runtime tile, including entries not present in `visible_objects`.
+    for (object_id, tile) in &snapshot.visible_object_runtime_tiles {
+        object_id.hash(&mut hasher);
+        tile.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -9032,39 +9033,36 @@ fn connection_composite_viewport_origin(
     Some((i16::try_from(x).ok()?, i16::try_from(y).ok()?))
 }
 
-fn connection_render_source<'a>(
-    snapshot: &'a RuntimeShellSnapshot,
-    base: &'a crate::RuntimeMapCatalogSnapshot,
+struct ResolvedRenderSource<'a> {
+    map: &'a crate::RuntimeMapCatalogSnapshot,
+    tileset: &'a crate::RuntimeTilesetCatalogSnapshot,
+    art_key: TilesetArtKey,
+    origin_x: i32,
+    origin_y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn resolved_render_source_at<'a>(
+    sources: &'a [ResolvedRenderSource<'a>],
     x: i32,
     y: i32,
-) -> Option<(&'a crate::RuntimeMapCatalogSnapshot, i32, i32)> {
-    let base_width = i32::from(base.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
-    let base_height = i32::from(base.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
-    if (0..base_width).contains(&x) && (0..base_height).contains(&y) {
-        return Some((base, x, y));
+) -> (&'a ResolvedRenderSource<'a>, i32, i32) {
+    let base = &sources[0];
+    if (0..base.width).contains(&x) && (0..base.height).contains(&y) {
+        return (base, x, y);
     }
-    for connection in base.attributes.connections.iter().rev() {
-        let target = snapshot
-            .maps
-            .iter()
-            .find(|candidate| candidate.map_name == connection.target_map)?;
-        let target_width = i32::from(target.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
-        let target_height = i32::from(target.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
-        let offset = connection.offset.saturating_mul(i32::from(RENDER_METATILE_WIDTH));
-        let (origin_x, origin_y) = match connection.direction.to_ascii_lowercase().as_str() {
-            "north" => (offset, -target_height),
-            "south" => (offset, base_height),
-            "west" => (-target_width, offset),
-            "east" => (base_width, offset),
-            _ => continue,
-        };
-        if (origin_x..origin_x.saturating_add(target_width)).contains(&x)
-            && (origin_y..origin_y.saturating_add(target_height)).contains(&y)
+    for source in sources[1..].iter().rev() {
+        if (source.origin_x..source.origin_x.saturating_add(source.width)).contains(&x)
+            && (source.origin_y..source.origin_y.saturating_add(source.height)).contains(&y)
         {
-            return Some((target, x - origin_x, y - origin_y));
+            return (source, x - source.origin_x, y - source.origin_y);
         }
     }
-    None
+    // The ASM border block belongs to the active map. Coordinates outside
+    // every connected rectangle deliberately remain in the base coordinate
+    // space so its repeating sub-tile phase is preserved.
+    (base, x, y)
 }
 
 fn priority_collision_token(token: &str) -> bool {

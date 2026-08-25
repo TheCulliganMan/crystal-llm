@@ -4031,6 +4031,14 @@ fn clear_transient_map_object_context(state: &mut GameState, session: &mut Overw
     session.last_talked_object_identifier = None;
 }
 
+fn initialize_loaded_object_roster(session: &mut OverworldSession, state: &GameState) {
+    // Crystal builds the map-object roster once from the current time and
+    // event flags when entering a map. Later flag mutations deliberately keep
+    // that loaded roster until an explicit object command or another entry.
+    session.set_time_of_day(state.time.time_of_day);
+    session.sync_event_flag_memory(&state.flags);
+}
+
 fn reset_map_bike_flags(state: &mut GameState) -> Result<()> {
     state.script_runtime.stone_table_entries.clear();
     for flag in [
