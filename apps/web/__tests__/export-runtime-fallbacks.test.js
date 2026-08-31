@@ -269,10 +269,11 @@ describe("export-runtime-fallbacks", () => {
         "title.json"
       );
       makeDir(path.dirname(titlePath));
-      fs.writeFileSync(
-        titlePath,
-        '{"new_game_spawn_identifier":0,"title_music":"LEGACY"}\n'
-      );
+      const canonicalTitle = {
+        title_music: "MUSIC_TITLE",
+        program: { schema_version: 1, marker: "owned-by-core-exporter" },
+      };
+      fs.writeFileSync(titlePath, `${JSON.stringify(canonicalTitle)}\n`);
 
       exportRuntimeAssets({
         projectRoot: tempRoot,
@@ -346,9 +347,7 @@ describe("export-runtime-fallbacks", () => {
           },
         },
       });
-      expect(JSON.parse(fs.readFileSync(titlePath, "utf8"))).toEqual({
-        title_music: "MUSIC_TITLE",
-      });
+      expect(JSON.parse(fs.readFileSync(titlePath, "utf8"))).toEqual(canonicalTitle);
       expect(JSON.parse(fs.readFileSync(path.join(outDir, "collision", "collision_stdscripts.json"), "utf8"))).toEqual({
         DEFAULT: "Default",
       });

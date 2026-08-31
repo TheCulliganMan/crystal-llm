@@ -2,7 +2,23 @@ import {
   resetMultiplayerClientFactory,
   setMultiplayerClientFactory,
 } from '@pokecrystal/core/adapters/multiplayer-client';
-import { extractRemotePlayersFromPresence, OverworldPresenceManager } from './overworld-presence';
+import {
+  buildOverworldChannelName,
+  extractRemotePlayersFromPresence,
+  OverworldPresenceManager,
+} from './overworld-presence';
+
+describe('buildOverworldChannelName', () => {
+  test('isolates presence by world, modpack, and map with bounded safe topics', () => {
+    const core = buildOverworldChannelName('New Bark Town', { worldId: 'public', modpackId: 'core' });
+    const modded = buildOverworldChannelName('New Bark Town', { worldId: 'public', modpackId: 'gen3@1' });
+    const nextMap = buildOverworldChannelName('Route 29', { worldId: 'public', modpackId: 'core' });
+
+    expect(core).toMatch(/^overworld:[a-z0-9_-]+:[a-z0-9_-]+:[a-z0-9_-]+$/);
+    expect(new Set([core, modded, nextMap]).size).toBe(3);
+    expect(core.length).toBeLessThan(160);
+  });
+});
 
 describe('extractRemotePlayersFromPresence', () => {
   test('filters invalid entries, excludes local user, and keeps newest update per user', () => {
@@ -162,8 +178,17 @@ describe('OverworldPresenceManager', () => {
       direction: 'down',
     });
 
-    expect(supabase.channel).toHaveBeenCalledWith('overworld:presence', {
+    expect(supabase.channel).toHaveBeenCalledWith(buildOverworldChannelName('NewBarkTown'), {
       config: { broadcast: { ack: true }, presence: { key: 'me' } },
+    });
+    expect(channel.track).toHaveBeenCalledTimes(1);
+
+    await manager.updateLocalState({
+      playerName: 'Local',
+      mapName: 'NewBarkTown',
+      tileX: 8,
+      tileY: 10,
+      direction: 'down',
     });
     expect(channel.track).toHaveBeenCalledTimes(1);
 
@@ -180,8 +205,12 @@ describe('OverworldPresenceManager', () => {
     });
 
     expect(channel.track).toHaveBeenCalledTimes(2);
-    await manager.disconnect();
+    expect(supabase.channel).toHaveBeenLastCalledWith(buildOverworldChannelName('Route29'), {
+      config: { broadcast: { ack: true }, presence: { key: 'me' } },
+    });
     expect(supabase.removeChannel).toHaveBeenCalledTimes(1);
+    await manager.disconnect();
+    expect(supabase.removeChannel).toHaveBeenCalledTimes(3);
     expect(events.at(-1)).toEqual([]);
   });
 
@@ -268,5 +297,34 @@ describe('OverworldPresenceManager', () => {
       },
     });
     expect(responses).toHaveLength(1);
+  });
+
+  test('requires a whisper recipient and rate-limits chat bursts', async () => {
+    const channel = {
+      on: jest.fn().mockReturnThis(),
+      subscribe: jest.fn((callback?: (status: string) => void) => {
+        callback?.('SUBSCRIBED');
+        return channel;
+      }),
+      send: jest.fn(async () => undefined),
+      track: jest.fn(async () => undefined),
+      presenceState: jest.fn(() => ({})),
+    };
+    setMultiplayerClientFactory(() => ({
+      auth: { getUser: jest.fn(async () => ({ data: { user: { id: 'me' } } })) },
+      channel: jest.fn(() => channel),
+      removeChannel: jest.fn(async () => undefined),
+      from: jest.fn(),
+    }) as any);
+    const manager = new OverworldPresenceManager();
+    await manager.connect({
+      playerName: 'Local', mapName: 'NewBarkTown', tileX: 1, tileY: 1, direction: 'down',
+    });
+
+    await expect(manager.sendChatMessage('whisper', 'hello')).rejects.toThrow(/recipient/i);
+    for (let index = 0; index < 5; index += 1) {
+      await manager.sendChatMessage('local', `message ${index}`);
+    }
+    await expect(manager.sendChatMessage('trade', 'one too many')).rejects.toThrow(/too quickly/i);
   });
 });

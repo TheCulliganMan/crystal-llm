@@ -91,7 +91,10 @@ fn visible_pokegear_phone_call_rings_twice_before_entering_the_compiled_asm_call
         .expect("initialize permanent phone contacts");
     let snapshot = runtime_shell.shell.snapshot().expect("phone snapshot");
     let contacts = visible_pokegear_phone_contact_ids(&snapshot);
-    assert!(!contacts.is_empty(), "new game must initialize permanent contacts");
+    assert!(
+        !contacts.is_empty(),
+        "new game must initialize permanent contacts"
+    );
     runtime_shell.pokegear_menu_open = true;
     runtime_shell.pokegear_page = PokegearPage::Phone;
     runtime_shell.pokegear_phone_cursor = 0;
@@ -113,13 +116,15 @@ fn visible_pokegear_phone_call_rings_twice_before_entering_the_compiled_asm_call
         call_sounds_before + 1,
         "PokegearPhone_MakePhoneCall must begin its first source ring"
     );
-    assert!(!runtime_shell
-        .shell
-        .snapshot()
-        .expect("phone state during first ring")
-        .script_events
-        .memory
-        .contains_key("wPhoneCallerScript"));
+    assert!(
+        !runtime_shell
+            .shell
+            .snapshot()
+            .expect("phone state during first ring")
+            .script_events
+            .memory
+            .contains_key("wPhoneScriptBank")
+    );
 
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = false;
@@ -139,17 +144,21 @@ fn visible_pokegear_phone_call_rings_twice_before_entering_the_compiled_asm_call
     runtime_shell.transient_audio_playing = false;
     advance_visible_pokegear_phone_call(&mut runtime_shell, 1)
         .expect("enter compiled outgoing phone callback");
-    assert!(runtime_shell
-        .last_runtime_action
-        .as_ref()
-        .is_some_and(|record| record.action.contains("LoadPhoneScriptBank")));
-    assert!(runtime_shell
-        .shell
-        .snapshot()
-        .expect("phone state after both rings")
-        .script_events
-        .memory
-        .contains_key("wPhoneCallerScript"));
+    assert!(
+        runtime_shell
+            .last_runtime_action
+            .as_ref()
+            .is_some_and(|record| record.action.contains("LoadPhoneScriptBank"))
+    );
+    assert!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("phone state after both rings")
+            .script_events
+            .memory
+            .contains_key("wPhoneScriptBank")
+    );
 }
 
 #[test]
@@ -186,13 +195,12 @@ fn visible_pokegear_phone_call_without_service_stays_in_the_contact_menu() {
         .initialize_permanent_phone_numbers()
         .expect("initialize permanent phone contacts");
     let cave_tile = TilePosition::new(4, 4);
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "WhirlIslandCave".to_string(),
-            tile: cave_tile,
-            facing: Direction::Down,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "WhirlIslandCave".to_string(),
+        tile: cave_tile,
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -217,21 +225,27 @@ fn visible_pokegear_phone_call_without_service_stays_in_the_contact_menu() {
         runtime_shell.pokegear_phone_status.as_deref(),
         Some("OUT OF SERVICE")
     );
-    assert!(runtime_shell
-        .last_audio_events
-        .iter()
-        .any(|event| event.contains("SFX_NO_SIGNAL")));
-    assert!(!runtime_shell
-        .last_audio_events
-        .iter()
-        .any(|event| event.contains("SFX_CALL")));
-    assert!(!runtime_shell
-        .shell
-        .snapshot()
-        .expect("no-service phone state")
-        .script_events
-        .memory
-        .contains_key("wPhoneCallerScript"));
+    assert!(
+        runtime_shell
+            .last_audio_events
+            .iter()
+            .any(|event| event.contains("SFX_NO_SIGNAL"))
+    );
+    assert!(
+        !runtime_shell
+            .last_audio_events
+            .iter()
+            .any(|event| event.contains("SFX_CALL"))
+    );
+    assert!(
+        !runtime_shell
+            .shell
+            .snapshot()
+            .expect("no-service phone state")
+            .script_events
+            .memory
+            .contains_key("wPhoneScriptBank")
+    );
     press_visible_b_button(&mut runtime_shell).expect("dismiss no-service prompt");
     assert!(runtime_shell.pokegear_phone_call.is_none());
     assert!(runtime_shell.pokegear_menu_open);
@@ -250,8 +264,10 @@ fn visible_pokegear_phone_call_waits_ten_frames_then_hangs_up_on_a() {
     runtime_shell.pokegear_menu_open = false;
 
     for expected_remaining in (1..10).rev() {
-        assert!(advance_visible_pokegear_phone_call(&mut runtime_shell, 1)
-            .expect("advance phone finish delay"));
+        assert!(
+            advance_visible_pokegear_phone_call(&mut runtime_shell, 1)
+                .expect("advance phone finish delay")
+        );
         assert_eq!(
             runtime_shell
                 .pokegear_phone_call
@@ -262,8 +278,10 @@ fn visible_pokegear_phone_call_waits_ten_frames_then_hangs_up_on_a() {
             })
         );
     }
-    assert!(advance_visible_pokegear_phone_call(&mut runtime_shell, 1)
-        .expect("reach phone hangup input"));
+    assert!(
+        advance_visible_pokegear_phone_call(&mut runtime_shell, 1)
+            .expect("reach phone hangup input")
+    );
     assert_eq!(
         runtime_shell
             .pokegear_phone_call
@@ -277,10 +295,12 @@ fn visible_pokegear_phone_call_waits_ten_frames_then_hangs_up_on_a() {
     assert!(runtime_shell.pokegear_phone_call.is_none());
     assert!(runtime_shell.pokegear_menu_open);
     assert_eq!(runtime_shell.pokegear_page, PokegearPage::Phone);
-    assert!(runtime_shell
-        .last_audio_events
-        .iter()
-        .any(|event| event.contains("SFX_HANG_UP")));
+    assert!(
+        runtime_shell
+            .last_audio_events
+            .iter()
+            .any(|event| event.contains("SFX_HANG_UP"))
+    );
 }
 
 #[test]
@@ -352,8 +372,7 @@ fn visible_incoming_phone_call_preserves_source_ring_and_hangup_timing() {
     advance_visible_incoming_phone_sequence(&mut runtime_shell, 139)
         .expect("advance before hangup completion");
     assert!(runtime_shell.incoming_phone_sequence.is_some());
-    advance_visible_incoming_phone_sequence(&mut runtime_shell, 1)
-        .expect("finish incoming hangup");
+    advance_visible_incoming_phone_sequence(&mut runtime_shell, 1).expect("finish incoming hangup");
     assert!(runtime_shell.incoming_phone_sequence.is_none());
     assert_eq!(
         runtime_shell
@@ -481,6 +500,55 @@ fn select_without_a_registered_item_opens_the_exact_asm_textbox() {
         }
         press_visible_a_button(&mut shell).expect("close SelectMenu MapTextbox");
         assert!(shell.field_notice.is_none());
+    }
+}
+
+#[test]
+fn dst_confirmation_uses_the_live_dst_flag_not_special_execution_history() {
+    for (dst, stale_history, expected) in [
+        (true, "InitialClearDSTFlag", "12:34 DST,\nis that OK?"),
+        (false, "InitialSetDSTFlag", "12:34,\nis that OK?"),
+    ] {
+        let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+        let yes_no_index = runtime_shell
+            .shell
+            .runtime()
+            .compiled_script_commands("MeetMomScript")
+            .expect("compiled Mom script")
+            .iter()
+            .position(|command| {
+                command.get("command").and_then(serde_json::Value::as_str) == Some("yesorno")
+            })
+            .expect("Mom DST yes/no command");
+        runtime_shell.shell.session.overworld = runtime_shell
+            .shell
+            .runtime()
+            .data()
+            .overworld_session("PlayersHouse1F", TilePosition::new(7, 4), 0)
+            .expect("PlayersHouse1F session");
+        let state = runtime_shell.shell.session_mut().state_mut();
+        state.overworld = crate::core::state::OverworldMemory::Active {
+            map_name: "PlayersHouse1F".to_string(),
+            tile: TilePosition::new(7, 4),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
+        state.time.dst = dst;
+        state.time.game_time_hours = 12;
+        state.time.game_time_minutes = 34;
+        state.script_runtime.last_special_routine = Some(stale_history.to_string());
+        state.script_runtime.text_window_open = true;
+        state.script_runtime.active_text_label = Some("IsItDSTText".to_string());
+        state.script_runtime.pending_yes_no = Some(crate::core::state::ScriptYesNoPrompt {
+            source_script: "MeetMomScript".to_string(),
+            command_index: yes_no_index,
+        });
+
+        let snapshot = runtime_shell.shell.snapshot().expect("DST prompt snapshot");
+        assert_eq!(
+            visible_field_dialog_pages(&snapshot, &runtime_shell),
+            Some(vec![expected.to_string()])
+        );
     }
 }
 
@@ -664,7 +732,10 @@ fn pokegear_radio_tunes_every_even_knob_position_without_station_wrapping() {
     runtime_shell.pokegear_menu_open = true;
     runtime_shell.pokegear_page = PokegearPage::Radio;
     runtime_shell.pokegear_radio_station = None;
-    let snapshot = runtime_shell.shell.snapshot().expect("initial radio snapshot");
+    let snapshot = runtime_shell
+        .shell
+        .snapshot()
+        .expect("initial radio snapshot");
     assert_eq!(
         visible_pokegear_menu_entries(&snapshot, &runtime_shell)
             .expect("valid no-signal radio entries")[0],
@@ -706,17 +777,26 @@ fn pokegear_radio_tunes_every_even_knob_position_without_station_wrapping() {
     );
 
     for _ in 0..40 {
-        move_visible_pokegear_cursor(&mut runtime_shell, -1)
-            .expect("tune toward upper bound");
+        move_visible_pokegear_cursor(&mut runtime_shell, -1).expect("tune toward upper bound");
     }
     assert_eq!(
-        runtime_shell.shell.snapshot().unwrap().progression.radio_tuning_knob,
+        runtime_shell
+            .shell
+            .snapshot()
+            .unwrap()
+            .progression
+            .radio_tuning_knob,
         80,
         "Up clamps at source knob position 80"
     );
     move_visible_pokegear_cursor(&mut runtime_shell, -1).expect("Up at bound is ignored");
     assert_eq!(
-        runtime_shell.shell.snapshot().unwrap().progression.radio_tuning_knob,
+        runtime_shell
+            .shell
+            .snapshot()
+            .unwrap()
+            .progression
+            .radio_tuning_knob,
         80,
         "the source does not wrap from 20.5 back to 0.5"
     );
@@ -747,19 +827,28 @@ fn pokemon_center_pc_preserves_boot_access_and_shutdown_choreography() {
         Some("PokecenterPCTurnOnText"),
     );
     assert_eq!(
-        runtime_shell.pending_audio.last().map(|audio| audio.audio_id.as_str()),
+        runtime_shell
+            .pending_audio
+            .last()
+            .map(|audio| audio.audio_id.as_str()),
         Some("SFX_BOOT_PC"),
     );
     assert!(runtime_shell.pc_hub_cursor.is_none());
 
     close_visible_special_boundary(&mut runtime_shell).expect("acknowledge PC boot text");
     assert!(runtime_shell.pc_hub_session_open);
-    assert_eq!(runtime_shell.pc_hub_cursor.as_ref().unwrap().option_index, 0);
+    assert_eq!(
+        runtime_shell.pc_hub_cursor.as_ref().unwrap().option_index,
+        0
+    );
 
     runtime_shell.pending_audio.clear();
     confirm_visible_pc_hub(&mut runtime_shell).expect("choose Bill's PC");
     assert_eq!(
-        runtime_shell.pending_audio.last().map(|audio| audio.audio_id.as_str()),
+        runtime_shell
+            .pending_audio
+            .last()
+            .map(|audio| audio.audio_id.as_str()),
         Some("SFX_CHOOSE_PC_OPTION"),
     );
     assert_eq!(
@@ -790,7 +879,10 @@ fn pokemon_center_pc_preserves_boot_access_and_shutdown_choreography() {
     );
     close_visible_special_boundary(&mut runtime_shell).expect("acknowledge link closed text");
     assert_eq!(
-        runtime_shell.pending_audio.last().map(|audio| audio.audio_id.as_str()),
+        runtime_shell
+            .pending_audio
+            .last()
+            .map(|audio| audio.audio_id.as_str()),
         Some("SFX_SHUT_DOWN_PC"),
     );
     assert!(!runtime_shell.pc_hub_session_open);
@@ -799,9 +891,18 @@ fn pokemon_center_pc_preserves_boot_access_and_shutdown_choreography() {
 #[test]
 fn pokemon_center_pc_without_party_plays_only_choose_sound_before_refusal() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session_mut().state_mut().storage.party.pokemon =
-        std::array::from_fn(|_| None);
-    runtime_shell.shell.session_mut().state_mut().sync_party_from_storage();
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .storage
+        .party
+        .pokemon = std::array::from_fn(|_| None);
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .sync_party_from_storage();
     runtime_shell.pending_audio.clear();
 
     activate_visible_special_routine_boundary(
@@ -813,7 +914,10 @@ fn pokemon_center_pc_without_party_plays_only_choose_sound_before_refusal() {
     )
     .expect("refuse empty-party Pokemon Center PC");
     assert_eq!(
-        runtime_shell.pending_audio.last().map(|audio| audio.audio_id.as_str()),
+        runtime_shell
+            .pending_audio
+            .last()
+            .map(|audio| audio.audio_id.as_str()),
         Some("SFX_CHOOSE_PC_OPTION"),
     );
     assert_eq!(
@@ -824,10 +928,12 @@ fn pokemon_center_pc_without_party_plays_only_choose_sound_before_refusal() {
         Some("PokecenterPCCantUseText"),
     );
     close_visible_special_boundary(&mut runtime_shell).expect("acknowledge no-party refusal");
-    assert!(runtime_shell
-        .pending_audio
-        .iter()
-        .all(|audio| audio.audio_id != "SFX_SHUT_DOWN_PC"));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .all(|audio| audio.audio_id != "SFX_SHUT_DOWN_PC")
+    );
 }
 
 #[test]
@@ -843,14 +949,12 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
     ));
     runtime_shell.quick_save_path = Some(save_path.clone());
     let state = runtime_shell.shell.session_mut().state_mut();
-    let party_mon = state.storage.party.pokemon[0].as_mut().expect("party Pokemon");
+    let party_mon = state.storage.party.pokemon[0]
+        .as_mut()
+        .expect("party Pokemon");
     party_mon.item = None;
     party_mon.mail = None;
     let box_mon = party_mon.clone();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     assert!(state.storage.pc_boxes[0].add_pokemon(box_mon));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
@@ -873,7 +977,11 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
     confirm_visible_save_menu(&mut runtime_shell).expect("decline initial MOVE save");
     assert!(!save_path.exists());
     assert_eq!(
-        runtime_shell.bill_pc_action_cursor.as_ref().unwrap().option_index,
+        runtime_shell
+            .bill_pc_action_cursor
+            .as_ref()
+            .unwrap()
+            .option_index,
         3,
     );
     confirm_visible_bill_pc_action(&mut runtime_shell).expect("select MOVE again");
@@ -905,11 +1013,17 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
     );
     let mut saving_entries = Vec::new();
     push_visible_storage_dialog_entries(&mut saving_entries, &pending_snapshot, &runtime_shell);
-    assert!(saving_entries.iter().any(|entry| entry == "Saving… Leave ON!"));
-    assert!(runtime_shell
-        .pending_audio
-        .iter()
-        .all(|audio| audio.audio_id != "SFX_SAVE"));
+    assert!(
+        saving_entries
+            .iter()
+            .any(|entry| entry == "Saving… Leave ON!")
+    );
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .all(|audio| audio.audio_id != "SFX_SAVE")
+    );
     let before_commit = runtime_shell
         .shell
         .runtime()
@@ -943,7 +1057,10 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
         2
     );
     assert!(matches!(
-        runtime_shell.bill_pc_move_save.as_ref().map(|save| (save.phase, save.frames_remaining)),
+        runtime_shell
+            .bill_pc_move_save
+            .as_ref()
+            .map(|save| (save.phase, save.frames_remaining)),
         Some((VisibleBillPcMoveSavePhase::AfterSave, 24))
     ));
     press_visible_b_button(&mut runtime_shell).expect("B is ignored during post-save hold");
@@ -954,7 +1071,10 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
     advance_visible_bill_pc_move_save(&mut runtime_shell, 1)
         .expect("finish twenty-fourth post-save frame");
     assert!(runtime_shell.bill_pc_move_save.is_none());
-    assert_eq!(runtime_shell.last_action_status.as_deref(), Some("POKEMON MOVED"));
+    assert_eq!(
+        runtime_shell.last_action_status.as_deref(),
+        Some("POKEMON MOVED")
+    );
 
     let saved = runtime_shell
         .shell
@@ -963,9 +1083,12 @@ fn bills_pc_move_mode_confirms_then_saves_entry_and_every_move() {
         .expect("load per-move autosave");
     assert_eq!(saved.storage.party.filled_slots(), 2);
     assert_eq!(saved.storage.pc_boxes[0].count, 0);
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "SFX_SAVE"
-    }));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "SFX_SAVE" })
+    );
 
     let _ = std::fs::remove_file(&save_path);
     let _ = std::fs::remove_file(save_path.with_extension("crystalsave.bak"));
@@ -1001,10 +1124,6 @@ fn bills_pc_release_plays_cry_and_retains_the_source_farewell_sequence() {
     pokemon.mail = None;
     pokemon.nickname = "EMBER".to_string();
     let boxed = pokemon.clone();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     assert!(state.storage.pc_boxes[0].add_pokemon(boxed.clone()));
     assert!(state.storage.pc_boxes[0].add_pokemon(boxed));
     state.sync_party_from_storage();
@@ -1020,10 +1139,16 @@ fn bills_pc_release_plays_cry_and_retains_the_source_farewell_sequence() {
         .expect("open release confirmation");
     confirm_visible_pc_release_prompt(&mut runtime_shell).expect("confirm release");
 
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "CRY_CYNDAQUIL"
-    }));
-    assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Released <PK><MN>."));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "CRY_CYNDAQUIL" })
+    );
+    assert_eq!(
+        runtime_shell.pc_notice.as_deref(),
+        Some("Released <PK><MN>.")
+    );
     assert!(matches!(
         runtime_shell
             .pc_release_sequence
@@ -1032,10 +1157,16 @@ fn bills_pc_release_plays_cry_and_retains_the_source_farewell_sequence() {
         Some((VisiblePcReleasePhase::Released, 80))
     ));
     press_visible_a_button(&mut runtime_shell).expect("A is ignored during release hold");
-    assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Released <PK><MN>."));
+    assert_eq!(
+        runtime_shell.pc_notice.as_deref(),
+        Some("Released <PK><MN>.")
+    );
     advance_visible_pc_release_sequence(&mut runtime_shell, 79)
         .expect("advance first 79 release frames");
-    assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Released <PK><MN>."));
+    assert_eq!(
+        runtime_shell.pc_notice.as_deref(),
+        Some("Released <PK><MN>.")
+    );
     advance_visible_pc_release_sequence(&mut runtime_shell, 1)
         .expect("enter farewell on eightieth release frame");
     assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Bye,\nEMBER!"));
@@ -1055,7 +1186,10 @@ fn bills_pc_release_plays_cry_and_retains_the_source_farewell_sequence() {
     assert!(runtime_shell.pc_release_sequence.is_none());
     assert!(runtime_shell.pc_notice.is_none());
     assert_eq!(
-        runtime_shell.storage_cursor.as_ref().map(|cursor| cursor.option_index),
+        runtime_shell
+            .storage_cursor
+            .as_ref()
+            .map(|cursor| cursor.option_index),
         Some(0)
     );
 }
@@ -1071,10 +1205,6 @@ fn bills_pc_deposit_plays_cry_and_holds_the_stored_message() {
     pokemon.mail = None;
     pokemon.nickname = "EMBER".to_string();
     state.storage.party.pokemon[1] = Some(pokemon.clone());
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     runtime_shell.pending_audio.clear();
@@ -1088,9 +1218,12 @@ fn bills_pc_deposit_plays_cry_and_holds_the_stored_message() {
 
     deposit_visible_party_pokemon(&mut runtime_shell).expect("deposit selected Pokemon");
 
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "CRY_CYNDAQUIL"
-    }));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "CRY_CYNDAQUIL" })
+    );
     assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Stored EMBER!"));
     assert!(matches!(
         runtime_shell
@@ -1123,10 +1256,6 @@ fn bills_pc_withdraw_plays_cry_and_holds_the_got_message() {
     pokemon.mail = None;
     pokemon.nickname = "EMBER".to_string();
     let boxed = pokemon.clone();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     assert!(state.storage.pc_boxes[0].add_pokemon(boxed.clone()));
     assert!(state.storage.pc_boxes[0].add_pokemon(boxed));
     state.sync_party_from_storage();
@@ -1140,9 +1269,12 @@ fn bills_pc_withdraw_plays_cry_and_holds_the_got_message() {
 
     withdraw_visible_pc_pokemon(&mut runtime_shell).expect("withdraw selected Pokemon");
 
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "CRY_CYNDAQUIL"
-    }));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "CRY_CYNDAQUIL" })
+    );
     assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Got EMBER!"));
     assert!(matches!(
         runtime_shell
@@ -1160,7 +1292,10 @@ fn bills_pc_withdraw_plays_cry_and_holds_the_got_message() {
     assert!(runtime_shell.pc_transfer_sequence.is_none());
     assert!(runtime_shell.pc_notice.is_none());
     assert_eq!(
-        runtime_shell.storage_cursor.as_ref().map(|cursor| cursor.option_index),
+        runtime_shell
+            .storage_cursor
+            .as_ref()
+            .map(|cursor| cursor.option_index),
         Some(0)
     );
 }
@@ -1174,10 +1309,6 @@ fn bills_pc_deposit_refusal_waits_for_wrong_sfx_then_fifty_frames() {
         .expect("party Pokemon")
         .clone();
     state.storage.party.pokemon[1] = Some(pokemon);
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     runtime_shell.pending_audio.clear();
@@ -1192,9 +1323,12 @@ fn bills_pc_deposit_refusal_waits_for_wrong_sfx_then_fifty_frames() {
     deposit_visible_party_pokemon(&mut runtime_shell).expect("refuse deposited Mail Pokemon");
 
     assert_eq!(runtime_shell.pc_notice.as_deref(), Some("Remove MAIL."));
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "SFX_WRONG"
-    }));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "SFX_WRONG" })
+    );
     assert!(matches!(
         runtime_shell
             .pc_transfer_sequence
@@ -1229,21 +1363,21 @@ fn bills_pc_deposit_refusal_waits_for_wrong_sfx_then_fifty_frames() {
         .expect("finish fiftieth refusal frame");
     assert!(runtime_shell.pc_transfer_sequence.is_none());
     assert!(runtime_shell.pc_notice.is_none());
-    assert_eq!(runtime_shell.shell.snapshot().expect("snapshot").storage.party_count, 2);
+    assert_eq!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("snapshot")
+            .storage
+            .party_count,
+        2
+    );
 }
 
 #[test]
 fn bills_pc_change_box_requires_the_source_save_flow_before_switching() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
     let state = runtime_shell.shell.session_mut().state_mut();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(1));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     let save_path = std::env::temp_dir().join(format!(
@@ -1276,7 +1410,10 @@ fn bills_pc_change_box_requires_the_source_save_flow_before_switching() {
             .current_pc_box,
         0
     );
-    let snapshot = runtime_shell.shell.snapshot().expect("save prompt snapshot");
+    let snapshot = runtime_shell
+        .shell
+        .snapshot()
+        .expect("save prompt snapshot");
     let mut prompt_entries = Vec::new();
     push_visible_save_dialog_entries(&mut prompt_entries, &snapshot, &runtime_shell)
         .expect("render CHANGE BOX save prompt");
@@ -1329,19 +1466,23 @@ fn bills_pc_change_box_requires_the_source_save_flow_before_switching() {
 #[test]
 fn scripted_shop_and_bill_box_renderers_reject_invalid_retained_state() {
     let mut shop_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    shop_shell.shell.session_mut().state_mut().script_runtime.pending_shop =
-        Some(crate::core::state::ScriptShopRequest {
-            mart_type: "MARTTYPE_STANDARD".to_string(),
-            mart_id: "MART_CHERRYGROVE".to_string(),
-            inventory: vec![
-                "POTION".to_string(),
-                "ANTIDOTE".to_string(),
-                "PARLYZ_HEAL".to_string(),
-                "AWAKENING".to_string(),
-            ],
-            source_script: "CherrygroveMartClerkScript".to_string(),
-            command_index: 3,
-        });
+    shop_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .script_runtime
+        .pending_shop = Some(crate::core::state::ScriptShopRequest {
+        mart_type: "MARTTYPE_STANDARD".to_string(),
+        mart_id: "MART_CHERRYGROVE".to_string(),
+        inventory: vec![
+            "POTION".to_string(),
+            "ANTIDOTE".to_string(),
+            "PARLYZ_HEAL".to_string(),
+            "AWAKENING".to_string(),
+        ],
+        source_script: "CherrygroveMartClerkScript".to_string(),
+        command_index: 3,
+    });
     shop_shell.shop_welcome_seen = true;
     shop_shell.shop_top_cursor = Some(MenuCursor {
         surface_id: "wrong:shop-surface".to_string(),
@@ -1357,6 +1498,14 @@ fn scripted_shop_and_bill_box_renderers_reject_invalid_retained_state() {
     assert!(shop_error.contains("shop:top"), "{shop_error}");
 
     let mut box_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    box_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .storage
+        .pc_boxes
+        .pop()
+        .expect("remove BOX14 for the malformed retained-state fixture");
     box_shell.bill_pc_box_cursor = Some(MenuCursor {
         surface_id: "pc:bill-boxes".to_string(),
         option_index: crate::core::models::MAX_PC_BOXES - 1,
@@ -1391,19 +1540,23 @@ fn scripted_shop_and_bill_box_renderers_reject_invalid_retained_state() {
 #[test]
 fn invalid_scripted_shop_item_cursor_is_not_reinitialized_by_confirmation() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session_mut().state_mut().script_runtime.pending_shop =
-        Some(crate::core::state::ScriptShopRequest {
-            mart_type: "MARTTYPE_STANDARD".to_string(),
-            mart_id: "MART_CHERRYGROVE".to_string(),
-            inventory: vec![
-                "POTION".to_string(),
-                "ANTIDOTE".to_string(),
-                "PARLYZ_HEAL".to_string(),
-                "AWAKENING".to_string(),
-            ],
-            source_script: "CherrygroveMartClerkScript".to_string(),
-            command_index: 3,
-        });
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .script_runtime
+        .pending_shop = Some(crate::core::state::ScriptShopRequest {
+        mart_type: "MARTTYPE_STANDARD".to_string(),
+        mart_id: "MART_CHERRYGROVE".to_string(),
+        inventory: vec![
+            "POTION".to_string(),
+            "ANTIDOTE".to_string(),
+            "PARLYZ_HEAL".to_string(),
+            "AWAKENING".to_string(),
+        ],
+        source_script: "CherrygroveMartClerkScript".to_string(),
+        command_index: 3,
+    });
     runtime_shell.menu_cursor = Some(MenuCursor {
         surface_id: "wrong:shop-items".to_string(),
         option_index: 0,
@@ -1470,12 +1623,18 @@ fn invalid_compiled_vertical_menu_surface_is_not_rebased_to_the_first_menu() {
     let target_error = active_menu_target_from_live_cursor(&menu, &cursor)
         .expect_err("an invalid live compiled-menu surface must not select the first menu")
         .to_string();
-    assert!(target_error.contains("wrong:compiled-menu"), "{target_error}");
+    assert!(
+        target_error.contains("wrong:compiled-menu"),
+        "{target_error}"
+    );
 
     let selected_error = selected_vertical_menu(&menu, &cursor)
         .expect_err("compiled-menu confirmation must reject the same invalid surface")
         .to_string();
-    assert!(selected_error.contains("wrong:compiled-menu"), "{selected_error}");
+    assert!(
+        selected_error.contains("wrong:compiled-menu"),
+        "{selected_error}"
+    );
 }
 
 #[test]
@@ -1493,12 +1652,18 @@ fn invalid_retained_elevator_surface_is_not_cleared_by_input() {
     let render_error = visible_scene_dialog_entries(&snapshot, &runtime_shell)
         .expect_err("an invalid retained elevator must fail its input-owning renderer")
         .to_string();
-    assert!(render_error.contains("wrong:elevator-surface"), "{render_error}");
+    assert!(
+        render_error.contains("wrong:elevator-surface"),
+        "{render_error}"
+    );
 
     let move_error = move_visible_elevator_cursor(&mut runtime_shell, 1)
         .expect_err("an invalid retained elevator must fail before navigation")
         .to_string();
-    assert!(move_error.contains("wrong:elevator-surface"), "{move_error}");
+    assert!(
+        move_error.contains("wrong:elevator-surface"),
+        "{move_error}"
+    );
     assert!(runtime_shell.elevator_cursor.is_some());
 
     let confirm_error = select_visible_elevator_floor(&mut runtime_shell)
@@ -1593,10 +1758,6 @@ fn invalid_pc_storage_cursor_is_not_reinitialized_by_selection() {
         .as_ref()
         .expect("party Pokemon")
         .clone();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     assert!(state.storage.pc_boxes[0].add_pokemon(pokemon));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
@@ -1670,7 +1831,10 @@ fn invalid_party_controller_cursors_are_not_clamped_before_input() {
     let selection_error = selected_party_index(&mut runtime_shell)
         .expect_err("an invalid selected party index must not become the final Pokemon")
         .to_string();
-    assert!(selection_error.contains("party cursor"), "{selection_error}");
+    assert!(
+        selection_error.contains("party cursor"),
+        "{selection_error}"
+    );
 
     let action_error = open_visible_party_action_menu(&mut runtime_shell)
         .expect_err("only the exact trailing CANCEL row may close the party menu")
@@ -1692,7 +1856,10 @@ fn invalid_battle_pack_target_cursor_is_not_clamped_before_input() {
     let secondary_error = move_visible_battle_pack_target_secondary_cursor(&mut runtime_shell, 1)
         .expect_err("secondary target navigation must reject the same invalid cursor")
         .to_string();
-    assert!(secondary_error.contains("party cursor"), "{secondary_error}");
+    assert!(
+        secondary_error.contains("party cursor"),
+        "{secondary_error}"
+    );
 }
 
 #[test]
@@ -1897,10 +2064,6 @@ fn invalid_pokedex_detail_page_is_not_advanced_or_wrapped_by_input() {
 fn bills_pc_change_box_name_uses_the_source_eight_character_naming_screen() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
     let state = runtime_shell.shell.session_mut().state_mut();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     runtime_shell.bill_pc_session_open = true;
@@ -1937,10 +2100,6 @@ fn bills_pc_change_box_name_uses_the_source_eight_character_naming_screen() {
 fn bills_pc_change_box_print_empty_uses_source_refusal_sfx_and_delay() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
     let state = runtime_shell.shell.session_mut().state_mut();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     runtime_shell.pending_audio.clear();
@@ -1958,10 +2117,16 @@ fn bills_pc_change_box_print_empty_uses_source_refusal_sfx_and_delay() {
         .option_index = 2;
     confirm_visible_bill_pc_box_action(&mut runtime_shell).expect("select PRINT");
 
-    assert_eq!(runtime_shell.pc_notice.as_deref(), Some("There's no <PK><MN>."));
-    assert!(runtime_shell.pending_audio.iter().any(|audio| {
-        audio.audio_id == "SFX_WRONG"
-    }));
+    assert_eq!(
+        runtime_shell.pc_notice.as_deref(),
+        Some("There's no <PK><MN>.")
+    );
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| { audio.audio_id == "SFX_WRONG" })
+    );
     assert!(matches!(
         runtime_shell
             .pc_transfer_sequence
@@ -1971,8 +2136,7 @@ fn bills_pc_change_box_print_empty_uses_source_refusal_sfx_and_delay() {
     ));
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = false;
-    advance_visible_pc_transfer_sequence(&mut runtime_shell, 1)
-        .expect("finish refusal SFX wait");
+    advance_visible_pc_transfer_sequence(&mut runtime_shell, 1).expect("finish refusal SFX wait");
     advance_visible_pc_transfer_sequence(&mut runtime_shell, 50)
         .expect("finish source refusal delay");
     assert!(runtime_shell.pc_notice.is_none());
@@ -1987,10 +2151,6 @@ fn bills_pc_change_box_print_without_link_uses_source_printer_error() {
         .as_ref()
         .expect("party Pokemon")
         .clone();
-    state
-        .storage
-        .pc_boxes
-        .push(crate::core::models::PcBox::new(0));
     assert!(state.storage.pc_boxes[0].add_pokemon(boxed));
     state.sync_party_from_storage();
     mark_runtime_snapshot_dirty(&mut runtime_shell);
@@ -2013,12 +2173,14 @@ fn bills_pc_change_box_print_without_link_uses_source_printer_error() {
         Some("Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.")
     );
     for _ in 0..256 {
-        let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
+        let snapshot = runtime_shell
+            .shell
+            .presentation_snapshot()
+            .expect("snapshot");
         if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) {
             break;
         }
-        tick_visible_field_text_reveal(&mut runtime_shell, true)
-            .expect("reveal printer status");
+        tick_visible_field_text_reveal(&mut runtime_shell, true).expect("reveal printer status");
     }
     press_visible_a_button(&mut runtime_shell).expect("A is ignored by printer status");
     assert_eq!(
@@ -2035,13 +2197,15 @@ fn bills_pc_change_box_print_without_link_uses_source_printer_error() {
 fn unown_printer_special_opens_authored_menu_instead_of_debug_boundary() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
 
-    assert!(activate_visible_special_routine_boundary(
-        &mut runtime_shell,
-        &crate::core::systems::special_routines::SpecialRoutineEffect::UnownPrinter {
-            letters: vec![1, 2, 26],
-        },
-    )
-    .expect("activate Unown Printer"));
+    assert!(
+        activate_visible_special_routine_boundary(
+            &mut runtime_shell,
+            &crate::core::systems::special_routines::SpecialRoutineEffect::UnownPrinter {
+                letters: vec![1, 2, 26],
+            },
+        )
+        .expect("activate Unown Printer")
+    );
 
     assert!(runtime_shell.special_boundary.is_none());
     assert_eq!(
@@ -2054,7 +2218,10 @@ fn unown_printer_special_opens_authored_menu_instead_of_debug_boundary() {
     assert!(retained_field_fullscreen_active(&runtime_shell));
     assert_eq!(
         visible_field_command_entries(
-            &runtime_shell.shell.presentation_snapshot().expect("snapshot"),
+            &runtime_shell
+                .shell
+                .presentation_snapshot()
+                .expect("snapshot"),
             &runtime_shell,
         )
         .expect("Unown Printer entries"),
@@ -2094,12 +2261,14 @@ fn unown_printer_special_opens_authored_menu_instead_of_debug_boundary() {
         Some("Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.")
     );
     for _ in 0..256 {
-        let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
+        let snapshot = runtime_shell
+            .shell
+            .presentation_snapshot()
+            .expect("snapshot");
         if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) {
             break;
         }
-        tick_visible_field_text_reveal(&mut runtime_shell, true)
-            .expect("reveal printer status");
+        tick_visible_field_text_reveal(&mut runtime_shell, true).expect("reveal printer status");
     }
     press_visible_a_button(&mut runtime_shell).expect("A is ignored by printer status");
     assert_eq!(
@@ -2111,13 +2280,15 @@ fn unown_printer_special_opens_authored_menu_instead_of_debug_boundary() {
     assert!(runtime_shell.visible_unown_printer.is_some());
 
     let mut unavailable_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    assert!(!activate_visible_special_routine_boundary(
-        &mut unavailable_shell,
-        &crate::core::systems::special_routines::SpecialRoutineEffect::UnownPrinter {
-            letters: vec![],
-        },
-    )
-    .expect("ignore unavailable Unown Printer"));
+    assert!(
+        !activate_visible_special_routine_boundary(
+            &mut unavailable_shell,
+            &crate::core::systems::special_routines::SpecialRoutineEffect::UnownPrinter {
+                letters: vec![],
+            },
+        )
+        .expect("ignore unavailable Unown Printer")
+    );
     assert!(unavailable_shell.special_boundary.is_none());
     assert!(unavailable_shell.visible_unown_printer.is_none());
 }
@@ -2125,13 +2296,12 @@ fn unown_printer_special_opens_authored_menu_instead_of_debug_boundary() {
 #[test]
 fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_answer() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "RadioTower2F".to_string(),
-            tile: TilePosition::new(8, 7),
-            facing: Direction::Down,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "RadioTower2F".to_string(),
+        tile: TilePosition::new(8, 7),
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2154,12 +2324,10 @@ fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_ans
                     == Some("BuenasPassword")
         })
         .expect("Buena script password special");
-    assert!(open_visible_buena_password_for_script_command(
-        &mut runtime_shell,
-        "Buena",
-        command_index,
-    )
-    .expect("intercept Buena password special"));
+    assert!(
+        open_visible_buena_password_for_script_command(&mut runtime_shell, "Buena", command_index,)
+            .expect("intercept Buena password special")
+    );
     arm_visible_active_script_cursor_with_origin(
         &mut runtime_shell,
         "RadioTower2F",
@@ -2172,19 +2340,32 @@ fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_ans
         .expect("Buena menu")
         .options
         .clone();
-    let correct = runtime_shell
+    let correct = options[runtime_shell
         .shell
         .session()
         .state()
-        .script_runtime
-        .variables
-        .get("_buena_password")
-        .expect("generated Buena password")
+        .buenas_password
+        .option_index]
         .clone();
+    for host_mirror in ["_buena_category", "_buena_category_type", "_buena_password"] {
+        assert!(
+            !runtime_shell
+                .shell
+                .session()
+                .state()
+                .script_runtime
+                .variables
+                .contains_key(host_mirror),
+            "Buena's source state must not gain the immediate {host_mirror} mirror"
+        );
+    }
     assert_eq!(options.len(), 3);
     assert!(runtime_shell.special_boundary.is_none());
     assert!(!scene_dialog_surface_active(
-        &runtime_shell.shell.presentation_snapshot().expect("snapshot"),
+        &runtime_shell
+            .shell
+            .presentation_snapshot()
+            .expect("snapshot"),
         &runtime_shell,
     ));
     assert_eq!(
@@ -2212,6 +2393,15 @@ fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_ans
     resolve_visible_buena_password_selection(&mut runtime_shell).expect("submit wrong answer");
 
     assert!(runtime_shell.visible_buena_password.is_none());
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .variables
+            .contains_key("BUENA_PASSWORD")
+    );
     assert_eq!(
         runtime_shell
             .shell
@@ -2222,28 +2412,17 @@ fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_ans
             .as_deref(),
         Some("0")
     );
-    assert_eq!(
-        runtime_shell
-            .shell
-            .session()
-            .state()
-            .script_runtime
-            .variables
-            .get("BUENA_PASSWORD"),
-        Some(&options[wrong_index])
-    );
 }
 
 #[test]
 fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_input() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "RadioTower2F".to_string(),
-            tile: TilePosition::new(8, 7),
-            facing: Direction::Down,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "RadioTower2F".to_string(),
+        tile: TilePosition::new(8, 7),
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2288,7 +2467,10 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
         .shell
         .presentation_snapshot()
         .expect("remember-password prompt snapshot");
-    assert!(scene_dialog_surface_active(&prompt_snapshot, &runtime_shell));
+    assert!(scene_dialog_surface_active(
+        &prompt_snapshot,
+        &runtime_shell
+    ));
     assert!(scene_dialog_yes_no_active(&prompt_snapshot, &runtime_shell));
     assert_eq!(
         scene_dialog_yes_no_cursor_index(&prompt_snapshot, &runtime_shell)
@@ -2298,8 +2480,10 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
 
     press_visible_b_button(&mut runtime_shell).expect("B selects the source NO row");
     for _ in 0..14 {
-        assert!(advance_visible_remember_password_prompt(&mut runtime_shell)
-            .expect("advance retained Buena menu delay"));
+        assert!(
+            advance_visible_remember_password_prompt(&mut runtime_shell)
+                .expect("advance retained Buena menu delay")
+        );
         assert!(runtime_shell.pending_remember_password.is_some());
         assert_eq!(
             runtime_shell
@@ -2313,8 +2497,10 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
             "AskRememberPassword does not return until its 15-frame menu delay ends"
         );
     }
-    assert!(advance_visible_remember_password_prompt(&mut runtime_shell)
-        .expect("finish Buena menu delay and resume the script"));
+    assert!(
+        advance_visible_remember_password_prompt(&mut runtime_shell)
+            .expect("finish Buena menu delay and resume the script")
+    );
     assert!(runtime_shell.pending_remember_password.is_none());
     assert_eq!(
         runtime_shell
@@ -2322,10 +2508,27 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
             .session()
             .state()
             .script_runtime
-            .variables
-            .get("_remember_password")
-            .map(String::as_str),
+            .script_value
+            .as_deref(),
         Some("0")
+    );
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .variables
+            .contains_key("_remember_password")
+    );
+    assert!(
+        !runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .variables
+            .contains_key("_yes_no_result")
     );
     assert_eq!(
         runtime_shell
@@ -2342,13 +2545,12 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
 #[test]
 fn battle_tower_action_is_silent_and_reaches_the_authored_receptionist_text() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTower1F".to_string(),
-            tile: TilePosition::new(10, 9),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTower1F".to_string(),
+        tile: TilePosition::new(10, 9),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2384,13 +2586,12 @@ fn battle_tower_action_is_silent_and_reaches_the_authored_receptionist_text() {
 fn battle_tower_challenge_menu_uses_source_choices_and_cancel_result() {
     fn shell_at_challenge_menu() -> (BevyRuntimeShell, usize) {
         let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-        runtime_shell.shell.session.state.overworld =
-            crate::core::state::OverworldMemory::Active {
-                map_name: "BattleTower1F".to_string(),
-                tile: TilePosition::new(10, 9),
-                facing: Direction::Up,
-                mode: MovementMode::Normal,
-            };
+        runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+            map_name: "BattleTower1F".to_string(),
+            tile: TilePosition::new(10, 9),
+            facing: Direction::Up,
+            mode: MovementMode::Normal,
+        };
         runtime_shell.shell.session.overworld = runtime_shell
             .shell
             .runtime()
@@ -2413,17 +2614,24 @@ fn battle_tower_challenge_menu_uses_source_choices_and_cancel_result() {
                         == Some("Menu_ChallengeExplanationCancel")
             })
             .expect("Battle Tower challenge menu special");
-        runtime_shell.shell.session.state.script_runtime.script_value = Some("1".to_string());
+        runtime_shell
+            .shell
+            .session
+            .state
+            .script_runtime
+            .script_value = Some("1".to_string());
         (runtime_shell, command_index)
     }
 
     let (mut explanation_shell, command_index) = shell_at_challenge_menu();
-    assert!(open_visible_battle_tower_challenge_menu_for_script_command(
-        &mut explanation_shell,
-        "Script_Menu_ChallengeExplanationCancel",
-        command_index,
-    )
-    .expect("open source Battle Tower challenge menu"));
+    assert!(
+        open_visible_battle_tower_challenge_menu_for_script_command(
+            &mut explanation_shell,
+            "Script_Menu_ChallengeExplanationCancel",
+            command_index,
+        )
+        .expect("open source Battle Tower challenge menu")
+    );
     arm_visible_active_script_cursor_with_origin(
         &mut explanation_shell,
         "BattleTower1F",
@@ -2488,11 +2696,10 @@ fn battle_tower_rule_check_is_silent_on_success_and_queues_authored_failure_text
         .shell
         .apply_declared_special_routine("CheckForBattleTowerRules")
         .expect("check invalid Battle Tower party");
-    assert!(activate_visible_special_routine_boundary(
-        &mut invalid_shell,
-        &invalid.outcome.effect,
-    )
-    .expect("present Battle Tower rejection"));
+    assert!(
+        activate_visible_special_routine_boundary(&mut invalid_shell, &invalid.outcome.effect,)
+            .expect("present Battle Tower rejection")
+    );
     assert_eq!(
         invalid_shell
             .special_boundary
@@ -2518,20 +2725,17 @@ fn battle_tower_rule_check_is_silent_on_success_and_queues_authored_failure_text
     );
 
     let mut valid_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    let species = ["CHIKORITA", "CYNDAQUIL", "TOTODILE"].map(|species_id| {
-        valid_shell.shell.runtime().data().pokemon[species_id].clone()
-    });
+    let species = ["CHIKORITA", "CYNDAQUIL", "TOTODILE"]
+        .map(|species_id| valid_shell.shell.runtime().data().pokemon[species_id].clone());
     {
         let state = valid_shell.shell.session_mut().state_mut();
         state.storage.party.pokemon = std::array::from_fn(|_| None);
         for (index, species) in species.into_iter().enumerate() {
-            state.storage.party.pokemon[index] = Some(
-                crate::core::models::Pokemon::new_for_tests(
-                    species,
-                    10,
-                    crate::core::models::Dv::default(),
-                ),
-            );
+            state.storage.party.pokemon[index] = Some(crate::core::models::Pokemon::new_for_tests(
+                species,
+                10,
+                crate::core::models::Dv::default(),
+            ));
         }
         state.sync_party_from_storage();
     }
@@ -2539,11 +2743,10 @@ fn battle_tower_rule_check_is_silent_on_success_and_queues_authored_failure_text
         .shell
         .apply_declared_special_routine("CheckForBattleTowerRules")
         .expect("check valid Battle Tower party");
-    assert!(!activate_visible_special_routine_boundary(
-        &mut valid_shell,
-        &valid.outcome.effect,
-    )
-    .expect("valid rule check is source-silent"));
+    assert!(
+        !activate_visible_special_routine_boundary(&mut valid_shell, &valid.outcome.effect,)
+            .expect("valid rule check is source-silent")
+    );
     assert!(valid_shell.special_boundary.is_none());
 }
 
@@ -2551,13 +2754,12 @@ fn battle_tower_rule_check_is_silent_on_success_and_queues_authored_failure_text
 fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
     fn shell_at_room_menu() -> (BevyRuntimeShell, usize) {
         let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-        runtime_shell.shell.session.state.overworld =
-            crate::core::state::OverworldMemory::Active {
-                map_name: "BattleTower1F".to_string(),
-                tile: TilePosition::new(10, 9),
-                facing: Direction::Up,
-                mode: MovementMode::Normal,
-            };
+        runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+            map_name: "BattleTower1F".to_string(),
+            tile: TilePosition::new(10, 9),
+            facing: Direction::Up,
+            mode: MovementMode::Normal,
+        };
         runtime_shell.shell.session.overworld = runtime_shell
             .shell
             .runtime()
@@ -2584,12 +2786,14 @@ fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
     }
 
     let (mut selection_shell, command_index) = shell_at_room_menu();
-    assert!(open_visible_battle_tower_room_menu_for_script_command(
-        &mut selection_shell,
-        "Script_ChooseChallenge",
-        command_index,
-    )
-    .expect("open source Battle Tower room menu"));
+    assert!(
+        open_visible_battle_tower_room_menu_for_script_command(
+            &mut selection_shell,
+            "Script_ChooseChallenge",
+            command_index,
+        )
+        .expect("open source Battle Tower room menu")
+    );
     arm_visible_active_script_cursor_with_origin(
         &mut selection_shell,
         "BattleTower1F",
@@ -2621,7 +2825,12 @@ fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
     press_visible_a_button(&mut selection_shell).expect("select level 10");
     assert!(selection_shell.visible_battle_tower_room_menu.is_none());
     assert_eq!(
-        selection_shell.shell.session().state().battle_tower.level_group,
+        selection_shell
+            .shell
+            .session()
+            .state()
+            .battle_tower
+            .level_group,
         1
     );
     assert_eq!(
@@ -2671,13 +2880,7 @@ fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
     );
 
     let (mut rejected_shell, command_index) = shell_at_room_menu();
-    let starter_species = rejected_shell
-        .shell
-        .session()
-        .state()
-        .storage
-        .party
-        .pokemon[0]
+    let starter_species = rejected_shell.shell.session().state().storage.party.pokemon[0]
         .as_ref()
         .expect("starter")
         .species
@@ -2743,13 +2946,12 @@ fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
 #[test]
 fn battle_tower_receptionist_escort_launches_canonical_opponent_battle() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTower1F".to_string(),
-            tile: TilePosition::new(7, 7),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTower1F".to_string(),
+        tile: TilePosition::new(7, 7),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2764,8 +2966,7 @@ fn battle_tower_receptionist_escort_launches_canonical_opponent_battle() {
         0,
     );
 
-    continue_visible_script_after_prompt(&mut runtime_shell)
-        .expect("start receptionist escort");
+    continue_visible_script_after_prompt(&mut runtime_shell).expect("start receptionist escort");
     for _ in 0..128 {
         settle_visible_shell_smoke_until_idle(&mut runtime_shell)
             .expect("settle receptionist escort boundary");
@@ -2840,13 +3041,12 @@ fn battle_tower_receptionist_escort_launches_canonical_opponent_battle() {
 #[test]
 fn battle_tower_win_resumes_the_room_loop_instead_of_the_failure_warp() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTowerBattleRoom".to_string(),
-            tile: TilePosition::new(4, 6),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTowerBattleRoom".to_string(),
+        tile: TilePosition::new(4, 6),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2856,9 +3056,7 @@ fn battle_tower_win_resumes_the_room_loop_instead_of_the_failure_warp() {
     runtime_shell.shell.session.state.battle_tower.level_group = 1;
     runtime_shell
         .shell
-        .load_battle_tower_opponent_special(
-            "BATTLETOWERBATTLEROOM_YOUNGSTER".to_string(),
-        )
+        .load_battle_tower_opponent_special("BATTLETOWERBATTLEROOM_YOUNGSTER".to_string())
         .expect("load source-selected Battle Tower opponent");
 
     let battle_command_index = runtime_shell
@@ -2897,8 +3095,19 @@ fn battle_tower_win_resumes_the_room_loop_instead_of_the_failure_warp() {
             .expect("complete Battle Tower reloadmap fade-in")
     );
 
-    assert_eq!(runtime_shell.shell.current_map_name(), "BattleTowerBattleRoom");
-    assert_eq!(runtime_shell.shell.session().state().battle_tower.beaten_trainers, 1);
+    assert_eq!(
+        runtime_shell.shell.current_map_name(),
+        "BattleTowerBattleRoom"
+    );
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .battle_tower
+            .beaten_trainers,
+        1
+    );
     assert!(
         runtime_shell.visible_script_movement.is_some(),
         "the win branch must reach the opponent walk-out movement before offering the next battle: cursor={:?} boundary={:?} events={:?}",
@@ -2920,13 +3129,12 @@ fn battle_tower_room_decision_shell() -> (BevyRuntimeShell, PathBuf) {
     ));
     runtime_shell.quick_save_path = Some(save_path.clone());
 
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTower1F".to_string(),
-            tile: TilePosition::new(7, 7),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTower1F".to_string(),
+        tile: TilePosition::new(7, 7),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2952,13 +3160,12 @@ fn battle_tower_room_decision_shell() -> (BevyRuntimeShell, PathBuf) {
         .save(&save_path)
         .expect("write pre-entry Battle Tower quick-save");
 
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTowerBattleRoom".to_string(),
-            tile: TilePosition::new(4, 6),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTowerBattleRoom".to_string(),
+        tile: TilePosition::new(4, 6),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -2994,8 +3201,7 @@ fn advance_battle_tower_room_decision_to_yes_no(runtime_shell: &mut BevyRuntimeS
             continue;
         }
         if !visible_field_dialogue_is_fully_revealed(runtime_shell, &snapshot) {
-            tick_visible_field_text_reveal(runtime_shell, true)
-                .expect("reveal room decision text");
+            tick_visible_field_text_reveal(runtime_shell, true).expect("reveal room decision text");
             continue;
         }
         press_visible_a_button(runtime_shell).expect("advance room decision text");
@@ -3011,9 +3217,18 @@ fn battle_tower_save_and_quit_updates_sram_save_then_reboots_to_the_intro() {
     settle_visible_shell_smoke_until_idle(&mut runtime_shell)
         .expect("finish Battle Tower save-and-reset script");
 
-    assert!(runtime_shell.intro_screen.is_some(), "Reset must reboot through the intro");
-    assert!(runtime_shell.title_menu.is_some(), "Reset must rebuild the title flow");
-    assert!(runtime_shell.special_boundary.is_none(), "Reset is not a diagnostic boundary");
+    assert!(
+        runtime_shell.intro_screen.is_some(),
+        "Reset must reboot through the intro"
+    );
+    assert!(
+        runtime_shell.title_menu.is_some(),
+        "Reset must rebuild the title flow"
+    );
+    assert!(
+        runtime_shell.special_boundary.is_none(),
+        "Reset is not a diagnostic boundary"
+    );
     assert!(runtime_shell.active_script_cursor.is_none());
 
     let saved = runtime_shell
@@ -3027,7 +3242,11 @@ fn battle_tower_save_and_quit_updates_sram_save_then_reboots_to_the_intro() {
             if map_name == "BattleTower1F"
     ));
     assert_eq!(
-        saved.scenes.map_scenes.get("BattleTower1F").map(String::as_str),
+        saved
+            .scenes
+            .map_scenes
+            .get("BattleTower1F")
+            .map(String::as_str),
         Some("SCENE_BATTLETOWER1F_CHECKSTATE")
     );
     assert_eq!(saved.battle_tower.challenge_state, 1);
@@ -3036,8 +3255,7 @@ fn battle_tower_save_and_quit_updates_sram_save_then_reboots_to_the_intro() {
     assert_eq!(saved.battle_tower.beaten_trainers, 3);
     assert_eq!(saved.battle_tower.reward_item, "HP_UP");
 
-    skip_visible_intro_screen(&mut runtime_shell, GameButton::Start)
-        .expect("skip reboot intro");
+    skip_visible_intro_screen(&mut runtime_shell, GameButton::Start).expect("skip reboot intro");
     advance_visible_title_to_main_menu(&mut runtime_shell).expect("open reboot title menu");
     select_visible_title_menu_option(&mut runtime_shell).expect("open Continue summary");
     assert!(runtime_shell.visible_continue_screen.is_some());
@@ -3065,7 +3283,10 @@ fn battle_tower_save_and_quit_updates_sram_save_then_reboots_to_the_intro() {
         "loading the resumed opponent increments the source SRAM counter before battle"
     );
     assert_eq!(
-        resumed.battle.as_ref().map(|battle| battle.battle_type.as_str()),
+        resumed
+            .battle
+            .as_ref()
+            .map(|battle| battle.battle_type.as_str()),
         Some("BATTLETYPE_BATTLE_TOWER")
     );
     assert!(runtime_shell.special_boundary.is_none());
@@ -3128,7 +3349,10 @@ fn battle_tower_declining_save_and_cancel_returns_to_the_next_opponent_loop() {
             .beaten_trainers,
         4
     );
-    assert!(snapshot.battle.is_some(), "the next source-selected opponent must start");
+    assert!(
+        snapshot.battle.is_some(),
+        "the next source-selected opponent must start"
+    );
     assert!(runtime_shell.special_boundary.is_none());
 
     let persisted = runtime_shell
@@ -3161,8 +3385,24 @@ fn battle_tower_declining_save_and_cancel_returns_to_the_next_opponent_loop() {
     settle_visible_shell_smoke_until_idle(&mut runtime_shell)
         .expect("finish Battle Tower left-without-saving cancellation");
     assert_eq!(runtime_shell.shell.current_map_name(), "BattleTower1F");
-    assert_eq!(runtime_shell.shell.session().state().battle_tower.challenge_state, 0);
-    assert_eq!(runtime_shell.shell.session().state().battle_tower.beaten_trainers, 0);
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .battle_tower
+            .challenge_state,
+        0
+    );
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .battle_tower
+            .beaten_trainers,
+        0
+    );
 
     let _ = std::fs::remove_file(&save_path);
     let _ = std::fs::remove_file(save_path.with_extension("crystalsave.bak"));
@@ -3171,8 +3411,7 @@ fn battle_tower_declining_save_and_cancel_returns_to_the_next_opponent_loop() {
 #[test]
 fn photo_studio_without_a_printer_reports_the_source_failure_instead_of_success() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.pending_script_party_selection =
-        Some(PendingScriptPartySelection::PhotoStudio);
+    runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::PhotoStudio);
     runtime_shell.party_menu_open = true;
 
     resolve_visible_script_party_selection(&mut runtime_shell, Some(0))
@@ -3194,13 +3433,15 @@ fn photo_studio_without_a_printer_reports_the_source_failure_instead_of_success(
         Vec::<&str>::new()
     );
     assert_eq!(runtime_shell.pending_photo_studio_commit, Some(0));
-    assert!(runtime_shell
-        .shell
-        .snapshot()
-        .expect("pre-print snapshot")
-        .ui
-        .active_pokemon_picture
-        .is_none());
+    assert!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("pre-print snapshot")
+            .ui
+            .active_pokemon_picture
+            .is_none()
+    );
     assert_eq!(runtime_shell.pending_special_sound, None);
 
     close_visible_special_boundary(&mut runtime_shell).expect("acknowledge Hold Still");
@@ -3238,13 +3479,15 @@ fn photo_studio_without_a_printer_reports_the_source_failure_instead_of_success(
             .map(|boundary| boundary.label.as_str()),
         Some("NoPhotoText")
     );
-    assert!(runtime_shell
-        .shell
-        .snapshot()
-        .expect("post-printer snapshot")
-        .ui
-        .active_pokemon_picture
-        .is_none());
+    assert!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("post-printer snapshot")
+            .ui
+            .active_pokemon_picture
+            .is_none()
+    );
 }
 
 #[test]
@@ -3255,8 +3498,7 @@ fn photo_studio_rejects_an_egg_without_opening_the_picture_surface() {
         .expect("party Pokemon");
     pokemon.is_egg = true;
     runtime_shell.shell.session.state.sync_party_from_storage();
-    runtime_shell.pending_script_party_selection =
-        Some(PendingScriptPartySelection::PhotoStudio);
+    runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::PhotoStudio);
     runtime_shell.party_menu_open = true;
 
     resolve_visible_script_party_selection(&mut runtime_shell, Some(0))
@@ -3278,7 +3520,10 @@ fn photo_studio_rejects_an_egg_without_opening_the_picture_surface() {
         .presentation_snapshot()
         .expect("Photo Studio Egg snapshot");
     let expected_pages = render_visible_asm_text_pages(
-        source.asm_text.as_deref().expect("Photo Studio Egg ASM text"),
+        source
+            .asm_text
+            .as_deref()
+            .expect("Photo Studio Egg ASM text"),
         &snapshot.script_events.named_buffers,
         &snapshot.trainer.player_name,
         visible_rival_name(&snapshot),
@@ -3293,13 +3538,15 @@ fn photo_studio_rejects_an_egg_without_opening_the_picture_surface() {
         expected_pages
     );
     assert!(runtime_shell.pending_photo_studio_commit.is_none());
-    assert!(runtime_shell
-        .shell
-        .snapshot()
-        .expect("Egg refusal snapshot")
-        .ui
-        .active_pokemon_picture
-        .is_none());
+    assert!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("Egg refusal snapshot")
+            .ui
+            .active_pokemon_picture
+            .is_none()
+    );
 }
 
 #[test]
@@ -3334,12 +3581,14 @@ fn photo_studio_special_prints_its_intro_before_opening_party_selection() {
         })
         .expect("PhotoStudio special command");
 
-    assert!(open_visible_script_party_selection_for_command(
-        &mut runtime_shell,
-        "CianwoodPhotoStudioFishingGuruScript",
-        command_index,
-    )
-    .expect("intercept PhotoStudio special"));
+    assert!(
+        open_visible_script_party_selection_for_command(
+            &mut runtime_shell,
+            "CianwoodPhotoStudioFishingGuruScript",
+            command_index,
+        )
+        .expect("intercept PhotoStudio special")
+    );
 
     assert!(!runtime_shell.party_menu_open);
     assert!(matches!(
@@ -3390,12 +3639,14 @@ fn poke_seer_special_prints_its_intro_before_opening_party_selection() {
         })
         .expect("PokeSeer special command");
 
-    assert!(open_visible_script_party_selection_for_command(
-        &mut runtime_shell,
-        "SeerScript",
-        command_index,
-    )
-    .expect("intercept PokeSeer special"));
+    assert!(
+        open_visible_script_party_selection_for_command(
+            &mut runtime_shell,
+            "SeerScript",
+            command_index,
+        )
+        .expect("intercept PokeSeer special")
+    );
 
     assert!(!runtime_shell.party_menu_open);
     assert!(matches!(
@@ -3471,12 +3722,14 @@ fn name_rater_special_preserves_the_exported_intro_pages_before_its_prompt() {
         })
         .expect("NameRater special command");
 
-    assert!(open_visible_script_party_selection_for_command(
-        &mut runtime_shell,
-        "GoldenrodNameRater",
-        command_index,
-    )
-    .expect("intercept Name Rater special"));
+    assert!(
+        open_visible_script_party_selection_for_command(
+            &mut runtime_shell,
+            "GoldenrodNameRater",
+            command_index,
+        )
+        .expect("intercept Name Rater special")
+    );
 
     let snapshot = runtime_shell
         .shell
@@ -3506,7 +3759,10 @@ fn name_rater_special_preserves_the_exported_intro_pages_before_its_prompt() {
             .expect("Name Rater final yes/no page"),
     );
     assert_eq!(actual_pages, expected_pages);
-    assert!(actual_pages.len() > 1, "the source intro has multiple input-gated pages");
+    assert!(
+        actual_pages.len() > 1,
+        "the source intro has multiple input-gated pages"
+    );
     assert!(runtime_shell.pc_confirmation.is_some());
     assert!(!runtime_shell.party_menu_open);
 
@@ -3587,12 +3843,14 @@ fn day_care_lady_intro_and_which_mon_prompt_preserve_exported_pages() {
         })
         .expect("DayCareLady special command");
 
-    assert!(open_visible_day_care_for_script_command(
-        &mut runtime_shell,
-        "DayCareLadyScript",
-        command_index,
-    )
-    .expect("intercept Day-Care lady special"));
+    assert!(
+        open_visible_day_care_for_script_command(
+            &mut runtime_shell,
+            "DayCareLadyScript",
+            command_index,
+        )
+        .expect("intercept Day-Care lady special")
+    );
 
     let snapshot = runtime_shell
         .shell
@@ -3620,11 +3878,9 @@ fn day_care_lady_intro_and_which_mon_prompt_preserve_exported_pages() {
     assert!(runtime_shell.shell.session.state.day_care.lady.active);
 
     for _ in 0..expected_pages.len() - 1 {
-        close_visible_special_boundary(&mut runtime_shell)
-            .expect("advance Day-Care introduction");
+        close_visible_special_boundary(&mut runtime_shell).expect("advance Day-Care introduction");
     }
-    resolve_visible_pc_confirmation(&mut runtime_shell, true)
-        .expect("accept Day-Care service");
+    resolve_visible_pc_confirmation(&mut runtime_shell, true).expect("accept Day-Care service");
     assert!(!runtime_shell.party_menu_open);
     assert_eq!(
         runtime_shell
@@ -3654,10 +3910,14 @@ fn day_care_growth_and_fee_pages_resolve_exact_decimal_operands() {
         .clone()
         .expect("party Pokemon");
     resident.nickname = "EMBER".to_string();
-    let initial_level = resident.level.saturating_sub(2);
+    let current_level = resident.level.saturating_add(2);
+    resident.experience = crate::core::systems::experience::calculate_experience(
+        runtime_shell.shell.runtime().growth_rates(),
+        &resident.species.growth_rate,
+        current_level,
+    )
+    .expect("derive resident current level from stored EXP");
     runtime_shell.shell.session.state.day_care.lady.pokemon = Some(resident);
-    runtime_shell.shell.session.state.day_care.lady.initial_level = initial_level;
-    runtime_shell.shell.session.state.day_care.lady.initial_experience = 0;
     runtime_shell.shell.session.state.day_care.lady.active = true;
     let command_index = runtime_shell
         .shell
@@ -3676,12 +3936,14 @@ fn day_care_growth_and_fee_pages_resolve_exact_decimal_operands() {
         })
         .expect("DayCareLady special command");
 
-    assert!(open_visible_day_care_for_script_command(
-        &mut runtime_shell,
-        "DayCareLadyScript",
-        command_index,
-    )
-    .expect("open Day-Care withdrawal"));
+    assert!(
+        open_visible_day_care_for_script_command(
+            &mut runtime_shell,
+            "DayCareLadyScript",
+            command_index,
+        )
+        .expect("open Day-Care withdrawal")
+    );
     let snapshot = runtime_shell
         .shell
         .presentation_snapshot()
@@ -3697,7 +3959,10 @@ fn day_care_growth_and_fee_pages_resolve_exact_decimal_operands() {
         visible_rival_name(&snapshot),
         snapshot.progression.time.day_of_week,
     );
-    assert_eq!(runtime_shell.pc_notice.as_deref(), intro_pages.last().map(String::as_str));
+    assert_eq!(
+        runtime_shell.pc_notice.as_deref(),
+        intro_pages.last().map(String::as_str)
+    );
 
     resolve_visible_pc_confirmation(&mut runtime_shell, true)
         .expect("request Day-Care growth result");
@@ -3735,10 +4000,14 @@ fn day_care_received_egg_holds_the_source_text_for_120_frames() {
         action: "collect_egg".to_string(),
         success: true,
         pokemon: Some("EGG".to_string()),
+        level: Some(5),
+        reason: None,
     };
 
-    assert!(activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
-        .expect("activate received Egg result"));
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("activate received Egg result")
+    );
     assert_eq!(
         runtime_shell
             .special_boundary
@@ -3746,8 +4015,7 @@ fn day_care_received_egg_holds_the_source_text_for_120_frames() {
             .map(|boundary| boundary.label.as_str()),
         Some("DayCareEgg")
     );
-    close_visible_special_boundary(&mut runtime_shell)
-        .expect("acknowledge received Egg text");
+    close_visible_special_boundary(&mut runtime_shell).expect("acknowledge received Egg text");
     assert_eq!(runtime_shell.visible_special_text_pause_frames, Some(120));
     assert_eq!(
         runtime_shell
@@ -3758,8 +4026,10 @@ fn day_care_received_egg_holds_the_source_text_for_120_frames() {
     );
 
     for _ in 0..119 {
-        assert!(advance_visible_special_text_pause(&mut runtime_shell)
-            .expect("advance received Egg delay"));
+        assert!(
+            advance_visible_special_text_pause(&mut runtime_shell)
+                .expect("advance received Egg delay")
+        );
     }
     assert_eq!(runtime_shell.visible_special_text_pause_frames, Some(1));
     assert_eq!(
@@ -3769,8 +4039,9 @@ fn day_care_received_egg_holds_the_source_text_for_120_frames() {
             .map(|boundary| boundary.label.as_str()),
         Some("DayCareEggDelay")
     );
-    assert!(advance_visible_special_text_pause(&mut runtime_shell)
-        .expect("finish received Egg delay"));
+    assert!(
+        advance_visible_special_text_pause(&mut runtime_shell).expect("finish received Egg delay")
+    );
     assert_eq!(runtime_shell.visible_special_text_pause_frames, None);
     assert_eq!(
         runtime_shell
@@ -3782,16 +4053,286 @@ fn day_care_received_egg_holds_the_source_text_for_120_frames() {
 }
 
 #[test]
+fn linked_friend_success_uses_the_silent_source_50_frame_tail() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let effect = SpecialRoutineEffect::LinkedFriendResult {
+        success: true,
+        link_mode: 0,
+        delay_frames: 50,
+    };
+
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("activate linked-friend success")
+    );
+    assert!(runtime_shell.special_boundary.is_none());
+    assert_eq!(
+        runtime_shell.visible_internal_special_delay_frames,
+        Some(50)
+    );
+}
+
+#[test]
+fn ordinary_link_results_do_not_open_a_host_diagnostic_boundary() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let effect = SpecialRoutineEffect::LinkResult {
+        success: true,
+        link_mode: 2,
+        delay_frames: 0,
+    };
+
+    assert!(
+        !activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("apply silent link result")
+    );
+    assert!(runtime_shell.special_boundary.is_none());
+}
+
+#[test]
+fn link_room_request_waits_for_online_peer_without_a_diagnostic_modal() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let effect = SpecialRoutineEffect::LinkAction { action: 2, room: 2 };
+
+    assert!(
+        !activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("start online Colosseum matchmaking")
+    );
+    assert_eq!(runtime_shell.pending_link_room_selection, Some(2));
+    assert!(runtime_shell.special_boundary.is_none());
+}
+
+#[test]
+fn hosted_peer_readiness_completes_the_internal_wait_and_starts_source_tail() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    runtime_shell.pending_linked_friend_wait = true;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .link_session
+        .serial_connection_status =
+        crate::core::state::LinkSerialConnectionStatus::UsingInternalClock;
+
+    complete_visible_linked_friend_wait(&mut runtime_shell)
+        .expect("complete hosted linked-friend wait");
+
+    assert!(!runtime_shell.pending_linked_friend_wait);
+    assert_eq!(
+        runtime_shell.visible_internal_special_delay_frames,
+        Some(50)
+    );
+    assert!(runtime_shell.special_boundary.is_none());
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .script_value
+            .as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn online_link_room_session_blocks_only_on_the_hosted_trade_or_battle() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let session = SpecialRoutineEffect::LinkRoom {
+        room: "TradeCenter".to_string(),
+        link_mode: 2,
+        session: true,
+    };
+
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &session)
+            .expect("enter hosted Trade Center session")
+    );
+    assert!(runtime_shell.pending_link_room_session);
+    assert!(runtime_shell.special_boundary.is_none());
+
+    let entry = SpecialRoutineEffect::LinkRoom {
+        room: "TimeCapsule".to_string(),
+        link_mode: 1,
+        session: false,
+    };
+    assert!(
+        !activate_visible_special_routine_boundary(&mut runtime_shell, &entry)
+            .expect("enter Time Capsule map")
+    );
+    assert!(!runtime_shell.pending_link_room_session);
+    assert!(runtime_shell.special_boundary.is_none());
+}
+
+#[test]
+fn cancelled_online_link_flow_releases_the_exact_authored_script_boundary() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    runtime_shell.pending_linked_friend_wait = true;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .link_session
+        .serial_connection_status = crate::core::state::LinkSerialConnectionStatus::NotEstablished;
+
+    cancel_visible_online_link_flow(&mut runtime_shell)
+        .expect("cancel hosted linked-friend wait through the source result");
+
+    assert!(!runtime_shell.pending_linked_friend_wait);
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .script_value
+            .as_deref(),
+        Some("0")
+    );
+    assert!(
+        runtime_shell
+            .visible_internal_special_delay_frames
+            .is_none()
+    );
+
+    runtime_shell.pending_link_room_session = true;
+    cancel_visible_online_link_flow(&mut runtime_shell)
+        .expect("cancel hosted room session through link-return");
+    assert!(!runtime_shell.pending_link_room_session);
+}
+
+#[test]
+fn cable_club_clock_owner_branch_is_silent() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let effect = SpecialRoutineEffect::CableClubCheckWhichChris {
+        external_clock_player: true,
+    };
+
+    assert!(
+        !activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("apply cable-club clock-owner branch")
+    );
+    assert!(runtime_shell.special_boundary.is_none());
+}
+
+#[test]
+fn time_capsule_compatibility_result_is_silent() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let effect = SpecialRoutineEffect::TimeCapsuleCompatibility {
+        result_code: 2,
+        mon_name: Some("PIKACHU".to_string()),
+        move_name: Some("SKETCH".to_string()),
+    };
+
+    assert!(
+        !activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("apply Time Capsule compatibility result")
+    );
+    assert!(runtime_shell.special_boundary.is_none());
+}
+
+#[test]
+fn timed_link_results_use_their_silent_source_frame_tail() {
+    for delay_frames in [1, 6, 12, 40] {
+        let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+        let effect = SpecialRoutineEffect::LinkResult {
+            success: true,
+            link_mode: 0,
+            delay_frames,
+        };
+
+        assert!(
+            activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+                .expect("apply timed link result")
+        );
+        assert!(runtime_shell.special_boundary.is_none());
+        assert_eq!(
+            runtime_shell.visible_internal_special_delay_frames,
+            Some(delay_frames)
+        );
+    }
+}
+
+#[test]
+fn link_quick_save_uses_the_silent_source_30_frame_tail() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    let save_path = std::env::temp_dir().join(format!(
+        "crystal-link-quick-save-{}-{}.crystalsave",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    runtime_shell.quick_save_path = Some(save_path.clone());
+    let effect = SpecialRoutineEffect::QuickSave {
+        requested: true,
+        delay_frames: 30,
+    };
+
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("activate link quick-save")
+    );
+    assert!(save_path.is_file());
+    assert!(runtime_shell.special_boundary.is_none());
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .script_value
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        runtime_shell.visible_internal_special_delay_frames,
+        Some(30)
+    );
+    let _ = std::fs::remove_file(save_path);
+}
+
+#[test]
+fn link_quick_save_failure_returns_false_and_still_waits_30_frames() {
+    let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    runtime_shell.quick_save_path = None;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .script_runtime
+        .script_value = Some("1".to_string());
+    let effect = SpecialRoutineEffect::QuickSave {
+        requested: true,
+        delay_frames: 30,
+    };
+
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &effect)
+            .expect("failed link quick-save returns through wScriptVar")
+    );
+    assert_eq!(
+        runtime_shell
+            .shell
+            .session()
+            .state()
+            .script_runtime
+            .script_value
+            .as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        runtime_shell.visible_internal_special_delay_frames,
+        Some(30)
+    );
+}
+
+#[test]
 fn name_rater_preserves_better_name_choice_and_what_name_boundaries() {
     let prepare = || {
         let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
         let player_id = runtime_shell.shell.session().state().player_id;
-        let player_name = runtime_shell
-            .shell
-            .session()
-            .state()
-            .player_name
-            .clone();
+        let player_name = runtime_shell.shell.session().state().player_name.clone();
         let pokemon = runtime_shell.shell.session.state.storage.party.pokemon[0]
             .as_mut()
             .expect("party Pokemon");
@@ -3799,16 +4340,14 @@ fn name_rater_preserves_better_name_choice_and_what_name_boundaries() {
         pokemon.original_trainer_id = player_id;
         pokemon.original_trainer_name = player_name;
         runtime_shell.shell.session.state.sync_party_from_storage();
-        runtime_shell.pending_script_party_selection =
-            Some(PendingScriptPartySelection::NameRater);
+        runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::NameRater);
         runtime_shell.party_menu_open = true;
         runtime_shell.party_cursor = 0;
         runtime_shell
     };
 
     let mut declined = prepare();
-    resolve_visible_script_party_selection(&mut declined, Some(0))
-        .expect("choose owned Pokemon");
+    resolve_visible_script_party_selection(&mut declined, Some(0)).expect("choose owned Pokemon");
     assert!(declined.pending_name_input.is_none());
     let snapshot = declined
         .shell
@@ -3842,8 +4381,7 @@ fn name_rater_preserves_better_name_choice_and_what_name_boundaries() {
     assert_eq!(actual_pages, expected_pages);
     assert!(declined.pc_confirmation.is_some());
     for _ in 0..actual_pages.len() - 1 {
-        close_visible_special_boundary(&mut declined)
-            .expect("advance better-name source page");
+        close_visible_special_boundary(&mut declined).expect("advance better-name source page");
     }
     resolve_visible_pc_confirmation(&mut declined, false).expect("decline renaming");
     assert_eq!(
@@ -3855,8 +4393,7 @@ fn name_rater_preserves_better_name_choice_and_what_name_boundaries() {
     );
 
     let mut accepted = prepare();
-    resolve_visible_script_party_selection(&mut accepted, Some(0))
-        .expect("choose owned Pokemon");
+    resolve_visible_script_party_selection(&mut accepted, Some(0)).expect("choose owned Pokemon");
     while accepted.special_boundary.is_some() {
         close_visible_special_boundary(&mut accepted)
             .expect("advance accepted better-name source page");
@@ -3952,9 +4489,8 @@ fn move_deleter_prints_which_move_before_opening_the_move_list() {
         },
     ];
     runtime_shell.shell.session.state.sync_party_from_storage();
-    runtime_shell.pending_script_party_selection = Some(
-        PendingScriptPartySelection::MoveDeletion { party_index: None },
-    );
+    runtime_shell.pending_script_party_selection =
+        Some(PendingScriptPartySelection::MoveDeletion { party_index: None });
     runtime_shell.party_menu_open = true;
     runtime_shell.party_cursor = 0;
 
@@ -3969,8 +4505,7 @@ fn move_deleter_prints_which_move_before_opening_the_move_list() {
             .map(|boundary| boundary.label.as_str()),
         Some("DeleterAskWhichMoveText")
     );
-    close_visible_special_boundary(&mut runtime_shell)
-        .expect("acknowledge which-move prompt");
+    close_visible_special_boundary(&mut runtime_shell).expect("acknowledge which-move prompt");
     assert_eq!(
         runtime_shell
             .party_move_cursor
@@ -4009,8 +4544,7 @@ fn move_deleter_waits_before_and_after_the_deleted_move_sound() {
     });
     runtime_shell.transient_audio_playing = true;
 
-    resolve_visible_pc_confirmation(&mut runtime_shell, true)
-        .expect("confirm move deletion");
+    resolve_visible_pc_confirmation(&mut runtime_shell, true).expect("confirm move deletion");
 
     assert!(runtime_shell.visible_wait_sfx_boundary);
     assert!(runtime_shell.special_boundary.is_none());
@@ -4022,24 +4556,34 @@ fn move_deleter_waits_before_and_after_the_deleted_move_sound() {
             .collect::<Vec<_>>(),
         vec!["SFX_MOVE_DELETED"]
     );
-    assert!(!runtime_shell
-        .pending_audio
-        .iter()
-        .any(|command| command.audio_id == "SFX_MOVE_DELETED"));
+    assert!(
+        !runtime_shell
+            .pending_audio
+            .iter()
+            .any(|command| command.audio_id == "SFX_MOVE_DELETED")
+    );
 
     runtime_shell.transient_audio_playing = false;
-    let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
     advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("play deletion sound after initial wait");
-    assert!(runtime_shell
-        .pending_audio
-        .iter()
-        .any(|command| command.audio_id == "SFX_MOVE_DELETED"));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|command| command.audio_id == "SFX_MOVE_DELETED")
+    );
     assert!(runtime_shell.special_boundary.is_none());
 
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = false;
-    let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
     advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
         .expect("finish deletion sound wait");
     assert!(!runtime_shell.visible_wait_sfx_boundary);
@@ -4234,7 +4778,10 @@ fn tmhm_forget_menu_renders_the_source_cancel_row() {
     let entries = visible_field_pack_entries(&snapshot, &runtime_shell)
         .expect("source-valid TM/HM CANCEL row");
 
-    assert!(entries.iter().any(|entry| entry == ">CANCEL"), "{entries:?}");
+    assert!(
+        entries.iter().any(|entry| entry == ">CANCEL"),
+        "{entries:?}"
+    );
 }
 
 #[test]
@@ -4289,18 +4836,8 @@ fn tmhm_refusal_and_full_moves_decision_use_exported_source_text() {
             "DYNAMICPUNCH",
             "_TMHMNotCompatibleText",
         ),
-        (
-            "known",
-            "TM_HEADBUTT",
-            "HEADBUTT",
-            "_KnowsMoveText",
-        ),
-        (
-            "full",
-            "TM_HEADBUTT",
-            "HEADBUTT",
-            "_AskForgetMoveText",
-        ),
+        ("known", "TM_HEADBUTT", "HEADBUTT", "_KnowsMoveText"),
+        ("full", "TM_HEADBUTT", "HEADBUTT", "_AskForgetMoveText"),
     ] {
         let mut runtime_shell = configured_tm_shell(item_id);
         let pokemon = runtime_shell.shell.session.state.storage.party.pokemon[0]
@@ -4338,12 +4875,7 @@ fn tmhm_refusal_and_full_moves_decision_use_exported_source_text() {
             .collect::<Vec<_>>();
         assert_eq!(
             actual,
-            expected_pages(
-                &runtime_shell,
-                text_target,
-                &nickname,
-                move_id,
-            ),
+            expected_pages(&runtime_shell, text_target, &nickname, move_id,),
             "{kind} branch",
         );
         if kind == "full" {
@@ -4398,10 +4930,7 @@ fn tmhm_boot_and_teach_prompt_preserve_exported_source_pages() {
     };
     let expected_boot = render("_BootedTMText");
     let expected_contained = render("_ContainedMoveText");
-    assert_eq!(
-        runtime_shell.field_notice.as_ref(),
-        expected_boot.first()
-    );
+    assert_eq!(runtime_shell.field_notice.as_ref(), expected_boot.first());
 
     let boot_page = runtime_shell.field_notice.clone().expect("boot notice");
     runtime_shell.field_text_reveal = Some(VisibleFieldTextReveal {
@@ -4475,10 +5004,7 @@ fn move_tutor_known_incompatible_and_stop_branches_use_exported_text() {
         let mut named_buffers = snapshot.script_events.named_buffers.clone();
         named_buffers.insert("wMonOrItemNameBuffer".to_string(), nickname.to_string());
         named_buffers.insert("STRING_BUFFER_1".to_string(), nickname.to_string());
-        named_buffers.insert(
-            "STRING_BUFFER_2".to_string(),
-            move_id.replace('_', " "),
-        );
+        named_buffers.insert("STRING_BUFFER_2".to_string(), move_id.replace('_', " "));
         let source = runtime_shell
             .shell
             .text_snapshot(text_target)
@@ -4514,12 +5040,11 @@ fn move_tutor_known_incompatible_and_stop_branches_use_exported_text() {
         }
         let nickname = pokemon.nickname.clone();
         runtime_shell.shell.session.state.sync_party_from_storage();
-        runtime_shell.pending_script_party_selection = Some(
-            PendingScriptPartySelection::MoveTutor {
+        runtime_shell.pending_script_party_selection =
+            Some(PendingScriptPartySelection::MoveTutor {
                 move_id: move_id.to_string(),
                 party_index: None,
-            },
-        );
+            });
         runtime_shell.party_menu_open = true;
 
         resolve_visible_script_party_selection(&mut runtime_shell, Some(0))
@@ -4531,11 +5056,16 @@ fn move_tutor_known_incompatible_and_stop_branches_use_exported_text() {
             .chain(runtime_shell.special_boundary_queue.iter())
             .flat_map(|boundary| boundary.details.iter().cloned())
             .collect::<Vec<_>>();
-        assert_eq!(actual, source_pages(&runtime_shell, text_target, &nickname, move_id));
-        assert!(runtime_shell
-            .special_boundary
-            .as_ref()
-            .is_some_and(|boundary| boundary.label == expected_label));
+        assert_eq!(
+            actual,
+            source_pages(&runtime_shell, text_target, &nickname, move_id)
+        );
+        assert!(
+            runtime_shell
+                .special_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.label == expected_label)
+        );
     }
 
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
@@ -4589,12 +5119,10 @@ fn move_tutor_four_move_prompt_preserves_every_exported_source_page() {
         .collect();
     let nickname = pokemon.nickname.clone();
     runtime_shell.shell.session.state.sync_party_from_storage();
-    runtime_shell.pending_script_party_selection = Some(
-        PendingScriptPartySelection::MoveTutor {
-            move_id: "FLAMETHROWER".to_string(),
-            party_index: None,
-        },
-    );
+    runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::MoveTutor {
+        move_id: "FLAMETHROWER".to_string(),
+        party_index: None,
+    });
     runtime_shell.party_menu_open = true;
 
     resolve_visible_script_party_selection(&mut runtime_shell, Some(0))
@@ -4648,8 +5176,7 @@ fn move_tutor_four_move_prompt_preserves_every_exported_source_page() {
         close_visible_special_boundary(&mut runtime_shell)
             .expect("advance one Move Tutor prompt page");
     }
-    resolve_visible_pc_confirmation(&mut runtime_shell, true)
-        .expect("agree to forget a move");
+    resolve_visible_pc_confirmation(&mut runtime_shell, true).expect("agree to forget a move");
     let move_list_prompt = runtime_shell
         .shell
         .text_snapshot("_MoveAskForgetText")
@@ -4664,10 +5191,7 @@ fn move_tutor_four_move_prompt_preserves_every_exported_source_page() {
         visible_rival_name(&snapshot),
         snapshot.progression.time.day_of_week,
     );
-    assert_eq!(
-        runtime_shell.pc_notice.as_ref(),
-        move_list_pages.first()
-    );
+    assert_eq!(runtime_shell.pc_notice.as_ref(), move_list_pages.first());
     assert!(runtime_shell.party_move_cursor.is_some());
 }
 
@@ -4686,12 +5210,10 @@ fn move_tutor_replacement_plays_each_sound_at_its_source_text_boundary() {
         })
         .collect();
     runtime_shell.shell.session.state.sync_party_from_storage();
-    runtime_shell.pending_script_party_selection = Some(
-        PendingScriptPartySelection::MoveTutor {
-            move_id: "FLAMETHROWER".to_string(),
-            party_index: Some(0),
-        },
-    );
+    runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::MoveTutor {
+        move_id: "FLAMETHROWER".to_string(),
+        party_index: Some(0),
+    });
     runtime_shell.party_menu_open = true;
     runtime_shell.party_move_cursor = Some(MenuCursor {
         surface_id: party_move_cursor_surface_id(0),
@@ -4714,8 +5236,7 @@ fn move_tutor_replacement_plays_each_sound_at_its_source_text_boundary() {
     assert!(runtime_shell.pending_audio.is_empty());
 
     for _ in 0..29 {
-        advance_visible_special_text_pause(&mut runtime_shell)
-            .expect("advance the count pause");
+        advance_visible_special_text_pause(&mut runtime_shell).expect("advance the count pause");
     }
     assert_eq!(runtime_shell.visible_special_text_pause_frames, Some(1));
     assert_eq!(
@@ -4734,12 +5255,14 @@ fn move_tutor_replacement_plays_each_sound_at_its_source_text_boundary() {
         Some("MoveForgotPoofText")
     );
     assert_eq!(runtime_shell.pending_audio.len(), 1);
-    assert_eq!(runtime_shell.pending_audio[0].audio_id, "SFX_SWITCH_POKEMON");
+    assert_eq!(
+        runtime_shell.pending_audio[0].audio_id,
+        "SFX_SWITCH_POKEMON"
+    );
 
     runtime_shell.pending_audio.clear();
     for _ in 0..29 {
-        advance_visible_special_text_pause(&mut runtime_shell)
-            .expect("advance the poof pause");
+        advance_visible_special_text_pause(&mut runtime_shell).expect("advance the poof pause");
     }
     assert_eq!(runtime_shell.visible_special_text_pause_frames, Some(1));
     advance_visible_special_text_pause(&mut runtime_shell).expect("finish the poof pause");
@@ -4763,8 +5286,7 @@ fn move_tutor_replacement_plays_each_sound_at_its_source_text_boundary() {
     );
     assert!(runtime_shell.pending_audio.is_empty());
 
-    close_visible_special_boundary(&mut runtime_shell)
-        .expect("acknowledge the source And page");
+    close_visible_special_boundary(&mut runtime_shell).expect("acknowledge the source And page");
     assert_eq!(
         runtime_shell
             .special_boundary
@@ -4800,8 +5322,12 @@ fn magikarp_length_special_prints_the_measurement_before_the_map_branch() {
     resolve_visible_script_party_selection(&mut runtime_shell, Some(0))
         .expect("measure selected Magikarp");
 
-    let formatted = runtime_shell.shell.session.state.script_runtime.named_buffers
-        ["STRING_BUFFER_1"]
+    let formatted = runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .named_buffers["STRING_BUFFER_1"]
         .clone();
     let boundary = runtime_shell
         .special_boundary
@@ -4820,15 +5346,15 @@ fn magikarp_length_special_prints_the_measurement_before_the_map_branch() {
 #[test]
 fn print_diploma_shows_the_diploma_then_requires_b_to_cancel_the_printer_error() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    let effect = crate::core::systems::special_routines::SpecialRoutineEffect::RuntimeVisualCommand {
-        kind: crate::core::state::ScriptGraphicsRuntimeKind::PrintDiploma,
-    };
+    let effect =
+        crate::core::systems::special_routines::SpecialRoutineEffect::RuntimeVisualCommand {
+            kind: crate::core::state::ScriptGraphicsRuntimeKind::PrintDiploma,
+        };
 
-    assert!(activate_visible_special_routine_boundary(
-        &mut runtime_shell,
-        &effect,
-    )
-    .expect("activate diploma printing"));
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &effect,)
+            .expect("activate diploma printing")
+    );
     assert!(runtime_shell.visible_diploma.is_some());
     assert_eq!(
         runtime_shell
@@ -4864,7 +5390,10 @@ fn poke_seer_preserves_the_asm_high_byte_ot_check_and_complete_advice() {
         location: 1,
     });
     runtime_shell.shell.session.state.sync_party_from_storage();
-    let snapshot = runtime_shell.shell.presentation_snapshot().expect("snapshot");
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
     let pokemon = snapshot.party.slots[0].pokemon.clone();
 
     let messages = visible_poke_seer_messages(&runtime_shell, &snapshot, &pokemon, "EMBER")
@@ -4910,12 +5439,14 @@ fn poke_seer_preserves_the_asm_high_byte_ot_check_and_complete_advice() {
         .flat_map(|message| message.details.iter().cloned())
         .collect::<Vec<_>>();
     assert_eq!(actual_pages, expected_pages);
-    assert!(messages
-        .last()
-        .expect("advice")
-        .details
-        .join("\n")
-        .contains("It looks brimming\nwith confidence."));
+    assert!(
+        messages
+            .last()
+            .expect("advice")
+            .details
+            .join("\n")
+            .contains("It looks brimming\nwith confidence.")
+    );
 
     let mut traded = pokemon.clone();
     traded.original_trainer_id = 0x3401;
@@ -4940,18 +5471,22 @@ fn poke_seer_preserves_the_asm_high_byte_ot_check_and_complete_advice() {
     let messages = visible_poke_seer_messages(&runtime_shell, &snapshot, &level_only, "EMBER")
         .expect("render event-location Poke Seer messages");
     assert_eq!(messages[0].label, "SeerNoLocationText");
-    assert!(messages
-        .iter()
-        .all(|message| message.label != "SeerTimeLevelText"));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.label != "SeerTimeLevelText")
+    );
     assert_eq!(messages.last().expect("advice").label, "SeerMightyText");
 
     let mut egg = pokemon.clone();
     egg.is_egg = true;
     let messages = visible_poke_seer_messages(&runtime_shell, &snapshot, &egg, "EGG")
         .expect("render Egg Poke Seer messages");
-    assert!(messages
-        .iter()
-        .all(|message| message.label == "SeerEggText"));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.label == "SeerEggText")
+    );
     let source = runtime_shell
         .shell
         .text_snapshot("_SeerEggText")
@@ -4996,9 +5531,11 @@ fn poke_seer_preserves_the_asm_high_byte_ot_check_and_complete_advice() {
     let messages =
         visible_poke_seer_messages(&runtime_shell, &snapshot, &zero_caught_data, "EMBER")
             .expect("render unknown Poke Seer messages");
-    assert!(messages
-        .iter()
-        .all(|message| message.label == "SeerCantTellAThingText"));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.label == "SeerCantTellAThingText")
+    );
     let source = runtime_shell
         .shell
         .text_snapshot("_SeerCantTellAThingText")
@@ -5091,14 +5628,12 @@ fn successful_npc_trade_waits_for_the_cable_prompt_before_exchanging_pokemon() {
             command.get("command").and_then(serde_json::Value::as_str) == Some("trade")
         })
         .expect("Mike trade command");
-    runtime_shell.pending_script_party_selection = Some(
-        PendingScriptPartySelection::NpcTrade {
-            origin_map_name: "GoldenrodDeptStore5F".to_string(),
-            source_script: "Mike".to_string(),
-            command_index,
-            trade_id: "NPC_TRADE_MIKE".to_string(),
-        },
-    );
+    runtime_shell.pending_script_party_selection = Some(PendingScriptPartySelection::NpcTrade {
+        origin_map_name: "GoldenrodDeptStore5F".to_string(),
+        source_script: "Mike".to_string(),
+        command_index,
+        trade_id: "NPC_TRADE_MIKE".to_string(),
+    });
     runtime_shell.party_menu_open = true;
     runtime_shell.party_cursor = 1;
 
@@ -5107,11 +5642,13 @@ fn successful_npc_trade_waits_for_the_cable_prompt_before_exchanging_pokemon() {
 
     let snapshot = runtime_shell.shell.snapshot().expect("pre-cable snapshot");
     assert!(snapshot.script_events.completed_trades.is_empty());
-    assert!(snapshot
-        .party
-        .slots
-        .iter()
-        .any(|slot| slot.pokemon.species.id == "ABRA"));
+    assert!(
+        snapshot
+            .party
+            .slots
+            .iter()
+            .any(|slot| slot.pokemon.species.id == "ABRA")
+    );
     assert_eq!(
         runtime_shell
             .special_boundary
@@ -5126,11 +5663,13 @@ fn successful_npc_trade_waits_for_the_cable_prompt_before_exchanging_pokemon() {
         snapshot.script_events.completed_trades,
         vec!["NPC_TRADE_MIKE"]
     );
-    assert!(snapshot
-        .party
-        .slots
-        .iter()
-        .any(|slot| slot.pokemon.species.id == "MACHOP"));
+    assert!(
+        snapshot
+            .party
+            .slots
+            .iter()
+            .any(|slot| slot.pokemon.species.id == "MACHOP")
+    );
     assert_eq!(
         runtime_shell
             .special_boundary
@@ -5150,13 +5689,12 @@ fn successful_npc_trade_waits_for_the_cable_prompt_before_exchanging_pokemon() {
 
 fn seventh_battle_tower_win_shell() -> BevyRuntimeShell {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
-    runtime_shell.shell.session.state.overworld =
-        crate::core::state::OverworldMemory::Active {
-            map_name: "BattleTowerBattleRoom".to_string(),
-            tile: TilePosition::new(4, 6),
-            facing: Direction::Up,
-            mode: MovementMode::Normal,
-        };
+    runtime_shell.shell.session.state.overworld = crate::core::state::OverworldMemory::Active {
+        map_name: "BattleTowerBattleRoom".to_string(),
+        tile: TilePosition::new(4, 6),
+        facing: Direction::Up,
+        mode: MovementMode::Normal,
+    };
     runtime_shell.shell.session.overworld = runtime_shell
         .shell
         .runtime()
@@ -5164,13 +5702,16 @@ fn seventh_battle_tower_win_shell() -> BevyRuntimeShell {
         .overworld_session("BattleTowerBattleRoom", TilePosition::new(4, 6), 0)
         .expect("start Battle Tower battle-room session");
     runtime_shell.shell.session.state.battle_tower.level_group = 1;
-    runtime_shell.shell.session.state.battle_tower.beaten_trainers = 6;
+    runtime_shell
+        .shell
+        .session
+        .state
+        .battle_tower
+        .beaten_trainers = 6;
     runtime_shell.shell.session.state.battle_tower.reward_item = "HP_UP".to_string();
     runtime_shell
         .shell
-        .load_battle_tower_opponent_special(
-            "BATTLETOWERBATTLEROOM_YOUNGSTER".to_string(),
-        )
+        .load_battle_tower_opponent_special("BATTLETOWERBATTLEROOM_YOUNGSTER".to_string())
         .expect("load seventh Battle Tower opponent");
 
     let battle_command_index = runtime_shell
@@ -5239,7 +5780,11 @@ fn seventh_battle_tower_win_keeps_the_prize_claimable_when_the_item_pocket_is_fu
         .take(20)
         .map(|(item_id, _)| item_id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(full_item_pocket.len(), 20, "test pack needs twenty item slots");
+    assert_eq!(
+        full_item_pocket.len(),
+        20,
+        "test pack needs twenty item slots"
+    );
     runtime_shell.shell.session.state.bag.items.clear();
     for item_id in full_item_pocket {
         runtime_shell
@@ -5304,8 +5849,8 @@ fn visible_pack_menu_renders_and_confirms_cancel_row_from_normal_inputs() {
         .expect("A opens Pack from the start menu through normal input dispatch");
     {
         let snapshot = runtime_shell.shell.snapshot().expect("Pack snapshot");
-        let entries = visible_field_pack_entries(&snapshot, &runtime_shell)
-            .expect("render Pack item list");
+        let entries =
+            visible_field_pack_entries(&snapshot, &runtime_shell).expect("render Pack item list");
         assert_eq!(entries.first().map(String::as_str), Some("POCKET: ITEMS"));
         assert!(
             entries.iter().any(|entry| entry == ">POTION x01"),
@@ -5360,8 +5905,8 @@ fn visible_pack_menu_renders_and_confirms_cancel_row_from_normal_inputs() {
             .shell
             .snapshot()
             .expect("Pack action snapshot");
-        let entries = visible_field_pack_entries(&snapshot, &runtime_shell)
-            .expect("render Pack action menu");
+        let entries =
+            visible_field_pack_entries(&snapshot, &runtime_shell).expect("render Pack action menu");
         assert_eq!(
             entries,
             vec!["ACTION POTION x01", ">USE", " GIVE", " TOSS", " QUIT"],
@@ -5416,8 +5961,8 @@ fn visible_pack_menu_renders_and_confirms_cancel_row_from_normal_inputs() {
             .shell
             .snapshot()
             .expect("Pack tossed snapshot");
-        let entries = visible_field_pack_entries(&snapshot, &runtime_shell)
-            .expect("render Pack after toss");
+        let entries =
+            visible_field_pack_entries(&snapshot, &runtime_shell).expect("render Pack after toss");
         assert!(
             entries.iter().any(|entry| entry == ">CANCEL"),
             "Tossing the only item should leave the Pack on CANCEL: {entries:?}"
@@ -5489,15 +6034,23 @@ fn visible_mail_composer_uses_asm_grid_and_atomically_attaches_player_mail() {
         .expect("complete player name");
     settle_visible_shell_smoke_until_idle(&mut runtime_shell).expect("settle arrival scripts");
     let species = runtime_shell.shell.runtime().data().pokemon["CYNDAQUIL"].clone();
-    runtime_shell.shell.session_mut().state_mut().storage.party.pokemon[0] = Some(
-        crate::core::models::Pokemon::new_for_tests(
-            species,
-            10,
-            crate::core::models::Dv::default(),
-        ),
-    );
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .storage
+        .party
+        .pokemon[0] = Some(crate::core::models::Pokemon::new_for_tests(
+        species,
+        10,
+        crate::core::models::Dv::default(),
+    ));
     runtime_shell.shell.session_mut().state_mut().player_id = 0x1234;
-    runtime_shell.shell.session_mut().state_mut().sync_party_from_storage();
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .sync_party_from_storage();
     runtime_shell
         .shell
         .add_bag_item("FLOWER_MAIL", 1)
@@ -5512,22 +6065,21 @@ fn visible_mail_composer_uses_asm_grid_and_atomically_attaches_player_mail() {
         .as_ref()
         .expect("Mail item must open the source composer");
     assert_eq!((input.cursor_column, input.cursor_row), (0, 0));
-    assert_eq!(visible_mail_input_layout(NameInputCase::Upper), &[
-        "A B C D E F G H I J",
-        "K L M N O P Q R S T",
-        "U V W X Y Z   , ? !",
-        "1 2 3 4 5 6 7 8 9 0",
-        "<PK> <MN> <PO> <KE> é ♂ ♀ ¥ … ×",
-        "lower  DEL   END   ",
-    ]);
+    assert_eq!(
+        visible_mail_input_layout(NameInputCase::Upper),
+        &[
+            "A B C D E F G H I J",
+            "K L M N O P Q R S T",
+            "U V W X Y Z   , ? !",
+            "1 2 3 4 5 6 7 8 9 0",
+            "<PK> <MN> <PO> <KE> é ♂ ♀ ¥ … ×",
+            "lower  DEL   END   ",
+        ]
+    );
 
     let mut images = Assets::<Image>::default();
-    let frame = load_mail_entry_frame(
-        &runtime_shell.asset_root,
-        input,
-        &mut images,
-    )
-    .expect("render Mail composer LCD");
+    let frame = load_mail_entry_frame(&runtime_shell.asset_root, input, &mut images)
+        .expect("render Mail composer LCD");
     assert_eq!(frame.size, Vec2::new(160.0, 144.0));
 
     select_visible_mail_grid_key(&mut runtime_shell).expect("write A");
@@ -5570,7 +6122,9 @@ fn visible_mail_composer_uses_asm_grid_and_atomically_attaches_player_mail() {
             .unwrap_or(0),
         0
     );
-    state.validate_saved_state().expect("composed Mail save state");
+    state
+        .validate_saved_state()
+        .expect("composed Mail save state");
 }
 
 #[test]
@@ -5597,7 +6151,10 @@ fn party_mail_read_opens_item_specific_full_lcd_until_game_boy_dismissal() {
     assert_eq!(frame.size, Vec2::new(160.0, 144.0));
     let image = images.get(&frame.handle).expect("Mail reader image");
     assert!(
-        image.data.chunks_exact(4).any(|pixel| pixel[..3] != [255, 255, 255]),
+        image
+            .data
+            .chunks_exact(4)
+            .any(|pixel| pixel[..3] != [255, 255, 255]),
         "Mail stationery must contain source border/art pixels"
     );
 
@@ -5658,14 +6215,28 @@ fn card_flip_lcd_composes_source_cards_instead_of_text_placeholders() {
     game.phase = VisibleCardFlipPhase::PlayAgain;
     game.face_card = Some(("PIKACHU".to_string(), 1));
     game.revealed[0] = true;
-    let reveal = render_visible_card_flip_frame(&sources, &game, &mut images)
-        .expect("render revealed card");
+    let reveal =
+        render_visible_card_flip_frame(&sources, &game, &mut images).expect("render revealed card");
 
     let ask_pixels = images.get(&ask.handle).expect("initial image").data.clone();
-    let choose_pixels = images.get(&choose.handle).expect("choose image").data.clone();
-    let reveal_pixels = images.get(&reveal.handle).expect("reveal image").data.clone();
-    assert_ne!(ask_pixels, choose_pixels, "face-down cards must be BG tiles, not host text");
-    assert_ne!(choose_pixels, reveal_pixels, "revealing must replace the chosen card with its source face");
+    let choose_pixels = images
+        .get(&choose.handle)
+        .expect("choose image")
+        .data
+        .clone();
+    let reveal_pixels = images
+        .get(&reveal.handle)
+        .expect("reveal image")
+        .data
+        .clone();
+    assert_ne!(
+        ask_pixels, choose_pixels,
+        "face-down cards must be BG tiles, not host text"
+    );
+    assert_ne!(
+        choose_pixels, reveal_pixels,
+        "revealing must replace the chosen card with its source face"
+    );
 }
 
 #[test]
@@ -5674,8 +6245,8 @@ fn card_flip_group_bet_cursors_use_the_complete_asm_oam_extents() {
         .join("../../..")
         .canonicalize()
         .expect("repository root");
-    let sources = load_card_flip_render_sources(&AssetRoot::new(repo_root))
-        .expect("Card Flip source art");
+    let sources =
+        load_card_flip_render_sources(&AssetRoot::new(repo_root)).expect("Card Flip source art");
 
     let mut poke_group = vec![0_u8; 160 * 144 * 4];
     draw_card_flip_bet_cursor(&sources, 2, 1, &mut poke_group);
@@ -5740,17 +6311,12 @@ fn visible_card_flip_commits_the_stake_and_deck_before_card_selection() {
         revealed: vec![false; 24],
         message: "PLAY WITH THREE COINS?".to_string(),
     });
-    runtime_shell
-        .shell
-        .session_mut()
-        .state
-        .script_runtime
-        .variables
-        .insert("card_flip_initialize".to_string(), "1".to_string());
-
     flip_visible_card(&mut runtime_shell).expect("accept Card Flip stake");
 
-    let game = runtime_shell.visible_card_flip.as_ref().expect("Card Flip remains open");
+    let game = runtime_shell
+        .visible_card_flip
+        .as_ref()
+        .expect("Card Flip remains open");
     assert_eq!(game.phase, VisibleCardFlipPhase::ChooseCard);
     assert_eq!(game.coins, 96);
     assert_eq!(game.deck.len(), 24);
@@ -5869,7 +6435,10 @@ fn visible_card_flip_commits_the_stake_and_deck_before_card_selection() {
     runtime_shell.transient_audio_playing = false;
     advance_visible_card_flip_animation(&mut runtime_shell)
         .expect("choose-card completion reveals and tabulates");
-    let game = runtime_shell.visible_card_flip.as_ref().expect("reveal remains visible");
+    let game = runtime_shell
+        .visible_card_flip
+        .as_ref()
+        .expect("reveal remains visible");
     assert_eq!(game.phase, VisibleCardFlipPhase::Result);
     assert_eq!(game.payout, 72);
     assert_eq!(game.coins, 96, "reveal precedes the source payout loop");
@@ -5918,8 +6487,36 @@ fn visible_card_flip_commits_the_stake_and_deck_before_card_selection() {
     let game = runtime_shell.visible_card_flip.as_ref().unwrap();
     assert_eq!(game.phase, VisibleCardFlipPhase::PlayAgain);
     assert_eq!(game.message, "WANT TO PLAY\nAGAIN?");
+    let card_flip_play_again = runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .card_flip
+        .clone()
+        .expect("typed Card Flip play-again state");
 
     runtime_shell.visible_card_flip.as_mut().unwrap().round = 11;
+    {
+        let core_game = runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
+            .card_flip
+            .as_mut()
+            .expect("typed Card Flip state");
+        core_game.num_cards_played = 11;
+        core_game.discard_pile.fill(false);
+        let face = usize::from(core_game.face_up_card.expect("revealed face"));
+        core_game.discard_pile[face] = true;
+        for index in 0..24 {
+            if core_game.discard_pile.iter().filter(|flag| **flag).count() == 12 {
+                break;
+            }
+            core_game.discard_pile[index] = true;
+        }
+    }
     flip_visible_card(&mut runtime_shell).expect("accept twelfth-round replay");
     let game = runtime_shell.visible_card_flip.as_ref().unwrap();
     assert_eq!(game.phase, VisibleCardFlipPhase::Shuffled);
@@ -5931,7 +6528,10 @@ fn visible_card_flip_commits_the_stake_and_deck_before_card_selection() {
     let game = runtime_shell.visible_card_flip.as_ref().unwrap();
     assert_eq!(game.phase, VisibleCardFlipPhase::ChooseCard);
     assert_eq!(game.animation, VisibleCardFlipAnimation::WaitStake);
-    assert_eq!(game.coins, 165, "the stake follows reshuffle acknowledgement");
+    assert_eq!(
+        game.coins, 165,
+        "the stake follows reshuffle acknowledgement"
+    );
 
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = true;
@@ -5941,6 +6541,12 @@ fn visible_card_flip_commits_the_stake_and_deck_before_card_selection() {
         game.animation = VisibleCardFlipAnimation::None;
         game.yes_no_index = 1;
     }
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .card_flip = Some(card_flip_play_again);
     flip_visible_card(&mut runtime_shell).expect("decline another game");
     assert_eq!(
         runtime_shell.visible_card_flip.as_ref().unwrap().animation,
@@ -5985,18 +6591,31 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
         .expect("add Coin Case");
     runtime_shell.shell.session_mut().state.random_state =
         crystal_core::random::CrystalRandomState::default();
-    runtime_shell.shell.session_mut().state.script_runtime.script_value = None;
     runtime_shell
         .shell
         .session_mut()
         .state
         .script_runtime
-        .variables
-        .insert("slot_keep_seven_bias_chance".to_string(), "0".to_string());
-    runtime_shell.shell.session_mut().divider =
-        crystal_core::random::RuntimeDividerSource::replay(
-            std::iter::repeat_n([0_u8, 255_u8], 64).flatten(),
-        );
+        .script_value = None;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .slot_machine = Some(SlotMachineState {
+        phase: SlotMachinePhase::Betting,
+        lucky: false,
+        keep_seven_bias_chance: false,
+        bet: 3,
+        bias: None,
+        offsets: [14; 3],
+        next_reel: 1,
+        matched_symbol: None,
+        payout_remaining: 0,
+    });
+    runtime_shell.shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay(
+        std::iter::repeat_n([0_u8, 255_u8], 64).flatten(),
+    );
     runtime_shell.visible_slot_machine = Some(VisibleSlotMachine {
         phase: VisibleSlotMachinePhase::Betting,
         animation: VisibleSlotMachineAnimation::None,
@@ -6022,10 +6641,16 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
     spin_visible_slot_machine(&mut runtime_shell).expect("start deterministic winning spin");
     let machine = runtime_shell.visible_slot_machine.as_ref().unwrap();
     assert_eq!(machine.phase, VisibleSlotMachinePhase::Spinning);
-    assert_eq!(machine.coins, 96, "starting the reels commits only the stake");
+    assert_eq!(
+        machine.coins, 96,
+        "starting the reels commits only the stake"
+    );
     assert!(matches!(
         machine.animation,
-        VisibleSlotMachineAnimation::Spinning { start_delay: 32, .. }
+        VisibleSlotMachineAnimation::Spinning {
+            start_delay: 32,
+            ..
+        }
     ));
     assert_eq!(runtime_shell.shell.session().state().coins, 96);
 
@@ -6042,19 +6667,35 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
         for _ in 0..2000 {
             advance_visible_slot_machine_animation(&mut runtime_shell)
                 .expect("advance staged reel stop");
-            if runtime_shell.visible_slot_machine.as_ref().unwrap().next_reel > reel {
+            if runtime_shell
+                .visible_slot_machine
+                .as_ref()
+                .unwrap()
+                .next_reel
+                > reel
+            {
                 break;
             }
         }
         assert_eq!(
-            runtime_shell.visible_slot_machine.as_ref().unwrap().next_reel,
+            runtime_shell
+                .visible_slot_machine
+                .as_ref()
+                .unwrap()
+                .next_reel,
             reel + 1,
             "each A press stops exactly one reel"
         );
     }
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
-        VisibleSlotMachineAnimation::FlashResult { frames_remaining: 16 }
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
+        VisibleSlotMachineAnimation::FlashResult {
+            frames_remaining: 16
+        }
     ));
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = false;
@@ -6068,14 +6709,22 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
     assert_eq!(runtime_shell.pending_audio.len(), 1);
     assert_eq!(runtime_shell.pending_audio[0].audio_id, "SFX_2ND_PLACE");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::WaitResult { payout: 300 }
     );
     runtime_shell.pending_audio.clear();
     advance_visible_slot_machine_animation(&mut runtime_shell)
         .expect("result cue completion starts payout");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Payout {
             remaining: 300,
             frames_until_coin: 1,
@@ -6107,13 +6756,21 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
     advance_visible_slot_machine_animation(&mut runtime_shell)
         .expect("first terminal payout delay frame");
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Payout { remaining: 0, .. }
     ));
     advance_visible_slot_machine_animation(&mut runtime_shell)
         .expect("finish terminal payout delay");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::AwaitResult
     );
     assert_eq!(runtime_shell.shell.session().state().coins, 396);
@@ -6125,10 +6782,18 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
 
     runtime_shell.pending_audio.clear();
     runtime_shell.transient_audio_playing = true;
-    runtime_shell.visible_slot_machine.as_mut().unwrap().yes_no_index = 1;
+    runtime_shell
+        .visible_slot_machine
+        .as_mut()
+        .unwrap()
+        .yes_no_index = 1;
     spin_visible_slot_machine(&mut runtime_shell).expect("decline another slot round");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::QuitWaitBefore
     );
     advance_visible_slot_machine_animation(&mut runtime_shell)
@@ -6139,7 +6804,11 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
     assert_eq!(runtime_shell.pending_audio.len(), 1);
     assert_eq!(runtime_shell.pending_audio[0].audio_id, "SFX_QUIT_SLOTS");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::QuitWaitAfter
     );
     advance_visible_slot_machine_animation(&mut runtime_shell)
@@ -6151,8 +6820,7 @@ fn visible_slot_machine_pays_one_coin_every_other_frame_after_result_sound() {
         .expect("playing slot quit cue blocks close");
     assert!(runtime_shell.visible_slot_machine.is_some());
     runtime_shell.transient_audio_playing = false;
-    advance_visible_slot_machine_animation(&mut runtime_shell)
-        .expect("slot closes after quit cue");
+    advance_visible_slot_machine_animation(&mut runtime_shell).expect("slot closes after quit cue");
     assert!(runtime_shell.visible_slot_machine.is_none());
 }
 
@@ -6195,7 +6863,11 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
         advance_visible_slot_machine_animation(&mut runtime_shell).expect("advance Golem fall");
     }
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Golem {
             phase: VisibleSlotGolemPhase::Fall,
             phase_frame: 31,
@@ -6204,13 +6876,19 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
     ));
     runtime_shell.pending_audio.clear();
     advance_visible_slot_machine_animation(&mut runtime_shell).expect("land Golem");
-    assert!(runtime_shell
-        .pending_audio
-        .iter()
-        .any(|command| command.audio_id == "SFX_PLACE_PUZZLE_PIECE_DOWN"));
+    assert!(
+        runtime_shell
+            .pending_audio
+            .iter()
+            .any(|command| command.audio_id == "SFX_PLACE_PUZZLE_PIECE_DOWN")
+    );
     advance_visible_slot_machine_animation(&mut runtime_shell).expect("start Golem roll");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().background_y_offset,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .background_y_offset,
         -2
     );
     assert!(matches!(
@@ -6228,7 +6906,11 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
     }
     advance_visible_slot_machine_animation(&mut runtime_shell).expect("restart Golem actor");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().background_y_offset,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .background_y_offset,
         0
     );
     assert!(matches!(
@@ -6237,7 +6919,11 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
     ));
     advance_visible_slot_machine_animation(&mut runtime_shell).expect("delete final Golem");
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Stopping { reel: 3, .. }
     ));
 
@@ -6247,18 +6933,21 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
         phase: VisibleSlotChanseyPhase::Walk,
         phase_frame: 0,
     }));
-    runtime_shell.visible_slot_machine.as_mut().unwrap().actor =
-        Some(VisibleSlotActor::Chansey {
-            x: 96,
-            frame: 0,
-            frame_tick: 0,
-            finishing: false,
-        });
+    runtime_shell.visible_slot_machine.as_mut().unwrap().actor = Some(VisibleSlotActor::Chansey {
+        x: 96,
+        frame: 0,
+        frame_tick: 0,
+        finishing: false,
+    });
     for _ in 0..9 {
         advance_visible_slot_machine_animation(&mut runtime_shell).expect("walk Chansey");
     }
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Chansey {
             phase: VisibleSlotChanseyPhase::PrepareEgg,
             ..
@@ -6272,14 +6961,22 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
         advance_visible_slot_machine_animation(&mut runtime_shell).expect("prepare Chansey egg");
     }
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().secondary_actor,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .secondary_actor,
         Some(VisibleSlotActor::Egg { x: 96, .. })
     ));
     for _ in 0..50 {
         advance_visible_slot_machine_animation(&mut runtime_shell).expect("arc Chansey egg");
     }
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Chansey {
             phase: VisibleSlotChanseyPhase::DropReel,
             ..
@@ -6288,9 +6985,16 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
     for _ in 0..17 {
         advance_visible_slot_machine_animation(&mut runtime_shell).expect("drop reel 17 symbols");
     }
-    assert_eq!(runtime_shell.visible_slot_machine.as_ref().unwrap().offsets[2], 1);
+    assert_eq!(
+        runtime_shell.visible_slot_machine.as_ref().unwrap().offsets[2],
+        1
+    );
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Chansey {
             phase: VisibleSlotChanseyPhase::CheckMatch,
             ..
@@ -6298,7 +7002,11 @@ fn visible_slot_machine_runs_exact_golem_and_chansey_phase_counts() {
     ));
     advance_visible_slot_machine_animation(&mut runtime_shell).expect("finish Chansey routine");
     assert!(matches!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::Stopping { reel: 3, .. }
     ));
 }
@@ -6311,7 +7019,7 @@ fn slot_machine_renderer_composites_source_oam_actors_and_scy_shake() {
         .expect("repository root");
     let asset_root = AssetRoot::new(repository_root);
     let sources = load_slot_machine_render_sources(&asset_root).expect("load slot source art");
-    let offsets = [14; 3];
+    let offsets = [14_usize; 3];
     let mut machine = VisibleSlotMachine {
         phase: VisibleSlotMachinePhase::Spinning,
         animation: VisibleSlotMachineAnimation::None,
@@ -6364,8 +7072,8 @@ fn slot_machine_renderer_composites_source_oam_actors_and_scy_shake() {
         x: 112,
         y_offset: -16,
     });
-    let egg = render_visible_slot_machine_frame(&sources, &machine, &mut images)
-        .expect("render Egg OAM");
+    let egg =
+        render_visible_slot_machine_frame(&sources, &machine, &mut images).expect("render Egg OAM");
     let egg = images.get(&egg.handle).unwrap().data.clone();
     assert_ne!(plain, egg, "slots_3 Egg pixels must be composited");
 
@@ -6374,13 +7082,33 @@ fn slot_machine_renderer_composites_source_oam_actors_and_scy_shake() {
     let shaken = render_visible_slot_machine_frame(&sources, &machine, &mut images)
         .expect("render Golem SCY shake");
     let shaken = images.get(&shaken.handle).unwrap().data.clone();
-    assert_ne!(plain, shaken, "Golem roll must move the BG plane through hSCY");
+    assert_ne!(
+        plain, shaken,
+        "Golem roll must move the BG plane through hSCY"
+    );
 }
 
 #[test]
 fn visible_slot_machine_runs_source_ran_out_text_and_sixty_frame_exit() {
     let mut runtime_shell = initialized_mail_reader_shell("FLOWER_MAIL");
     let offsets = [14; 3];
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .slot_machine = Some(SlotMachineState {
+        phase: SlotMachinePhase::Result,
+        lucky: false,
+        keep_seven_bias_chance: false,
+        bet: 1,
+        bias: None,
+        offsets: offsets.map(|offset| u8::try_from(offset).expect("slot offset fits byte")),
+        next_reel: 4,
+        matched_symbol: None,
+        payout_remaining: 0,
+    });
+    runtime_shell.shell.session_mut().state.coins = 0;
     runtime_shell.visible_slot_machine = Some(VisibleSlotMachine {
         phase: VisibleSlotMachinePhase::Result,
         animation: VisibleSlotMachineAnimation::AwaitResult,
@@ -6407,7 +7135,11 @@ fn visible_slot_machine_runs_source_ran_out_text_and_sixty_frame_exit() {
 
     spin_visible_slot_machine(&mut runtime_shell).expect("acknowledge ran-out text");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::RanOutDelay {
             frames_remaining: 60
         }
@@ -6421,10 +7153,13 @@ fn visible_slot_machine_runs_source_ran_out_text_and_sixty_frame_exit() {
                 if frames_remaining == 60 - frame
         ));
     }
-    advance_visible_slot_machine_animation(&mut runtime_shell)
-        .expect("finish ran-out delay");
+    advance_visible_slot_machine_animation(&mut runtime_shell).expect("finish ran-out delay");
     assert_eq!(
-        runtime_shell.visible_slot_machine.as_ref().unwrap().animation,
+        runtime_shell
+            .visible_slot_machine
+            .as_ref()
+            .unwrap()
+            .animation,
         VisibleSlotMachineAnimation::QuitWaitBefore
     );
 }
@@ -6468,7 +7203,11 @@ fn initialized_mail_reader_shell(mail_type: &str) -> BevyRuntimeShell {
         mail_type: mail_type.to_string(),
     });
     shell.shell.session_mut().state_mut().storage.party.pokemon[0] = Some(pokemon);
-    shell.shell.session_mut().state_mut().sync_party_from_storage();
+    shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .sync_party_from_storage();
     shell
 }
 
@@ -6478,10 +7217,8 @@ fn malformed_script_snapshot_cannot_fall_through_b_to_overworld_input() {
     {
         let state = runtime_shell.shell.session_mut().state_mut();
         state.script_runtime.text_window_open = true;
-        state.script_runtime.active_text_label =
-            Some("MISSING_COMPILED_TEXT_LABEL".to_string());
-        state.script_runtime.pending_text_label =
-            Some("MISSING_COMPILED_TEXT_LABEL".to_string());
+        state.script_runtime.active_text_label = Some("MISSING_COMPILED_TEXT_LABEL".to_string());
+        state.script_runtime.pending_text_label = Some("MISSING_COMPILED_TEXT_LABEL".to_string());
     }
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     assert!(runtime_shell.shell.presentation_snapshot().is_err());

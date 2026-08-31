@@ -2830,7 +2830,21 @@ fn spawn_battle_battler_markers(
     let line_offsets = visible_battle_line_offsets(move_animation);
     let player_line_offsets = visible_battler_line_offsets(line_offsets.as_ref(), move_player_bgp);
     let enemy_line_offsets = visible_battler_line_offsets(line_offsets.as_ref(), move_enemy_bgp);
-    let render_hp = |side, hp| visible_faint_animation_render_hp(move_animation, side, hp);
+    let render_hp = |side, hp| {
+        let unchecked_spikes_ko = match side {
+            crate::core::battle::turn::BattleSide::Player => {
+                battle.player_spikes_zero_hp_unchecked
+            }
+            crate::core::battle::turn::BattleSide::Enemy => {
+                battle.enemy_spikes_zero_hp_unchecked
+            }
+        };
+        if hp == 0 && unchecked_spikes_ko {
+            1
+        } else {
+            visible_faint_animation_render_hp(move_animation, side, hp)
+        }
+    };
     let active_player_pokemon = battle
         .active_player_party_index
         .and_then(|active_index| {
@@ -6133,12 +6147,12 @@ fn visible_battle_anim_object_position(
             let mut base_x = x & 0xff;
             let mut base_y = y & 0xff;
             let mut current_x = base_x;
-            let mut x_offset = 0_i32;
             let mut y_offset = 0_i32;
             for step in 1..=age {
                 let angle = (param & 0x3f).wrapping_add(step as u8);
                 y_offset = visible_battle_anim_sine(angle, amplitude);
-                x_offset = visible_battle_anim_sine(angle.wrapping_add(0x10), amplitude);
+                let x_offset =
+                    visible_battle_anim_sine(angle.wrapping_add(0x10), amplitude);
                 if current_x < 0x80 {
                     if angle & 3 == 0 {
                         base_y = (base_y - 1) & 0xff;
@@ -7541,7 +7555,7 @@ fn spawn_battle_command_menu(
             );
         }
         if visible_battle_message_is_complete(runtime_shell, message)
-            && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+            && visible_vblank_counter_bit4(runtime_shell)
         {
             let (x, y) = battle_hud_tile_origin(18.0, 16.0);
             spawn_battle_command_bitmap_text(
@@ -10227,7 +10241,7 @@ fn visible_battle_command_menu_entries(
     if runtime_shell.key_item_cursor.is_some() || runtime_shell.tmhm_cursor.is_some() {
         return visible_field_pack_entries(snapshot, runtime_shell);
     }
-    if battle.enemy_pokemon.hp == 0 {
+    if battle.enemy_pokemon.hp == 0 && !battle.enemy_spikes_zero_hp_unchecked {
         // KO settlement is driven by the retained faint/reward presentation.
         // Crystal never exposes the shell's claim/advance operations as a
         // selectable battle menu between those boundaries.

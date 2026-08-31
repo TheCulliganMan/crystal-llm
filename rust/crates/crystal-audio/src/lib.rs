@@ -90,7 +90,6 @@ pub struct AudioPcmFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum AudioProgramSource {
-    Midi(Vec<u8>),
     Pcm {
         bytes: Vec<u8>,
         format: AudioPcmFormat,
@@ -107,11 +106,11 @@ pub enum AudioProgramSource {
         loop_start_sample: Option<usize>,
         loop_end_sample: Option<usize>,
     },
-    /// PCM stored as a separately fetched gzip payload. `path` is relative to
-    /// the compiled pack and is integrity-checked after decompression with the
-    /// manifest's raw byte length and payload hash.
-    PcmGzipSidecar {
-        path: String,
+    /// Compact MIDI rendered to canonical PCM only when the browser first
+    /// requests it. Expected PCM metadata keeps the generated output covered
+    /// by the same integrity checks as pre-rendered audio.
+    Midi {
+        midi_base64: String,
         format: AudioPcmFormat,
         byte_len: usize,
         payload_hash: String,
@@ -168,13 +167,13 @@ impl AudioRepository {
 
     pub fn load_pointer_table(&self) -> Result<AudioPointerTable> {
         Ok(AudioPointerTable {
-            music: self.load_mid_entries("music")?,
-            sfx: self.load_mid_entries("sfx")?,
-            cries: self.load_mid_entries("cries")?,
+            music: self.load_pcm_entries("music")?,
+            sfx: self.load_pcm_entries("sfx")?,
+            cries: self.load_pcm_entries("cries")?,
         })
     }
 
-    fn load_mid_entries(&self, namespace: &str) -> Result<Vec<String>> {
+    fn load_pcm_entries(&self, namespace: &str) -> Result<Vec<String>> {
         let mut entries = Vec::new();
         let directory = self.audio_root.join(namespace);
         let kind = audio_kind_for_namespace(namespace)
@@ -193,9 +192,9 @@ impl AudioRepository {
                 .with_context(|| {
                     format!("audio file {} is missing an extension", path.display())
                 })?;
-            if extension != "mid" {
+            if extension != "pcm" {
                 anyhow::bail!(
-                    "audio file {} must use the .mid extension; no alternate audio formats are supported",
+                    "audio file {} must use the .pcm extension; no alternate audio formats are supported",
                     path.display()
                 );
             }
@@ -217,27 +216,39 @@ impl AudioRepository {
         validate_audio_asset_id(kind, asset_id)?;
 
         match kind {
-            AudioKind::Music => self.load_midi_program("music", "music", asset_id),
-            AudioKind::SoundEffect => self.load_midi_program("sfx", "sfx", asset_id),
-            AudioKind::Cry => self.load_midi_program("cry", "cries", asset_id),
+            AudioKind::Music => self.load_pcm_program("music", "music", asset_id),
+            AudioKind::SoundEffect => self.load_pcm_program("sfx", "sfx", asset_id),
+            AudioKind::Cry => self.load_pcm_program("cry", "cries", asset_id),
         }
     }
 
-    fn load_midi_program(
+    fn load_pcm_program(
         &self,
         namespace: &str,
         directory: &str,
         stem: &str,
     ) -> Result<AudioProgram> {
-        let midi_path = self.audio_root.join(directory).join(format!("{stem}.mid"));
-        let source = std::fs::read(&midi_path)
-            .with_context(|| format!("read MIDI audio program {}", midi_path.display()))?;
-        if !source.starts_with(b"MThd") {
-            anyhow::bail!("audio program {} is not a MIDI file", midi_path.display());
+        let pcm_path = self.audio_root.join(directory).join(format!("{stem}.pcm"));
+        let source = std::fs::read(&pcm_path)
+            .with_context(|| format!("read PCM audio program {}", pcm_path.display()))?;
+        if source.is_empty() || source.len() % 4 != 0 {
+            anyhow::bail!(
+                "audio program {} is not whole signed 16-bit stereo PCM",
+                pcm_path.display()
+            );
         }
         Ok(AudioProgram {
-            cache_key: format!("{namespace}:{}", midi_path.display()),
-            source: AudioProgramSource::Midi(source),
+            cache_key: format!("{namespace}:{}", pcm_path.display()),
+            source: AudioProgramSource::Pcm {
+                bytes: source,
+                format: AudioPcmFormat {
+                    sample_rate_hz: 22_050,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                loop_start_sample: None,
+                loop_end_sample: None,
+            },
         })
     }
 }
@@ -534,42 +545,33 @@ mod tests {
 
     static AUDIO_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn repository_root_for_tests() -> PathBuf {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir
-            .ancestors()
-            .nth(3)
-            .expect("workspace is nested under rust/crates/crystal-audio")
-            .to_path_buf()
-    }
-
-    fn generated_midi_audio_root() -> PathBuf {
-        let root = repository_root_for_tests();
-        let fixture = root.join("apps/web/test-fixtures/audio/route29.mid");
+    fn generated_pcm_audio_root() -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
         let counter = AUDIO_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp = std::env::temp_dir().join(format!(
-            "crystal-audio-midi-fixture-{}-{unique}-{counter}",
+            "crystal-audio-pcm-fixture-{}-{unique}-{counter}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&temp);
         for directory in ["music", "sfx", "cries"] {
             std::fs::create_dir_all(temp.join(directory)).expect("create temp audio namespace");
         }
-        std::fs::copy(&fixture, temp.join("music/MUSIC_ROUTE_29.mid"))
-            .expect("copy music MIDI fixture");
-        std::fs::copy(&fixture, temp.join("sfx/SFX_TACKLE.mid")).expect("copy sfx MIDI fixture");
-        std::fs::copy(fixture, temp.join("cries/CRY_NIDORAN_M.mid"))
-            .expect("copy cry MIDI fixture");
+        for path in [
+            "music/MUSIC_ROUTE_29.pcm",
+            "sfx/SFX_TACKLE.pcm",
+            "cries/CRY_NIDORAN_M.pcm",
+        ] {
+            std::fs::write(temp.join(path), [0_u8, 0, 1, 0]).expect("write PCM fixture");
+        }
         temp
     }
 
     #[test]
-    fn discovers_audio_entries_from_generated_mid_files() {
-        let temp = generated_midi_audio_root();
+    fn discovers_audio_entries_from_generated_pcm_files() {
+        let temp = generated_pcm_audio_root();
 
         let table = AudioRepository::from_audio_root(&temp)
             .load_pointer_table()
@@ -583,12 +585,9 @@ mod tests {
 
     #[test]
     fn audio_discovery_rejects_lowercase_stems_instead_of_coercing_ids() {
-        let temp = generated_midi_audio_root();
-        std::fs::copy(
-            repository_root_for_tests().join("apps/web/test-fixtures/audio/route29.mid"),
-            temp.join("music/route29.mid"),
-        )
-        .expect("copy lowercase music fixture");
+        let temp = generated_pcm_audio_root();
+        std::fs::write(temp.join("music/route29.pcm"), [0_u8, 0])
+            .expect("write lowercase music fixture");
 
         let error = AudioRepository::from_audio_root(&temp)
             .load_pointer_table()
@@ -604,12 +603,9 @@ mod tests {
 
     #[test]
     fn audio_discovery_rejects_reserved_runtime_identity_prefixes() {
-        let temp = generated_midi_audio_root();
-        std::fs::copy(
-            repository_root_for_tests().join("apps/web/test-fixtures/audio/route29.mid"),
-            temp.join("music/MUSIC_FALLBACK_ROUTE_29.mid"),
-        )
-        .expect("copy reserved music fixture");
+        let temp = generated_pcm_audio_root();
+        std::fs::write(temp.join("music/MUSIC_FALLBACK_ROUTE_29.pcm"), [0_u8, 0])
+            .expect("write reserved music fixture");
 
         let error = AudioRepository::from_audio_root(&temp)
             .load_pointer_table()
@@ -624,95 +620,89 @@ mod tests {
     }
 
     #[test]
-    fn audio_discovery_rejects_non_mid_files_instead_of_ignoring_them() {
-        let temp = generated_midi_audio_root();
-        std::fs::copy(
-            repository_root_for_tests().join("apps/web/test-fixtures/audio/route29.mid"),
-            temp.join("music/ignored.midi"),
-        )
-        .expect("copy unsupported MIDI extension fixture");
+    fn audio_discovery_rejects_non_pcm_files_instead_of_ignoring_them() {
+        let temp = generated_pcm_audio_root();
+        std::fs::write(temp.join("music/MUSIC_IGNORED.mid"), b"not supported")
+            .expect("write unsupported MIDI fixture");
         std::fs::write(temp.join("cries/CRY_NIDORAN_M.mp3"), b"not supported")
             .expect("write unsupported cry format");
-        std::fs::write(temp.join("sfx/SFX_TACKLE.MID"), b"MThd")
-            .expect("write case-changed MIDI extension");
+        std::fs::write(temp.join("sfx/SFX_TACKLE.PCM"), [0_u8, 0])
+            .expect("write case-changed PCM extension");
 
         let error = AudioRepository::from_audio_root(&temp)
             .load_pointer_table()
             .expect_err("audio discovery must reject unsupported formats")
             .to_string();
 
-        assert!(error.contains("must use the .mid extension"));
+        assert!(error.contains("must use the .pcm extension"), "{error}");
         assert!(
-            error.contains("ignored.midi")
+            error.contains("MUSIC_IGNORED.mid")
                 || error.contains("CRY_NIDORAN_M.mp3")
-                || error.contains("SFX_TACKLE.MID"),
+                || error.contains("SFX_TACKLE.PCM"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn builds_music_program_from_mid_file() {
-        let temp = generated_midi_audio_root();
+    fn builds_music_program_from_pcm_file() {
+        let temp = generated_pcm_audio_root();
         let repo = AudioRepository::from_audio_root(&temp);
         let program = repo
             .build_program(AudioKind::Music, "MUSIC_ROUTE_29")
             .expect("build program");
-        assert!(program.cache_key.contains("MUSIC_ROUTE_29.mid"));
+        assert!(program.cache_key.contains("MUSIC_ROUTE_29.pcm"));
         assert!(!program.cache_key.contains(".mp3"));
         match program.source {
-            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. }
-            | AudioProgramSource::PcmGzip { .. }
-            | AudioProgramSource::PcmGzipSidecar { .. } => {
-                panic!("MIDI repository must not emit PCM")
+            AudioProgramSource::Pcm { bytes, format, .. } => {
+                assert_eq!(bytes, [0_u8, 0, 1, 0]);
+                assert_eq!(format.sample_rate_hz, 22_050);
+            }
+            AudioProgramSource::PcmGzip { .. } | AudioProgramSource::Midi { .. } => {
+                panic!("loose PCM was compressed")
             }
         }
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn builds_sfx_program_from_mid_file() {
-        let temp = generated_midi_audio_root();
+    fn builds_sfx_program_from_pcm_file() {
+        let temp = generated_pcm_audio_root();
         let repo = AudioRepository::from_audio_root(&temp);
         let sfx = repo
             .build_program(AudioKind::SoundEffect, "SFX_TACKLE")
             .expect("build sfx");
-        assert!(sfx.cache_key.contains("SFX_TACKLE.mid"));
+        assert!(sfx.cache_key.contains("SFX_TACKLE.pcm"));
         match sfx.source {
-            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. }
-            | AudioProgramSource::PcmGzip { .. }
-            | AudioProgramSource::PcmGzipSidecar { .. } => {
-                panic!("MIDI repository must not emit PCM")
+            AudioProgramSource::Pcm { bytes, .. } => assert_eq!(bytes, [0_u8, 0, 1, 0]),
+            AudioProgramSource::PcmGzip { .. } | AudioProgramSource::Midi { .. } => {
+                panic!("loose PCM was compressed")
             }
         }
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn builds_cry_program_from_mid_file() {
-        let temp = generated_midi_audio_root();
+    fn builds_cry_program_from_pcm_file() {
+        let temp = generated_pcm_audio_root();
         let repo = AudioRepository::from_audio_root(&temp);
         let cry = repo
             .build_program(AudioKind::Cry, "CRY_NIDORAN_M")
             .expect("build cry");
-        assert!(cry.cache_key.contains("CRY_NIDORAN_M.mid"));
+        assert!(cry.cache_key.contains("CRY_NIDORAN_M.pcm"));
         assert!(!cry.cache_key.contains(".mp3"));
         match cry.source {
-            AudioProgramSource::Midi(bytes) => assert!(bytes.starts_with(b"MThd")),
-            AudioProgramSource::Pcm { .. }
-            | AudioProgramSource::PcmGzip { .. }
-            | AudioProgramSource::PcmGzipSidecar { .. } => {
-                panic!("MIDI repository must not emit PCM")
+            AudioProgramSource::Pcm { bytes, .. } => assert_eq!(bytes, [0_u8, 0, 1, 0]),
+            AudioProgramSource::PcmGzip { .. } | AudioProgramSource::Midi { .. } => {
+                panic!("loose PCM was compressed")
             }
         }
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn build_program_rejects_empty_or_missing_midi_stems_without_none_fallback() {
-        let temp = generated_midi_audio_root();
+    fn build_program_rejects_empty_or_missing_pcm_stems_without_none_fallback() {
+        let temp = generated_pcm_audio_root();
         let repo = AudioRepository::from_audio_root(&temp);
 
         let empty = repo
@@ -741,10 +731,10 @@ mod tests {
 
         let missing = repo
             .build_program(AudioKind::Cry, "CRY_MISSING")
-            .expect_err("missing cry MIDI is invalid")
+            .expect_err("missing cry PCM is invalid")
             .to_string();
-        assert!(missing.contains("read MIDI audio program"));
-        assert!(missing.contains("CRY_MISSING.mid"));
+        assert!(missing.contains("read PCM audio program"));
+        assert!(missing.contains("CRY_MISSING.pcm"));
         let _ = std::fs::remove_dir_all(temp);
     }
 

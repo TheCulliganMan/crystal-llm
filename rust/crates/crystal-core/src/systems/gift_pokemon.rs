@@ -412,9 +412,7 @@ pub fn give_gift_pokemon(
         pokemon.nickname = EGG_NICKNAME.to_string();
         pokemon.happiness = species_data.step_cycles_to_hatch;
         pokemon.hp = 0;
-        // Eggs are a distinct persistent state.  The nickname remains the
-        // displayed Crystal label, but is no longer the runtime discriminator.
-        pokemon.status = Some("EGG".to_string());
+        pokemon.status = None;
     } else {
         pokemon.hp = pokemon.max_hp;
         pokemon.status = None;
@@ -956,7 +954,8 @@ mod tests {
         .expect("gift egg");
 
         assert_eq!(outcome.pokemon.nickname, EGG_NICKNAME);
-        assert_eq!(outcome.pokemon.status.as_deref(), Some("EGG"));
+        assert_eq!(outcome.pokemon.status, None);
+        assert!(outcome.pokemon.is_egg);
         assert_eq!(outcome.pokemon.hp, 0);
         assert_eq!(outcome.pokemon.happiness, 20);
     }

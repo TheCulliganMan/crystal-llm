@@ -7,7 +7,7 @@ use crate::systems::script_runtime::script_label_parent;
 use crate::timing::wrapping_byte_counter_ticks;
 use crate::world::session::{
     FollowQueuedStep, OverworldFollowState, OverworldSession,
-    raw_event_tile_to_runtime_tile_checked,
+    raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
 };
 use crate::world::{
     map::{Direction, TilePosition},
@@ -467,8 +467,9 @@ pub enum ScriptObjectCommandIssue {
 
 pub const SCRIPT_OBJECT_VISIBILITY_COMMANDS: &[&str] = &["appear", "disappear"];
 pub const SCRIPT_OBJECT_COORDINATE_COMMANDS: &[&str] = &["moveobject"];
+pub const SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS: &[&str] = &["writeobjectxy"];
 pub const SCRIPT_OBJECT_DIRECTION_COMMANDS: &[&str] = &["turnobject"];
-pub const SCRIPT_OBJECT_TARGET_COMMANDS: &[&str] = &["faceobject", "follow"];
+pub const SCRIPT_OBJECT_TARGET_COMMANDS: &[&str] = &["faceobject", "follow", "follownotexact"];
 pub const SCRIPT_OBJECT_DIRECT_MOVEMENT_COMMANDS: &[&str] = &["applymovement"];
 pub const SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS: &[&str] = &["applymovementlasttalked"];
 pub const SCRIPT_OBJECT_MOVEMENT_COMMANDS: &[&str] = &["applymovement", "applymovementlasttalked"];
@@ -568,6 +569,7 @@ pub const SCRIPT_MOVEMENT_COMMANDS: &[&str] = &[
 pub fn is_known_script_object_command(command: &str) -> bool {
     SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command)
         || SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&command)
+        || SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS.contains(&command)
         || SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command)
         || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command)
         || SCRIPT_OBJECT_MOVEMENT_COMMANDS.contains(&command)
@@ -614,6 +616,14 @@ fn validate_script_object_command_shape(command: &ScriptObjectCommand) -> Result
                     "script object command {command_name} raw event coordinates overflow runtime tile space"
                 ));
             }
+            reject_target_object_id(command, command_name)?;
+            reject_direction(command, command_name)?;
+            reject_movement(command, command_name)?;
+            reject_emote(command, command_name)?;
+        }
+        command_name if SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS.contains(&command_name) => {
+            require_object_id_shape(command, command_name)?;
+            reject_coordinates(command, command_name)?;
             reject_target_object_id(command, command_name)?;
             reject_direction(command, command_name)?;
             reject_movement(command, command_name)?;
@@ -843,6 +853,8 @@ pub fn script_object_command_issues(
                 y,
             });
         }
+    } else if SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS.contains(&command.command.as_str()) {
+        collect_required_object_id_issue(command, object_event_flags, true, &mut issues);
     } else if SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&command.command.as_str())
         || SCRIPT_OBJECT_TARGET_COMMANDS.contains(&command.command.as_str())
     {
@@ -1187,10 +1199,12 @@ pub fn apply_script_object_mutation(
         "appear" => apply_visibility_command(state, session, command, false),
         "disappear" => apply_visibility_command(state, session, command, true),
         "moveobject" => apply_moveobject_command(session, command),
+        "writeobjectxy" => apply_writeobjectxy_command(session, command),
         "turnobject" => apply_turnobject_command(session, command),
         "faceobject" => apply_faceobject_command(session, command),
         "faceplayer" => apply_faceplayer_command(session, command),
         "follow" => apply_follow_command(session, command),
+        "follownotexact" => apply_follownotexact_command(session, command),
         "stopfollow" => apply_stopfollow_command(session, command),
         "showemote" => apply_showemote_command(state, session, command),
         command => Err(ScriptObjectCommandError::NotObjectMutation {
@@ -1297,8 +1311,8 @@ pub fn apply_script_movement(
             })
         });
     let mut steps_applied = 0;
-    let mut fixed_facing = false;
-    let mut sliding = false;
+    let mut fixed_facing = session.fixed_facing_object_identifiers.contains(&object_id);
+    let mut sliding = session.sliding_object_identifiers.contains(&object_id);
     let mut executed_steps = Vec::new();
     let mut effects = Vec::new();
     let mut last_movement_step = None;
@@ -1446,6 +1460,18 @@ pub fn apply_script_movement(
 
     set_object_tile(session, &object_id, tile)?;
     set_object_facing(session, &object_id, facing)?;
+    if fixed_facing {
+        session
+            .fixed_facing_object_identifiers
+            .insert(object_id.clone());
+    } else {
+        session.fixed_facing_object_identifiers.remove(&object_id);
+    }
+    if sliding {
+        session.sliding_object_identifiers.insert(object_id.clone());
+    } else {
+        session.sliding_object_identifiers.remove(&object_id);
+    }
     if let (Some(follower), Some(tile), Some(facing)) =
         (previous_follower.as_ref(), follower_tile, follower_facing)
     {
@@ -1576,11 +1602,17 @@ fn set_movement_object_hidden(session: &mut OverworldSession, object_id: &str, h
     if object_id == "PLAYER" {
         session.player_hidden = hidden;
     } else if hidden {
+        session.clear_loaded_roster_visibility_override(object_id);
+        session.shown_object_identifiers.remove(object_id);
         session
             .hidden_object_identifiers
             .insert(object_id.to_string());
     } else {
+        session.clear_loaded_roster_visibility_override(object_id);
         session.hidden_object_identifiers.remove(object_id);
+        session
+            .shown_object_identifiers
+            .insert(object_id.to_string());
     }
 }
 
@@ -1613,6 +1645,7 @@ fn apply_visibility_command(
             object_id: object_id.clone(),
         })?;
     let event_flag = object.event_flag.clone();
+    session.clear_loaded_roster_visibility_override(&object_id);
 
     if event_flag == "-1" {
         if hidden {
@@ -1629,6 +1662,7 @@ fn apply_visibility_command(
             .set_event_flag(&event_flag, hidden)
             .map_err(|error| ScriptObjectCommandError::EventFlag { error })?;
         session.sync_event_flag_memory(&state.flags);
+        session.clear_loaded_roster_visibility_override(&object_id);
         if hidden {
             session.hidden_object_identifiers.insert(object_id.clone());
             session.shown_object_identifiers.remove(&object_id);
@@ -1663,6 +1697,12 @@ fn apply_turnobject_command(
             command: command.command.clone(),
         })
         .and_then(parse_script_direction)?;
+    if !object_is_visible(session, &object_id)?
+        || !object_has_facings(session, &object_id)?
+        || session.fixed_facing_object_identifiers.contains(&object_id)
+    {
+        return Ok(facing_noop_outcome(command, object_id));
+    }
     set_object_facing(session, &object_id, direction)?;
 
     Ok(ScriptObjectMutationOutcome {
@@ -1684,6 +1724,13 @@ fn apply_faceobject_command(
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
     let object_id = required_object_id(session, command)?;
     let target_object_id = required_target_object_id(session, command)?;
+    if !object_is_visible(session, &object_id)?
+        || !object_is_visible(session, &target_object_id)?
+        || !object_has_facings(session, &object_id)?
+        || session.fixed_facing_object_identifiers.contains(&object_id)
+    {
+        return Ok(facing_noop_outcome(command, object_id));
+    }
     let from = object_tile(session, &object_id)?;
     let target = object_tile(session, &target_object_id)?;
     let direction = match direction_toward(from, target) {
@@ -1709,10 +1756,16 @@ fn apply_faceplayer_command(
     session: &mut OverworldSession,
     command: &ScriptObjectCommand,
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
-    let object_id = session
-        .last_talked_object_identifier
-        .clone()
-        .ok_or(ScriptObjectCommandError::MissingLastTalkedObject)?;
+    let Some(object_id) = session.last_talked_object_identifier.clone() else {
+        return Ok(facing_noop_outcome(command, "LAST_TALKED".to_string()));
+    };
+    if !object_is_visible(session, &object_id)?
+        || session.player_hidden
+        || !object_has_facings(session, &object_id)?
+        || session.fixed_facing_object_identifiers.contains(&object_id)
+    {
+        return Ok(facing_noop_outcome(command, object_id));
+    }
     let from = object_tile(session, &object_id)?;
     let target = object_tile(session, "PLAYER")?;
     let direction = match direction_toward(from, target) {
@@ -1732,6 +1785,23 @@ fn apply_faceplayer_command(
         source_script: command.source_script.clone(),
         command_index: command.command_index,
     })
+}
+
+fn facing_noop_outcome(
+    command: &ScriptObjectCommand,
+    object_id: String,
+) -> ScriptObjectMutationOutcome {
+    ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id,
+        event_flag: None,
+        previous_x: None,
+        previous_y: None,
+        x: None,
+        y: None,
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    }
 }
 
 fn apply_follow_command(
@@ -1791,6 +1861,47 @@ fn apply_stopfollow_command(
         previous_y: None,
         x: None,
         y: None,
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    })
+}
+
+fn apply_follownotexact_command(
+    session: &mut OverworldSession,
+    command: &ScriptObjectCommand,
+) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    let leader_object_id = required_object_id(session, command)?;
+    let follower_object_id = required_target_object_id(session, command)?;
+    validate_object_reference(session, &leader_object_id)?;
+    validate_object_reference(session, &follower_object_id)?;
+    let leader_tile = object_tile(session, &leader_object_id)?;
+    let previous_follower_tile = object_tile(session, &follower_object_id)?;
+    let follower_tile = direction_toward(previous_follower_tile, leader_tile)
+        .and_then(|direction| {
+            checked_move_by_stride(
+                previous_follower_tile,
+                direction,
+                SCRIPT_MOVEMENT_EVENT_TILE_STRIDE,
+            )
+        })
+        .unwrap_or(previous_follower_tile);
+    set_object_tile(session, &follower_object_id, follower_tile)?;
+    session
+        .following_not_exact
+        .insert(follower_object_id.clone(), leader_object_id.clone());
+    session.object_step_durations.remove(&follower_object_id);
+    session
+        .object_pending_random_wait
+        .remove(&follower_object_id);
+
+    Ok(ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id: follower_object_id,
+        event_flag: None,
+        previous_x: u16::try_from(previous_follower_tile.x).ok(),
+        previous_y: u16::try_from(previous_follower_tile.y).ok(),
+        x: u16::try_from(follower_tile.x).ok(),
+        y: u16::try_from(follower_tile.y).ok(),
         source_script: command.source_script.clone(),
         command_index: command.command_index,
     })
@@ -1887,6 +1998,95 @@ fn apply_moveobject_command(
         source_script: command.source_script.clone(),
         command_index: command.command_index,
     })
+}
+
+/// Applies Crystal's `WriteObjectXY` primitive for both interpreted scripts
+/// and source-certified typed consumers.
+pub fn apply_writeobjectxy_command(
+    session: &mut OverworldSession,
+    command: &ScriptObjectCommand,
+) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    let object_id = required_object_id(session, command)?;
+    let (object_index, previous_coordinates) = if object_id == "PLAYER" {
+        if session.player_hidden {
+            return Ok(writeobjectxy_noop_outcome(command, object_id));
+        }
+        (None, None)
+    } else {
+        let object_index = session
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+            .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
+                object_id: object_id.clone(),
+            })?;
+        if !session.is_object_visible(&session.objects[object_index]) {
+            return Ok(writeobjectxy_noop_outcome(command, object_id));
+        }
+        (
+            Some(object_index),
+            Some((
+                session.objects[object_index].x,
+                session.objects[object_index].y,
+            )),
+        )
+    };
+    let tile = object_tile(session, &object_id)?;
+    let raw_tile = runtime_tile_to_raw_event_tile(tile).ok_or_else(|| {
+        ScriptObjectCommandError::ObjectPositionUnsavable {
+            object_id: object_id.clone(),
+            x: tile.x,
+            y: tile.y,
+        }
+    })?;
+    let x = u16::try_from(raw_tile.x).map_err(|_| {
+        ScriptObjectCommandError::ObjectPositionUnsavable {
+            object_id: object_id.clone(),
+            x: tile.x,
+            y: tile.y,
+        }
+    })?;
+    let y = u16::try_from(raw_tile.y).map_err(|_| {
+        ScriptObjectCommandError::ObjectPositionUnsavable {
+            object_id: object_id.clone(),
+            x: tile.x,
+            y: tile.y,
+        }
+    })?;
+
+    if let Some(object_index) = object_index {
+        session.objects[object_index].x = x;
+        session.objects[object_index].y = y;
+    }
+
+    Ok(ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id,
+        event_flag: None,
+        previous_x: previous_coordinates.map(|(x, _)| x),
+        previous_y: previous_coordinates.map(|(_, y)| y),
+        x: Some(x),
+        y: Some(y),
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    })
+}
+
+fn writeobjectxy_noop_outcome(
+    command: &ScriptObjectCommand,
+    object_id: String,
+) -> ScriptObjectMutationOutcome {
+    ScriptObjectMutationOutcome {
+        command: command.command.clone(),
+        object_id,
+        event_flag: None,
+        previous_x: None,
+        previous_y: None,
+        x: None,
+        y: None,
+        source_script: command.source_script.clone(),
+        command_index: command.command_index,
+    }
 }
 
 fn moveobject_raw_coordinates_fit_runtime_tile(command: &ScriptObjectCommand) -> bool {
@@ -2281,6 +2481,40 @@ fn set_object_facing(
     Ok(())
 }
 
+fn object_is_visible(
+    session: &OverworldSession,
+    object_id: &str,
+) -> Result<bool, ScriptObjectCommandError> {
+    if object_id == "PLAYER" {
+        return Ok(!session.player_hidden);
+    }
+    let object = session
+        .objects
+        .iter()
+        .find(|object| object.object_identifier.as_deref() == Some(object_id))
+        .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
+            object_id: object_id.to_string(),
+        })?;
+    Ok(session.is_object_visible(object))
+}
+
+fn object_has_facings(
+    session: &OverworldSession,
+    object_id: &str,
+) -> Result<bool, ScriptObjectCommandError> {
+    if object_id == "PLAYER" {
+        return Ok(true);
+    }
+    session
+        .objects
+        .iter()
+        .find(|object| object.object_identifier.as_deref() == Some(object_id))
+        .map(|object| object.sprite_has_facings)
+        .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
+            object_id: object_id.to_string(),
+        })
+}
+
 fn required_object_id(
     session: &OverworldSession,
     command: &ScriptObjectCommand,
@@ -2397,6 +2631,7 @@ mod tests {
     fn object(object_id: &str, event_flag: &str, x: u16, y: u16) -> ObjectEvent {
         ObjectEvent {
             sprite: "SPRITE_MON".to_string(),
+            sprite_has_facings: true,
             x,
             y,
             spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN".to_string(),
@@ -2554,6 +2789,7 @@ mod tests {
         assert!(SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&"appear"));
         assert!(SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&"disappear"));
         assert!(SCRIPT_OBJECT_COORDINATE_COMMANDS.contains(&"moveobject"));
+        assert!(SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS.contains(&"writeobjectxy"));
         assert!(SCRIPT_OBJECT_DIRECTION_COMMANDS.contains(&"turnobject"));
         assert!(SCRIPT_OBJECT_TARGET_COMMANDS.contains(&"faceobject"));
         assert!(SCRIPT_OBJECT_TARGET_COMMANDS.contains(&"follow"));
@@ -2565,6 +2801,7 @@ mod tests {
         assert!(SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS.contains(&"stopfollow"));
         assert!(SCRIPT_OBJECT_EMOTE_COMMANDS.contains(&"showemote"));
         assert!(is_known_script_object_command("moveobject"));
+        assert!(is_known_script_object_command("writeobjectxy"));
         assert!(!is_known_script_object_command("MoveObject"));
         assert!(!is_known_script_object_command("hideobject"));
         assert_eq!(
@@ -2632,6 +2869,49 @@ mod tests {
         assert!(is_known_script_movement_command("hide_object"));
         assert!(!is_known_script_movement_command("step_sleep_17"));
         assert!(!is_known_script_movement_command("spin_forever"));
+    }
+
+    #[test]
+    fn writeobjectxy_copies_last_talked_runtime_coordinates_to_map_object_memory() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object("ROUTE29_TRAINER", "-1", 2, 3)]);
+        session.last_talked_object_identifier = Some("ROUTE29_TRAINER".to_string());
+        session
+            .object_runtime_tiles
+            .insert("ROUTE29_TRAINER".to_string(), TilePosition::new(7, 9));
+        let command = command("writeobjectxy", "LAST_TALKED");
+
+        let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect("writeobjectxy applies");
+
+        assert_eq!(outcome.object_id, "ROUTE29_TRAINER");
+        assert_eq!((outcome.previous_x, outcome.previous_y), (Some(2), Some(3)));
+        assert_eq!((outcome.x, outcome.y), (Some(7), Some(9)));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (7, 9));
+        assert_eq!(
+            session.object_runtime_tiles.get("ROUTE29_TRAINER"),
+            Some(&TilePosition::new(7, 9))
+        );
+    }
+
+    #[test]
+    fn writeobjectxy_returns_without_reading_coordinates_when_object_is_not_visible() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object("HIDDEN_TRAINER", "-1", 2, 3)]);
+        session
+            .hidden_object_identifiers
+            .insert("HIDDEN_TRAINER".to_string());
+        session
+            .object_runtime_tiles
+            .insert("HIDDEN_TRAINER".to_string(), TilePosition::new(-1, -1));
+        let command = command("writeobjectxy", "HIDDEN_TRAINER");
+
+        let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect("invisible writeobjectxy returns like CheckObjectVisibility carry");
+
+        assert_eq!((outcome.previous_x, outcome.previous_y), (None, None));
+        assert_eq!((outcome.x, outcome.y), (None, None));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (2, 3));
     }
 
     #[test]
@@ -3689,6 +3969,201 @@ mod tests {
         };
         apply_script_object_mutation(&mut state, &mut session, &stop).expect("stopfollow applies");
         assert_eq!(session.following, None);
+    }
+
+    #[test]
+    fn follownotexact_moves_object1_toward_object2_and_tracks_its_last_coordinate() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("LOOSE_LEADER", "EVENT_LOOSE_LEADER", 4, 4),
+            object("LOOSE_FOLLOWER", "EVENT_LOOSE_FOLLOWER", 8, 6),
+        ]);
+        let leader_tile = object_tile(&session, "LOOSE_LEADER").expect("leader tile");
+        let follower_before = object_tile(&session, "LOOSE_FOLLOWER").expect("follower tile");
+        let mut command = command("follownotexact", "LOOSE_LEADER");
+        command.target_object_id = Some("LOOSE_FOLLOWER".to_string());
+
+        let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect("follownotexact applies");
+        let follower_after = object_tile(&session, "LOOSE_FOLLOWER").expect("moved follower");
+        assert_eq!(follower_after.x, follower_before.x - 1);
+        assert_eq!(follower_after.y, follower_before.y);
+        assert_eq!(outcome.object_id, "LOOSE_FOLLOWER");
+        assert_eq!(
+            session.following_not_exact.get("LOOSE_FOLLOWER"),
+            Some(&"LOOSE_LEADER".to_string())
+        );
+
+        session.update_follow_after_entity_move(
+            "LOOSE_LEADER",
+            leader_tile,
+            TilePosition::new(leader_tile.x + 1, leader_tile.y),
+        );
+        let follower_second = object_tile(&session, "LOOSE_FOLLOWER").expect("tracked follower");
+        assert_eq!(follower_second.x, follower_after.x - 1);
+        assert_eq!(follower_second.y, follower_after.y);
+        assert_eq!(
+            session.object_step_durations.get("LOOSE_FOLLOWER"),
+            Some(&8)
+        );
+    }
+
+    #[test]
+    fn facing_commands_return_without_turning_invisible_objects() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("HIDDEN_NPC", "EVENT_HIDDEN_NPC", 4, 4),
+            object("VISIBLE_NPC", "EVENT_VISIBLE_NPC", 4, 6),
+            object("STILL_OBJECT", "EVENT_STILL_OBJECT", 6, 6),
+        ]);
+        session.objects[2].sprite_has_facings = false;
+        session
+            .hidden_object_identifiers
+            .insert("HIDDEN_NPC".to_string());
+        session
+            .object_facings
+            .insert("HIDDEN_NPC".to_string(), Direction::Left);
+        session
+            .object_facings
+            .insert("VISIBLE_NPC".to_string(), Direction::Right);
+
+        let mut turn = command("turnobject", "HIDDEN_NPC");
+        turn.direction = Some("DOWN".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &turn)
+            .expect("turnobject returns like CheckObjectVisibility carry");
+        assert_eq!(
+            session.object_facings.get("HIDDEN_NPC"),
+            Some(&Direction::Left)
+        );
+
+        let mut face = command("faceobject", "VISIBLE_NPC");
+        face.target_object_id = Some("HIDDEN_NPC".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &face)
+            .expect("faceobject returns when GetRelativeFacing cannot see its target");
+        assert_eq!(
+            session.object_facings.get("VISIBLE_NPC"),
+            Some(&Direction::Right)
+        );
+
+        session
+            .object_facings
+            .insert("STILL_OBJECT".to_string(), Direction::Up);
+        let mut turn_still = command("turnobject", "STILL_OBJECT");
+        turn_still.direction = Some("RIGHT".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &turn_still)
+            .expect("STILL_SPRITE turnobject returns without turning");
+        assert_eq!(
+            session.object_facings.get("STILL_OBJECT"),
+            Some(&Direction::Up)
+        );
+    }
+
+    #[test]
+    fn faceplayer_returns_when_last_talked_is_the_no_object_sentinel() {
+        let mut state = GameState::default();
+        let mut session = session(Vec::new());
+        let command = ScriptObjectCommand {
+            command: "faceplayer".to_string(),
+            object_id: None,
+            target_object_id: None,
+            x: None,
+            y: None,
+            direction: None,
+            movement: None,
+            emote: None,
+            duration: None,
+            source_script: "NoLastTalkedScript".to_string(),
+            command_index: 0,
+        };
+
+        let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect("hLastTalked == 0 returns without an error");
+        assert_eq!(outcome.object_id, "LAST_TALKED");
+        assert!(session.object_facings.is_empty());
+    }
+
+    #[test]
+    fn fixed_facing_and_sliding_bits_survive_separate_movement_programs() {
+        let object_id = "SCRIPT_NPC";
+        let mut state = GameState::default();
+        let mut session = session(vec![object(object_id, "EVENT_SCRIPT_NPC", 4, 4)]);
+        session
+            .object_facings
+            .insert(object_id.to_string(), Direction::Left);
+
+        let apply =
+            |session: &mut OverworldSession, label: &str, steps: Vec<ScriptMovementStep>| {
+                let mut command = command("applymovement", object_id);
+                command.movement = Some(label.to_string());
+                apply_script_movement(
+                    session,
+                    &command,
+                    &ScriptMovement {
+                        label: label.to_string(),
+                        source_script: None,
+                        steps,
+                    },
+                )
+                .expect("movement applies")
+            };
+        let no_arg = |command: &str, index| ScriptMovementStep {
+            command: command.to_string(),
+            direction: None,
+            duration: None,
+            index,
+        };
+
+        let fixed = apply(
+            &mut session,
+            "FixFacing",
+            vec![no_arg("fix_facing", 0), no_arg("set_sliding", 1)],
+        );
+        assert!(fixed.fixed_facing);
+        assert!(fixed.sliding);
+
+        let mut turn = command("turnobject", object_id);
+        turn.direction = Some("DOWN".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &turn)
+            .expect("fixed-facing turnobject returns without turning");
+        assert_eq!(
+            session.object_facings.get(object_id),
+            Some(&Direction::Left)
+        );
+
+        let retained = apply(
+            &mut session,
+            "RetainFlags",
+            vec![ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("DOWN".to_string()),
+                duration: None,
+                index: 0,
+            }],
+        );
+        assert_eq!(retained.tile, TilePosition::new(4, 5));
+        assert_eq!(retained.facing, Direction::Left);
+        assert!(retained.fixed_facing);
+        assert!(retained.sliding);
+
+        let released = apply(
+            &mut session,
+            "ReleaseFlags",
+            vec![
+                no_arg("remove_fixed_facing", 0),
+                no_arg("remove_sliding", 1),
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("DOWN".to_string()),
+                    duration: None,
+                    index: 2,
+                },
+            ],
+        );
+        assert_eq!(released.facing, Direction::Down);
+        assert!(!released.fixed_facing);
+        assert!(!released.sliding);
+        assert!(session.fixed_facing_object_identifiers.is_empty());
+        assert!(session.sliding_object_identifiers.is_empty());
     }
 
     #[test]

@@ -1,26 +1,17 @@
-import {
-  MIDI_CONTROLLER_PAN,
-  MIDI_CONTROLLER_VOLUME,
-  SAMPLE_RATE,
-} from "./constants";
+import { SAMPLE_RATE } from "./constants";
 
-type MidiNoteEvent = {
-  startTick: number;
-  durationTick: number;
-  note: number;
-  velocity: number;
-  channel: number;
+type MidiEvent = {
+  tick: number;
+  order: number;
+  payload: Uint8Array;
 };
 
 export class MidiRecorder {
   private readonly ticksPerBeat: number;
   private readonly tempoUsPerBeat: number;
   private readonly sampleRate: number;
-  private readonly events = new Map<number, MidiNoteEvent[]>();
   private readonly ticksPerSecond: number;
-  private loopStartTick: number | null = null;
-  private loopEndTick: number | null = null;
-  private controlEvents: Array<[number, number, Uint8Array]> = [];
+  private readonly events: MidiEvent[] = [];
 
   constructor(options?: {
     ticksPerBeat?: number;
@@ -30,12 +21,10 @@ export class MidiRecorder {
     this.ticksPerBeat = options?.ticksPerBeat ?? 960;
     this.tempoUsPerBeat = options?.tempoUsPerBeat ?? 1_000_000;
     this.sampleRate = options?.sampleRate ?? SAMPLE_RATE;
-
     if (this.ticksPerBeat <= 0 || this.tempoUsPerBeat <= 0 || this.sampleRate <= 0) {
       throw new Error("Invalid MidiRecorder constructor argument.");
     }
-
-    this.ticksPerSecond = (this.ticksPerBeat * 1_000_000.0) / this.tempoUsPerBeat;
+    this.ticksPerSecond = (this.ticksPerBeat * 1_000_000) / this.tempoUsPerBeat;
   }
 
   recordNote(options: {
@@ -45,148 +34,120 @@ export class MidiRecorder {
     durationSamples: number;
     velocity: number;
   }): void {
-    const channel = clamp(options.channel, 0, 15);
-    const note = clamp(options.note, 0, 127);
-    const velocity = clamp(options.velocity, 1, 127);
     if (options.durationSamples <= 0) {
       return;
     }
-
-    const startTick = this.samplesToTicks(options.startSample);
-    const durationTick = Math.max(1, this.samplesToTicks(options.durationSamples));
-    const entry: MidiNoteEvent = { channel, note, velocity, startTick, durationTick };
-
-    const list = this.events.get(channel) ?? [];
-    list.push(entry);
-    this.events.set(channel, list);
-  }
-
-  setLoopPoints(options: { startSample: number | null; endSample: number | null }): void {
-    if (options.startSample == null || options.endSample == null) {
-      this.loopStartTick = null;
-      this.loopEndTick = null;
-      return;
-    }
-    const start = Math.max(0, options.startSample);
-    const end = Math.max(0, options.endSample);
-    if (end <= start) {
-      throw new Error("Loop end must be greater than loop start.");
-    }
-    this.loopStartTick = this.samplesToTicks(start);
-    this.loopEndTick = this.samplesToTicks(end);
-  }
-
-  recordProgramChange(options: { channel: number; program: number; sampleOffset?: number }): void {
     const channel = clamp(options.channel, 0, 15);
-    const program = clamp(options.program, 0, 127);
-    const tick = this.samplesToTicks(Math.max(0, options.sampleOffset ?? 0));
-    this.controlEvents.push([tick, 0, new Uint8Array([0xc0 | channel, program])]);
+    const note = clamp(options.note, 0, 127);
+    const velocity = clamp(options.velocity, 1, 127);
+    const start = this.samplesToTicks(options.startSample);
+    const end = start + Math.max(1, this.samplesToTicks(options.durationSamples));
+    this.events.push({
+      tick: start,
+      order: 2,
+      payload: Uint8Array.of(0x90 | channel, note, velocity),
+    });
+    this.events.push({
+      tick: end,
+      order: 1,
+      payload: Uint8Array.of(0x80 | channel, note, 0),
+    });
   }
 
-  recordPan(options: { channel: number; pan: number; sampleOffset?: number }): void {
-    const channel = clamp(options.channel, 0, 15);
-    const pan = clamp(options.pan, 0, 127);
-    const tick = this.samplesToTicks(Math.max(0, options.sampleOffset ?? 0));
-    this.controlEvents.push([tick, 0, new Uint8Array([0xb0 | channel, MIDI_CONTROLLER_PAN, pan])]);
+  recordProgramChange(channel: number, program: number): void {
+    this.events.push({
+      tick: 0,
+      order: 0,
+      payload: Uint8Array.of(0xc0 | clamp(channel, 0, 15), clamp(program, 0, 127)),
+    });
   }
 
-  recordVolume(options: { channel: number; volume: number; sampleOffset?: number }): void {
-    const channel = clamp(options.channel, 0, 15);
-    const volume = clamp(options.volume, 0, 127);
-    const tick = this.samplesToTicks(Math.max(0, options.sampleOffset ?? 0));
-    this.controlEvents.push([tick, 0, new Uint8Array([0xb0 | channel, MIDI_CONTROLLER_VOLUME, volume])]);
+  recordMarker(label: string, sample: number): void {
+    this.events.push({
+      tick: this.samplesToTicks(sample),
+      order: 0,
+      payload: metaEvent(0x06, new TextEncoder().encode(label)),
+    });
+  }
+
+  recordSequencerSpecific(payload: Uint8Array): void {
+    this.events.push({ tick: 0, order: 0, payload: metaEvent(0x7f, payload) });
   }
 
   toBytes(): Uint8Array {
-    const header = this.buildHeader();
-    const track = this.buildTrack();
-    const out = new Uint8Array(header.length + track.length);
-    out.set(header, 0);
-    out.set(track, header.length);
-    return out;
+    const header = Uint8Array.of(
+      0x4d, 0x54, 0x68, 0x64,
+      0, 0, 0, 6,
+      0, 0,
+      0, 1,
+      (this.ticksPerBeat >> 8) & 0xff,
+      this.ticksPerBeat & 0xff,
+    );
+    const events = [...this.events].sort((left, right) =>
+      left.tick === right.tick ? left.order - right.order : left.tick - right.tick,
+    );
+    const track: number[] = [];
+    push(track, encodeVlq(0));
+    push(
+      track,
+      metaEvent(
+        0x51,
+        Uint8Array.of(
+          (this.tempoUsPerBeat >> 16) & 0xff,
+          (this.tempoUsPerBeat >> 8) & 0xff,
+          this.tempoUsPerBeat & 0xff,
+        ),
+      ),
+    );
+    let previousTick = 0;
+    for (const event of events) {
+      push(track, encodeVlq(event.tick - previousTick));
+      push(track, event.payload);
+      previousTick = event.tick;
+    }
+    track.push(0, 0xff, 0x2f, 0);
+    const trackBytes = Uint8Array.from(track);
+    const trackHeader = Uint8Array.of(
+      0x4d, 0x54, 0x72, 0x6b,
+      (trackBytes.length >>> 24) & 0xff,
+      (trackBytes.length >>> 16) & 0xff,
+      (trackBytes.length >>> 8) & 0xff,
+      trackBytes.length & 0xff,
+    );
+    const output = new Uint8Array(header.length + trackHeader.length + trackBytes.length);
+    output.set(header);
+    output.set(trackHeader, header.length);
+    output.set(trackBytes, header.length + trackHeader.length);
+    return output;
   }
 
   private samplesToTicks(samples: number): number {
-    const seconds = Math.max(0, samples) / this.sampleRate;
-    return Math.floor(seconds * this.ticksPerSecond + 0.5);
-  }
-
-  private buildHeader(): Uint8Array {
-    const out = new Uint8Array(14);
-    out.set([0x4d, 0x54, 0x68, 0x64], 0); // MThd
-    out.set([0, 0, 0, 6], 4);
-    out.set([0, 0], 8); // format 0
-    out.set([0, 1], 10); // one track
-    out.set([(this.ticksPerBeat >> 8) & 0xff, this.ticksPerBeat & 0xff], 12);
-    return out;
-  }
-
-  private buildTrack(): Uint8Array {
-    const events: Array<[number, number, Uint8Array]> = [...this.controlEvents];
-
-    for (const channelEvents of this.events.values()) {
-      for (const evt of channelEvents) {
-        events.push([evt.startTick, 2, new Uint8Array([0x90 | (evt.channel & 0xf), evt.note & 0x7f, evt.velocity & 0x7f])]);
-        events.push([evt.startTick + evt.durationTick, 1, new Uint8Array([0x80 | (evt.channel & 0xf), evt.note & 0x7f, 0])]);
-      }
-    }
-
-    for (const [tick, marker] of [
-      [this.loopStartTick, "loopStart"],
-      [this.loopEndTick, "loopEnd"],
-    ] as const) {
-      if (tick == null) {
-        continue;
-      }
-      const encoded = new TextEncoder().encode(marker);
-      const payload = new Uint8Array(3 + encoded.length);
-      payload.set([0xff, 0x06, encoded.length], 0);
-      payload.set(encoded, 3);
-      events.push([tick, 0, payload]);
-    }
-
-    events.sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] - b[0]));
-
-    const bytes: number[] = [];
-    pushBytes(bytes, encodeVlq(0));
-    pushBytes(bytes, new Uint8Array([0xff, 0x51, 0x03, (this.tempoUsPerBeat >> 16) & 0xff, (this.tempoUsPerBeat >> 8) & 0xff, this.tempoUsPerBeat & 0xff]));
-
-    let lastTick = 0;
-    for (const [tick, _order, payload] of events) {
-      const delta = Math.max(0, tick - lastTick);
-      pushBytes(bytes, encodeVlq(delta));
-      pushBytes(bytes, payload);
-      lastTick = tick;
-    }
-
-    bytes.push(0x00, 0xff, 0x2f, 0x00);
-
-    const trackData = Uint8Array.from(bytes);
-    const header = new Uint8Array(8);
-    header.set([0x4d, 0x54, 0x72, 0x6b], 0); // MTrk
-    const len = trackData.length;
-    header.set([(len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff], 4);
-
-    const out = new Uint8Array(header.length + trackData.length);
-    out.set(header, 0);
-    out.set(trackData, header.length);
-    return out;
+    return Math.max(0, Math.round((samples / this.sampleRate) * this.ticksPerSecond));
   }
 }
 
-const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, Math.floor(value)));
+function metaEvent(type: number, payload: Uint8Array): Uint8Array {
+  const length = encodeVlq(payload.length);
+  const output = new Uint8Array(2 + length.length + payload.length);
+  output.set([0xff, type], 0);
+  output.set(length, 2);
+  output.set(payload, 2 + length.length);
+  return output;
+}
 
-const encodeVlq = (value: number): Uint8Array => {
-  let v = Math.max(0, Math.floor(value));
-  const buffer = [v & 0x7f];
-  while ((v >>= 7)) {
-    buffer.unshift(0x80 | (v & 0x7f));
+function encodeVlq(value: number): Uint8Array {
+  let remaining = Math.max(0, Math.floor(value));
+  const bytes = [remaining & 0x7f];
+  while ((remaining >>= 7) > 0) {
+    bytes.unshift(0x80 | (remaining & 0x7f));
   }
-  return Uint8Array.from(buffer);
-};
+  return Uint8Array.from(bytes);
+}
 
-const pushBytes = (target: number[], payload: Uint8Array): void => {
-  for (const b of payload) {
-    target.push(b);
-  }
-};
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, Math.floor(value)));
+}
+
+function push(target: number[], bytes: Uint8Array): void {
+  target.push(...bytes);
+}

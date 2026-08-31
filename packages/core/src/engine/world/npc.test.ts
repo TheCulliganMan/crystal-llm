@@ -35,6 +35,7 @@ const createTrainer = (trainerId: string): Trainer =>
 const createObjectEvent = (overrides: Partial<ObjectEvent> = {}): ObjectEvent =>
   ({
     sprite: "SPRITE_NPC",
+    sprite_has_facings: true,
     x: 0,
     y: 0,
     spritemovedata: "SPRITEMOVEDATA_STANDING_LEFT",

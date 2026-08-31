@@ -1,6 +1,11 @@
 import fs from "fs";
 import path from "path";
-import type { WildEncounter, WildEncounterData, WildEncounterTable } from "@pokecrystal/assets/content/wild-encounter-data";
+import type {
+  WildEncounter,
+  WildEncounterData,
+  WildEncounterSwarmOverride,
+  WildEncounterTable,
+} from "@pokecrystal/assets/content/wild-encounter-data";
 import { getDisassemblyRoot } from "@pokecrystal/core/core/paths";
 import { mapConstantToName } from "@pokecrystal/core/engine/world/maps";
 import { writeJsonToTargets } from "./asm-utils";
@@ -11,6 +16,108 @@ function hasEncounters(table: WildEncounterTable | null | undefined): boolean {
 
 function hasSurfaceData(rate: WildEncounterData["grass_rates"] | WildEncounterData["water_rate"], table: WildEncounterTable | null | undefined): boolean {
   return rate !== null || table !== null || hasEncounters(table);
+}
+
+export type WildEncounterSwarmDeclaration = {
+  swarm_token: string;
+  engine_flag: string;
+  map_constant: string;
+};
+
+export type ParsedWildEncounterSwarm = {
+  map_name: string;
+  swarm_token: string;
+  override: WildEncounterSwarmOverride;
+};
+
+export function parseWildEncounterSwarmDeclarations(filePaths: Iterable<string>): WildEncounterSwarmDeclaration[] {
+  const declarations = new Map<string, WildEncounterSwarmDeclaration>();
+  for (const filePath of filePaths) {
+    let precedingEngineFlag: string | null = null;
+    for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+      const line = rawLine.replace(/;.*/, "").trim();
+      const flag = line.match(/^setflag\s+(ENGINE_[A-Z0-9_]+_SWARM)$/)?.[1];
+      if (flag) {
+        precedingEngineFlag = flag;
+        continue;
+      }
+      const swarm = line.match(/^swarm\s+(SWARM_[A-Z0-9_]+),\s*([A-Z0-9_]+)$/);
+      if (!swarm) {
+        continue;
+      }
+      if (!precedingEngineFlag) {
+        throw new Error(`Swarm declaration ${swarm[1]} in ${filePath} has no preceding engine flag.`);
+      }
+      const declaration = {
+        swarm_token: swarm[1],
+        engine_flag: precedingEngineFlag,
+        map_constant: swarm[2],
+      };
+      const existing = declarations.get(declaration.swarm_token);
+      if (existing && JSON.stringify(existing) !== JSON.stringify(declaration)) {
+        throw new Error(`Conflicting declarations for ${declaration.swarm_token}.`);
+      }
+      declarations.set(declaration.swarm_token, declaration);
+      precedingEngineFlag = null;
+    }
+  }
+  return [...declarations.values()];
+}
+
+export function parseWildEncounterSwarms(
+  filePath: string,
+  declarations: Iterable<WildEncounterSwarmDeclaration>,
+): ParsedWildEncounterSwarm[] {
+  const declarationByMap = new Map(
+    [...declarations].map((declaration) => [declaration.map_constant, declaration]),
+  );
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  const starts = lines
+    .map((line, index) => ({ index, map: line.trim().match(/^map_id\s+([A-Z0-9_]+)$/)?.[1] }))
+    .filter((entry): entry is { index: number; map: string } => Boolean(entry.map));
+  const parsed: ParsedWildEncounterSwarm[] = [];
+  for (const [recordIndex, start] of starts.entries()) {
+    const declaration = declarationByMap.get(start.map);
+    if (!declaration) {
+      throw new Error(`Swarm table map ${start.map} in ${filePath} has no source script declaration.`);
+    }
+    const end = starts[recordIndex + 1]?.index ?? lines.length;
+    const body = lines.slice(start.index + 1, end);
+    const rateLine = body.find((line) => /\bpercent\b/.test(line));
+    const rates = [...(rateLine ?? "").matchAll(/(\d+)\s+percent/g)].map((match) => Number.parseInt(match[1], 10));
+    if (rates.length !== 3) {
+      throw new Error(`Could not parse three grass swarm rates for ${start.map} in ${filePath}.`);
+    }
+    const table: WildEncounterTable = { morning: [], day: [], night: [] };
+    let time: keyof WildEncounterTable | null = null;
+    for (const rawLine of body) {
+      const trimmed = rawLine.trim();
+      if (trimmed === "; morn") time = "morning";
+      else if (trimmed === "; day") time = "day";
+      else if (trimmed === "; nite") time = "night";
+      else {
+        const row = trimmed.match(/^db\s+(\d+),\s*([A-Z0-9_]+)$/);
+        if (row && time) {
+          table[time].push({ level: Number.parseInt(row[1], 10), species: row[2] });
+        }
+      }
+    }
+    for (const timeKey of ["morning", "day", "night"] as const) {
+      if (table[timeKey].length !== 7) {
+        throw new Error(`Grass swarm ${start.map} has ${table[timeKey].length} ${timeKey} slots, expected 7.`);
+      }
+    }
+    parsed.push({
+      map_name: mapConstantToName(start.map),
+      swarm_token: declaration.swarm_token,
+      override: {
+        engine_flag: declaration.engine_flag,
+        grass_rates: { morning: rates[0], day: rates[1], night: rates[2] },
+        grass: table,
+      },
+    });
+  }
+  return parsed;
 }
 
 export function parseWildEncounters(filePath: string): WildEncounterData[] {
@@ -112,6 +219,10 @@ export function mergeWildEncounterData(collections: Iterable<Iterable<WildEncoun
         water_rate: entry.water_rate ?? existing.water_rate,
         grass: entry.grass ?? existing.grass,
         water: entry.water ?? existing.water,
+        swarm_overrides: {
+          ...(existing.swarm_overrides ?? {}),
+          ...(entry.swarm_overrides ?? {}),
+        },
       });
     }
   }
@@ -130,6 +241,23 @@ export function exportWildEncounters(): WildEncounterData[] {
     })
     .map((filePath) => parseWildEncounters(filePath));
   const merged = mergeWildEncounterData(collections);
+  const phoneScriptsRoot = path.join(getDisassemblyRoot(), "engine", "phone", "scripts");
+  const phoneScriptPaths = fs.readdirSync(phoneScriptsRoot)
+    .filter((name) => name.endsWith(".asm"))
+    .map((name) => path.join(phoneScriptsRoot, name));
+  const swarmDeclarations = parseWildEncounterSwarmDeclarations(phoneScriptPaths);
+  const swarms = parseWildEncounterSwarms(path.join(root, "swarm_grass.asm"), swarmDeclarations);
+  const byMap = new Map(merged.map((entry) => [entry.map_name, entry]));
+  for (const swarm of swarms) {
+    const entry = byMap.get(swarm.map_name);
+    if (!entry) {
+      throw new Error(`Swarm ${swarm.swarm_token} references map ${swarm.map_name} without normal wild data.`);
+    }
+    entry.swarm_overrides = {
+      ...(entry.swarm_overrides ?? {}),
+      [swarm.swarm_token]: swarm.override,
+    };
+  }
   writeJsonToTargets("wild_encounters.json", merged, { indent: 2 });
   return merged;
 }

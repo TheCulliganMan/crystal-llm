@@ -8,6 +8,7 @@ use crate::input::{
     B_PAD_A, B_PAD_B, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_SELECT, B_PAD_START, B_PAD_UP,
 };
 use crate::models::{PARTY_SIZE, Party, Pokemon};
+use crate::random::{LinkBattleRandom, LinkBattleRandomState};
 use crate::save::{SaveGameSummary, SaveModpackIdentity, validate_pack_content_hash};
 use crate::state::{GameCommand, GameEvent, GameState, GameStateFrameError};
 use crate::timing::Frame;
@@ -1170,6 +1171,8 @@ pub enum MultiplayerMessageError {
     #[error("{message}")]
     InvalidBattleRng { message: String },
     #[error("{message}")]
+    InvalidPartyFrame { message: String },
+    #[error("{message}")]
     InvalidTradeFrame { message: String },
     #[error("{message}")]
     InvalidLinkCableFrame { message: String },
@@ -1421,6 +1424,67 @@ impl BattleRngState {
 
     pub const fn h_random_sub(&self) -> u8 {
         self.h_random_sub
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkBattleRngFrame {
+    player_id: PlayerId,
+    state: LinkBattleRandomState,
+}
+
+impl<'de> Deserialize<'de> for LinkBattleRngFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkBattleRngFrame {
+            player_id: PlayerId,
+            state: LinkBattleRandomState,
+        }
+
+        let raw = RawLinkBattleRngFrame::deserialize(deserializer)?;
+        LinkBattleRngFrame::new(raw.player_id, raw.state).map_err(serde::de::Error::custom)
+    }
+}
+
+impl LinkBattleRngFrame {
+    pub fn new(
+        player_id: PlayerId,
+        state: LinkBattleRandomState,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let frame = Self { player_id, state };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        if self.player_id == 0 {
+            return Err(MultiplayerMessageError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
+        LinkBattleRandom::from_state(&self.state).map_err(|error| {
+            MultiplayerMessageError::InvalidBattleRng {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn state(&self) -> &LinkBattleRandomState {
+        &self.state
+    }
+
+    pub fn into_state(self) -> LinkBattleRandomState {
+        self.state
     }
 }
 
@@ -3075,6 +3139,134 @@ pub struct SessionBattleActionFrame {
     action: BattleActionFrame,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkPartyFrame {
+    player_id: PlayerId,
+    revision: u64,
+    party: Party,
+}
+
+impl<'de> Deserialize<'de> for LinkPartyFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLinkPartyFrame {
+            player_id: PlayerId,
+            revision: u64,
+            party: Party,
+        }
+
+        let raw = RawLinkPartyFrame::deserialize(deserializer)?;
+        LinkPartyFrame::new(raw.player_id, raw.revision, raw.party)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl LinkPartyFrame {
+    pub fn new(
+        player_id: PlayerId,
+        revision: u64,
+        party: Party,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let frame = Self {
+            player_id,
+            revision,
+            party,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        if self.player_id == 0 {
+            return Err(MultiplayerMessageError::InvalidPlayerIdentity {
+                player_id: self.player_id,
+            });
+        }
+        if self.revision == 0 {
+            return Err(MultiplayerMessageError::InvalidFrame {
+                field: "party.revision",
+                frame: self.revision,
+            });
+        }
+        self.party
+            .validate_saved_state()
+            .map_err(|message| MultiplayerMessageError::InvalidPartyFrame { message })
+    }
+
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub const fn party(&self) -> &Party {
+        &self.party
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn into_party(self) -> Party {
+        self.party
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLinkPartyFrame {
+    session: LinkSessionIdentity,
+    party: LinkPartyFrame,
+}
+
+impl<'de> Deserialize<'de> for SessionLinkPartyFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSessionLinkPartyFrame {
+            session: LinkSessionIdentity,
+            party: LinkPartyFrame,
+        }
+
+        let raw = RawSessionLinkPartyFrame::deserialize(deserializer)?;
+        SessionLinkPartyFrame::new(raw.session, raw.party).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SessionLinkPartyFrame {
+    pub fn new(
+        session: LinkSessionIdentity,
+        party: LinkPartyFrame,
+    ) -> Result<Self, MultiplayerMessageError> {
+        let frame = Self { session, party };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiplayerMessageError> {
+        self.session
+            .validate()
+            .map_err(|error| MultiplayerMessageError::InvalidLinkHandshake {
+                message: error.to_string(),
+            })?;
+        self.party.validate()
+    }
+
+    pub const fn session(&self) -> &LinkSessionIdentity {
+        &self.session
+    }
+
+    pub const fn party(&self) -> &LinkPartyFrame {
+        &self.party
+    }
+}
+
 impl<'de> Deserialize<'de> for SessionBattleActionFrame {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3145,7 +3337,74 @@ fn validate_battle_action(action: &BattleAction) -> Result<(), BattleSyncError> 
                 });
             }
         }
+        BattleAction::TrainerSwitch {
+            selected_move_slot,
+            party_index,
+        } => {
+            if *selected_move_slot >= BATTLE_MOVE_SLOTS {
+                return Err(BattleSyncError::InvalidMoveSlot {
+                    slot: *selected_move_slot,
+                });
+            }
+            if *party_index >= PARTY_SIZE {
+                return Err(BattleSyncError::InvalidSwitchPartyIndex {
+                    party_index: *party_index,
+                });
+            }
+        }
         BattleAction::Item { item_id } => {
+            if item_id.is_empty() {
+                return Err(BattleSyncError::EmptyItemId);
+            }
+            if !is_exact_multiplayer_item_id(item_id) {
+                return Err(BattleSyncError::InvalidItemId {
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+        BattleAction::PartyItem {
+            item_id,
+            party_index,
+            move_slot,
+        } => {
+            if *party_index >= PARTY_SIZE {
+                return Err(BattleSyncError::InvalidSwitchPartyIndex {
+                    party_index: *party_index,
+                });
+            }
+            if move_slot.is_some_and(|slot| slot >= BATTLE_MOVE_SLOTS) {
+                return Err(BattleSyncError::InvalidMoveSlot {
+                    slot: move_slot.expect("checked present move slot"),
+                });
+            }
+            if item_id.is_empty() {
+                return Err(BattleSyncError::EmptyItemId);
+            }
+            if !is_exact_multiplayer_item_id(item_id) {
+                return Err(BattleSyncError::InvalidItemId {
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+        BattleAction::Ball { item_id } => {
+            if item_id.is_empty() {
+                return Err(BattleSyncError::EmptyItemId);
+            }
+            if !is_exact_multiplayer_item_id(item_id) {
+                return Err(BattleSyncError::InvalidItemId {
+                    item_id: item_id.clone(),
+                });
+            }
+        }
+        BattleAction::TrainerItem {
+            selected_move_slot,
+            item_id,
+        } => {
+            if *selected_move_slot >= BATTLE_MOVE_SLOTS {
+                return Err(BattleSyncError::InvalidMoveSlot {
+                    slot: *selected_move_slot,
+                });
+            }
             if item_id.is_empty() {
                 return Err(BattleSyncError::EmptyItemId);
             }
@@ -3754,6 +4013,12 @@ pub struct TradeOutcome {
     replacements: BTreeMap<PlayerId, TradeReplacement>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkTradeTransferMode {
+    TradeCenter,
+    TimeCapsule,
+}
+
 impl<'de> Deserialize<'de> for TradeOutcome {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3830,6 +4095,15 @@ impl TradeOutcome {
         player_id: PlayerId,
         party: &mut Party,
     ) -> Result<Option<Pokemon>, TradeError> {
+        self.apply_to_party_for_mode(player_id, party, LinkTradeTransferMode::TradeCenter)
+    }
+
+    pub fn apply_to_party_for_mode(
+        &self,
+        player_id: PlayerId,
+        party: &mut Party,
+        mode: LinkTradeTransferMode,
+    ) -> Result<Option<Pokemon>, TradeError> {
         if self.cancelled {
             return Ok(None);
         }
@@ -3841,12 +4115,52 @@ impl TradeOutcome {
                     trade_id: self.trade_id.clone(),
                 })?;
         replacement.validate()?;
-        let previous = party.pokemon[replacement.party_slot()]
-            .replace(replacement.received().clone())
-            .ok_or(TradeError::EmptyPartySlot {
-                party_slot: replacement.party_slot(),
-            })?;
+        let mut received = replacement.received().clone();
+        normalize_received_link_trade_pokemon(&mut received, mode);
+        let party_slot = replacement.party_slot();
+        let last_party_slot = party
+            .pokemon
+            .iter()
+            .rposition(Option::is_some)
+            .ok_or(TradeError::EmptyPartySlot { party_slot })?;
+        let previous = party.pokemon[party_slot]
+            .take()
+            .ok_or(TradeError::EmptyPartySlot { party_slot })?;
+        for index in party_slot..last_party_slot {
+            party.pokemon[index] = party.pokemon[index + 1].take();
+        }
+        party.pokemon[last_party_slot] = Some(received);
         Ok(Some(previous))
+    }
+}
+
+fn normalize_received_link_trade_pokemon(pokemon: &mut Pokemon, mode: LinkTradeTransferMode) {
+    // These fields are battle-engine state rather than bytes in either the
+    // Gen I or Gen II party structures exchanged by LinkCommunications.
+    pokemon.flinching = false;
+    pokemon.rampage_turns = 0;
+    pokemon.confusion_turns = 0;
+    pokemon.perish_song_turns = 0;
+    pokemon.focus_energy = false;
+    pokemon.turns_in_battle = 0;
+    for stage in pokemon.stat_boosts.values_mut() {
+        *stage = 0;
+    }
+
+    if mode == LinkTradeTransferMode::TimeCapsule {
+        // Link_ConvertPartyStruct1to2 writes BASE_HAPPINESS followed by zero
+        // Pokerus/caught-data bytes. Gen I has no Mail structure. Its single
+        // Special stat is expanded back into Crystal's two calculated stats.
+        pokemon.happiness = 70;
+        pokemon.pokerus = 0;
+        pokemon.caught_data = None;
+        pokemon.mail = None;
+        pokemon.special_attack = pokemon
+            .calculate_stat(crate::models::Stat::SpecialAttack)
+            .expect("Special Attack always has a party stat");
+        pokemon.special_defense = pokemon
+            .calculate_stat(crate::models::Stat::SpecialDefense)
+            .expect("Special Defense always has a party stat");
     }
 }
 
@@ -4467,6 +4781,14 @@ impl TradeSyncBuffer {
 
     pub fn participants(&self) -> &TradeParticipants {
         &self.participants
+    }
+
+    pub fn offer(&self, player_id: PlayerId) -> Option<&TradeOffer> {
+        self.offers.get(&player_id)
+    }
+
+    pub fn confirmation(&self, player_id: PlayerId) -> Option<bool> {
+        self.confirmations.get(&player_id).copied()
     }
 
     pub fn insert_offer(
@@ -5886,8 +6208,11 @@ pub enum LinkMessage {
     Hello(LinkHello),
     RngInit { state: BattleRngState },
     SessionRngInit(SessionBattleRngInitFrame),
+    LinkBattleRngInit(LinkBattleRngFrame),
     BattleAction(BattleActionFrame),
     SessionBattleAction(SessionBattleActionFrame),
+    Party(LinkPartyFrame),
+    SessionParty(SessionLinkPartyFrame),
     TradeOffer(TradeOffer),
     SessionTradeOffer(SessionTradeOffer),
     TradeConfirmation(TradeConfirmation),
@@ -5937,8 +6262,11 @@ impl<'de> Deserialize<'de> for LinkMessage {
             Hello(LinkHello),
             RngInit { state: BattleRngState },
             SessionRngInit(SessionBattleRngInitFrame),
+            LinkBattleRngInit(LinkBattleRngFrame),
             BattleAction(BattleActionFrame),
             SessionBattleAction(SessionBattleActionFrame),
+            Party(LinkPartyFrame),
+            SessionParty(SessionLinkPartyFrame),
             TradeOffer(TradeOffer),
             SessionTradeOffer(SessionTradeOffer),
             TradeConfirmation(TradeConfirmation),
@@ -5982,8 +6310,11 @@ impl<'de> Deserialize<'de> for LinkMessage {
             RawLinkMessage::Hello(hello) => Self::Hello(hello),
             RawLinkMessage::RngInit { state } => Self::RngInit { state },
             RawLinkMessage::SessionRngInit(frame) => Self::SessionRngInit(frame),
+            RawLinkMessage::LinkBattleRngInit(frame) => Self::LinkBattleRngInit(frame),
             RawLinkMessage::BattleAction(action) => Self::BattleAction(action),
             RawLinkMessage::SessionBattleAction(action) => Self::SessionBattleAction(action),
+            RawLinkMessage::Party(party) => Self::Party(party),
+            RawLinkMessage::SessionParty(party) => Self::SessionParty(party),
             RawLinkMessage::TradeOffer(offer) => Self::TradeOffer(offer),
             RawLinkMessage::SessionTradeOffer(offer) => Self::SessionTradeOffer(offer),
             RawLinkMessage::TradeConfirmation(confirmation) => {
@@ -6048,8 +6379,11 @@ impl LinkMessage {
             Self::Hello(_) => "hello",
             Self::RngInit { .. } => "rng_init",
             Self::SessionRngInit(_) => "session_rng_init",
+            Self::LinkBattleRngInit(_) => "link_battle_rng_init",
             Self::BattleAction(_) => "battle_action",
             Self::SessionBattleAction(_) => "session_battle_action",
+            Self::Party(_) => "party",
+            Self::SessionParty(_) => "session_party",
             Self::TradeOffer(_) => "trade_offer",
             Self::SessionTradeOffer(_) => "session_trade_offer",
             Self::TradeConfirmation(_) => "trade_confirmation",
@@ -6094,6 +6428,7 @@ impl LinkMessage {
             Self::Hello(hello) => Some(hello.session()),
             Self::SessionRngInit(frame) => Some(frame.session()),
             Self::SessionBattleAction(frame) => Some(frame.session()),
+            Self::SessionParty(frame) => Some(frame.session()),
             Self::SessionTradeOffer(frame) => Some(frame.session()),
             Self::SessionTradeConfirmation(frame) => Some(frame.session()),
             Self::SessionLinkByte(frame) => Some(frame.session()),
@@ -6114,7 +6449,9 @@ impl LinkMessage {
             Self::SessionInteractionResponse(frame) => Some(frame.session()),
             Self::SessionDisconnect(frame) => Some(frame.session()),
             Self::RngInit { .. }
+            | Self::LinkBattleRngInit(_)
             | Self::BattleAction(_)
+            | Self::Party(_)
             | Self::TradeOffer(_)
             | Self::TradeConfirmation(_)
             | Self::LinkByte(_)
@@ -6172,6 +6509,7 @@ impl LinkMessage {
             Self::SessionRngInit(frame) => frame
                 .validate()
                 .map_err(|message| MultiplayerMessageError::InvalidBattleRng { message }),
+            Self::LinkBattleRngInit(frame) => frame.validate(),
             Self::BattleAction(action) => {
                 action
                     .validate()
@@ -6182,6 +6520,8 @@ impl LinkMessage {
             Self::SessionBattleAction(action) => action
                 .validate()
                 .map_err(|message| MultiplayerMessageError::InvalidBattleAction { message }),
+            Self::Party(party) => party.validate(),
+            Self::SessionParty(party) => party.validate(),
             Self::TradeOffer(offer) => {
                 offer
                     .validate()
@@ -6569,6 +6909,35 @@ mod tests {
         let mut party = Party::default();
         party.pokemon[slot] = Some(pokemon);
         party
+    }
+
+    #[test]
+    fn link_party_frame_round_trips_the_exact_six_slot_party() {
+        let party = party_with(0, pokemon("CHIKORITA", Some("BERRY")));
+        let frame = LinkPartyFrame::new(2, 144, party.clone()).expect("party frame");
+        let message = LinkMessage::Party(frame.clone());
+
+        let encoded = encode_link_message_bytes(&message).expect("encode party frame");
+        assert_eq!(decode_link_message_bytes(&encoded), Ok(message));
+        assert_eq!(frame.player_id(), 2);
+        assert_eq!(frame.revision(), 144);
+        assert_eq!(frame.party(), &party);
+    }
+
+    #[test]
+    fn link_party_frame_rejects_invalid_player_and_noncontiguous_party() {
+        assert_eq!(
+            LinkPartyFrame::new(0, 1, Party::default()),
+            Err(MultiplayerMessageError::InvalidPlayerIdentity { player_id: 0 })
+        );
+
+        let mut party = Party::default();
+        party.pokemon[1] = Some(pokemon("CYNDAQUIL", None));
+        assert!(matches!(
+            LinkPartyFrame::new(1, 1, party),
+            Err(MultiplayerMessageError::InvalidPartyFrame { message })
+                if message.contains("filled after empty slot")
+        ));
     }
 
     #[test]
@@ -9592,6 +9961,109 @@ mod tests {
         assert_eq!(outcome.replacements().len(), 0);
         assert_eq!(outcome.apply_to_party(1, &mut party_one), Ok(None));
         assert_eq!(party_one.pokemon[0], Some(pikachu));
+    }
+
+    #[test]
+    fn time_capsule_receive_uses_gen_one_party_struct_fields() {
+        let sent = pokemon("PIKACHU", Some("BERRY"));
+        let mut received = sent.clone();
+        received.happiness = 233;
+        received.pokerus = 0x43;
+        received.caught_data = Some(crate::models::pokemon::CaughtData {
+            level: 12,
+            time_of_day: Some(crate::systems::time::TimeOfDay::Night),
+            original_trainer_gender: 1,
+            location: 44,
+        });
+        received.flinching = true;
+        received.rampage_turns = 3;
+        received.confusion_turns = 4;
+        received.perish_song_turns = 2;
+        received.focus_energy = true;
+        received.turns_in_battle = 9;
+        received
+            .stat_boosts
+            .values_mut()
+            .for_each(|stage| *stage = 3);
+        received.special_attack = 1;
+        received.special_defense = 2;
+
+        let outcome = TradeOutcome::new(
+            "time-capsule-1",
+            false,
+            BTreeMap::from([
+                (
+                    1,
+                    TradeReplacement::new(0, received).expect("local replacement"),
+                ),
+                (
+                    2,
+                    TradeReplacement::new(0, sent.clone()).expect("peer replacement"),
+                ),
+            ]),
+        )
+        .expect("Time Capsule outcome");
+        let mut party = party_with(0, pokemon("EEVEE", None));
+        outcome
+            .apply_to_party_for_mode(1, &mut party, LinkTradeTransferMode::TimeCapsule)
+            .expect("apply Time Capsule replacement");
+
+        let converted = party.pokemon[0].as_ref().expect("received Pokemon");
+        assert_eq!(converted.happiness, 70);
+        assert_eq!(converted.pokerus, 0);
+        assert_eq!(converted.caught_data, None);
+        assert!(!converted.flinching);
+        assert_eq!(converted.rampage_turns, 0);
+        assert_eq!(converted.confusion_turns, 0);
+        assert_eq!(converted.perish_song_turns, 0);
+        assert!(!converted.focus_energy);
+        assert_eq!(converted.turns_in_battle, 0);
+        assert!(converted.stat_boosts.values().all(|stage| *stage == 0));
+        assert_eq!(
+            converted.special_attack,
+            converted
+                .calculate_stat(crate::models::Stat::SpecialAttack)
+                .unwrap()
+        );
+        assert_eq!(
+            converted.special_defense,
+            converted
+                .calculate_stat(crate::models::Stat::SpecialDefense)
+                .unwrap()
+        );
+        assert_eq!(converted.item.as_deref(), Some("BERRY"));
+    }
+
+    #[test]
+    fn completed_link_trade_removes_the_offer_and_appends_the_received_mon() {
+        let first = pokemon("CHIKORITA", None);
+        let offered = pokemon("CYNDAQUIL", None);
+        let third = pokemon("TOTODILE", None);
+        let received = pokemon("PIKACHU", None);
+        let mut party = Party::default();
+        party.pokemon[0] = Some(first.clone());
+        party.pokemon[1] = Some(offered.clone());
+        party.pokemon[2] = Some(third.clone());
+        let outcome = TradeOutcome::new(
+            "append-received",
+            false,
+            BTreeMap::from([
+                (
+                    1,
+                    TradeReplacement::new(1, received.clone()).expect("local replacement"),
+                ),
+                (
+                    2,
+                    TradeReplacement::new(0, offered.clone()).expect("peer replacement"),
+                ),
+            ]),
+        )
+        .expect("trade outcome");
+
+        assert_eq!(outcome.apply_to_party(1, &mut party), Ok(Some(offered)));
+        assert_eq!(party.pokemon[0], Some(first));
+        assert_eq!(party.pokemon[1], Some(third));
+        assert_eq!(party.pokemon[2], Some(received));
     }
 
     #[test]

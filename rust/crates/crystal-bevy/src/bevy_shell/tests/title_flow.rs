@@ -66,17 +66,10 @@ fn visible_title_launch_starts_with_crystal_intro_before_title() {
 
     assert!(runtime_shell.intro_screen.is_some());
     let intro = runtime_shell.intro_screen.as_ref().expect("intro screen");
-    assert_eq!(intro.jumptable_index, 1);
-    assert_eq!(intro.scene_frame_counter, 8);
-    assert_eq!(intro.scene_name(), "unown_fade");
-    assert_eq!(
-        intro.palette_effect,
-        VisibleIntroPaletteEffect::UnownFade {
-            palette_idx: 0,
-            timer: 8,
-        },
-        "packaged launch must begin with visible pixels, not an ambiguous black window"
-    );
+    assert_eq!(intro.jumptable_index, 0);
+    assert_eq!(intro.scene_frame_counter, 0);
+    assert_eq!(intro.scene_name(), "unown_a");
+    assert_eq!(intro.palette_effect, VisibleIntroPaletteEffect::None);
     assert!(
         runtime_shell
             .title_menu
@@ -84,6 +77,51 @@ fn visible_title_launch_starts_with_crystal_intro_before_title() {
             .is_some_and(|title| matches!(title.phase, VisibleTitlePhase::Entrance)),
         "title state should be staged behind the intro"
     );
+}
+
+#[test]
+fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    let fade_frames = RuntimeTitlePresentationParameters::from_program(
+        runtime_shell.runtime.title_presentation_program(),
+    )
+    .expect("source title parameters")
+    .timeout_fade_frames;
+    {
+        let title = runtime_shell.title_menu.as_mut().expect("title menu");
+        title.phase = VisibleTitlePhase::PressStart;
+        title.title_timer = 0;
+        title
+            .presentation_machine
+            .memory
+            .insert("wJumptableIndex".to_string(), 2);
+        title
+            .presentation_machine
+            .memory
+            .insert("wTitleScreenTimer".to_string(), 0);
+    }
+
+    tick_visible_title_screen_state(&mut runtime_shell);
+    assert!(runtime_shell.intro_screen.is_none());
+    assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        matches!(title.phase, VisibleTitlePhase::FadeOut)
+            && title.presentation_machine.memory.get("wMusicFade").copied() == Some(fade_frames)
+    }));
+
+    for _ in 0..fade_frames {
+        tick_visible_title_screen_state(&mut runtime_shell);
+    }
+
+    assert!(
+        runtime_shell.intro_screen.is_some(),
+        "timeout must tail-dispatch to IntroSequence"
+    );
+    assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
+        matches!(title.phase, VisibleTitlePhase::Entrance)
+            && title.scx == title.entrance_start_scx
+            && title.title_timer == 0
+    }));
 }
 
 #[test]
@@ -120,6 +158,113 @@ fn visible_intro_live_skip_enters_title_entrance() {
 }
 
 #[test]
+fn visible_title_direct_confirm_runs_the_source_scene_before_opening_the_menu() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::A)
+        .expect("entrance input should execute the source entrance scene");
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert!(!matches!(title.phase, VisibleTitlePhase::MainMenu));
+    assert_eq!(
+        title.scx,
+        title
+            .entrance_start_scx
+            .wrapping_sub(title.entrance_scroll_step)
+    );
+
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::Start)
+        .expect("Start should execute the source main scene");
+    assert!(
+        runtime_shell
+            .title_menu
+            .as_ref()
+            .is_some_and(visible_title_main_menu_ready)
+    );
+}
+
+#[test]
+fn visible_main_menu_ignores_start_and_accepts_only_a() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
+    let before = runtime_shell.title_menu.clone();
+
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::Start)
+        .expect("Start should be ignored");
+
+    assert_eq!(runtime_shell.title_menu, before);
+    assert!(runtime_shell.pending_time_set.is_none());
+    assert!(runtime_shell.pending_oak_intro.is_none());
+    assert!(runtime_shell.pending_gender_selection.is_none());
+
+    press_visible_title_confirm_button(&mut runtime_shell, GameButton::A)
+        .expect("A should confirm the selected main-menu item");
+    assert!(runtime_shell.pending_gender_selection.is_some());
+}
+
+#[test]
+fn visible_main_menu_b_returns_through_start_title_screen() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    finish_visible_intro_screen(&mut runtime_shell, "test").expect("finish intro");
+    advance_visible_title_to_press_start(&mut runtime_shell);
+    open_visible_title_main_menu(&mut runtime_shell).expect("open main menu");
+
+    press_visible_title_cancel_button(&mut runtime_shell).expect("cancel main menu");
+
+    let title = runtime_shell.title_menu.as_ref().expect("title menu");
+    assert!(matches!(title.phase, VisibleTitlePhase::Entrance));
+    assert_eq!(title.presentation_machine.memory["wJumptableIndex"], 0);
+    assert_eq!(title.scx, title.entrance_start_scx);
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+    assert!(runtime_shell.pending_audio.iter().any(|command| {
+        command.audio_id == "SFX_TITLE_SCREEN_ENTRANCE"
+            && command.kind == ModpackAudioKind::SoundEffect
+    }));
+}
+
+#[test]
+fn visible_main_menu_navigation_uses_only_up_and_down() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut app = integrated_shell_test_app(runtime_shell);
+    open_title_main_menu_for_test(&mut app);
+    let initial = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .title_menu
+        .as_ref()
+        .expect("title menu")
+        .cursor
+        .option_index;
+
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .title_menu
+            .as_ref()
+            .expect("title menu")
+            .cursor
+            .option_index,
+        initial,
+    );
+
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowDown);
+    assert_ne!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .title_menu
+            .as_ref()
+            .expect("title menu")
+            .cursor
+            .option_index,
+        initial,
+    );
+}
+
+#[test]
 fn intro_title_handoff_clears_fade_and_old_audio_before_title_cue() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.screen_fade = Some(VisibleScreenFade::new(
@@ -138,6 +283,7 @@ fn intro_title_handoff_clears_fade_and_old_audio_before_title_cue() {
 
     assert!(runtime_shell.screen_fade.is_none());
     assert!(runtime_shell.pending_music_stop);
+    assert!(runtime_shell.pending_full_audio_reset);
     assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
     assert_eq!(
         runtime_shell
@@ -579,7 +725,7 @@ fn complete_time_set_for_test(app: &mut App) {
                 }
             }
         }
-        press_key_for_runtime_hotkey_app(app, KeyCode::Enter);
+        press_key_for_runtime_hotkey_app(app, KeyCode::KeyZ);
     }
     panic!("time set screen did not complete");
 }
@@ -598,7 +744,7 @@ fn complete_oak_intro_for_test(app: &mut App) {
                 .pending_name_choice
                 .is_some()
             {
-                press_key_for_runtime_hotkey_app(app, KeyCode::Enter);
+                press_key_for_runtime_hotkey_app(app, KeyCode::KeyZ);
             }
             return;
         }
@@ -643,8 +789,16 @@ fn finish_current_oak_intro_page_for_test(runtime_shell: &mut BevyRuntimeShell) 
 }
 
 fn confirm_gender_for_test(app: &mut App, expected: VisiblePlayerGender) {
-    press_key_for_runtime_hotkey_app(app, KeyCode::Enter);
-    for _ in 0..=usize::from(VISIBLE_GENDER_CONFIRM_DELAY_FRAMES) + 1 {
+    let confirm_delay_frames = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .pending_gender_selection
+        .as_ref()
+        .expect("gender selection before confirm")
+        .definition
+        .confirm_delay_frames;
+    press_key_for_runtime_hotkey_app(app, KeyCode::KeyZ);
+    for _ in 0..=usize::from(confirm_delay_frames) + 1 {
         app.update();
         if app
             .world()
@@ -807,10 +961,11 @@ fn assert_main_camera_presents_one_logical_lcd(world: &mut World) {
     assert!(
         matches!(
             projection.scaling_mode,
-            bevy::render::camera::ScalingMode::WindowSize(scale)
-                if (scale - 1.0).abs() < f32::EPSILON
+            bevy::render::camera::ScalingMode::AutoMin { min_width, min_height }
+                if (min_width - 640.0).abs() < f32::EPSILON
+                    && (min_height - 576.0).abs() < f32::EPSILON
         ),
-        "the TypeScript renderer scales one logical LCD to the host target; a fixed physical-pixel projection can show only part of it on Retina displays: {:?}",
+        "the client must scale one complete logical LCD into every host aspect while allowing widescreen space around it: {:?}",
         projection.scaling_mode
     );
     assert!(

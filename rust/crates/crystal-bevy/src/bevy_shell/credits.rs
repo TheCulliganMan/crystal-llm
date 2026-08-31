@@ -303,8 +303,9 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
         return open_visible_title_main_menu(runtime_shell);
     }
     let mut arm_new_game_arrival = false;
-    match selected_visible_title_menu_option(runtime_shell, &title)? {
-        TitleMenuOption::Continue => {
+    let selected_title_option = selected_visible_title_menu_option(runtime_shell, &title)?;
+    match selected_title_option.dispatch_target.as_str() {
+        "MainMenu_Continue" => {
             let save_path = title
                 .save_path
                 .context("title Continue requires an exact save path")?;
@@ -347,19 +348,12 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
             set_shell_action_status(runtime_shell, "CONTINUE DATA");
             mark_runtime_snapshot_dirty(runtime_shell);
         }
-        TitleMenuOption::NewGame => {
-            runtime_shell.shell = RuntimeGameShell::new_game(
-                runtime_shell.asset_root.clone(),
-                runtime_shell.runtime.clone(),
-                title.spawn_identifier,
-            )?;
-            runtime_shell.shell.set_runtime_journal_enabled(false);
+        "MainMenu_NewGame" => {
             runtime_shell
                 .shell
-                .session_mut()
-                .state_mut()
-                .set_game_timer_counting(false);
+                .reset_new_game_from_title(title.spawn_identifier)?;
             runtime_shell.title_menu = None;
+            runtime_shell.new_game_pre_overworld = true;
             reset_visible_navigation_state(runtime_shell);
             runtime_shell.last_field_pack_pocket = FieldPackPocket::Items;
             runtime_shell.field_pack_cursor_positions = [0; 4];
@@ -390,16 +384,17 @@ fn select_visible_title_menu_option(runtime_shell: &mut BevyRuntimeShell) -> Res
                 && runtime_shell.pending_name_choice.is_none()
                 && runtime_shell.pending_name_input.is_none();
         }
-        TitleMenuOption::Options => {
+        "MainMenu_Option" => {
             record_visible_runtime_action(runtime_shell, "title:options")?;
             runtime_shell
                 .last_audio_events
                 .push("title opened Options".to_string());
             open_visible_options_menu(runtime_shell)?;
         }
-        TitleMenuOption::MysteryGift => {
+        "MainMenu_MysteryGift" => {
             open_visible_mystery_gift_screen(runtime_shell)?;
         }
+        target => anyhow::bail!("unsupported source main-menu dispatch target {target}"),
     }
     if arm_new_game_arrival {
         settle_visible_overworld_arrival(runtime_shell, "new_game")?;
@@ -1267,8 +1262,14 @@ fn complete_visible_smoke_gender_if_needed(runtime_shell: &mut BevyRuntimeShell)
     if runtime_shell.pending_gender_selection.is_none() {
         return Ok(());
     }
+    let confirm_delay_frames = runtime_shell
+        .pending_gender_selection
+        .as_ref()
+        .expect("checked gender selection")
+        .definition
+        .confirm_delay_frames;
     confirm_visible_gender_selection(runtime_shell)?;
-    for _ in 0..=VISIBLE_GENDER_CONFIRM_DELAY_FRAMES {
+    for _ in 0..=confirm_delay_frames {
         tick_visible_gender_selection(runtime_shell)?;
         if runtime_shell.pending_gender_selection.is_none() {
             return Ok(());
@@ -1478,6 +1479,32 @@ fn finish_visible_capture_nickname(
     runtime_shell: &mut BevyRuntimeShell,
     nickname: Option<String>,
 ) -> Result<()> {
+    if nickname.is_none()
+        && runtime_shell
+            .runtime
+            .data()
+            .nuzlocke_rules()
+            .require_capture_nickname
+    {
+        let species_name = runtime_shell
+            .pending_standard_capture
+            .as_ref()
+            .context("Nuzlocke capture nickname prompt lost its pending Pokemon")?
+            .default_name
+            .clone();
+        runtime_shell.pending_name_input = Some(PendingNameInput {
+            label: visible_pokemon_nickname_label(&species_name),
+            value: String::new(),
+            max_length: 10,
+            cursor_column: 0,
+            cursor_row: 0,
+            case: NameInputCase::Upper,
+        });
+        runtime_shell.pending_name_choice = None;
+        set_shell_action_status(runtime_shell, "NUZLOCKE: NICKNAME REQUIRED");
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
     let pending = runtime_shell
         .pending_standard_capture
         .take()
@@ -1540,7 +1567,10 @@ fn apply_visible_player_name(
 fn reset_visible_music_state(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.active_music = None;
     runtime_shell.faded_music = None;
+    runtime_shell.music_fade = None;
+    runtime_shell.music_volume = 7;
     runtime_shell.pending_music_stop = true;
+    runtime_shell.pending_full_audio_reset = true;
     clear_pending_music_commands(&mut runtime_shell.pending_audio);
 }
 
@@ -3281,19 +3311,11 @@ fn visible_local_link_descriptor(
 
 fn explicit_script_runtime_inputs(
     _runtime_shell: &BevyRuntimeShell,
-    command: &str,
+    _command: &str,
     _args: &[String],
     _command_index: usize,
 ) -> Result<ScriptRuntimeInputs> {
-    let game_version = if command == "checkver" {
-        Some("0".to_string())
-    } else {
-        None
-    };
-    Ok(ScriptRuntimeInputs {
-        game_version,
-        ..ScriptRuntimeInputs::default()
-    })
+    Ok(ScriptRuntimeInputs::default())
 }
 
 fn explicit_compiled_script_runtime_inputs(

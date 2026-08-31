@@ -589,6 +589,7 @@ export class TilesetAnimationController {
   public readonly FLOWER_SUPPORTED_TILESETS = new Set([
     "johto",
     "johto_modern",
+    "johto_modern_generated",
     "kanto",
     "park",
     "forest",
@@ -601,6 +602,7 @@ export class TilesetAnimationController {
   public readonly WATER_SUPPORTED_TILESETS = new Set([
     "johto",
     "johto_modern",
+    "johto_modern_generated",
     "kanto",
     "park",
     "forest",

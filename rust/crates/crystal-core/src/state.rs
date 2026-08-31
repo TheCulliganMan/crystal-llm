@@ -5,7 +5,7 @@ use crate::battle::turn::BattleCombatState;
 use crate::input::{B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_UP};
 use crate::map::MapSceneTable;
 use crate::models::{
-    Bag, LearnedMove, MAX_PC_BOXES, PARTY_SIZE, PokedexState, Pokemon, PokemonSpecies,
+    Bag, LearnedMove, MAX_PC_BOXES, PARTY_SIZE, PcBox, PokedexState, Pokemon, PokemonSpecies,
     PokemonStorage, Trainer,
 };
 use crate::random::{
@@ -44,17 +44,21 @@ pub struct MailboxMail {
     pub item_id: String,
     pub mail: crate::models::pokemon::MailData,
 }
+
+/// The four WRAM bytes used by `InitMapNameSign` and `PlaceMapNameSign`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MapNameSignMemory {
+    pub current_landmark: u8,
+    pub previous_landmark: u8,
+    pub flags: u8,
+    pub timer: u8,
+}
 const MOBILE_LOGIN_PASSWORD_LENGTH: usize = 17;
 const BATTLE_TOWER_SAVE_FILE_FLAG_YOURS: u8 = 0x1;
 const BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION: u8 = 0x2;
 const BATTLE_TOWER_SAVE_FILE_FLAGS_MASK: u8 =
     BATTLE_TOWER_SAVE_FILE_FLAG_YOURS | BATTLE_TOWER_SAVE_FILE_FLAG_EXPLANATION;
-const BATTLE_TOWER_RULE_FAILURES: &[&str] = &[
-    "OnlyThreeMonMayBeEnteredText",
-    "TheMonMustAllBeDifferentKindsText",
-    "TheMonMustNotHoldTheSameItemsText",
-    "YouCantTakeAnEggText",
-];
 const BATTLE_TOWER_MOBILE_FLAGS: &[&str] = &[
     "function103780",
     "function1037c2",
@@ -69,6 +73,7 @@ pub struct GameState {
     pub options: Options,
     pub player_name: String,
     pub player_id: u16,
+    pub secret_id: u16,
     pub player_gender: u8,
     pub party: PartyState,
     pub storage: PokemonStorage,
@@ -105,6 +110,8 @@ pub struct GameState {
     /// Exact persisted `wRadioTuningKnob` byte. The Pokegear changes it by
     /// two and clamps it to the even range 0..=80.
     pub radio_tuning_knob: u8,
+    /// Exact map-name-sign WRAM bytes owned by `InitMapNameSign`.
+    pub map_name_sign: MapNameSignMemory,
     pub dig_warp_map_name: Option<String>,
     pub dig_warp_index: Option<u16>,
     pub previous_warp_map_name: Option<String>,
@@ -152,10 +159,12 @@ pub struct GameState {
     pub flags: EventFlagMemory,
     pub script_runtime: ScriptRuntimeMemory,
     pub frame_counter: u64,
+    /// Exact wrapping HRAM `hVBlankCounter`. This is distinct from the
+    /// gameplay command frame and advances only in handlers that do so in ASM.
+    pub vblank_counter: u8,
     /// Cartridge hRandomAdd/hRandomSub bytes. DIV timing is runtime-owned and
     /// deliberately is not packed into this persistent state.
     pub random_state: CrystalRandomState,
-    pub rng_seed: u32,
     pub has_seen_intro: bool,
 }
 
@@ -170,6 +179,7 @@ impl<'de> Deserialize<'de> for GameState {
             options: Options,
             player_name: String,
             player_id: u16,
+            secret_id: u16,
             player_gender: u8,
             party: PartyState,
             storage: PokemonStorage,
@@ -205,6 +215,7 @@ impl<'de> Deserialize<'de> for GameState {
             active_repel_item: Option<String>,
             registered_key_item: Option<String>,
             radio_tuning_knob: u8,
+            map_name_sign: MapNameSignMemory,
             dig_warp_map_name: Option<String>,
             dig_warp_index: Option<u16>,
             #[serde(default)]
@@ -252,8 +263,8 @@ impl<'de> Deserialize<'de> for GameState {
             flags: EventFlagMemory,
             script_runtime: ScriptRuntimeMemory,
             frame_counter: u64,
+            vblank_counter: u8,
             random_state: CrystalRandomState,
-            rng_seed: u32,
             has_seen_intro: bool,
         }
 
@@ -262,6 +273,7 @@ impl<'de> Deserialize<'de> for GameState {
             options: raw.options,
             player_name: raw.player_name,
             player_id: raw.player_id,
+            secret_id: raw.secret_id,
             player_gender: raw.player_gender,
             party: raw.party,
             storage: raw.storage,
@@ -296,6 +308,7 @@ impl<'de> Deserialize<'de> for GameState {
             active_repel_item: raw.active_repel_item,
             registered_key_item: raw.registered_key_item,
             radio_tuning_knob: raw.radio_tuning_knob,
+            map_name_sign: raw.map_name_sign,
             dig_warp_map_name: raw.dig_warp_map_name,
             dig_warp_index: raw.dig_warp_index,
             previous_warp_map_name: raw.previous_warp_map_name,
@@ -339,8 +352,8 @@ impl<'de> Deserialize<'de> for GameState {
             flags: raw.flags,
             script_runtime: raw.script_runtime,
             frame_counter: raw.frame_counter,
+            vblank_counter: raw.vblank_counter,
             random_state: raw.random_state,
-            rng_seed: raw.rng_seed,
             has_seen_intro: raw.has_seen_intro,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
@@ -358,8 +371,9 @@ where
 }
 
 impl GameState {
-    /// Construct the cleared WRAM state used as the input to Crystal's
-    /// new-game initialization program.
+    /// Construct the deterministic WRAM state produced by Crystal's
+    /// `ResetWRAM` path. Hardware- and SRAM-derived identity/daily values are
+    /// completed by the runtime new-game lifecycle.
     ///
     /// This is deliberately not `Default`: production callers must identify
     /// the lifecycle transition that creates a fresh state, while save loads
@@ -369,9 +383,13 @@ impl GameState {
             options: Options::default(),
             player_name: String::new(),
             player_id: 0,
+            secret_id: 0,
             player_gender: PLAYER_GENDER_MALE,
             party: PartyState::default(),
-            storage: PokemonStorage::default(),
+            storage: PokemonStorage {
+                party: crate::models::Party::default(),
+                pc_boxes: (0..MAX_PC_BOXES).map(PcBox::new).collect(),
+            },
             mailbox: Vec::new(),
             pending_move_learn: None,
             pending_move_learn_queue: Vec::new(),
@@ -403,6 +421,7 @@ impl GameState {
             active_repel_item: None,
             registered_key_item: None,
             radio_tuning_knob: 0,
+            map_name_sign: MapNameSignMemory::default(),
             dig_warp_map_name: None,
             dig_warp_index: None,
             previous_warp_map_name: None,
@@ -433,7 +452,13 @@ impl GameState {
             blue_card_balance: 0,
             buenas_password: BuenasPasswordState::default(),
             pending_special_battle_type: None,
-            magikarp_record: MagikarpRecordState::default(),
+            magikarp_record: MagikarpRecordState {
+                current_feet: 0,
+                current_inches: 0,
+                best_feet: 3,
+                best_inches: 6,
+                best_owner_name: "RALPH".to_string(),
+            },
             day_care: DayCareState::default(),
             bug_contest: BugContestState::default(),
             link_session: LinkSessionState::default(),
@@ -446,10 +471,62 @@ impl GameState {
             flags: EventFlagMemory::default(),
             script_runtime: ScriptRuntimeMemory::default(),
             frame_counter: 0,
+            vblank_counter: 0,
             random_state: CrystalRandomState::default(),
-            rng_seed: 1,
             has_seen_intro: false,
         }
+    }
+
+    pub fn reset_wram_for_new_game_with_hardware<S>(
+        options: Options,
+        random_state: CrystalRandomState,
+        vblank_counter: u8,
+        stored_lucky_number_day: Option<u8>,
+        stored_lucky_id_number: u16,
+        divider: &mut S,
+    ) -> Result<Self, S::Error>
+    where
+        S: DividerSource + ?Sized,
+    {
+        let mut state = Self::reset_wram_for_new_game();
+        state.options = options;
+        // ResetWRAM clears WRAM0/WRAMX ranges, not HRAM.
+        state.vblank_counter = vblank_counter;
+
+        let mut rng = CrystalRandom::new(random_state, divider);
+
+        // Each DelayFrame executes the VBlank RNG update and then clears carry
+        // before returning. ResetWRAM reads hRandomSub after the first frame
+        // and hRandomAdd after the second.
+        let player_id_high = rng.random(false)?.value;
+        rng.random(false)?;
+        let player_id_low = rng.state().add;
+        state.player_id = u16::from_be_bytes([player_id_high, player_id_low]);
+
+        let secret_id_high = rng.random(false)?.value;
+        // VBlank_Normal's handler dispatch clears carry before its RNG update,
+        // and DelayFrame clears carry again before the following Random call.
+        rng.random(false)?;
+        let secret_id_low = rng.random(false)?.value;
+        state.secret_id = u16::from_be_bytes([secret_id_high, secret_id_low]);
+
+        state.lucky_number_day = stored_lucky_number_day;
+        state.lucky_id_number = stored_lucky_id_number;
+        let current_day = state.time.current_day;
+        let current_marker = current_day.wrapping_add(1);
+        let stored_marker = stored_lucky_number_day
+            .map(|day| day.wrapping_add(1))
+            .unwrap_or(0);
+        if stored_marker != current_marker {
+            let first = rng.random(stored_marker < current_marker)?;
+            let second = rng.random(first.carry_out)?;
+            // The ASM keeps the first byte in C, then stores the second Random
+            // result first and the saved C byte second.
+            state.lucky_id_number = u16::from_be_bytes([second.value, first.value]);
+            state.lucky_number_day = Some(current_day);
+        }
+        state.random_state = rng.state();
+        Ok(state)
     }
 }
 
@@ -725,11 +802,6 @@ pub struct LinkSessionState {
     pub chosen_cable_club_room: u8,
     pub other_player_link_mode: u8,
     pub serial_connection_status: LinkSerialConnectionStatus,
-    pub friend_ready: bool,
-    pub last_result: bool,
-    pub failed_link_to_past: bool,
-    pub quick_save_requested: bool,
-    pub active_room: Option<String>,
     pub battle_random: Option<LinkBattleRandomState>,
 }
 
@@ -746,11 +818,6 @@ impl<'de> Deserialize<'de> for LinkSessionState {
             chosen_cable_club_room: u8,
             other_player_link_mode: u8,
             serial_connection_status: LinkSerialConnectionStatus,
-            friend_ready: bool,
-            last_result: bool,
-            failed_link_to_past: bool,
-            quick_save_requested: bool,
-            active_room: Option<String>,
             battle_random: Option<LinkBattleRandomState>,
         }
 
@@ -761,11 +828,6 @@ impl<'de> Deserialize<'de> for LinkSessionState {
             chosen_cable_club_room: raw.chosen_cable_club_room,
             other_player_link_mode: raw.other_player_link_mode,
             serial_connection_status: raw.serial_connection_status,
-            friend_ready: raw.friend_ready,
-            last_result: raw.last_result,
-            failed_link_to_past: raw.failed_link_to_past,
-            quick_save_requested: raw.quick_save_requested,
-            active_room: raw.active_room,
             battle_random: raw.battle_random,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
@@ -790,38 +852,9 @@ impl LinkSerialConnectionStatus {
 
 impl LinkSessionState {
     fn validate_saved_state(&self) -> Result<(), String> {
-        validate_optional_script_runtime_token(
-            "link_session.active_room",
-            self.active_room.as_deref(),
-        )?;
-        if let Some(room) = &self.active_room {
-            if self.link_mode == 0 {
-                return Err(format!(
-                    "link_session.active_room {room} cannot be saved with link_mode 0"
-                ));
-            }
-            if !self.serial_connection_status.is_established() {
-                return Err(format!(
-                    "link_session.active_room {room} requires an established serial clock owner"
-                ));
-            }
-        }
-        if self.link_mode == 0 && self.serial_connection_status.is_established() {
-            // WaitForLinkedFriend establishes hSerialConnectionStatus before
-            // CheckBothSelectedSameRoom writes wLinkMode. The Cable Club and
-            // Time Capsule scripts may quick-save at exactly this boundary.
-            let live_pre_room_handshake =
-                self.friend_ready && self.last_result && self.active_room.is_none();
-            if !live_pre_room_handshake {
-                return Err(
-                    "link_session serial clock owner cannot be saved with link_mode 0 outside a live pre-room handshake"
-                        .to_string(),
-                );
-            }
-        }
-        if self.link_mode != 0 && self.battle_random.is_none() {
+        if self.link_mode == 3 && self.battle_random.is_none() {
             return Err(
-                "active link session requires persisted link_session.battle_random seeds and count"
+                "active Colosseum session requires persisted link_session.battle_random seeds and count"
                     .to_string(),
             );
         }
@@ -831,28 +864,6 @@ impl LinkSessionState {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(deny_unknown_fields)]
-pub enum LinkSessionSaveError {
-    #[error("saved link_session.active_room {room} is missing from compiled pack special routines")]
-    MissingActiveRoom { room: String },
-}
-
-pub fn validate_saved_link_session_references<F>(
-    link_session: &LinkSessionState,
-    special_routine_exists: F,
-) -> Result<(), LinkSessionSaveError>
-where
-    F: Fn(&str) -> bool,
-{
-    if let Some(room) = &link_session.active_room {
-        if !special_routine_exists(room) {
-            return Err(LinkSessionSaveError::MissingActiveRoom { room: room.clone() });
-        }
-    }
-    Ok(())
 }
 
 pub const HALL_OF_FAME_TEAM_SIZE: usize = 6;
@@ -914,9 +925,7 @@ pub struct BattleTowerState {
     pub record_last_day: Option<u8>,
     pub record_reset_counter: u8,
     pub leaderboard_acknowledged: bool,
-    pub last_rule_failure: Option<String>,
     pub loaded_trainer_id: Option<String>,
-    pub last_sprite_constant: Option<String>,
     pub selected_party_indexes: Vec<usize>,
     pub mobile_flags: BTreeSet<String>,
 }
@@ -946,9 +955,7 @@ impl<'de> Deserialize<'de> for BattleTowerState {
             record_last_day: Option<u8>,
             record_reset_counter: u8,
             leaderboard_acknowledged: bool,
-            last_rule_failure: Option<String>,
             loaded_trainer_id: Option<String>,
-            last_sprite_constant: Option<String>,
             selected_party_indexes: Vec<usize>,
             mobile_flags: BTreeSet<String>,
         }
@@ -972,9 +979,7 @@ impl<'de> Deserialize<'de> for BattleTowerState {
             record_last_day: raw.record_last_day,
             record_reset_counter: raw.record_reset_counter,
             leaderboard_acknowledged: raw.leaderboard_acknowledged,
-            last_rule_failure: raw.last_rule_failure,
             loaded_trainer_id: raw.loaded_trainer_id,
-            last_sprite_constant: raw.last_sprite_constant,
             selected_party_indexes: raw.selected_party_indexes,
             mobile_flags: raw.mobile_flags,
         };
@@ -1003,9 +1008,7 @@ impl Default for BattleTowerState {
             record_last_day: None,
             record_reset_counter: 0,
             leaderboard_acknowledged: false,
-            last_rule_failure: None,
             loaded_trainer_id: None,
-            last_sprite_constant: None,
             selected_party_indexes: Vec::new(),
             mobile_flags: BTreeSet::new(),
         }
@@ -1035,23 +1038,8 @@ impl BattleTowerState {
         }
         validate_script_runtime_token("battle_tower.reward_item", &self.reward_item)?;
         validate_optional_script_runtime_token(
-            "battle_tower.last_rule_failure",
-            self.last_rule_failure.as_deref(),
-        )?;
-        if let Some(failure) = &self.last_rule_failure {
-            if !BATTLE_TOWER_RULE_FAILURES.contains(&failure.as_str()) {
-                return Err(format!(
-                    "battle_tower.last_rule_failure {failure} is not a saved Battle Tower rule failure"
-                ));
-            }
-        }
-        validate_optional_script_runtime_token(
             "battle_tower.loaded_trainer_id",
             self.loaded_trainer_id.as_deref(),
-        )?;
-        validate_optional_script_runtime_token(
-            "battle_tower.last_sprite_constant",
-            self.last_sprite_constant.as_deref(),
         )?;
         if self.record_streaks.len() != self.record_outcomes.len()
             || self.record_streaks.len() != self.record_days.len()
@@ -1273,11 +1261,7 @@ pub struct BugContestState {
     pub second_party_species: Option<String>,
     pub caught_mon: Option<Pokemon>,
     pub pending_caught_mon: Option<Pokemon>,
-    pub caught_species: Option<String>,
-    pub caught_level: Option<u8>,
     pub selected_contestant_flags: Vec<String>,
-    pub last_rank: Option<u8>,
-    pub last_result: Option<u8>,
 }
 
 impl<'de> Deserialize<'de> for BugContestState {
@@ -1299,11 +1283,7 @@ impl<'de> Deserialize<'de> for BugContestState {
             caught_mon: Option<Pokemon>,
             #[serde(default)]
             pending_caught_mon: Option<Pokemon>,
-            caught_species: Option<String>,
-            caught_level: Option<u8>,
             selected_contestant_flags: Vec<String>,
-            last_rank: Option<u8>,
-            last_result: Option<u8>,
         }
 
         let raw = RawBugContestState::deserialize(deserializer)?;
@@ -1317,11 +1297,7 @@ impl<'de> Deserialize<'de> for BugContestState {
             second_party_species: raw.second_party_species,
             caught_mon: raw.caught_mon,
             pending_caught_mon: raw.pending_caught_mon,
-            caught_species: raw.caught_species,
-            caught_level: raw.caught_level,
             selected_contestant_flags: raw.selected_contestant_flags,
-            last_rank: raw.last_rank,
-            last_result: raw.last_result,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
         Ok(state)
@@ -1340,44 +1316,10 @@ impl BugContestState {
             "bug_contest.second_party_species",
             self.second_party_species.as_deref(),
         )?;
-        validate_optional_script_runtime_token(
-            "bug_contest.caught_species",
-            self.caught_species.as_deref(),
-        )?;
-        match (&self.caught_mon, &self.caught_species, self.caught_level) {
-            (Some(pokemon), Some(species), Some(level)) => {
-                pokemon
-                    .validate_saved_state()
-                    .map_err(|error| format!("bug_contest.caught_mon: {error}"))?;
-                if pokemon.species.id != *species {
-                    return Err(format!(
-                        "bug_contest.caught_species {species} does not match caught_mon species {}",
-                        pokemon.species.id
-                    ));
-                }
-                if pokemon.level != level {
-                    return Err(format!(
-                        "bug_contest.caught_level {level} does not match caught_mon level {}",
-                        pokemon.level
-                    ));
-                }
-            }
-            (Some(_), _, _) => {
-                return Err(
-                    "bug_contest.caught_mon requires caught_species and caught_level".to_string(),
-                );
-            }
-            (None, Some(species), _) => {
-                return Err(format!(
-                    "bug_contest.caught_species {species} cannot be saved without caught_mon"
-                ));
-            }
-            (None, None, Some(level)) => {
-                return Err(format!(
-                    "bug_contest.caught_level {level} cannot be saved without caught_mon"
-                ));
-            }
-            (None, None, None) => {}
+        if let Some(pokemon) = &self.caught_mon {
+            pokemon
+                .validate_saved_state()
+                .map_err(|error| format!("bug_contest.caught_mon: {error}"))?;
         }
         if let Some(pokemon) = &self.pending_caught_mon {
             pokemon
@@ -1444,27 +1386,21 @@ pub struct DayCareState {
     pub lady: DayCareResidentState,
     pub compatibility_score: u8,
     pub egg_present: bool,
-    /// The concrete egg generated by breeding.  Keeping the record (rather
-    /// than only a boolean flag) makes pickup deterministic and saveable.
+    /// Crystal's prebuilt `wEggMon`. This exists as soon as breeding is
+    /// initialized; `egg_present` records when the Day Care Man may offer it.
     #[serde(default)]
     pub egg: Option<Pokemon>,
-    pub steps_until_next_egg: u16,
-    pub steps_since_last_egg: u8,
-    pub last_interaction: Option<DayCareInteractionState>,
+    pub steps_until_next_egg: u8,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DayCareResidentState {
     pub pokemon: Option<Pokemon>,
-    pub initial_experience: i32,
-    pub initial_level: u8,
-    pub steps: u32,
     pub active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DayCareInteractionState {
     pub caretaker: String,
     pub action: String,
@@ -1472,6 +1408,31 @@ pub struct DayCareInteractionState {
     pub pokemon: Option<String>,
     pub level: Option<u8>,
     pub reason: Option<String>,
+}
+
+/// One host-visible decision already made by Crystal's Day Care menu flow.
+/// The core routine consumes this exactly once instead of consulting parallel
+/// string registers that do not exist in WRAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DayCareInput {
+    Open {},
+    Deposit { party_slot: usize },
+    Withdraw {},
+    Inspect {},
+    CollectEgg {},
+}
+
+impl DayCareInput {
+    pub fn action_name(self) -> &'static str {
+        match self {
+            Self::Open {} => "open",
+            Self::Deposit { .. } => "deposit",
+            Self::Withdraw {} => "withdraw",
+            Self::Inspect {} => "inspect",
+            Self::CollectEgg {} => "collect_egg",
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for DayCareState {
@@ -1488,9 +1449,7 @@ impl<'de> Deserialize<'de> for DayCareState {
             egg_present: bool,
             #[serde(default)]
             egg: Option<Pokemon>,
-            steps_until_next_egg: u16,
-            steps_since_last_egg: u8,
-            last_interaction: Option<DayCareInteractionState>,
+            steps_until_next_egg: u8,
         }
 
         let raw = RawDayCareState::deserialize(deserializer)?;
@@ -1501,8 +1460,6 @@ impl<'de> Deserialize<'de> for DayCareState {
             egg_present: raw.egg_present,
             egg: raw.egg,
             steps_until_next_egg: raw.steps_until_next_egg,
-            steps_since_last_egg: raw.steps_since_last_egg,
-            last_interaction: raw.last_interaction,
         };
         state.validate_saved_state().map_err(D::Error::custom)?;
         Ok(state)
@@ -1518,18 +1475,12 @@ impl<'de> Deserialize<'de> for DayCareResidentState {
         #[serde(deny_unknown_fields)]
         struct RawDayCareResidentState {
             pokemon: Option<Pokemon>,
-            initial_experience: i32,
-            initial_level: u8,
-            steps: u32,
             active: bool,
         }
 
         let raw = RawDayCareResidentState::deserialize(deserializer)?;
         let state = Self {
             pokemon: raw.pokemon,
-            initial_experience: raw.initial_experience,
-            initial_level: raw.initial_level,
-            steps: raw.steps,
             active: raw.active,
         };
         state
@@ -1539,43 +1490,13 @@ impl<'de> Deserialize<'de> for DayCareResidentState {
     }
 }
 
-impl<'de> Deserialize<'de> for DayCareInteractionState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawDayCareInteractionState {
-            caretaker: String,
-            action: String,
-            success: bool,
-            pokemon: Option<String>,
-            level: Option<u8>,
-            reason: Option<String>,
-        }
-
-        let raw = RawDayCareInteractionState::deserialize(deserializer)?;
-        let state = Self {
-            caretaker: raw.caretaker,
-            action: raw.action,
-            success: raw.success,
-            pokemon: raw.pokemon,
-            level: raw.level,
-            reason: raw.reason,
-        };
-        state.validate_saved_state().map_err(D::Error::custom)?;
-        Ok(state)
-    }
-}
-
 impl DayCareState {
     fn validate_saved_state(&self) -> Result<(), String> {
         self.man.validate_saved_state("day_care.man")?;
         self.lady.validate_saved_state("day_care.lady")?;
         let both_residents_active = self.man.active && self.lady.active;
-        if self.egg.is_some() && !self.egg_present {
-            return Err("day_care.egg cannot exist without egg_present".to_string());
+        if self.egg_present && self.egg.is_none() {
+            return Err("day_care.egg_present requires a prebuilt egg".to_string());
         }
         if self.egg.as_ref().is_some_and(|egg| !egg.is_egg) {
             return Err("day_care.egg must retain egg identity".to_string());
@@ -1597,15 +1518,6 @@ impl DayCareState {
                 self.steps_until_next_egg
             ));
         }
-        if self.steps_since_last_egg != 0 && !both_residents_active {
-            return Err(format!(
-                "day_care.steps_since_last_egg {} cannot be saved without both residents active",
-                self.steps_since_last_egg
-            ));
-        }
-        if let Some(interaction) = &self.last_interaction {
-            interaction.validate_saved_state()?;
-        }
         Ok(())
     }
 }
@@ -1613,232 +1525,17 @@ impl DayCareState {
 impl DayCareResidentState {
     fn validate_saved_state(&self, field: &str) -> Result<(), String> {
         let Some(pokemon) = &self.pokemon else {
-            if self.initial_experience != 0 {
-                return Err(format!(
-                    "{field}.initial_experience {} cannot be saved without a Pokemon",
-                    self.initial_experience
-                ));
-            }
-            if self.initial_level != 0 {
-                return Err(format!(
-                    "{field}.initial_level {} cannot be saved without a Pokemon",
-                    self.initial_level
-                ));
-            }
-            if self.steps != 0 {
-                return Err(format!(
-                    "{field}.steps {} cannot be saved without a Pokemon",
-                    self.steps
-                ));
-            }
             return Ok(());
         };
-        if self.initial_level == 0 {
-            return Err(format!("{field}.initial_level must be nonzero"));
-        }
         if !self.active {
             return Err(format!(
                 "{field}.active must be true when a Pokemon is deposited"
-            ));
-        }
-        if self.initial_experience < 0 {
-            return Err(format!(
-                "{field}.initial_experience {} must be nonnegative",
-                self.initial_experience
             ));
         }
         pokemon
             .validate_saved_state()
             .map_err(|error| format!("{field}.pokemon: {error}"))?;
         Ok(())
-    }
-}
-
-impl DayCareInteractionState {
-    fn validate_saved_state(&self) -> Result<(), String> {
-        validate_script_runtime_token("day_care.last_interaction.caretaker", &self.caretaker)?;
-        validate_script_runtime_token("day_care.last_interaction.action", &self.action)?;
-        validate_optional_script_runtime_token(
-            "day_care.last_interaction.pokemon",
-            self.pokemon.as_deref(),
-        )?;
-        validate_optional_script_runtime_token(
-            "day_care.last_interaction.reason",
-            self.reason.as_deref(),
-        )?;
-        if !matches!(self.caretaker.as_str(), "man" | "lady") {
-            return Err(format!(
-                "day_care.last_interaction.caretaker {} is not a saved Day Care caretaker",
-                self.caretaker
-            ));
-        }
-        if self.action == "collect_egg" && self.caretaker != "man" {
-            return Err(format!(
-                "day_care.last_interaction.action collect_egg requires caretaker man, got {}",
-                self.caretaker
-            ));
-        }
-        if let Some(level) = self.level {
-            if level == 0 {
-                return Err("day_care.last_interaction.level must be nonzero".to_string());
-            }
-        }
-        match self.action.as_str() {
-            "deposit" => {
-                if !self.success
-                    && matches!(
-                        self.reason.as_deref(),
-                        Some("occupied" | "egg" | "fainted" | "mail" | "last_usable")
-                    )
-                {
-                    validate_day_care_pokemon_and_reason(
-                        "day_care.last_interaction",
-                        self,
-                        false,
-                        self.reason.as_deref(),
-                    )
-                } else {
-                    validate_day_care_interaction_payload(
-                        "day_care.last_interaction",
-                        self,
-                        DayCareInteractionShape {
-                            success_pokemon: true,
-                            success_reason: None,
-                            failure_reason: Some("occupied"),
-                            failure_pokemon: false,
-                        },
-                    )
-                }
-            }
-            "withdraw" => {
-                if self.success {
-                    validate_day_care_pokemon_and_reason(
-                        "day_care.last_interaction",
-                        self,
-                        true,
-                        None,
-                    )
-                } else {
-                    match self.reason.as_deref() {
-                        Some("empty") => validate_day_care_pokemon_and_reason(
-                            "day_care.last_interaction",
-                            self,
-                            false,
-                            Some("empty"),
-                        ),
-                        Some("party_full") => validate_day_care_pokemon_and_reason(
-                            "day_care.last_interaction",
-                            self,
-                            true,
-                            Some("party_full"),
-                        ),
-                        Some("not_enough_money") => validate_day_care_pokemon_and_reason(
-                            "day_care.last_interaction",
-                            self,
-                            true,
-                            Some("not_enough_money"),
-                        ),
-                        Some(reason) => Err(format!(
-                            "day_care.last_interaction.reason {reason} is not valid for failed withdraw"
-                        )),
-                        None => Err(
-                            "day_care.last_interaction.reason is required for failed withdraw"
-                                .to_string(),
-                        ),
-                    }
-                }
-            }
-            "inspect" => validate_day_care_interaction_payload(
-                "day_care.last_interaction",
-                self,
-                DayCareInteractionShape {
-                    success_pokemon: true,
-                    success_reason: None,
-                    failure_reason: Some("empty"),
-                    failure_pokemon: false,
-                },
-            ),
-            "collect_egg" => validate_day_care_interaction_payload(
-                "day_care.last_interaction",
-                self,
-                DayCareInteractionShape {
-                    success_pokemon: false,
-                    success_reason: None,
-                    failure_reason: Some("no_egg"),
-                    failure_pokemon: false,
-                },
-            ),
-            action => Err(format!(
-                "day_care.last_interaction.action {action} is not a saved Day Care action"
-            )),
-        }
-    }
-}
-
-struct DayCareInteractionShape {
-    success_pokemon: bool,
-    success_reason: Option<&'static str>,
-    failure_reason: Option<&'static str>,
-    failure_pokemon: bool,
-}
-
-fn validate_day_care_interaction_payload(
-    field: &str,
-    interaction: &DayCareInteractionState,
-    shape: DayCareInteractionShape,
-) -> Result<(), String> {
-    if interaction.success {
-        validate_day_care_pokemon_and_reason(
-            field,
-            interaction,
-            shape.success_pokemon,
-            shape.success_reason,
-        )
-    } else {
-        validate_day_care_pokemon_and_reason(
-            field,
-            interaction,
-            shape.failure_pokemon,
-            shape.failure_reason,
-        )
-    }
-}
-
-fn validate_day_care_pokemon_and_reason(
-    field: &str,
-    interaction: &DayCareInteractionState,
-    expect_pokemon: bool,
-    expected_reason: Option<&str>,
-) -> Result<(), String> {
-    match (expect_pokemon, &interaction.pokemon, interaction.level) {
-        (true, Some(_), Some(_)) | (false, None, None) => {}
-        (true, _, _) => {
-            return Err(format!(
-                "{field}.action {} requires pokemon and level",
-                interaction.action
-            ));
-        }
-        (false, Some(pokemon), _) => {
-            return Err(format!(
-                "{field}.pokemon {pokemon} is not allowed for action {}",
-                interaction.action
-            ));
-        }
-        (false, None, Some(level)) => {
-            return Err(format!(
-                "{field}.level {level} is not allowed for action {}",
-                interaction.action
-            ));
-        }
-    }
-    match (expected_reason, interaction.reason.as_deref()) {
-        (Some(expected), Some(actual)) if expected == actual => Ok(()),
-        (Some(expected), Some(actual)) => Err(format!(
-            "{field}.reason {actual} does not match expected reason {expected}"
-        )),
-        (Some(expected), None) => Err(format!("{field}.reason {expected} is required")),
-        (None, Some(actual)) => Err(format!("{field}.reason {actual} is not allowed")),
-        (None, None) => Ok(()),
     }
 }
 
@@ -1979,7 +1676,7 @@ impl BuenasPasswordState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoamingPokemonState {
     pub species: Option<String>,
@@ -1989,6 +1686,21 @@ pub struct RoamingPokemonState {
     pub hp: u8,
     /// Big-endian packed DV bytes: attack/defense, then speed/special.
     pub dvs_be: [u8; 2],
+}
+
+impl Default for RoamingPokemonState {
+    fn default() -> Self {
+        Self {
+            species: None,
+            level: 0,
+            // ResetWRAM fills this WRAM range with $ff before
+            // InitializeWorld replaces the roamer map bytes.
+            map_group: u8::MAX,
+            map_number: u8::MAX,
+            hp: 0,
+            dvs_be: [0, 0],
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for RoamingPokemonState {
@@ -2039,14 +1751,9 @@ impl RoamingPokemonState {
                     "roaming_pokemon[{index}] inactive slot must have zero hp"
                 ));
             }
-            if (self.map_group == 0) != (self.map_number == 0) {
+            if self.map_group == 0 || self.map_number == 0 {
                 return Err(format!(
-                    "roaming_pokemon[{index}] inactive map bytes must be both zero or both nonzero"
-                ));
-            }
-            if self.map_group == 0 && (self.level != 0 || self.dvs_be != [0, 0]) {
-                return Err(format!(
-                    "roaming_pokemon[{index}] pre-init 0/0 slot must have zero level, hp, and DVs"
+                    "roaming_pokemon[{index}] inactive map requires a nonzero pair"
                 ));
             }
         }
@@ -2120,7 +1827,7 @@ pub enum RoamingSaveError {
         level: u8,
     },
     #[error(
-        "saved roaming_pokemon[{index}] inactive map {map_group}/{map_number} is neither pre-init 0/0 nor catalog inactive map {inactive_group}/{inactive_number}"
+        "saved roaming_pokemon[{index}] inactive map {map_group}/{map_number} is neither ResetWRAM 255/255 nor catalog inactive map {inactive_group}/{inactive_number}"
     )]
     InvalidInactiveLocation {
         index: usize,
@@ -2191,13 +1898,27 @@ where
                 map_group: roaming.map_group,
                 map_number: roaming.map_number,
             };
-            if location != RoamingMapLocation::default() && location != catalog.inactive_map {
+            let reset_wram_location = RoamingMapLocation {
+                map_group: u8::MAX,
+                map_number: u8::MAX,
+            };
+            if location != reset_wram_location && location != catalog.inactive_map {
                 return Err(RoamingSaveError::InvalidInactiveLocation {
                     index,
                     map_group: roaming.map_group,
                     map_number: roaming.map_number,
                     inactive_group: catalog.inactive_map.map_group,
                     inactive_number: catalog.inactive_map.map_number,
+                });
+            }
+            if location == reset_wram_location
+                && location != catalog.inactive_map
+                && (roaming.level != 0 || roaming.dvs_be != [0, 0])
+            {
+                return Err(RoamingSaveError::InvalidInactiveUnusedSlotPayload {
+                    index,
+                    level: roaming.level,
+                    dvs_be: roaming.dvs_be,
                 });
             }
             if location == catalog.inactive_map {
@@ -3016,6 +2737,458 @@ pub struct PendingFieldTravel {
     pub flypoint_flag: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardFlipPhase {
+    ChooseCard,
+    Result,
+    PlayAgain,
+    Shuffled,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CardFlipInput {
+    Start,
+    Continue,
+    ResumeAfterShuffle,
+    Reveal {
+        which_card: u8,
+        cursor_x: u8,
+        cursor_y: u8,
+    },
+    PayoutFrame,
+    AcknowledgeResult,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardFlipState {
+    /// Exact 24-byte `wDeck`, encoded as level/species face ids 0..=23.
+    pub deck: Vec<u8>,
+    /// Exact face-indexed `wDiscardPile` flags.
+    pub discard_pile: Vec<bool>,
+    pub phase: CardFlipPhase,
+    pub num_cards_played: u8,
+    pub which_card: u8,
+    pub cursor_x: u8,
+    pub cursor_y: u8,
+    pub face_up_card: Option<u8>,
+    /// Remaining iterations in CardFlip_CheckWinCondition's payout loop.
+    pub payout_remaining: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotSymbol {
+    Seven,
+    Pokeball,
+    Cherry,
+    Pikachu,
+    Squirtle,
+    Staryu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotMachinePhase {
+    Betting,
+    Spinning,
+    Result,
+    PlayAgain,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SlotMachineInput {
+    Enter { lucky: bool },
+    Start { bet: u8, lucky: bool },
+    StopReel { reel: u8, offsets: [u8; 3] },
+    ResolveResult,
+    PayoutFrame,
+    AcknowledgeResult,
+    Continue,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlotMachineState {
+    pub phase: SlotMachinePhase,
+    pub lucky: bool,
+    pub keep_seven_bias_chance: bool,
+    pub bet: u8,
+    pub bias: Option<SlotSymbol>,
+    pub offsets: [u8; 3],
+    pub next_reel: u8,
+    pub matched_symbol: Option<SlotSymbol>,
+    pub payout_remaining: u16,
+}
+
+impl SlotMachineState {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=3).contains(&self.bet)
+            && !(self.phase == SlotMachinePhase::Betting && self.bet == 0)
+        {
+            return Err(format!("slot_machine.bet {} is outside 1..=3", self.bet));
+        }
+        if self.offsets.iter().any(|offset| *offset >= 15) {
+            return Err("slot_machine.offsets contain a position outside 0..15".to_string());
+        }
+        if !(1..=4).contains(&self.next_reel) {
+            return Err(format!(
+                "slot_machine.next_reel {} is outside 1..=4",
+                self.next_reel
+            ));
+        }
+        match self.phase {
+            SlotMachinePhase::Betting => {
+                if self.payout_remaining != 0 {
+                    return Err("slot_machine Betting phase retains a payout".to_string());
+                }
+            }
+            SlotMachinePhase::Spinning => {
+                if self.payout_remaining != 0 || self.matched_symbol.is_some() {
+                    return Err(
+                        "slot_machine Spinning phase retains a result or payout".to_string()
+                    );
+                }
+            }
+            SlotMachinePhase::Result => {
+                if self.next_reel != 4 {
+                    return Err(
+                        "slot_machine Result phase requires three stopped reels".to_string()
+                    );
+                }
+                if self.matched_symbol.is_none() && self.payout_remaining != 0 {
+                    return Err("slot_machine unmatched result retains a payout".to_string());
+                }
+            }
+            SlotMachinePhase::PlayAgain => {
+                if self.next_reel != 4 || self.payout_remaining != 0 {
+                    return Err(
+                        "slot_machine PlayAgain phase requires a completed payout".to_string()
+                    );
+                }
+            }
+            SlotMachinePhase::Quit => {}
+        }
+        Ok(())
+    }
+}
+
+impl CardFlipState {
+    pub fn validate(&self) -> Result<(), String> {
+        const DECK_SIZE: usize = 24;
+        if self.deck.len() != DECK_SIZE {
+            return Err(format!(
+                "card_flip.deck has {} cards instead of {DECK_SIZE}",
+                self.deck.len()
+            ));
+        }
+        let mut identities = self.deck.clone();
+        identities.sort_unstable();
+        if identities != (0_u8..24).collect::<Vec<_>>() {
+            return Err("card_flip.deck must contain each face id 0..=23 once".to_string());
+        }
+        if self.discard_pile.len() != DECK_SIZE {
+            return Err(format!(
+                "card_flip.discard_pile has {} flags instead of {DECK_SIZE}",
+                self.discard_pile.len()
+            ));
+        }
+        if self.num_cards_played >= 12 {
+            return Err(format!(
+                "card_flip.num_cards_played {} is outside 0..12",
+                self.num_cards_played
+            ));
+        }
+        if self.which_card > 1 || self.cursor_x >= 6 || self.cursor_y >= 8 {
+            return Err("card_flip cursor registers are outside their source grids".to_string());
+        }
+        if self.face_up_card.is_some_and(|face| face >= 24) {
+            return Err("card_flip.face_up_card is outside 0..24".to_string());
+        }
+        let discarded = self.discard_pile.iter().filter(|flag| **flag).count();
+        let expected_discarded = match self.phase {
+            CardFlipPhase::ChooseCard | CardFlipPhase::Shuffled => {
+                usize::from(self.num_cards_played)
+            }
+            CardFlipPhase::Result | CardFlipPhase::PlayAgain => {
+                usize::from(self.num_cards_played) + 1
+            }
+            CardFlipPhase::Quit => discarded,
+        };
+        if discarded != expected_discarded {
+            return Err(format!(
+                "card_flip has {discarded} discarded faces but phase {:?} with {} played cards requires {expected_discarded}",
+                self.phase, self.num_cards_played
+            ));
+        }
+        if self.phase != CardFlipPhase::Result && self.payout_remaining != 0 {
+            return Err(format!(
+                "card_flip phase {:?} retains {} payout coins",
+                self.phase, self.payout_remaining
+            ));
+        }
+        if matches!(self.phase, CardFlipPhase::Result | CardFlipPhase::PlayAgain)
+            && self.face_up_card.is_none()
+        {
+            return Err(format!(
+                "card_flip phase {:?} has no face-up card",
+                self.phase
+            ));
+        }
+        if matches!(self.phase, CardFlipPhase::Result | CardFlipPhase::PlayAgain)
+            && self
+                .face_up_card
+                .is_some_and(|face| !self.discard_pile[usize::from(face)])
+        {
+            return Err(format!(
+                "card_flip phase {:?} has a face-up card that is not discarded",
+                self.phase
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryGamePhase {
+    RestartGame,
+    ResetBoard,
+    InitBoardTilemapAndCursor,
+    CheckTriesRemaining,
+    PickCard1,
+    PickCard2,
+    DelayPickAgain,
+    RevealAll,
+    RevealAllAcknowledgement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryGameInput {
+    Enter { menu_cursor_y: u8 },
+    AdvanceFrame { button: Option<MemoryGameButton> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryGameButton {
+    A,
+    B,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryGameState {
+    /// Exact 45-byte `wMemoryGameCards` board. Deleted cards use `$ff`.
+    pub cards: Vec<u8>,
+    pub phase: MemoryGamePhase,
+    /// Zero-based row selected by the live `wMenuCursorY` value read by
+    /// `MemoryGame_GetDistributionOfTiles`.
+    pub distribution: u8,
+    pub counter: u8,
+    pub number_tries_remaining: u8,
+    /// Exact five-byte `wMemoryGameLastMatches`; zero marks unused slots.
+    pub last_matches: [u8; 5],
+    pub num_cards_matched: u8,
+    pub card1: Option<u8>,
+    pub card1_location: Option<u8>,
+    pub card2: Option<u8>,
+    pub card2_location: Option<u8>,
+    /// Exact zero-based `SPRITEANIMSTRUCT_VAR1` board location.
+    pub cursor_index: u8,
+    /// Whether the source Memory Game cursor sprite animation exists. It
+    /// survives AskPlayAgain/RestartGame and is cleared by ResetBoard.
+    pub cursor_active: bool,
+    /// Exact one-based `wMemoryGameCardChoice`; zero means no pending A press.
+    pub card_choice: u8,
+    /// Exact `wMemoryGameLastCardPicked` tile identity; zero means face-down.
+    pub last_card_picked: u8,
+}
+
+impl MemoryGameState {
+    pub fn validate(&self) -> Result<(), String> {
+        const BOARD_LEN: usize = 45;
+        if self.cards.len() != BOARD_LEN {
+            return Err(format!(
+                "memory_game.cards has {} cells instead of {BOARD_LEN}",
+                self.cards.len()
+            ));
+        }
+        // RestartGame can retain the completed board for its one source frame;
+        // ResetBoard clears and replaces it before returning. Only a fresh
+        // entry has the all-zero pre-board representation.
+        let board_initialized = self.cards.iter().any(|card| *card != 0);
+        if self.cards.iter().any(|card| {
+            if board_initialized {
+                !matches!(*card, 1..=8 | u8::MAX)
+            } else {
+                *card != 0
+            }
+        }) {
+            return Err(if board_initialized {
+                "memory_game.cards contains a value outside 1..=8 or $ff".to_string()
+            } else {
+                "memory_game pre-board phases require cleared card WRAM".to_string()
+            });
+        }
+        if self.distribution >= 3 {
+            return Err(format!(
+                "memory_game.distribution {} is outside 0..3",
+                self.distribution
+            ));
+        }
+        if self.cursor_index >= BOARD_LEN as u8 {
+            return Err("memory_game.cursor_index is outside the 9×5 board".to_string());
+        }
+        if self.card_choice > BOARD_LEN as u8 {
+            return Err("memory_game.card_choice is outside 0..=45".to_string());
+        }
+        if !matches!(self.last_card_picked, 0..=8) {
+            return Err("memory_game.last_card_picked is outside 0..=8".to_string());
+        }
+        if self.number_tries_remaining > 5 {
+            return Err(format!(
+                "memory_game.number_tries_remaining {} exceeds five",
+                self.number_tries_remaining
+            ));
+        }
+        let used_matches = self
+            .last_matches
+            .iter()
+            .position(|card| *card == 0)
+            .unwrap_or(self.last_matches.len());
+        if self.last_matches[..used_matches]
+            .iter()
+            .any(|card| !matches!(*card, 1..=8))
+            || self.last_matches[used_matches..]
+                .iter()
+                .any(|card| *card != 0)
+        {
+            return Err(
+                "memory_game.last_matches must be card ids 1..=8 followed by zeroes".to_string(),
+            );
+        }
+        let expected_matched =
+            u8::try_from(used_matches * 2).expect("five Memory Game match slots fit in one byte");
+        if self.num_cards_matched != expected_matched {
+            return Err(format!(
+                "memory_game.num_cards_matched {} does not match {} recorded cards",
+                self.num_cards_matched, expected_matched
+            ));
+        }
+        let deleted = self.cards.iter().filter(|card| **card == u8::MAX).count();
+        if deleted != usize::from(self.num_cards_matched) {
+            return Err(format!(
+                "memory_game has {deleted} deleted cards but num_cards_matched is {}",
+                self.num_cards_matched
+            ));
+        }
+        let first_complete = self.card1.is_some() && self.card1_location.is_some();
+        let second_complete = self.card2.is_some() && self.card2_location.is_some();
+        if self.card1.is_some() != self.card1_location.is_some()
+            || self.card2.is_some() != self.card2_location.is_some()
+        {
+            return Err("memory_game card values and locations must be paired".to_string());
+        }
+        for (name, card, location) in [
+            ("card1", self.card1, self.card1_location),
+            ("card2", self.card2, self.card2_location),
+        ] {
+            if let Some(card) = card
+                && !matches!(card, 1..=8)
+            {
+                return Err(format!("memory_game.{name} is outside 1..=8"));
+            }
+            if let Some(location) = location
+                && usize::from(location) >= BOARD_LEN
+            {
+                return Err(format!("memory_game.{name}_location is outside the board"));
+            }
+            if let (Some(card), Some(location)) = (card, location)
+                && self.cards[usize::from(location)] != card
+            {
+                return Err(format!(
+                    "memory_game.{name} does not match its board location"
+                ));
+            }
+        }
+        if first_complete && second_complete && self.card1_location == self.card2_location {
+            return Err("memory_game card locations must be distinct".to_string());
+        }
+        match self.phase {
+            MemoryGamePhase::RestartGame | MemoryGamePhase::ResetBoard => {}
+            MemoryGamePhase::InitBoardTilemapAndCursor => {
+                if self.counter > 45
+                    || self.number_tries_remaining != 0
+                    || first_complete
+                    || second_complete
+                    || self.cursor_active
+                {
+                    return Err(
+                        "memory_game board placement phase has inconsistent registers".to_string(),
+                    );
+                }
+            }
+            MemoryGamePhase::CheckTriesRemaining
+            | MemoryGamePhase::PickCard1
+            | MemoryGamePhase::RevealAll => {
+                if first_complete || second_complete || self.counter != 0 || !self.cursor_active {
+                    return Err(format!(
+                        "memory_game {:?} phase retains pair or delay registers",
+                        self.phase
+                    ));
+                }
+            }
+            MemoryGamePhase::PickCard2 => {
+                if !first_complete || second_complete || self.counter != 0 || !self.cursor_active {
+                    return Err(
+                        "memory_game PickCard2 requires only the first card registers".to_string(),
+                    );
+                }
+            }
+            MemoryGamePhase::DelayPickAgain => {
+                if !first_complete || !second_complete || self.counter > 63 || !self.cursor_active {
+                    return Err(
+                        "memory_game DelayPickAgain requires both cards and counter <= 63"
+                            .to_string(),
+                    );
+                }
+            }
+            MemoryGamePhase::RevealAllAcknowledgement => {
+                if self.counter != 45 || first_complete || second_complete || !self.cursor_active {
+                    return Err(
+                        "memory_game reveal acknowledgement requires the complete board"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if matches!(
+            self.phase,
+            MemoryGamePhase::RevealAll | MemoryGamePhase::RevealAllAcknowledgement
+        ) && self.number_tries_remaining != 0
+        {
+            return Err(format!(
+                "memory_game {:?} phase requires zero tries",
+                self.phase
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeMemory {
@@ -3024,6 +3197,21 @@ pub struct ScriptRuntimeMemory {
     /// prevents a turn boundary from silently resetting screens, weather,
     /// traps, and multi-turn move counters.
     pub active_battle_combat: Option<BattleCombatState>,
+    /// Live WRAM owned by `_CardFlip`.
+    pub card_flip: Option<CardFlipState>,
+    /// One typed input edge for the next Card Flip jumptable transition.
+    pub pending_card_flip_input: Option<CardFlipInput>,
+    /// Live WRAM owned by `_SlotMachine`.
+    pub slot_machine: Option<SlotMachineState>,
+    /// One typed input edge for the next Slot Machine jumptable transition.
+    pub pending_slot_machine_input: Option<SlotMachineInput>,
+    /// Live WRAM owned by `_MemoryGame`. `None` means the routine is not
+    /// active and its initial ResetBoard menu has not initialized a board.
+    pub memory_game: Option<MemoryGameState>,
+    /// One typed input edge for the next Memory Game jumptable execution.
+    pub pending_memory_game_input: Option<MemoryGameInput>,
+    /// One typed decision from the source Day Care menu flow.
+    pub pending_day_care_input: Option<DayCareInput>,
     pub script_value: Option<String>,
     pub variables: BTreeMap<String, String>,
     pub memory: BTreeMap<String, String>,
@@ -3059,6 +3247,10 @@ pub struct ScriptRuntimeMemory {
     /// and committed only at the source warp boundary after departure.
     pub pending_field_travel: Option<PendingFieldTravel>,
     pub command_queue: Vec<ScriptRuntimeQueuedCommand>,
+    /// Host presentation history for the currently running process. Crystal
+    /// has no corresponding WRAM/SRAM field, so this must never enter a save
+    /// payload or deterministic game-state checksum.
+    #[serde(skip)]
     pub last_special_routine: Option<String>,
     pub last_talked_object: Option<String>,
     pub active_menu: Option<String>,
@@ -3076,7 +3268,6 @@ pub struct ScriptRuntimeMemory {
     pub credits_requested: bool,
     pub reset_requested: bool,
     pub menu_2d_requested: bool,
-    pub version_check_requested: bool,
     pub completed_trades: Vec<String>,
     pub audio_events: Vec<ScriptAudioRuntimeEvent>,
     pub current_music: Option<String>,
@@ -3119,6 +3310,13 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
         struct RawScriptRuntimeMemory {
             #[serde(default)]
             active_battle_combat: Option<BattleCombatState>,
+            card_flip: Option<CardFlipState>,
+            pending_card_flip_input: Option<CardFlipInput>,
+            slot_machine: Option<SlotMachineState>,
+            pending_slot_machine_input: Option<SlotMachineInput>,
+            memory_game: Option<MemoryGameState>,
+            pending_memory_game_input: Option<MemoryGameInput>,
+            pending_day_care_input: Option<DayCareInput>,
             script_value: Option<String>,
             variables: BTreeMap<String, String>,
             memory: BTreeMap<String, String>,
@@ -3138,7 +3336,6 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_waterfall_field_move: Option<FieldMoveTravelOutcome>,
             pending_field_travel: Option<PendingFieldTravel>,
             command_queue: Vec<ScriptRuntimeQueuedCommand>,
-            last_special_routine: Option<String>,
             last_talked_object: Option<String>,
             active_menu: Option<String>,
             active_pokemon_picture: Option<String>,
@@ -3155,7 +3352,6 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             credits_requested: bool,
             reset_requested: bool,
             menu_2d_requested: bool,
-            version_check_requested: bool,
             completed_trades: Vec<String>,
             audio_events: Vec<ScriptAudioRuntimeEvent>,
             current_music: Option<String>,
@@ -3188,6 +3384,13 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
         let raw = RawScriptRuntimeMemory::deserialize(deserializer)?;
         let memory = Self {
             active_battle_combat: raw.active_battle_combat,
+            card_flip: raw.card_flip,
+            pending_card_flip_input: raw.pending_card_flip_input,
+            slot_machine: raw.slot_machine,
+            pending_slot_machine_input: raw.pending_slot_machine_input,
+            memory_game: raw.memory_game,
+            pending_memory_game_input: raw.pending_memory_game_input,
+            pending_day_care_input: raw.pending_day_care_input,
             script_value: raw.script_value,
             variables: raw.variables,
             memory: raw.memory,
@@ -3207,7 +3410,7 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             pending_waterfall_field_move: raw.pending_waterfall_field_move,
             pending_field_travel: raw.pending_field_travel,
             command_queue: raw.command_queue,
-            last_special_routine: raw.last_special_routine,
+            last_special_routine: None,
             last_talked_object: raw.last_talked_object,
             active_menu: raw.active_menu,
             active_pokemon_picture: raw.active_pokemon_picture,
@@ -3224,7 +3427,6 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
             credits_requested: raw.credits_requested,
             reset_requested: raw.reset_requested,
             menu_2d_requested: raw.menu_2d_requested,
-            version_check_requested: raw.version_check_requested,
             completed_trades: raw.completed_trades,
             audio_events: raw.audio_events,
             current_music: raw.current_music,
@@ -3260,6 +3462,22 @@ impl<'de> Deserialize<'de> for ScriptRuntimeMemory {
 
 impl ScriptRuntimeMemory {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(card_flip) = &self.card_flip {
+            card_flip.validate()?;
+        }
+        if let Some(slot_machine) = &self.slot_machine {
+            slot_machine.validate()?;
+        }
+        if let Some(memory_game) = &self.memory_game {
+            memory_game.validate()?;
+        }
+        if let Some(DayCareInput::Deposit { party_slot }) = self.pending_day_care_input
+            && party_slot >= PARTY_SIZE
+        {
+            return Err(format!(
+                "pending_day_care_input deposit party_slot {party_slot} is outside party range 0..{PARTY_SIZE}"
+            ));
+        }
         if let Some(next_script) = &self.next_script {
             validate_script_runtime_token(
                 "next_script.origin_map_name",
@@ -3379,10 +3597,6 @@ impl ScriptRuntimeMemory {
                 }
             }
         }
-        validate_optional_script_runtime_label(
-            "last_special_routine",
-            self.last_special_routine.as_deref(),
-        )?;
         validate_optional_script_runtime_label(
             "last_talked_object",
             self.last_talked_object.as_deref(),
@@ -3529,6 +3743,18 @@ impl ScriptRuntimeMemory {
             validate_script_end_state(end)?;
         }
         for (index, entry) in self.stone_table_entries.iter().enumerate() {
+            if entry.queue_slot >= 4 {
+                return Err(format!(
+                    "stone_table_entries[{index}].queue_slot {} is outside wCmdQueue",
+                    entry.queue_slot
+                ));
+            }
+            let queue_type_key = format!("wCmdQueueType{}", entry.queue_slot);
+            if self.memory.get(&queue_type_key).map(String::as_str) != Some("2") {
+                return Err(format!(
+                    "stone_table_entries[{index}] belongs to inactive {queue_type_key}"
+                ));
+            }
             validate_script_runtime_token(
                 &format!("stone_table_entries[{index}].object_event"),
                 &entry.object_event,
@@ -3950,10 +4176,11 @@ fn validate_earthquake_payload(
             earthquake.parameter
         ));
     }
-    if earthquake.shake_frames != earthquake.parameter {
+    let expected_shake_frames = wrapping_byte_counter_ticks((earthquake.parameter & 0x3f) as u8);
+    if earthquake.shake_frames != expected_shake_frames {
         return Err(format!(
-            "pending_earthquakes[{index}].shake_frames {} must equal parameter {}",
-            earthquake.shake_frames, earthquake.parameter
+            "pending_earthquakes[{index}].shake_frames {} must equal the wrapping low-six-bit counter ({expected_shake_frames})",
+            earthquake.shake_frames
         ));
     }
     let expected_sleep_frames = wrapping_byte_counter_ticks((earthquake.parameter & 0x3f) as u8);
@@ -4387,6 +4614,8 @@ fn validate_audio_event_payload(
         }
         ScriptAudioRuntimeKind::SoundEffect => {
             if event.command != "special"
+                && event.command != "warpsound"
+                && event.command != "specialsound"
                 && !(event.command == "standard_receive_item"
                     && event.source_script == "ReceiveItemScript"
                     && event.audio_id.as_deref() == Some("SFX_ITEM")
@@ -4402,6 +4631,17 @@ fn validate_audio_event_payload(
                 return Err(format!(
                     "audio_events[{index}].audio_id is required for {:?}",
                     event.kind
+                ));
+            }
+            if event.command == "warpsound"
+                && !matches!(
+                    event.audio_id.as_deref(),
+                    Some("SFX_ENTER_DOOR" | "SFX_WARP_TO" | "SFX_EXIT_BUILDING")
+                )
+            {
+                return Err(format!(
+                    "audio_events[{index}].audio_id {:?} is not a GetWarpSFX result",
+                    event.audio_id
                 ));
             }
             if event.fade_frames.is_some() {
@@ -6201,6 +6441,9 @@ pub fn validate_saved_audio_reference(
     expected_kind: &str,
     compiled_kind: Option<&str>,
 ) -> Result<(), AudioReferenceSaveError> {
+    if audio_id == crate::systems::script_audio::MUSIC_NONE_ID && expected_kind == "Music" {
+        return Ok(());
+    }
     let Some(actual_kind) = compiled_kind else {
         return Err(AudioReferenceSaveError::MissingAudio {
             path: path.to_string(),
@@ -6285,14 +6528,6 @@ pub fn validate_saved_bug_contest_references(
         validate_pokemon("bug_contest.caught_mon", pokemon)
             .map_err(BugContestReferenceSaveError::Pokemon)?;
     }
-    if let Some(species) = &bug_contest.caught_species {
-        if !species_exists(species) {
-            return Err(BugContestReferenceSaveError::MissingSpecies {
-                path: "bug_contest.caught_species".to_string(),
-                species: species.clone(),
-            });
-        }
-    }
     for flag in &bug_contest.selected_contestant_flags {
         if !event_flag_exists(flag) {
             return Err(BugContestReferenceSaveError::MissingContestantFlag { flag: flag.clone() });
@@ -6306,16 +6541,11 @@ pub fn validate_saved_bug_contest_references(
 pub enum DayCareReferenceSaveError {
     #[error("{0}")]
     Pokemon(String),
-    #[error(
-        "saved day_care.last_interaction.pokemon {species} is missing from compiled pack pokemon"
-    )]
-    MissingInteractionSpecies { species: String },
 }
 
 pub fn validate_saved_day_care_references(
     day_care: &DayCareState,
     mut validate_pokemon: impl FnMut(&str, &Pokemon) -> Result<(), String>,
-    mut species_exists: impl FnMut(&str) -> bool,
 ) -> Result<(), DayCareReferenceSaveError> {
     if let Some(pokemon) = &day_care.man.pokemon {
         validate_pokemon("day_care.man.pokemon", pokemon)
@@ -6331,15 +6561,6 @@ pub fn validate_saved_day_care_references(
             return Err(DayCareReferenceSaveError::Pokemon(
                 "day_care.egg must retain egg identity".to_string(),
             ));
-        }
-    }
-    if let Some(interaction) = &day_care.last_interaction {
-        if let Some(species) = &interaction.pokemon {
-            if !species_exists(species) {
-                return Err(DayCareReferenceSaveError::MissingInteractionSpecies {
-                    species: species.clone(),
-                });
-            }
         }
     }
     Ok(())
@@ -7062,7 +7283,8 @@ fn validate_queued_command_payload(
                 ));
             }
         }
-        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
+        "writecmdqueue" | "elevator" | "callasm" | "memcallasm" | "checkpokemail"
+        | "givepokemail" => {
             if command.bank.is_some() {
                 return Err(format!(
                     "command_queue[{index}].bank is not valid for {}",
@@ -7104,7 +7326,11 @@ fn validate_text_event_payload(index: usize, event: &ScriptTextRuntimeEvent) -> 
                     "text_events[{index}].text_label is required for Write"
                 ));
             }
-            if !SCRIPT_TEXT_LABEL_COMMANDS.contains(&event.command.as_str()) {
+            if !matches!(
+                event.command.as_str(),
+                "repeattext" | "pocketisfull" | "trainertext"
+            ) && !SCRIPT_TEXT_LABEL_COMMANDS.contains(&event.command.as_str())
+            {
                 return Err(format!(
                     "text_events[{index}].command {} is not valid for Write",
                     event.command
@@ -7587,6 +7813,9 @@ pub struct ScriptRuntimeElevatorFloor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeStoneTableEntry {
+    /// Index in Crystal's four-entry `wCmdQueue` that owns this stone-table
+    /// row. All rows copied by one `writecmdqueue` share the same slot.
+    pub queue_slot: u8,
     pub warp: u16,
     pub object_event: String,
     pub script: String,
@@ -8148,6 +8377,13 @@ impl GameState {
                 self.radio_tuning_knob
             ));
         }
+        if self.map_name_sign.flags & !crate::systems::map_name_sign::SHOWN_MAP_NAME_SIGN_MASK != 0
+        {
+            return Err(format!(
+                "map_name_sign.flags {:#04x} contains bits outside SHOWN_MAP_NAME_SIGN",
+                self.map_name_sign.flags
+            ));
+        }
         self.bag
             .validate()
             .map_err(|error| format!("invalid saved bag: {error}"))?;
@@ -8705,15 +8941,6 @@ impl GameState {
             return self.active_repel_item.take();
         }
         None
-    }
-
-    pub fn commit_rng_seed(&mut self, rng_seed_after: u32) -> RngSeedCommit {
-        let commit = RngSeedCommit {
-            rng_seed_before: self.rng_seed,
-            rng_seed_after,
-        };
-        self.rng_seed = rng_seed_after;
-        commit
     }
 
     pub fn require_no_active_battle(&self) -> Result<(), GameStateBattleError> {
@@ -9850,13 +10077,6 @@ pub enum GameEvent {
     JoypadChanged { pressed: u8, down: u8 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RngSeedCommit {
-    pub rng_seed_before: u32,
-    pub rng_seed_after: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(deny_unknown_fields)]
 pub enum GameStateBattleError {
@@ -9998,13 +10218,17 @@ mod tests {
         assert_eq!(state.options.text_speed, TextSpeed::Mid);
         assert_eq!(state.player_name, "");
         assert_eq!(state.player_id, 0);
+        assert_eq!(state.secret_id, 0);
         assert_eq!(state.player_gender, PLAYER_GENDER_MALE);
         assert_eq!(state.options.battle_scene, BattleScene::On);
         assert_eq!(state.options.battle_style, BattleStyle::Shift);
         assert_eq!(state.options.sound, Sound::Mono);
         assert_eq!(state.options.menu_account, MenuAccount::On);
         assert_eq!(state.party.pokemon, [const { None }; 6]);
-        assert_eq!(state.storage, PokemonStorage::default());
+        assert_eq!(state.storage.party, crate::models::Party::default());
+        assert_eq!(state.storage.pc_boxes.len(), MAX_PC_BOXES);
+        assert_eq!(state.storage.pc_boxes[0].name, "BOX1");
+        assert_eq!(state.storage.pc_boxes[13].name, "BOX14");
         assert_eq!(state.bag, Bag::default());
         assert_eq!(state.pokedex, PokedexState::default());
         assert_eq!(state.link_battle_stats, LinkBattleStats::default());
@@ -10034,6 +10258,14 @@ mod tests {
         assert_eq!(state.lucky_number_day, None);
         assert_eq!(state.lucky_id_number, 0);
         assert_eq!(state.current_pc_box, 0);
+        assert!(state.roaming_pokemon.iter().all(|roaming| {
+            roaming.species.is_none()
+                && roaming.map_group == u8::MAX
+                && roaming.map_number == u8::MAX
+        }));
+        assert_eq!(state.magikarp_record.best_feet, 3);
+        assert_eq!(state.magikarp_record.best_inches, 6);
+        assert_eq!(state.magikarp_record.best_owner_name, "RALPH");
         assert_eq!(state.gs_healings, 0);
         assert_eq!(state.trainer_rankings_healings, 0);
         assert!(!state.script_runtime.reset_requested);
@@ -10041,8 +10273,69 @@ mod tests {
         assert_eq!(state.flags, EventFlagMemory::default());
         assert_eq!(state.frame_counter, 0);
         assert_eq!(state.random_state, CrystalRandomState::default());
-        assert_eq!(state.rng_seed, 1);
         assert!(!state.has_seen_intro);
+    }
+
+    #[test]
+    fn reset_wram_hardware_sequence_matches_player_secret_and_lucky_id_asm() {
+        let mut options = Options::default();
+        options.text_speed = TextSpeed::Fast;
+        let mut divider = ReplayDivider::new(1..=14);
+
+        let state = GameState::reset_wram_for_new_game_with_hardware(
+            options.clone(),
+            CrystalRandomState {
+                add: 0x10,
+                sub: 0x80,
+            },
+            0x9a,
+            None,
+            999,
+            &mut divider,
+        )
+        .expect("complete ResetWRAM hardware sequence");
+
+        assert_eq!(state.options, options);
+        assert_eq!(state.vblank_counter, 0x9a);
+        assert_eq!(state.player_id, 0x7e14);
+        assert_eq!(state.secret_id, 0x7462);
+        assert_eq!(state.lucky_number_day, Some(0));
+        assert_eq!(state.lucky_id_number, 0x4856);
+        assert_eq!(
+            state.random_state,
+            CrystalRandomState {
+                add: 0x42,
+                sub: 0x48,
+            }
+        );
+        assert_eq!(divider.consumed(), 14);
+    }
+
+    #[test]
+    fn reset_wram_delay_frame_clears_a_secret_random_borrow() {
+        let mut divider = ReplayDivider::new([
+            0, 0, // first player-ID VBlank
+            0, 0, // second player-ID VBlank
+            0, 1, // first secret-ID Random: borrow set
+            0, 0, // DelayFrame VBlank: carry cleared by handler dispatch
+            0, 0, // second secret-ID Random: carry cleared by DelayFrame
+            0, 0, // first Lucky-ID Random
+            0, 0, // second Lucky-ID Random
+        ]);
+
+        let state = GameState::reset_wram_for_new_game_with_hardware(
+            Options::default(),
+            CrystalRandomState::default(),
+            0,
+            None,
+            0,
+            &mut divider,
+        )
+        .expect("complete ResetWRAM after a secret-ID borrow");
+
+        assert_eq!(state.secret_id, 0xffff);
+        assert_eq!(state.random_state, CrystalRandomState { add: 1, sub: 0xff });
+        assert_eq!(divider.consumed(), 14);
     }
 
     #[test]
@@ -10075,7 +10368,6 @@ mod tests {
     fn daily_reset_decrements_kenji_break_countdown_without_resampling() {
         let mut state = GameState::default();
         state.kenji_break_timer = 4;
-        let seed = state.rng_seed;
 
         let mut divider = ReplayDivider::new([]);
         state
@@ -10083,7 +10375,6 @@ mod tests {
             .expect("countdown does not sample");
 
         assert_eq!(state.kenji_break_timer, 3);
-        assert_eq!(state.rng_seed, seed);
         assert_eq!(state.random_state, CrystalRandomState::default());
         assert_eq!(divider.consumed(), 0);
     }
@@ -10138,7 +10429,7 @@ mod tests {
         state.storage.party.pokemon[0] = Some(party_mon);
         let mut pc_box = PcBox::new(0);
         pc_box.set_slot(0, Some(boxed_mon));
-        state.storage.pc_boxes.push(pc_box);
+        state.storage.pc_boxes[0] = pc_box;
         state.sync_party_from_storage();
 
         state.apply_pokerus_tick(2);
@@ -10563,22 +10854,6 @@ mod tests {
         assert_eq!(state.validate_saved_state(), Ok(()));
 
         state = GameState::default();
-        state.link_session.active_room = Some("Trade Center".to_string());
-        assert_eq!(
-            state.validate_saved_state(),
-            Err("link_session.active_room has invalid token 'Trade Center'".to_string())
-        );
-
-        state = GameState::default();
-        state.link_session.active_room = Some("TradeCenter".to_string());
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "link_session.active_room TradeCenter cannot be saved with link_mode 0".to_string()
-            )
-        );
-
-        state = GameState::default();
         state
             .map_block_overrides
             .insert("Route 29".to_string(), BTreeMap::new());
@@ -10728,16 +11003,6 @@ mod tests {
         );
 
         state = GameState::default();
-        state.battle_tower.last_rule_failure = Some("StaleFailureText".to_string());
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "battle_tower.last_rule_failure StaleFailureText is not a saved Battle Tower rule failure"
-                    .to_string()
-            )
-        );
-
-        state = GameState::default();
         state
             .battle_tower
             .mobile_flags
@@ -10751,7 +11016,6 @@ mod tests {
         );
 
         state = GameState::default();
-        state.battle_tower.last_rule_failure = Some("YouCantTakeAnEggText".to_string());
         state
             .battle_tower
             .mobile_flags
@@ -10807,50 +11071,6 @@ mod tests {
         );
 
         state = GameState::default();
-        state.bug_contest.caught_species = Some("SCYTHER".to_string());
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "bug_contest.caught_species SCYTHER cannot be saved without caught_mon".to_string()
-            )
-        );
-
-        state = GameState::default();
-        let mut species = crate::models::PokemonSpecies::new_for_tests(
-            "SCYTHER",
-            crate::models::BaseStats::new(70, 110, 80, 55, 80, 105),
-        );
-        species.int_id = 123;
-        state.bug_contest.caught_mon = Some(Pokemon::new_for_tests(
-            species,
-            14,
-            crate::models::Dv::default(),
-        ));
-        state.bug_contest.caught_species = Some("PINSIR".to_string());
-        state.bug_contest.caught_level = Some(14);
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "bug_contest.caught_species PINSIR does not match caught_mon species SCYTHER"
-                    .to_string()
-            )
-        );
-
-        state = GameState::default();
-        state.day_care.man.initial_level = 5;
-        assert_eq!(
-            state.validate_saved_state(),
-            Err("day_care.man.initial_level 5 cannot be saved without a Pokemon".to_string())
-        );
-
-        state = GameState::default();
-        state.day_care.lady.steps = 1;
-        assert_eq!(
-            state.validate_saved_state(),
-            Err("day_care.lady.steps 1 cannot be saved without a Pokemon".to_string())
-        );
-
-        state = GameState::default();
         state.day_care.man.active = true;
         assert_eq!(state.validate_saved_state(), Ok(()));
 
@@ -10865,7 +11085,6 @@ mod tests {
             5,
             crate::models::Dv::default(),
         ));
-        state.day_care.man.initial_level = 5;
         assert_eq!(
             state.validate_saved_state(),
             Err("day_care.man.active must be true when a Pokemon is deposited".to_string())
@@ -10873,6 +11092,21 @@ mod tests {
 
         state = GameState::default();
         state.day_care.egg_present = true;
+        assert_eq!(
+            state.validate_saved_state(),
+            Err("day_care.egg_present requires a prebuilt egg".to_string())
+        );
+
+        let mut prebuilt_egg = Pokemon::new_for_tests(
+            crate::models::PokemonSpecies::new_for_tests(
+                "TOGEPI",
+                crate::models::BaseStats::new(35, 20, 65, 20, 40, 65),
+            ),
+            5,
+            crate::models::Dv::default(),
+        );
+        prebuilt_egg.is_egg = true;
+        state.day_care.egg = Some(prebuilt_egg);
         assert_eq!(
             state.validate_saved_state(),
             Err("day_care.egg_present cannot be saved without both residents active".to_string())
@@ -10897,75 +11131,6 @@ mod tests {
                     .to_string()
             )
         );
-
-        state = GameState::default();
-        state.day_care.steps_since_last_egg = 1;
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "day_care.steps_since_last_egg 1 cannot be saved without both residents active"
-                    .to_string()
-            )
-        );
-
-        state = GameState::default();
-        state.day_care.last_interaction = Some(DayCareInteractionState {
-            caretaker: "elder".to_string(),
-            action: "inspect".to_string(),
-            success: false,
-            pokemon: None,
-            level: None,
-            reason: Some("empty".to_string()),
-        });
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "day_care.last_interaction.caretaker elder is not a saved Day Care caretaker"
-                    .to_string()
-            )
-        );
-
-        state = GameState::default();
-        state.day_care.last_interaction = Some(DayCareInteractionState {
-            caretaker: "man".to_string(),
-            action: "deposit".to_string(),
-            success: true,
-            pokemon: Some("DITTO".to_string()),
-            level: None,
-            reason: None,
-        });
-        assert_eq!(
-            state.validate_saved_state(),
-            Err("day_care.last_interaction.action deposit requires pokemon and level".to_string())
-        );
-
-        state = GameState::default();
-        state.day_care.last_interaction = Some(DayCareInteractionState {
-            caretaker: "lady".to_string(),
-            action: "collect_egg".to_string(),
-            success: true,
-            pokemon: None,
-            level: None,
-            reason: None,
-        });
-        assert_eq!(
-            state.validate_saved_state(),
-            Err(
-                "day_care.last_interaction.action collect_egg requires caretaker man, got lady"
-                    .to_string()
-            )
-        );
-
-        state = GameState::default();
-        state.day_care.last_interaction = Some(DayCareInteractionState {
-            caretaker: "man".to_string(),
-            action: "withdraw".to_string(),
-            success: false,
-            pokemon: Some("DITTO".to_string()),
-            level: Some(5),
-            reason: Some("party_full".to_string()),
-        });
-        assert_eq!(state.validate_saved_state(), Ok(()));
 
         state = GameState::default();
         state.mystery_gift.stored_item = Some("GOLD BERRY".to_string());
@@ -11247,24 +11412,21 @@ mod tests {
         );
 
         state = GameState::default();
+        state.roaming_pokemon[0].map_group = 0;
         state.roaming_pokemon[0].map_number = 1;
         assert_eq!(
             state.validate_saved_state(),
-            Err(
-                "roaming_pokemon[0] inactive map bytes must be both zero or both nonzero"
-                    .to_string()
-            )
+            Err("roaming_pokemon[0] inactive map requires a nonzero pair".to_string())
         );
 
         state = GameState::default();
+        state.roaming_pokemon[0].map_group = 0;
+        state.roaming_pokemon[0].map_number = 0;
         state.roaming_pokemon[0].level = 40;
         state.roaming_pokemon[0].dvs_be = [0x12, 0x34];
         assert_eq!(
             state.validate_saved_state(),
-            Err(
-                "roaming_pokemon[0] pre-init 0/0 slot must have zero level, hp, and DVs"
-                    .to_string()
-            )
+            Err("roaming_pokemon[0] inactive map requires a nonzero pair".to_string())
         );
 
         state = GameState::default();
@@ -11726,6 +11888,15 @@ mod tests {
         assert_eq!(
             validate_saved_audio_reference(
                 "script_runtime.current_music",
+                crate::systems::script_audio::MUSIC_NONE_ID,
+                "Music",
+                None,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_audio_reference(
+                "script_runtime.current_music",
                 "SFX_TACKLE",
                 "Music",
                 Some("SoundEffect"),
@@ -11977,45 +12148,15 @@ mod tests {
             ),
             Ok(())
         );
-        contest.caught_species = Some("PINSIR".to_string());
-        assert_eq!(
-            validate_saved_bug_contest_references(
-                &contest,
-                |_, _| Ok(()),
-                |species| species == "SCYTHER",
-                |_| true,
-            ),
-            Err(BugContestReferenceSaveError::MissingSpecies {
-                path: "bug_contest.caught_species".to_string(),
-                species: "PINSIR".to_string(),
-            })
-        );
-
         let mut day_care = DayCareState::default();
         day_care.man.pokemon = Some(saved_enemy.clone());
-        day_care.last_interaction = Some(DayCareInteractionState {
-            caretaker: "man".to_string(),
-            action: "inspect".to_string(),
-            success: true,
-            pokemon: Some("PIDGEY".to_string()),
-            level: Some(9),
-            reason: None,
-        });
         assert_eq!(
-            validate_saved_day_care_references(
-                &day_care,
-                |path, _| Err(format!("bad pokemon at {path}")),
-                |_| true,
-            ),
+            validate_saved_day_care_references(&day_care, |path, _| Err(format!(
+                "bad pokemon at {path}"
+            ))),
             Err(DayCareReferenceSaveError::Pokemon(
                 "bad pokemon at day_care.man.pokemon".to_string()
             ))
-        );
-        assert_eq!(
-            validate_saved_day_care_references(&day_care, |_, _| Ok(()), |_| false),
-            Err(DayCareReferenceSaveError::MissingInteractionSpecies {
-                species: "PIDGEY".to_string(),
-            })
         );
         assert_eq!(
             validate_saved_wild_battle_origin_reference(
@@ -13197,8 +13338,12 @@ mod tests {
 
         runtime = ScriptRuntimeMemory::default();
         runtime
+            .memory
+            .insert("wCmdQueueType0".to_string(), "2".to_string());
+        runtime
             .stone_table_entries
             .push(ScriptRuntimeStoneTableEntry {
+                queue_slot: 0,
                 warp: 1,
                 object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
                 script: ".Stone Script".to_string(),
@@ -13213,6 +13358,7 @@ mod tests {
             )
         );
         let stone = ScriptRuntimeStoneTableEntry {
+            queue_slot: 0,
             warp: 5,
             object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
             script: "StoneScript".to_string(),
@@ -13465,20 +13611,23 @@ mod tests {
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
             parameter: 84,
-            shake_frames: 83,
+            shake_frames: 19,
             sleep_frames: 84 & 0x3f,
             source_script: "EarthquakeScript".to_string(),
             command_index: 7,
         });
         assert_eq!(
             runtime.validate(),
-            Err("pending_earthquakes[0].shake_frames 83 must equal parameter 84".to_string())
+            Err(
+                "pending_earthquakes[0].shake_frames 19 must equal the wrapping low-six-bit counter (20)"
+                    .to_string()
+            )
         );
 
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
             parameter: 84,
-            shake_frames: 84,
+            shake_frames: 20,
             sleep_frames: 84,
             source_script: "EarthquakeScript".to_string(),
             command_index: 7,
@@ -13494,7 +13643,7 @@ mod tests {
         runtime = ScriptRuntimeMemory::default();
         runtime.pending_earthquakes.push(ScriptRuntimeEarthquake {
             parameter: 0,
-            shake_frames: 0,
+            shake_frames: 256,
             sleep_frames: 256,
             source_script: "EarthquakeScript".to_string(),
             command_index: 7,
@@ -13519,7 +13668,7 @@ mod tests {
 
         let earthquake = ScriptRuntimeEarthquake {
             parameter: 72,
-            shake_frames: 72,
+            shake_frames: 8,
             sleep_frames: 8,
             source_script: "EarthquakeScript".to_string(),
             command_index: 8,
@@ -13629,6 +13778,25 @@ mod tests {
         assert_eq!(
             runtime.validate(),
             Err("audio_events[0].fade_frames is only valid for FadeMusic".to_string())
+        );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.audio_events.push(ScriptAudioRuntimeEvent {
+            command: "warpsound".to_string(),
+            kind: ScriptAudioRuntimeKind::SoundEffect,
+            audio_id: Some("SFX_EXIT_BUILDING".to_string()),
+            fade_frames: None,
+            source_script: "AudioScript".to_string(),
+            command_index: 8,
+        });
+        assert_eq!(runtime.validate(), Ok(()));
+        runtime.audio_events[0].audio_id = Some("SFX_TACKLE".to_string());
+        assert_eq!(
+            runtime.validate(),
+            Err(
+                "audio_events[0].audio_id Some(\"SFX_TACKLE\") is not a GetWarpSFX result"
+                    .to_string()
+            )
         );
 
         runtime = ScriptRuntimeMemory::default();
@@ -14536,6 +14704,186 @@ mod tests {
     }
 
     #[test]
+    fn saved_memory_game_state_is_typed_and_register_consistent() {
+        let cards = [
+            (1_u8, 8_usize),
+            (2, 2),
+            (3, 6),
+            (4, 6),
+            (5, 6),
+            (6, 8),
+            (7, 6),
+            (8, 3),
+        ]
+        .into_iter()
+        .flat_map(|(card, count)| std::iter::repeat_n(card, count))
+        .collect();
+        let mut runtime = ScriptRuntimeMemory {
+            memory_game: Some(MemoryGameState {
+                cards,
+                phase: MemoryGamePhase::DelayPickAgain,
+                distribution: 0,
+                counter: 63,
+                number_tries_remaining: 4,
+                last_matches: [0; 5],
+                num_cards_matched: 0,
+                card1: Some(1),
+                card1_location: Some(0),
+                card2: Some(1),
+                card2_location: Some(1),
+                cursor_index: 1,
+                cursor_active: true,
+                card_choice: 0,
+                last_card_picked: 1,
+            }),
+            pending_memory_game_input: Some(MemoryGameInput::AdvanceFrame { button: None }),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(runtime.validate(), Ok(()));
+
+        let encoded = serde_json::to_value(&runtime).expect("serialize typed Memory Game WRAM");
+        let decoded: ScriptRuntimeMemory =
+            serde_json::from_value(encoded).expect("deserialize typed Memory Game WRAM");
+        assert_eq!(decoded, runtime);
+
+        runtime.memory_game.as_mut().expect("active game").card2 = Some(2);
+        assert_eq!(
+            runtime.validate(),
+            Err("memory_game.card2 does not match its board location".to_string())
+        );
+    }
+
+    #[test]
+    fn saved_day_care_uses_only_source_sized_state() {
+        let state = GameState::default();
+        let encoded = serde_json::to_value(&state).expect("serialize game state");
+
+        let mut oversized_countdown = encoded.clone();
+        oversized_countdown["day_care"]["steps_until_next_egg"] = serde_json::json!(256);
+        let error = serde_json::from_value::<GameState>(oversized_countdown)
+            .expect_err("wStepsToEgg is one byte");
+        assert!(error.to_string().contains("invalid value"), "{error}");
+
+        for (scope, field, value) in [
+            ("day_care", "steps_since_last_egg", serde_json::json!(1)),
+            ("day_care", "last_interaction", serde_json::json!(null)),
+            ("man", "initial_experience", serde_json::json!(0)),
+            ("man", "initial_level", serde_json::json!(5)),
+            ("man", "steps", serde_json::json!(1)),
+        ] {
+            let mut stale = encoded.clone();
+            if scope == "day_care" {
+                stale["day_care"][field] = value;
+            } else {
+                stale["day_care"][scope][field] = value;
+            }
+            let error = serde_json::from_value::<GameState>(stale)
+                .expect_err("non-source Day Care counters must reject");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown field `{field}`")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_day_care_input_is_typed_and_party_bounded() {
+        let mut runtime = ScriptRuntimeMemory {
+            pending_day_care_input: Some(DayCareInput::Deposit { party_slot: 2 }),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(runtime.validate(), Ok(()));
+
+        let encoded = serde_json::to_value(&runtime).expect("serialize typed Day Care input");
+        let decoded: ScriptRuntimeMemory =
+            serde_json::from_value(encoded).expect("deserialize typed Day Care input");
+        assert_eq!(decoded, runtime);
+
+        runtime.pending_day_care_input = Some(DayCareInput::Deposit {
+            party_slot: PARTY_SIZE,
+        });
+        assert_eq!(
+            runtime.validate(),
+            Err(format!(
+                "pending_day_care_input deposit party_slot {PARTY_SIZE} is outside party range 0..{PARTY_SIZE}"
+            ))
+        );
+    }
+
+    #[test]
+    fn saved_card_flip_state_is_typed_and_register_consistent() {
+        let mut discard_pile = vec![false; 24];
+        discard_pile[0] = true;
+        discard_pile[1] = true;
+        let mut runtime = ScriptRuntimeMemory {
+            card_flip: Some(CardFlipState {
+                deck: (0_u8..24).collect(),
+                discard_pile,
+                phase: CardFlipPhase::PlayAgain,
+                num_cards_played: 1,
+                which_card: 0,
+                cursor_x: 2,
+                cursor_y: 2,
+                face_up_card: Some(1),
+                payout_remaining: 0,
+            }),
+            pending_card_flip_input: Some(CardFlipInput::Continue),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(runtime.validate(), Ok(()));
+
+        let encoded = serde_json::to_value(&runtime).expect("serialize typed Card Flip WRAM");
+        let decoded: ScriptRuntimeMemory =
+            serde_json::from_value(encoded).expect("deserialize typed Card Flip WRAM");
+        assert_eq!(decoded, runtime);
+
+        let card_flip = runtime.card_flip.as_mut().expect("active game");
+        card_flip.discard_pile[1] = false;
+        card_flip.discard_pile[2] = true;
+        assert_eq!(
+            runtime.validate(),
+            Err("card_flip phase PlayAgain has a face-up card that is not discarded".to_string())
+        );
+    }
+
+    #[test]
+    fn saved_slot_machine_state_is_typed_and_register_consistent() {
+        let mut runtime = ScriptRuntimeMemory {
+            slot_machine: Some(SlotMachineState {
+                phase: SlotMachinePhase::Result,
+                lucky: true,
+                keep_seven_bias_chance: false,
+                bet: 3,
+                bias: Some(SlotSymbol::Seven),
+                offsets: [14, 7, 2],
+                next_reel: 4,
+                matched_symbol: Some(SlotSymbol::Seven),
+                payout_remaining: 299,
+            }),
+            pending_slot_machine_input: Some(SlotMachineInput::PayoutFrame),
+            ..ScriptRuntimeMemory::default()
+        };
+        assert_eq!(runtime.validate(), Ok(()));
+
+        let encoded = serde_json::to_value(&runtime).expect("serialize typed Slot Machine WRAM");
+        let decoded: ScriptRuntimeMemory =
+            serde_json::from_value(encoded).expect("deserialize typed Slot Machine WRAM");
+        assert_eq!(decoded, runtime);
+
+        runtime
+            .slot_machine
+            .as_mut()
+            .expect("active machine")
+            .offsets[1] = 15;
+        assert_eq!(
+            runtime.validate(),
+            Err("slot_machine.offsets contain a position outside 0..15".to_string())
+        );
+    }
+
+    #[test]
     fn party_state_projects_full_authoritative_storage() {
         let mut state = GameState::default();
         let mut species = crate::models::PokemonSpecies::new_for_tests(
@@ -14561,37 +14909,18 @@ mod tests {
     }
 
     #[test]
-    fn saved_link_serial_clock_owner_requires_a_live_handshake_or_active_room() {
-        let mut idle = GameState::default();
-        idle.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingInternalClock;
-        let idle_error = serde_json::from_value::<GameState>(
-            serde_json::to_value(&idle).expect("serialize contradictory idle link state"),
-        )
-        .expect_err("idle link state cannot own the serial clock")
-        .to_string();
-        assert!(idle_error.contains("outside a live pre-room handshake"));
-
+    fn saved_link_serial_status_and_colosseum_rng_follow_source_state() {
         let mut handshake = GameState::default();
-        handshake.link_session.friend_ready = true;
-        handshake.link_session.last_result = true;
         handshake.link_session.serial_connection_status =
             LinkSerialConnectionStatus::UsingInternalClock;
         let reloaded_handshake: GameState = serde_json::from_value(
             serde_json::to_value(&handshake).expect("serialize pre-room handshake"),
         )
-        .expect("pre-room handshake is a canonical quick-save boundary");
+        .expect("established serial status is the canonical pre-room boundary");
         assert_eq!(reloaded_handshake.link_session, handshake.link_session);
 
         let mut room = GameState::default();
         room.link_session.link_mode = 2;
-        room.link_session.active_room = Some("TradeCenter".to_string());
-        let room_error = serde_json::from_value::<GameState>(
-            serde_json::to_value(&room).expect("serialize unowned active room"),
-        )
-        .expect_err("active link room requires a clock owner")
-        .to_string();
-        assert!(room_error.contains("requires an established serial clock owner"));
-
         room.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingExternalClock;
         let missing_stream_error = serde_json::from_value::<GameState>(
             serde_json::to_value(&room).expect("serialize active room without battle RNG stream"),
@@ -14600,7 +14929,7 @@ mod tests {
         .to_string();
         assert!(
             missing_stream_error.contains(
-                "active link session requires persisted link_session.battle_random seeds and count"
+                "active Colosseum session requires persisted link_session.battle_random seeds and count"
             ),
             "{missing_stream_error}"
         );
@@ -14760,6 +15089,20 @@ mod tests {
         assert!(
             state_error.contains("unknown field `legacy_sram`"),
             "{state_error}"
+        );
+
+        let mut seeded_state_json =
+            serde_json::to_value(GameState::default()).expect("seedless state json");
+        seeded_state_json
+            .as_object_mut()
+            .expect("state object")
+            .insert("rng_seed".to_string(), serde_json::json!(1));
+        let seed_error = serde_json::from_value::<GameState>(seeded_state_json)
+            .expect_err("game state must reject the removed host-seed facade")
+            .to_string();
+        assert!(
+            seed_error.contains("unknown field `rng_seed`"),
+            "{seed_error}"
         );
 
         let mut runtime_json =
@@ -15123,23 +15466,6 @@ mod tests {
             .joypad
             .validate_saved_state()
             .expect("joypad accumulator may contain directions pressed across different frames");
-    }
-
-    #[test]
-    fn rng_seed_commit_records_authoritative_before_after_seed() {
-        let mut state = GameState {
-            rng_seed: 0x1234_5678,
-            ..GameState::default()
-        };
-
-        assert_eq!(
-            state.commit_rng_seed(0xfeed_beef),
-            RngSeedCommit {
-                rng_seed_before: 0x1234_5678,
-                rng_seed_after: 0xfeed_beef,
-            }
-        );
-        assert_eq!(state.rng_seed, 0xfeed_beef);
     }
 
     #[test]
@@ -15580,30 +15906,6 @@ mod tests {
                 path: "mystery_gift.backup_item",
                 item_id: "SILVER_LEAF".to_string(),
             }
-        );
-    }
-
-    #[test]
-    fn validate_saved_link_session_references_requires_compiled_active_room() {
-        let link_session = LinkSessionState {
-            active_room: Some("CableClubTradeCenter".to_string()),
-            ..LinkSessionState::default()
-        };
-
-        let error = validate_saved_link_session_references(&link_session, |_| false)
-            .expect_err("active link room must exist in compiled special routines");
-        assert_eq!(
-            error,
-            LinkSessionSaveError::MissingActiveRoom {
-                room: "CableClubTradeCenter".to_string(),
-            }
-        );
-
-        assert_eq!(
-            validate_saved_link_session_references(&link_session, |room| {
-                room == "CableClubTradeCenter"
-            }),
-            Ok(())
         );
     }
 

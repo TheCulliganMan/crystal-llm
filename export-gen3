@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  echo "Usage: ./export-gen3 [base-pack] [output-pack]"
+  echo "Build the Generation 3 roster modpack on top of the canonical core pack."
+  exit 0
+fi
+
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target-pack-core}"
+exec cargo run --quiet \
+  --manifest-path "$repo_root/rust/Cargo.toml" \
+  -p crystal-assets \
+  --bin pack_gen3 \
+  -- "$repo_root" "$@"

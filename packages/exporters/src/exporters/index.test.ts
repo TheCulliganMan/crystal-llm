@@ -362,9 +362,10 @@ const mockExportAudioAssets = jest.fn(() => {
   return {
     MUSIC_ROUTE_29: {
       id: "MUSIC_ROUTE_29",
-      path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+      path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
       kind: "music",
-      source: "midi",
+      source: "pcm",
+      pcm_format: { sample_rate_hz: 22050, channels: 2, bits_per_sample: 16 },
     },
   };
 });
@@ -573,6 +574,7 @@ describe("exportCoreData", () => {
       evolutions: [],
       wildEncounters: [],
       fieldEncounters: [],
+      decorations: expect.any(Object),
       fishing: { groups: {}, time_groups: [], swarm_rules: [] },
       fieldMoves: {
         cut: { move_id: "CUT", badge: { region: "johto", index: 1 }, target_collisions: [], replacements: {} },
@@ -769,6 +771,7 @@ describe("exportCoreData", () => {
       pokegearTownMapPaletteMap: { town_map: ["EARTH"], pokegear: ["BORDER"] },
       pokemonCries: { BULBASAUR: { cry: "CRY_BULBASAUR", pitch: 128, length: 129 } },
       trainers: [],
+      trainerClassNames: undefined,
       pokedex: [],
       npcData: {},
       pokegearLandmarks: { landmarks: [], map_to_landmark: {} },
@@ -776,9 +779,10 @@ describe("exportCoreData", () => {
       audioAssets: {
         MUSIC_ROUTE_29: {
           id: "MUSIC_ROUTE_29",
-          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.mid",
+          path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
           kind: "music",
-          source: "midi",
+          source: "pcm",
+          pcm_format: { sample_rate_hz: 22050, channels: 2, bits_per_sample: 16 },
         },
       },
     });

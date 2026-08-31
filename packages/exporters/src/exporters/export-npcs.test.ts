@@ -6,6 +6,7 @@ import {
   parseNpcData,
   parseNpcDataFromMapFile,
   parseNumericExpression,
+  parseSpriteFacings,
 } from "./export-npcs";
 
 describe("export-npcs", () => {
@@ -29,12 +30,13 @@ describe("export-npcs", () => {
       expect(
         parseNpcDataFromMapFile("TestMap", mapPath, {
           PAL_NPC_BLUE: 9,
-        })
+        }, { SPRITE_YOUNGSTER: true })
       ).toEqual([
         {
           x: 1,
           y: 2,
           sprite: "SPRITE_YOUNGSTER",
+          sprite_has_facings: true,
           spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN",
           move_range_x: 0,
           move_range_y: 0,
@@ -83,7 +85,7 @@ describe("export-npcs", () => {
       expect(
         parseNpcDataFromMapFile("TrainerMap", mapPath, {
           PAL_NPC_BLUE: 9,
-        })
+        }, { SPRITE_BUG_CATCHER: true })
       ).toEqual([
         expect.objectContaining({
           object_type: "OBJECTTYPE_TRAINER",
@@ -129,6 +131,33 @@ describe("export-npcs", () => {
           PAL_NPC_GREEN: 10,
         })
       );
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("derives exact facing capability from the ordered ASM sprite table", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pokecrystal-export-npcs-"));
+    const constantsPath = path.join(tempDir, "sprite_constants.asm");
+    const spritesPath = path.join(tempDir, "sprites.asm");
+    try {
+      fs.writeFileSync(
+        constantsPath,
+        ["\tconst SPRITE_NONE", "\tconst SPRITE_YOUNGSTER", "\tconst SPRITE_POKE_BALL", ""].join("\n")
+      );
+      fs.writeFileSync(
+        spritesPath,
+        [
+          "\toverworld_sprite YoungsterSpriteGFX, 12, WALKING_SPRITE, PAL_OW_BLUE",
+          "\toverworld_sprite PokeBallSpriteGFX, 4, STILL_SPRITE, PAL_OW_RED",
+          "",
+        ].join("\n")
+      );
+
+      expect(parseSpriteFacings(constantsPath, spritesPath)).toEqual({
+        SPRITE_YOUNGSTER: true,
+        SPRITE_POKE_BALL: false,
+      });
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -187,7 +216,7 @@ describe("export-npcs", () => {
       expect(() =>
         parseNpcDataFromMapFile("BrokenMap", mapPath, {
           PAL_NPC_BLUE: 9,
-        })
+        }, { SPRITE_YOUNGSTER: true })
       ).toThrow("Object constant count does not match object_event count for BrokenMap: 2 != 1");
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -214,7 +243,7 @@ describe("export-npcs", () => {
         ].join("\n")
       );
 
-      expect(parseNpcData(tempDir, { PAL_NPC_RED: 8 })).toEqual({
+      expect(parseNpcData(tempDir, { PAL_NPC_RED: 8 }, { SPRITE_COOLTRAINER_M: true })).toEqual({
         EmptyMap: [],
         Route1: [
           expect.objectContaining({

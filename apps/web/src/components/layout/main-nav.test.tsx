@@ -59,7 +59,6 @@ describe("MainNav", () => {
     render(<MainNav mode="desktop" />);
 
     expect(screen.getByLabelText("Game Corner: Game Corner")).toHaveAttribute("href", "/game-corner?tab=slot-machine");
-    expect(screen.getByLabelText("Game Corner: Audio Generation")).toHaveAttribute("href", "/game-corner?tab=audio-generation");
     expect(screen.getByLabelText("Game Corner: Arena MCP/Skill")).toHaveAttribute("href", "/game-corner?tab=arena-mcp-skill");
     expect(screen.getByLabelText("Game Corner: Progress Tracker")).toHaveAttribute("href", "/game-corner?tab=progress-tracker");
   });
@@ -260,7 +259,7 @@ describe("MainNav", () => {
     render(<MainNav mode="desktop" />);
 
     const trigger = getDesktopGameCornerTrigger();
-    const submenuLink = screen.getByLabelText("Game Corner: Audio Generation");
+    const submenuLink = screen.getByLabelText("Game Corner: Arena MCP/Skill");
     const flyoutMenu = getGameCornerFlyout();
 
     fireEvent.focus(trigger);

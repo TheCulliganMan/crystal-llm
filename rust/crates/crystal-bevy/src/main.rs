@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use crystal_bevy::{
-    BevyShellConfig, BevyShellStart, CrystalRuntime,
+    BevyMultiplayerConfig, BevyShellConfig, BevyShellStart, CrystalRuntime,
     assets::{AssetRoot, modpack::COMPILED_GAME_PACK_EXTENSION},
     core::save::SAVE_EXTENSION,
 };
@@ -19,6 +19,7 @@ fn main() -> Result<()> {
         print_usage();
         return Ok(());
     }
+    let multiplayer = multiplayer_config(&args)?;
 
     let requested_pack_path = resolve_pack_path(args.pack.as_deref())?;
     let pack_path = std::fs::canonicalize(&requested_pack_path).with_context(|| {
@@ -54,6 +55,7 @@ fn main() -> Result<()> {
         start,
         BevyShellConfig {
             quick_save_path: Some(args.save_path.unwrap_or(default_save_path)),
+            multiplayer,
             ..Default::default()
         },
     )
@@ -78,18 +80,101 @@ async fn run_browser() -> Result<()> {
     let asset_root = AssetRoot::new(".");
     let runtime = CrystalRuntime::from_loaded_compiled_pack(&asset_root, loaded)?;
     let spawn_identifier = runtime.title_new_game_spawn_identifier()?;
+    let multiplayer = browser_multiplayer_config()?;
+    let save_path = browser_save_path_for_identity(
+        runtime.modpack().id(),
+        multiplayer.as_ref().map(|config| config.player_id),
+    );
+    let continue_save_path = runtime
+        .load_save_summary(&save_path)
+        .is_ok()
+        .then_some(save_path.clone());
+    let config = BevyShellConfig {
+        quick_save_path: Some(save_path),
+        multiplayer,
+        ..Default::default()
+    };
     crystal_bevy::run_bevy_shell(
         asset_root,
         runtime,
         BevyShellStart::Title {
             spawn_identifier,
-            save_path: None,
+            save_path: continue_save_path,
         },
-        BevyShellConfig {
-            quick_save_path: None,
-            ..Default::default()
-        },
+        config,
     )
+}
+
+fn browser_save_path_for_identity(modpack_id: &str, player_id: Option<u64>) -> PathBuf {
+    let identity = player_id
+        .map(|player_id| format!("player-{player_id}"))
+        .unwrap_or_else(|| "local".to_string());
+    PathBuf::from("saves").join(format!("{modpack_id}-{identity}.{SAVE_EXTENSION}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_multiplayer_config() -> Result<Option<BevyMultiplayerConfig>> {
+    let window = web_sys::window().context("browser window is unavailable")?;
+    let location = window.location();
+    let params = web_sys::UrlSearchParams::new_with_str(&location.search().unwrap_or_default())
+        .map_err(|error| anyhow::anyhow!("parse browser multiplayer query: {error:?}"))?;
+    if params.get("multiplayer").as_deref() == Some("off") {
+        return Ok(None);
+    }
+    let server_url = match params.get("multiplayer_server") {
+        Some(value) => value,
+        None => {
+            let scheme = if location.protocol().unwrap_or_default() == "https:" {
+                "wss"
+            } else {
+                "ws"
+            };
+            format!("{scheme}://{}/v1/ws", location.host().unwrap_or_default())
+        }
+    };
+    let storage = window.local_storage().ok().flatten();
+    let player_id = params
+        .get("player_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            storage
+                .as_ref()
+                .and_then(|storage| {
+                    storage
+                        .get_item("crystal.multiplayer.player_id")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            let time = js_sys::Date::now() as u64;
+            let random = (js_sys::Math::random() * f64::from(u32::MAX)) as u64;
+            ((time << 20) ^ random) & ((1_u64 << 53) - 1)
+        })
+        .max(1);
+    if let Some(storage) = &storage {
+        let _ = storage.set_item("crystal.multiplayer.player_id", &player_id.to_string());
+    }
+    let display_name = params
+        .get("player_name")
+        .unwrap_or_else(|| format!("PLAYER{:04}", player_id % 10_000));
+    Ok(Some(BevyMultiplayerConfig {
+        server_url,
+        server_token: params.get("token"),
+        world_id: params.get("world").unwrap_or_else(|| "main".into()),
+        player_id,
+        display_name,
+        rating: params
+            .get("rating")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1000),
+        rating_range: params
+            .get("rating_range")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(200),
+    }))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -130,6 +215,13 @@ struct Args {
     pack: Option<String>,
     load_save: Option<PathBuf>,
     save_path: Option<PathBuf>,
+    multiplayer_server: Option<String>,
+    multiplayer_token: Option<String>,
+    multiplayer_world: Option<String>,
+    multiplayer_player_id: Option<u64>,
+    multiplayer_player_name: Option<String>,
+    multiplayer_rating: Option<i32>,
+    multiplayer_rating_range: Option<u32>,
 }
 
 fn parse_args_from(values: impl IntoIterator<Item = String>) -> Result<Args> {
@@ -161,10 +253,127 @@ fn parse_args_from(values: impl IntoIterator<Item = String>) -> Result<Args> {
                 }
                 args.save_path = Some(parse_save_path_arg("--save-path", value)?);
             }
+            "--multiplayer-server" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-server requires a WebSocket URL")?;
+                if args.multiplayer_server.is_some() {
+                    bail!("--multiplayer-server may be provided only once");
+                }
+                args.multiplayer_server = Some(value);
+            }
+            "--multiplayer-token" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-token requires a token")?;
+                if args.multiplayer_token.is_some() {
+                    bail!("--multiplayer-token may be provided only once");
+                }
+                args.multiplayer_token = Some(value);
+            }
+            "--multiplayer-world" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-world requires a world id")?;
+                if args.multiplayer_world.is_some() {
+                    bail!("--multiplayer-world may be provided only once");
+                }
+                args.multiplayer_world = Some(value);
+            }
+            "--multiplayer-player-id" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-player-id requires a positive integer")?;
+                if args.multiplayer_player_id.is_some() {
+                    bail!("--multiplayer-player-id may be provided only once");
+                }
+                args.multiplayer_player_id = Some(
+                    value
+                        .parse::<u64>()
+                        .with_context(|| format!("invalid multiplayer player id '{value}'"))?,
+                );
+            }
+            "--multiplayer-player-name" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-player-name requires a display name")?;
+                if args.multiplayer_player_name.is_some() {
+                    bail!("--multiplayer-player-name may be provided only once");
+                }
+                args.multiplayer_player_name = Some(value);
+            }
+            "--multiplayer-rating" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-rating requires an integer")?;
+                args.multiplayer_rating = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("invalid multiplayer rating '{value}'"))?,
+                );
+            }
+            "--multiplayer-rating-range" => {
+                let value = values
+                    .next()
+                    .context("--multiplayer-rating-range requires an integer")?;
+                args.multiplayer_rating_range = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("invalid multiplayer rating range '{value}'"))?,
+                );
+            }
             other => bail!("unknown argument '{other}'"),
         }
     }
+    validate_multiplayer_flags(&args)?;
     Ok(args)
+}
+
+fn validate_multiplayer_flags(args: &Args) -> Result<()> {
+    let mode_selected = args.multiplayer_server.is_some();
+    let details_selected = args.multiplayer_token.is_some()
+        || args.multiplayer_world.is_some()
+        || args.multiplayer_player_id.is_some()
+        || args.multiplayer_player_name.is_some()
+        || args.multiplayer_rating.is_some()
+        || args.multiplayer_rating_range.is_some();
+    if !mode_selected && details_selected {
+        bail!("multiplayer options require --multiplayer-server");
+    }
+    if mode_selected {
+        if args.multiplayer_player_id.is_none() {
+            bail!("multiplayer requires --multiplayer-player-id");
+        }
+        if args.multiplayer_player_name.is_none() {
+            bail!("multiplayer requires --multiplayer-player-name");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn multiplayer_config(args: &Args) -> Result<Option<BevyMultiplayerConfig>> {
+    validate_multiplayer_flags(args)?;
+    let Some(server_url) = &args.multiplayer_server else {
+        return Ok(None);
+    };
+    Ok(Some(BevyMultiplayerConfig {
+        server_url: server_url.clone(),
+        server_token: args.multiplayer_token.clone(),
+        world_id: args
+            .multiplayer_world
+            .clone()
+            .unwrap_or_else(|| "main".into()),
+        player_id: args
+            .multiplayer_player_id
+            .context("validated multiplayer player id")?,
+        display_name: args
+            .multiplayer_player_name
+            .clone()
+            .context("validated multiplayer player name")?,
+        rating: args.multiplayer_rating.unwrap_or(1000),
+        rating_range: args.multiplayer_rating_range.unwrap_or(200),
+    }))
 }
 
 fn resolve_pack_path(explicit_pack: Option<&str>) -> Result<PathBuf> {
@@ -213,7 +422,7 @@ fn default_save_path(pack_directory: &Path, runtime: &CrystalRuntime) -> PathBuf
 
 fn print_usage() {
     println!(
-        "crystal-bevy [--pack <path.crystalpack>] [--load-save <path.{SAVE_EXTENSION}>] [--save-path <path.{SAVE_EXTENSION}>]"
+        "crystal-bevy [--pack <path.crystalpack>] [--load-save <path.{SAVE_EXTENSION}>] [--save-path <path.{SAVE_EXTENSION}>] [--multiplayer-server <ws-url> --multiplayer-player-id <id> --multiplayer-player-name <name>] [--multiplayer-token <token>] [--multiplayer-world <id>]"
     );
 }
 
@@ -222,7 +431,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_argument_surface_contains_only_pack_and_save_configuration() {
+    fn browser_save_paths_are_stable_and_scoped_to_multiplayer_identity() {
+        assert_eq!(
+            browser_save_path_for_identity("core-modular", Some(42)),
+            PathBuf::from("saves/core-modular-player-42.crystalsave")
+        );
+        assert_eq!(
+            browser_save_path_for_identity("core-modular", None),
+            PathBuf::from("saves/core-modular-local.crystalsave")
+        );
+    }
+
+    #[test]
+    fn release_argument_surface_accepts_pack_save_and_multiplayer_configuration() {
         let args = parse_args_from([
             "--pack".to_string(),
             "/tmp/game.crystalpack".to_string(),
@@ -239,6 +460,13 @@ mod tests {
                 pack: Some("/tmp/game.crystalpack".to_string()),
                 load_save: Some(PathBuf::from("/tmp/input.crystalsave")),
                 save_path: Some(PathBuf::from("/tmp/output.crystalsave")),
+                multiplayer_server: None,
+                multiplayer_token: None,
+                multiplayer_world: None,
+                multiplayer_player_id: None,
+                multiplayer_player_name: None,
+                multiplayer_rating: None,
+                multiplayer_rating_range: None,
             }
         );
 
@@ -253,6 +481,40 @@ mod tests {
                 .expect_err("debug argument must not be accepted");
             assert_eq!(error.to_string(), format!("unknown argument '{forbidden}'"));
         }
+    }
+
+    #[test]
+    fn multiplayer_arguments_require_a_hosted_server_and_complete_identity() {
+        let args = parse_args_from([
+            "--multiplayer-server".to_string(),
+            "ws://127.0.0.1:3003/v1/ws".to_string(),
+            "--multiplayer-player-id".to_string(),
+            "1".to_string(),
+            "--multiplayer-player-name".to_string(),
+            "CHRIS".to_string(),
+        ])
+        .expect("hosted multiplayer arguments");
+        assert_eq!(
+            multiplayer_config(&args).expect("hosted multiplayer config"),
+            Some(BevyMultiplayerConfig {
+                server_url: "ws://127.0.0.1:3003/v1/ws".to_string(),
+                server_token: None,
+                world_id: "main".to_string(),
+                player_id: 1,
+                display_name: "CHRIS".to_string(),
+                rating: 1000,
+                rating_range: 200,
+            })
+        );
+
+        assert!(parse_args_from(["--multiplayer-world".to_string(), "main".to_string(),]).is_err());
+        assert!(
+            parse_args_from([
+                "--multiplayer-server".to_string(),
+                "ws://127.0.0.1:3003/v1/ws".to_string(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

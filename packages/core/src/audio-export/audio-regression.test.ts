@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { WavConverter } from "@pokecrystal/core/audio-export/converter";
+import { PcmConverter } from "@pokecrystal/core/audio-export/converter";
 import type { ParsedMusicData } from "@pokecrystal/core/audio-export/parsers";
 import type { NoiseNote } from "@pokecrystal/core/audio-export/schemas";
 
@@ -107,7 +107,7 @@ const summarizePcm = (pcm: Int16Array) => {
 describe("audio-export regression fixtures", () => {
   it("produces stable PCM signatures for ASM-derived fixtures", () => {
     const summary = fixtures.map(({ name, musicData, drumkits = {}, waveSamples = { 0: new Array(32).fill(0) }, waveInstrumentMap, qualityMode }) => {
-      const converter = new WavConverter(
+      const converter = new PcmConverter(
         musicData,
         drumkits,
         waveSamples,

@@ -18,8 +18,8 @@ export const GameCornerPageContent = ({
               <div className="space-y-2">
                 <h1 className="kc-arena-display text-3xl font-semibold md:text-4xl">Game Corner</h1>
                 <p className="max-w-2xl text-sm leading-6 kc-arena-muted md:text-base">
-                  One control room for spectacle and operation: arcade play, audio generation, Arena automation, and a
-                  story-tracking planner that feels deliberate instead of dashboard-heavy.
+                  One control room for spectacle and operation: arcade play, Arena automation, and a story-tracking
+                  planner that feels deliberate instead of dashboard-heavy.
                 </p>
               </div>
             </div>
@@ -28,10 +28,6 @@ export const GameCornerPageContent = ({
               <div className="kc-arena-stat-card">
                 <span>Slots</span>
                 <strong>Live</strong>
-              </div>
-              <div className="kc-arena-stat-card">
-                <span>Audio</span>
-                <strong>Export-ready</strong>
               </div>
               <div className="kc-arena-stat-card">
                 <span>Arena</span>

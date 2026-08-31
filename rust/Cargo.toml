@@ -4,6 +4,7 @@ members = [
     "crates/crystal-audio",
     "crates/crystal-bevy",
     "crates/crystal-core",
+    "crates/crystal-mapgen",
     "crates/crystal-net",
     "crates/crystal-render-api",
     "crates/crystal-voxel-view",
@@ -19,6 +20,15 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+strip = "symbols"
+
+# Browser downloads benefit more from a small artifact than from native-style
+# peak throughput. Keep this separate so the relay server and desktop game can
+# retain their faster release optimization profile.
+[profile.web-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
 
 # Bevy's default dev profile (opt-level 0) makes the renderer and ECS spend
 # most of their time in bounds checks and unoptimized scheduling code.  That

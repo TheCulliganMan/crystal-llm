@@ -109,7 +109,7 @@ export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
     name: "press",
     title: "Press",
     description:
-      "Press a button with hardware-accurate press + release. A selects/confirms, B cancels/deletes, Start accepts END on name entry, and Select sends the Game Boy Select button.",
+      "Press a button with hardware-accurate press + release. A selects/confirms, B cancels/deletes, Start moves to END on name entry (press A afterward to submit), and Select sends the Game Boy Select button.",
     inputSchema: withTrainingMetadata(PressSchema),
     handler: pressHandler,
   },

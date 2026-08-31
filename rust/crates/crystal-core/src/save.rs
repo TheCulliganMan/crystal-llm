@@ -8,12 +8,15 @@ use thiserror::Error;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(target_arch = "wasm32")]
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
 use crate::multiplayer::{fnv1a32_bytes, game_state_checksum};
 use crate::state::GameState;
 
 const SAVE_MAGIC: &[u8; 12] = b"CRYSTALSAVE\0";
 pub const SAVE_EXTENSION: &str = "crystalsave";
-pub const SAVE_FORMAT_VERSION: u16 = 17;
+pub const SAVE_FORMAT_VERSION: u16 = 23;
 const SAVE_VERSION_OFFSET: usize = SAVE_MAGIC.len();
 const SAVE_PAYLOAD_LENGTH_OFFSET: usize = SAVE_VERSION_OFFSET + 2;
 const SAVE_PAYLOAD_HASH_OFFSET: usize = SAVE_PAYLOAD_LENGTH_OFFSET + 4;
@@ -583,40 +586,52 @@ fn write_save_game(path: impl AsRef<Path>, save: &SaveGame) -> Result<(), SaveEr
     validate_save_path(path)?;
     save.validate()?;
     let bytes = encode_save_game_bytes(save)?;
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+    #[cfg(target_arch = "wasm32")]
     {
-        std::fs::create_dir_all(parent).map_err(|source| SaveError::CreateDirectory {
-            path: parent.display().to_string(),
-            source,
-        })?;
+        // Keep the recovery generation current before replacing the primary.
+        // If a refresh interrupts the second write, Continue can still repair
+        // the primary from the complete backup.
+        write_primary_save_bytes(&save_backup_path(path), &bytes)?;
+        write_primary_save_bytes(path, &bytes)?;
+        return Ok(());
     }
-    let backup = save_backup_path(path);
-    if path.exists() {
-        if backup.exists() {
-            std::fs::remove_file(&backup).map_err(|source| SaveError::Write {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|source| SaveError::CreateDirectory {
+                path: parent.display().to_string(),
+                source,
+            })?;
+        }
+        let backup = save_backup_path(path);
+        if path.exists() {
+            if backup.exists() {
+                std::fs::remove_file(&backup).map_err(|source| SaveError::Write {
+                    path: backup.display().to_string(),
+                    source,
+                })?;
+            }
+            std::fs::rename(path, &backup).map_err(|source| SaveError::Write {
                 path: backup.display().to_string(),
                 source,
             })?;
         }
-        std::fs::rename(path, &backup).map_err(|source| SaveError::Write {
-            path: backup.display().to_string(),
-            source,
-        })?;
-    }
-    if let Err(error) = write_primary_save_bytes(path, &bytes) {
-        if !path.exists() && backup.exists() {
-            let _ = std::fs::rename(&backup, path);
+        if let Err(error) = write_primary_save_bytes(path, &bytes) {
+            if !path.exists() && backup.exists() {
+                let _ = std::fs::rename(&backup, path);
+            }
+            return Err(error);
         }
-        return Err(error);
+        // SaveBackupOptions/PlayerData/PokemonData/Checksum copy the same current
+        // generation after the primary save. A successful first save therefore
+        // also has a complete recovery copy, rather than treating the backup as
+        // a previous-generation undo slot.
+        write_primary_save_bytes(&backup, &bytes)?;
+        Ok(())
     }
-    // SaveBackupOptions/PlayerData/PokemonData/Checksum copy the same current
-    // generation after the primary save. A successful first save therefore
-    // also has a complete recovery copy, rather than treating the backup as
-    // a previous-generation undo slot.
-    write_primary_save_bytes(&backup, &bytes)?;
-    Ok(())
 }
 
 pub fn save_backup_path(path: &Path) -> PathBuf {
@@ -626,36 +641,122 @@ pub fn save_backup_path(path: &Path) -> PathBuf {
 pub fn erase_save_game(path: impl AsRef<Path>) -> Result<bool, SaveError> {
     let path = path.as_ref();
     validate_save_path(path)?;
-    let mut removed = false;
-    for artifact in [path.to_path_buf(), save_backup_path(path)] {
-        match std::fs::remove_file(&artifact) {
-            Ok(()) => removed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(SaveError::Write {
-                    path: artifact.display().to_string(),
-                    source,
-                });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let storage = browser_save_storage().map_err(|source| SaveError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let mut removed = false;
+        for artifact in [path.to_path_buf(), save_backup_path(path)] {
+            let key = browser_save_storage_key(&artifact);
+            if storage.get_item(&key).ok().flatten().is_some() {
+                storage
+                    .remove_item(&key)
+                    .map_err(|error| SaveError::Write {
+                        path: artifact.display().to_string(),
+                        source: browser_storage_error("remove browser save", error),
+                    })?;
+                removed = true;
             }
         }
+        return Ok(removed);
     }
-    Ok(removed)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut removed = false;
+        for artifact in [path.to_path_buf(), save_backup_path(path)] {
+            match std::fs::remove_file(&artifact) {
+                Ok(()) => removed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(SaveError::Write {
+                        path: artifact.display().to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 fn write_primary_save_bytes(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
-    let temporary = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|source| SaveError::Write {
-        path: temporary.display().to_string(),
-        source,
-    })?;
-    if let Err(source) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(SaveError::Write {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let storage = browser_save_storage().map_err(|source| SaveError::Write {
             path: path.display().to_string(),
             source,
-        });
+        })?;
+        return storage
+            .set_item(&browser_save_storage_key(path), &BASE64.encode(bytes))
+            .map_err(|error| SaveError::Write {
+                path: path.display().to_string(),
+                source: browser_storage_error("write browser save", error),
+            });
     }
-    Ok(())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let temporary = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
+        std::fs::write(&temporary, bytes).map_err(|source| SaveError::Write {
+            path: temporary.display().to_string(),
+            source,
+        })?;
+        if let Err(source) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(SaveError::Write {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const BROWSER_SAVE_STORAGE_PREFIX: &str = "crystal.save.v1.";
+
+#[cfg(target_arch = "wasm32")]
+fn browser_save_storage() -> Result<web_sys::Storage, std::io::Error> {
+    web_sys::window()
+        .ok_or_else(|| std::io::Error::other("browser window is unavailable"))?
+        .local_storage()
+        .map_err(|error| browser_storage_error("open browser save storage", error))?
+        .ok_or_else(|| std::io::Error::other("browser local storage is unavailable"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_storage_error(context: &str, error: impl std::fmt::Debug) -> std::io::Error {
+    std::io::Error::other(format!("{context}: {error:?}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_save_storage_key(path: &Path) -> String {
+    format!(
+        "{BROWSER_SAVE_STORAGE_PREFIX}{}",
+        path.to_string_lossy().replace('\\', "/")
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_browser_save_bytes(path: &Path) -> Result<Vec<u8>, SaveError> {
+    let storage = browser_save_storage().map_err(|source| SaveError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let encoded = storage
+        .get_item(&browser_save_storage_key(path))
+        .map_err(|error| SaveError::Read {
+            path: path.display().to_string(),
+            source: browser_storage_error("read browser save", error),
+        })?
+        .ok_or_else(|| SaveError::Read {
+            path: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "browser save not found"),
+        })?;
+    BASE64
+        .decode(encoded)
+        .map_err(|error| SaveError::Decode(format!("browser save {}: {error}", path.display())))
 }
 
 fn encode_save_game_bytes(save: &SaveGame) -> Result<Vec<u8>, SaveError> {
@@ -690,6 +791,9 @@ pub fn write_save_game_for_modpack(
 fn read_save_game(path: impl AsRef<Path>) -> Result<SaveGame, SaveError> {
     let path = path.as_ref();
     validate_save_path(path)?;
+    #[cfg(target_arch = "wasm32")]
+    let bytes = read_browser_save_bytes(path)?;
+    #[cfg(not(target_arch = "wasm32"))]
     let bytes = std::fs::read(path).map_err(|source| SaveError::Read {
         path: path.display().to_string(),
         source,
@@ -707,9 +811,12 @@ pub fn read_save_game_for_modpack(
         Ok(save) => save,
         Err(primary_error) => {
             let backup = save_backup_path(path);
-            if !backup.exists() {
-                return Err(primary_error);
-            }
+            #[cfg(target_arch = "wasm32")]
+            let backup_bytes = match read_browser_save_bytes(&backup) {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(primary_error),
+            };
+            #[cfg(not(target_arch = "wasm32"))]
             let backup_bytes = match std::fs::read(&backup) {
                 Ok(bytes) => bytes,
                 Err(_) => return Err(primary_error),
@@ -1646,13 +1753,13 @@ mod tests {
         )
         .expect("encode prior v8 roaming vector shape");
         prior_payload.splice(roaming_start..history_start + history.len(), legacy_roaming);
-        let mut prior_under_v17 = SAVE_MAGIC.to_vec();
-        prior_under_v17.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
-        prior_under_v17.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
-        prior_under_v17.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
-        prior_under_v17.extend_from_slice(&prior_payload);
+        let mut prior_under_v18 = SAVE_MAGIC.to_vec();
+        prior_under_v18.extend_from_slice(&SAVE_FORMAT_VERSION.to_be_bytes());
+        prior_under_v18.extend_from_slice(&(prior_payload.len() as u32).to_be_bytes());
+        prior_under_v18.extend_from_slice(&fnv1a32_bytes(&prior_payload).to_be_bytes());
+        prior_under_v18.extend_from_slice(&prior_payload);
         assert!(matches!(
-            read_save_game_bytes(&prior_under_v17, "slot-v8-shape-under-v17.crystalsave"),
+            read_save_game_bytes(&prior_under_v18, "slot-v8-shape-under-v18.crystalsave"),
             Err(SaveError::Decode(_))
         ));
     }

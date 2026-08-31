@@ -46,7 +46,10 @@ fn runtime_story_keys_dispatch_their_exact_facing_tile_scripts() {
             .expect("use story key at exact source location");
 
         assert_eq!(used.target_script, expected_script);
-        assert_eq!(used.target_tile, TilePosition::new(player_tile.x, player_tile.y - 1));
+        assert_eq!(
+            used.target_tile,
+            TilePosition::new(player_tile.x, player_tile.y - 1)
+        );
         assert_eq!(
             shell
                 .snapshot()
@@ -58,6 +61,87 @@ fn runtime_story_keys_dispatch_their_exact_facing_tile_scripts() {
             Some(expected_script)
         );
     }
+}
+
+#[test]
+fn team_rocket_exploding_trap_clears_last_talked_with_the_minus_one_sentinel() {
+    let asset_root = AssetRoot::new(repository_root_for_tests());
+    let pack = asset_root
+        .load_verified_compiled_game_pack("content-packs/core-modular.crystalpack")
+        .expect("load the Rust-built game pack");
+    let runtime = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
+        .expect("load runtime from the Rust-built game pack");
+    let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
+        asset_root,
+        runtime,
+        0,
+        "TeamRocketBaseB1F",
+        24,
+        2,
+    )
+    .expect("start on the exploding-trap map");
+    let player_species = shell.runtime().data().pokemon["CHIKORITA"].clone();
+    shell.session_mut().state.storage.party.pokemon[0] =
+        Some(Pokemon::new_for_tests(player_species, 5, Dv::default()));
+    let party_state = crystal_core::state::PartyState::from_storage(&shell.session().state.storage);
+    shell.session_mut().state.party = party_state;
+    let prior_object = shell
+        .session()
+        .overworld
+        .objects
+        .iter()
+        .find_map(|object| object.object_identifier.clone())
+        .expect("trap map has an exact object identifier");
+    shell.session_mut().state.script_runtime.last_talked_object = Some(prior_object.clone());
+    shell.session_mut().overworld.last_talked_object_identifier = Some(prior_object);
+
+    let step = shell
+        .step_compiled_script_command(
+            "TeamRocketBaseB1F",
+            "VoltorbExplodingTrap",
+            3,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("execute canonical setlasttalked -1");
+
+    assert_eq!(step.command, "setlasttalked");
+    assert_eq!(
+        shell.session().state.script_runtime.last_talked_object,
+        None
+    );
+    assert_eq!(
+        shell.session().overworld.last_talked_object_identifier,
+        None
+    );
+    for command_index in 4..=6 {
+        shell
+            .step_compiled_script_command(
+                "TeamRocketBaseB1F",
+                "VoltorbExplodingTrap",
+                command_index,
+                ScriptRuntimeInputs::default(),
+                ScriptPhoneInputs::default(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("execute VoltorbExplodingTrap command {command_index}: {error:#}")
+            });
+    }
+    let BattleMemory::StaticWild {
+        battle_type,
+        species,
+        level,
+        enemy_pokemon,
+        ..
+    } = &shell.session().state.battle
+    else {
+        panic!("VoltorbExplodingTrap must enter a wild battle");
+    };
+    assert_eq!(battle_type, "BATTLETYPE_TRAP");
+    assert_eq!(species, "VOLTORB");
+    assert_eq!(*level, 23);
+    assert_eq!(enemy_pokemon.species.id, "VOLTORB");
+    assert_eq!(enemy_pokemon.level, 23);
 }
 
 #[test]
@@ -472,10 +556,10 @@ fn runtime_processes_step_events_on_actual_moves_with_exact_statuses() {
 fn runtime_overworld_sets_declared_map_music_from_modpack_asset() {
     let root = temp_repository_root("overworld-music");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let runtime = CrystalRuntime::from_compiled_pack(
@@ -873,7 +957,9 @@ fn every_pokecenter_nurse_uses_the_compiled_flow_and_renders_its_complete_dialog
         .expect("finish printing the nurse heal question");
     let ask_yes_no = shell
         .run_compiled_script_until_boundary(
-            ask.run.next_cursor.expect("heal question continuation cursor"),
+            ask.run
+                .next_cursor
+                .expect("heal question continuation cursor"),
             32,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -1004,7 +1090,9 @@ fn every_pokecenter_nurse_uses_the_compiled_flow_and_renders_its_complete_dialog
         .expect("finish printing the declined-flow greeting");
     let greeting_wait = declined
         .run_compiled_script_until_boundary(
-            greeting.next_cursor.expect("declined greeting continuation cursor"),
+            greeting
+                .next_cursor
+                .expect("declined greeting continuation cursor"),
             32,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -1023,7 +1111,9 @@ fn every_pokecenter_nurse_uses_the_compiled_flow_and_renders_its_complete_dialog
         .expect("finish printing the declined-flow heal question");
     let ask_yes_no = declined
         .run_compiled_script_until_boundary(
-            ask.run.next_cursor.expect("declined question continuation cursor"),
+            ask.run
+                .next_cursor
+                .expect("declined question continuation cursor"),
             32,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -1435,30 +1525,25 @@ fn runtime_overworld_triggers_exact_coord_event_for_current_scene() {
 fn runtime_applies_script_audio_commands_from_exact_modpack_entries() {
     let root = temp_repository_root("script-audio");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_NONE.mid"),
+            .join("content-packs/test/sfx/SFX_TACKLE.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_TACKLE.mid"),
+            .join("content-packs/test/sfx/SFX_ITEM.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_ITEM.mid"),
-    );
-    write_midi(
-        &root
-            .join("apps/web/assets/data")
-            .join("content-packs/test/cries/CRY_CHIKORITA.mid"),
+            .join("content-packs/test/cries/CRY_CHIKORITA.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let runtime = CrystalRuntime::from_compiled_pack(
@@ -1558,15 +1643,15 @@ fn runtime_applies_script_audio_commands_from_exact_modpack_entries() {
 fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
     let root = temp_repository_root("script-audio-pcm");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.mid"),
+            .join("content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.pcm"),
     );
     write_pcm(
         &root
@@ -1581,12 +1666,13 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
     data.audio = vec![
         ModpackAudioAsset::music(
             "MUSIC_ROUTE_29",
-            "content-packs/test/music/MUSIC_ROUTE_29.mid",
+            "content-packs/test/music/MUSIC_ROUTE_29.pcm",
         )
         .expect("music asset"),
         ModpackAudioAsset::sound_effect(
             "SFX_DEX_FANFARE_LESS_THAN_20",
-            "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.mid",
+            "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.pcm",
+            0x9f,
         )
         .expect("oak fanfare asset"),
         ModpackAudioAsset::pcm(
@@ -1594,8 +1680,8 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
             "content-packs/test/cries/CRY_CHIKORITA.pcm",
             ModpackAudioKind::Cry,
             ModpackPcmAudioFormat {
-                sample_rate_hz: 32768,
-                channels: 1,
+                sample_rate_hz: 22_050,
+                channels: 2,
                 bits_per_sample: 16,
             },
         )
@@ -1604,18 +1690,12 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
     let asset_root = AssetRoot::new(&root);
     let runtime_report = report_for(&data);
     let compiled_audio = [
-            (
-                "MUSIC_ROUTE_29".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
-            ),
-            (
-                "SFX_DEX_FANFARE_LESS_THAN_20".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
-            ),
-            ("CRY_CHIKORITA".to_string(), vec![0_u8, 0, 0xff, 0x7f]),
-        ]
-        .into_iter()
-        .collect();
+        ("MUSIC_ROUTE_29".to_string(), vec![0_u8; 4]),
+        ("SFX_DEX_FANFARE_LESS_THAN_20".to_string(), vec![0_u8; 4]),
+        ("CRY_CHIKORITA".to_string(), vec![0_u8, 0, 0xff, 0x7f]),
+    ]
+    .into_iter()
+    .collect();
     let runtime = CrystalRuntime::from_compiled_pack(
         &asset_root,
         CompiledGamePack::new_unchecked_with_audio_for_tests(data, compiled_audio, runtime_report),
@@ -1630,12 +1710,11 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
     match &cry.source {
         AudioProgramSource::Pcm { bytes, format, .. } => {
             assert_eq!(bytes, &[0_u8, 0, 0xff, 0x7f]);
-            assert_eq!(format.sample_rate_hz, 32768);
-            assert_eq!(format.channels, 1);
+            assert_eq!(format.sample_rate_hz, 22_050);
+            assert_eq!(format.channels, 2);
             assert_eq!(format.bits_per_sample, 16);
         }
-        AudioProgramSource::Midi(_) => panic!("compiled PCM cry must not load as MIDI"),
-        AudioProgramSource::PcmGzip { .. } | AudioProgramSource::PcmGzipSidecar { .. } => {
+        AudioProgramSource::PcmGzip { .. } | AudioProgramSource::Midi { .. } => {
             panic!("test PCM cry unexpectedly used compressed pack source")
         }
     }
@@ -1646,7 +1725,7 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
         .get("CRY_CHIKORITA")
         .expect("PCM cry manifest entry");
     assert_eq!(manifest_entry.byte_len, 4);
-    assert_eq!(manifest_entry.pcm_frame_count, Some(2));
+    assert_eq!(manifest_entry.pcm_frame_count, Some(1));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1654,15 +1733,15 @@ fn runtime_loads_declared_pcm_cries_from_compiled_pack() {
 fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
     let root = temp_repository_root("script-audio-pcm-unaligned");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.mid"),
+            .join("content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.pcm"),
     );
     let pcm_path = root
         .join("apps/web/assets/data")
@@ -1677,12 +1756,13 @@ fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
     data.audio = vec![
         ModpackAudioAsset::music(
             "MUSIC_ROUTE_29",
-            "content-packs/test/music/MUSIC_ROUTE_29.mid",
+            "content-packs/test/music/MUSIC_ROUTE_29.pcm",
         )
         .expect("music asset"),
         ModpackAudioAsset::sound_effect(
             "SFX_DEX_FANFARE_LESS_THAN_20",
-            "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.mid",
+            "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.pcm",
+            0x9f,
         )
         .expect("oak fanfare asset"),
         ModpackAudioAsset::pcm(
@@ -1690,8 +1770,8 @@ fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
             "content-packs/test/cries/CRY_CHIKORITA.pcm",
             ModpackAudioKind::Cry,
             ModpackPcmAudioFormat {
-                sample_rate_hz: 32768,
-                channels: 1,
+                sample_rate_hz: 22_050,
+                channels: 2,
                 bits_per_sample: 16,
             },
         )
@@ -1700,18 +1780,12 @@ fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
     let asset_root = AssetRoot::new(&root);
     let runtime_report = report_for(&data);
     let compiled_audio = [
-            (
-                "MUSIC_ROUTE_29".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
-            ),
-            (
-                "SFX_DEX_FANFARE_LESS_THAN_20".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
-            ),
-            ("CRY_CHIKORITA".to_string(), vec![0_u8, 1, 2]),
-        ]
-        .into_iter()
-        .collect();
+        ("MUSIC_ROUTE_29".to_string(), vec![0_u8; 4]),
+        ("SFX_DEX_FANFARE_LESS_THAN_20".to_string(), vec![0_u8; 4]),
+        ("CRY_CHIKORITA".to_string(), vec![0_u8, 1, 2]),
+    ]
+    .into_iter()
+    .collect();
     let error = CrystalRuntime::from_compiled_pack(
         &asset_root,
         CompiledGamePack::new_unchecked_with_audio_for_tests(data, compiled_audio, runtime_report),
@@ -1721,7 +1795,7 @@ fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
     .to_string();
 
     assert!(
-        error.contains("not a whole number of 2-byte frames"),
+        error.contains("not a whole number of 4-byte frames"),
         "{error}"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -1731,30 +1805,25 @@ fn runtime_rejects_declared_pcm_cries_with_incomplete_frames() {
 fn runtime_applies_script_map_commands_and_executes_pending_warp() {
     let root = temp_repository_root("script-map");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_NONE.mid"),
+            .join("content-packs/test/sfx/SFX_TACKLE.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_TACKLE.mid"),
+            .join("content-packs/test/sfx/SFX_ITEM.pcm"),
     );
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/sfx/SFX_ITEM.mid"),
-    );
-    write_midi(
-        &root
-            .join("apps/web/assets/data")
-            .join("content-packs/test/cries/CRY_CHIKORITA.mid"),
+            .join("content-packs/test/cries/CRY_CHIKORITA.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let runtime = CrystalRuntime::from_compiled_pack(
@@ -2613,7 +2682,9 @@ fn runtime_shell_steps_verified_compiled_script_commands_with_explicit_cursor() 
         .expect("finish RuntimeScript text");
     let wait_run = shell
         .run_compiled_script_until_boundary(
-            run.next_cursor.clone().expect("waitbutton continuation cursor"),
+            run.next_cursor
+                .clone()
+                .expect("waitbutton continuation cursor"),
             4,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -2939,10 +3010,18 @@ fn runtime_shell_steps_verified_compiled_script_commands_with_explicit_cursor() 
             ScriptPhoneInputs::default(),
         )
         .expect("step writecmdqueue");
-    assert!(shell.session.state().script_runtime.command_queue.is_empty());
+    assert!(
+        shell
+            .session
+            .state()
+            .script_runtime
+            .command_queue
+            .is_empty()
+    );
     assert_eq!(
         shell.session.state().script_runtime.stone_table_entries,
         vec![crystal_core::state::ScriptRuntimeStoneTableEntry {
+            queue_slot: 0,
             warp: 1,
             object_event: "RUNTIME_BOULDER".to_string(),
             script: "RuntimeAcceptedScript".to_string(),
@@ -3066,15 +3145,9 @@ fn compiled_runner_preserves_the_resolved_cross_map_jump_owner() {
                     == Some("Script_GivePlayerHisPrize")
         })
         .expect("cross-map prize sjump");
-    let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
-        asset_root,
-        runtime,
-        0,
-        "BattleTower1F",
-        8,
-        5,
-    )
-    .expect("Battle Tower 1F shell");
+    let mut shell =
+        RuntimeGameShell::new_game_at_runtime_tile(asset_root, runtime, 0, "BattleTower1F", 8, 5)
+            .expect("Battle Tower 1F shell");
 
     let step = shell
         .step_compiled_script_command(
@@ -3120,15 +3193,9 @@ fn compiled_runner_executes_source_derived_loadwildmon_setup() {
             command.get("command").and_then(serde_json::Value::as_str) == Some("loadwildmon")
         })
         .expect("Sudowoodo loadwildmon command");
-    let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
-        asset_root,
-        runtime,
-        0,
-        "Route36",
-        34,
-        9,
-    )
-    .expect("Route 36 shell");
+    let mut shell =
+        RuntimeGameShell::new_game_at_runtime_tile(asset_root, runtime, 0, "Route36", 34, 9)
+            .expect("Route 36 shell");
 
     let step = shell
         .step_compiled_script_command(
@@ -3150,15 +3217,27 @@ fn compiled_runner_executes_source_derived_loadwildmon_setup() {
     );
     let snapshot = shell.snapshot().expect("post-loadwildmon snapshot");
     assert_eq!(
-        snapshot.script_events.memory.get("wBattleScriptFlags").map(String::as_str),
+        snapshot
+            .script_events
+            .memory
+            .get("wBattleScriptFlags")
+            .map(String::as_str),
         Some("128")
     );
     assert_eq!(
-        snapshot.script_events.memory.get("wTempWildMonSpecies").map(String::as_str),
+        snapshot
+            .script_events
+            .memory
+            .get("wTempWildMonSpecies")
+            .map(String::as_str),
         Some("SUDOWOODO")
     );
     assert_eq!(
-        snapshot.script_events.memory.get("wCurPartyLevel").map(String::as_str),
+        snapshot
+            .script_events
+            .memory
+            .get("wCurPartyLevel")
+            .map(String::as_str),
         Some("20")
     );
 }
@@ -3178,7 +3257,7 @@ fn compiled_runner_executes_source_derived_dynamic_phone_memcall() {
         .overworld
         .map_name;
     shell.session_mut().state.script_runtime.memory.insert(
-        "wPhoneCallerScript".to_string(),
+        "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK".to_string(),
         "BikeShopPhoneCallerScript".to_string(),
     );
 
@@ -3625,6 +3704,29 @@ fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
             .script_runtime
             .teleport_from_queued
     );
+    let written = dispatch_shell
+        .step_compiled_script_command(
+            "RuntimeMap",
+            "RuntimeObjectScript",
+            9,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("compiled writeobjectxy dispatch");
+    let RuntimeMutationResult::ScriptObjectMutated(written_object) = written.mutation.result else {
+        panic!("compiled writeobjectxy must dispatch as an object mutation");
+    };
+    assert_eq!((written_object.x, written_object.y), (Some(2), Some(0)));
+    assert_eq!(
+        dispatch_shell
+            .session
+            .state()
+            .map_object_overrides
+            .get("RuntimeMap")
+            .and_then(|memory| memory.objects.get("RUNTIME_NPC"))
+            .map(|object| (object.x, object.y)),
+        Some((2, 0))
+    );
     assert_eq!(
         session
             .state
@@ -3854,11 +3956,7 @@ fn runtime_applies_script_runtime_commands_with_exact_typed_inputs_and_divider_t
                 1,
                 1,
                 RuntimeMutationCommand::ApplyRandomScriptRuntime(RuntimeRandomScriptCommand {
-                    command: RuntimeScriptCommandRef::new(
-                        "RuntimeMap",
-                        "RuntimeCommandScript",
-                        2,
-                    ),
+                    command: RuntimeScriptCommandRef::new("RuntimeMap", "RuntimeCommandScript", 2),
                     divider_trace: RuntimeDividerTrace::new(trace),
                 }),
             )
@@ -3877,10 +3975,7 @@ fn runtime_applies_script_runtime_commands_with_exact_typed_inputs_and_divider_t
             "RuntimeMap",
             "RuntimeCommandScript",
             3,
-            ScriptRuntimeInputs {
-                game_version: Some("CRYSTAL".to_string()),
-                ..ScriptRuntimeInputs::default()
-            },
+            ScriptRuntimeInputs::default(),
         )
         .expect("checkver");
     assert!(matches!(
@@ -3888,7 +3983,7 @@ fn runtime_applies_script_runtime_commands_with_exact_typed_inputs_and_divider_t
         ScriptRuntimeOutcome::ScriptValueSet {
             value,
             ..
-        } if value == "CRYSTAL"
+        } if value == "0"
     ));
 
     session.state.script_runtime.script_value = Some("12".to_string());
@@ -3972,6 +4067,25 @@ fn runtime_applies_script_runtime_commands_with_exact_typed_inputs_and_divider_t
         )
         .expect_err("object ids are exact");
     assert!(format!("{bad_last_talked:#}").contains("missing exact object id runtime_npc"));
+    session
+        .apply_script_runtime_command(
+            &runtime,
+            "RuntimeMap",
+            "RuntimeCommandScript",
+            8,
+            ScriptRuntimeInputs::default(),
+        )
+        .expect("setlasttalked -1 clears the sentinel");
+    assert_eq!(session.state.script_runtime.last_talked_object, None);
+    assert_eq!(session.overworld.last_talked_object_identifier, None);
+    assert_eq!(
+        session
+            .state
+            .map_object_overrides
+            .get("RuntimeMap")
+            .and_then(|memory| memory.last_talked_object_identifier.as_ref()),
+        None
+    );
     let missing_index = session
         .apply_script_runtime_command(
             &runtime,
@@ -3989,8 +4103,6 @@ fn runtime_applies_script_runtime_commands_with_exact_typed_inputs_and_divider_t
 fn runtime_shell_routes_compiled_special_commands_to_special_routines() {
     let root = temp_repository_root("compiled-special-command");
     write_floor_tileset(&root, "johto");
-    let data_root = root.join("apps/web/assets/data");
-    write_midi(&data_root.join("content-packs/test/music/MUSIC_NONE.mid"));
     let asset_root = AssetRoot::new(&root);
     let mut data = minimal_runtime_data_with_runtime_commands();
     data.special_routines
@@ -4102,11 +4214,8 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
     )
     .expect("runtime");
     let mut shell = RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
-    shell
-        .session_mut()
-        .state
-        .script_runtime
-        .special_phone_call = Some("SPECIALCALL_TEST".to_string());
+    shell.session_mut().state.script_runtime.special_phone_call =
+        Some("SPECIALCALL_TEST".to_string());
     shell
         .session_mut()
         .state
@@ -4125,12 +4234,14 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
     assert_eq!(call.contact_id, "PHONE_TEST");
     assert_eq!(call.caller_script, "TestPhoneCallerScript");
     assert_eq!(call.receive_script, "Script_ReceivePhoneCall");
-    assert!(shell
-        .session()
-        .state
-        .script_runtime
-        .command_queue
-        .is_empty());
+    assert!(
+        shell
+            .session()
+            .state
+            .script_runtime
+            .command_queue
+            .is_empty()
+    );
     assert_eq!(
         shell
             .session()
@@ -4160,9 +4271,7 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
             .iter()
             .map(|step| (step.source_script.as_str(), step.command.as_str()))
             .collect::<Vec<_>>(),
-        vec![
-            ("Script_ReceivePhoneCall", "reanchormap"),
-        ]
+        vec![("Script_ReceivePhoneCall", "reanchormap"),]
     );
     assert!(matches!(
         caller.run.boundary,
@@ -4173,7 +4282,10 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
         .expect("complete receive-call map refresh");
     let caller_after_refresh = shell
         .run_compiled_script_until_boundary(
-            caller.run.next_cursor.expect("receive wrapper continuation"),
+            caller
+                .run
+                .next_cursor
+                .expect("receive wrapper continuation"),
             8,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -4248,12 +4360,7 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
             .is_none()
     );
     assert!(
-        shell
-            .session()
-            .state
-            .script_runtime
-            .call_stack
-            .is_empty(),
+        shell.session().state.script_runtime.call_stack.is_empty(),
         "the composed runner must return from the global caller before exposing the wrapper's waitbutton"
     );
     let _ = std::fs::remove_dir_all(root);
@@ -4331,10 +4438,10 @@ fn runtime_applies_script_swarm_commands_with_exact_pack_rows() {
 fn runtime_overworld_checks_wild_encounters_after_successful_grass_step() {
     let root = temp_repository_root("overworld-encounter");
     write_grass_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let runtime = CrystalRuntime::from_compiled_pack(
@@ -4364,7 +4471,6 @@ fn runtime_overworld_checks_wild_encounters_after_successful_grass_step() {
         .apply_buttons(&runtime, &asset_root, [GameButton::Right])
         .expect("turn right");
     assert_eq!(turn.wild_encounter, None);
-    assert_eq!(session.state.rng_seed, 1);
 
     let step = apply_until_wild_encounter_roll(&mut session, &runtime, &asset_root);
     assert_eq!(step.snapshot.tile, TilePosition::new(1, 0));
@@ -4424,10 +4530,10 @@ fn runtime_overworld_checks_wild_encounters_after_successful_grass_step() {
 fn runtime_repel_item_blocks_lower_level_wild_encounter_after_real_step() {
     let root = temp_repository_root("overworld-repel-lower");
     write_grass_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = minimal_runtime_data_with_grass_encounter();
@@ -4523,10 +4629,10 @@ fn runtime_repel_item_blocks_lower_level_wild_encounter_after_real_step() {
 fn runtime_repel_does_not_block_same_or_higher_level_wild_encounter() {
     let root = temp_repository_root("overworld-repel-higher");
     write_grass_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = minimal_runtime_data_with_grass_encounter();
@@ -4721,6 +4827,7 @@ fn runtime_data_with_escape_rope_maps() -> GameDataSet {
     escape_rope.consumable = true;
     escape_rope.escape_rope_mode = Some("DIG_WARP".to_string());
     data.items.insert("ESCAPE_ROPE".to_string(), escape_rope);
+    add_map_name_sign_landmark_for_fixture(&mut data, 5, "LANDMARK_RUNTIME_CAVE", "RuntimeCave");
     data
 }
 
@@ -4744,10 +4851,10 @@ fn step_right_until_warp(
 fn runtime_escape_rope_uses_saved_dig_warp_without_fallback_destination() {
     let root = temp_repository_root("escape-rope");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = runtime_data_with_escape_rope_maps();
@@ -4828,10 +4935,10 @@ fn runtime_escape_rope_uses_saved_dig_warp_without_fallback_destination() {
 fn runtime_escape_rope_rejects_missing_dig_warp_without_consumption() {
     let root = temp_repository_root("escape-rope-missing-dig");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = runtime_data_with_escape_rope_maps();
@@ -4872,10 +4979,10 @@ fn runtime_escape_rope_rejects_missing_dig_warp_without_consumption() {
 fn runtime_dig_field_move_uses_saved_dig_warp_without_fallback_destination() {
     let root = temp_repository_root("field-move-dig");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let mut data = runtime_data_with_escape_rope_maps();
@@ -4949,10 +5056,10 @@ fn runtime_dig_field_move_uses_saved_dig_warp_without_fallback_destination() {
 fn runtime_dig_field_move_rejects_missing_dig_warp_without_mutation() {
     let root = temp_repository_root("field-move-dig-missing-warp");
     write_floor_tileset(&root, "johto");
-    write_midi(
+    write_pcm(
         &root
             .join("apps/web/assets/data")
-            .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+            .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
     );
     let asset_root = AssetRoot::new(&root);
     let runtime = CrystalRuntime::from_compiled_pack(
@@ -5035,6 +5142,45 @@ fn runtime_casts_fishing_rod_from_current_map_compiled_group() {
 }
 
 #[test]
+fn runtime_fishing_allows_an_npc_on_the_facing_water_tile() {
+    let root = temp_repository_root("fishing-on-npc");
+    write_fishing_tileset(&root, "johto");
+    let asset_root = AssetRoot::new(&root);
+    let runtime = CrystalRuntime::from_compiled_pack(
+        &asset_root,
+        CompiledGamePack::new_unchecked_for_tests(minimal_runtime_data_with_fishing(), report()),
+        identity(),
+    )
+    .expect("runtime");
+    let mut session = runtime
+        .start_overworld_session(&asset_root, 0)
+        .expect("overworld session");
+    add_runtime_party_pokemon(&runtime, &mut session);
+    session.divider = crystal_core::random::RuntimeDividerSource::replay([0; 10]);
+    let target = crystal_core::world::movement::checked_move_by_stride(
+        session.overworld.player.tile,
+        session.overworld.player.facing,
+        crystal_core::world::movement::StepOptions::default().stride_tiles,
+    )
+    .expect("facing water tile");
+    session
+        .overworld
+        .objects
+        .push(runtime_object("FISH_NPC", "EVENT_FISH_NPC"));
+    session
+        .overworld
+        .object_runtime_tiles
+        .insert("FISH_NPC".to_string(), target);
+    let cast = session
+        .cast_fishing_rod(&runtime, ROD_GOOD)
+        .expect("the source bug skips CheckFacingObject");
+
+    assert_eq!(cast.bite, Some(true));
+    assert!(cast.wild_battle.is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn runtime_fishing_records_and_atomically_replays_the_exact_divider_trace() {
     let root = temp_repository_root("fishing-divider-trace");
     write_fishing_tileset(&root, "johto");
@@ -5047,8 +5193,7 @@ fn runtime_fishing_records_and_atomically_replays_the_exact_divider_trace() {
     .expect("runtime");
     let mut shell = RuntimeGameShell::new_game(asset_root, runtime.clone(), 0).expect("game shell");
     add_runtime_party_pokemon(&runtime, shell.session_mut());
-    shell.session_mut().divider =
-        crystal_core::random::RuntimeDividerSource::replay([0; 10]);
+    shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([0; 10]);
     let replay_base = shell.session().clone();
     let before = shell.session().state().clone();
 
@@ -5113,8 +5258,7 @@ fn runtime_fishing_no_bite_records_only_one_random_call() {
     )
     .expect("runtime");
     let mut shell = RuntimeGameShell::new_game(asset_root, runtime, 0).expect("game shell");
-    shell.session_mut().divider =
-        crystal_core::random::RuntimeDividerSource::replay([0, 0]);
+    shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([0, 0]);
     let before = shell.session().state().clone();
 
     let cast = shell.cast_fishing_rod(ROD_GOOD).expect("no-bite cast");
@@ -5649,9 +5793,8 @@ fn runtime_starts_scripted_wild_battle_from_exact_map_script_command() {
         .register_capture_in_box(0, battle_player)
         .expect("register battle runner player");
     battle_shell.session_mut().state.sync_party_from_storage();
-    battle_shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([
-        0, 64, 0, 173, 0, 3, 0, 101,
-    ]);
+    battle_shell.session_mut().divider =
+        crystal_core::random::RuntimeDividerSource::replay([0, 64, 0, 173, 0, 3, 0, 101]);
     battle_shell
         .step_compiled_script_command(
             "RuntimeMap",
@@ -6037,7 +6180,6 @@ fn runtime_resolves_active_battle_turn_into_authoritative_state() {
     if let Some(player) = session.state.storage.party.pokemon[active_party_index].as_mut() {
         player.hp = player.max_hp;
     }
-    session.state.rng_seed = 19;
     if let BattleMemory::StaticWild {
         enemy_pokemon,
         enemy_party,
@@ -6081,7 +6223,6 @@ fn runtime_resolves_active_battle_turn_into_authoritative_state() {
         .expect("resolve turn");
 
     assert_eq!(turn.outcome.state.turn, 1);
-    assert_eq!(turn.outcome.state.rng_seed_after, session.state.rng_seed);
     assert!(turn.outcome.events.iter().any(|event| matches!(
         event,
         crystal_core::battle::turn::BattleEvent::Damage { .. }

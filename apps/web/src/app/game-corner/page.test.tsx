@@ -21,13 +21,6 @@ describe("GameCornerPage", () => {
     expect(shell).toHaveAttribute("data-initial-tab", "slot-machine");
   });
 
-  it("accepts audio-generation tab from query params", async () => {
-    render(await GameCornerPage({ searchParams: Promise.resolve({ tab: "audio-generation" }) }));
-
-    const shell = screen.getByTestId("game-corner-shell");
-    expect(shell).toHaveAttribute("data-initial-tab", "audio-generation");
-  });
-
   it("accepts arena-mcp-skill tab from query params", async () => {
     render(await GameCornerPage({ searchParams: Promise.resolve({ tab: "arena-mcp-skill" }) }));
 

@@ -493,12 +493,9 @@ fn field_rule_item_ids(data: &GameDataSet) -> BTreeSet<String> {
     .into_iter()
     .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone()))
     .chain(
-        [
-            &data.field_moves.card_key,
-            &data.field_moves.basement_key,
-        ]
-        .into_iter()
-        .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone())),
+        [&data.field_moves.card_key, &data.field_moves.basement_key]
+            .into_iter()
+            .filter_map(|rule| (!rule.item_id.is_empty()).then(|| rule.item_id.clone())),
     )
     .chain(
         (!data.field_moves.escape_rope.item_id.is_empty())
@@ -1176,6 +1173,14 @@ fn verify_audio_assets(
     let mut seen_audio_ids = BTreeSet::new();
     let mut seen_audio_paths = BTreeMap::new();
     for audio_asset in &data.audio {
+        if audio_asset.id == crystal_core::systems::script_audio::MUSIC_NONE_ID {
+            diagnostics.push(VerificationError::error(
+                "reserved_silent_music_asset",
+                &audio_asset.id,
+                "MUSIC_NONE is the PlayMusic/_InitSound control sentinel and must not store an audio payload",
+            ));
+            continue;
+        }
         if let Err(error) = audio_asset.validate() {
             diagnostics.push(VerificationError::error(
                 "invalid_audio_asset",
@@ -1226,18 +1231,6 @@ fn verify_audio_assets(
         }
         match std::fs::read(&path) {
             Ok(bytes) => match audio_asset.source {
-                ModpackAudioSource::Midi => {
-                    if let Err(error) = validate_compiled_audio_payload(audio_asset, &bytes) {
-                        diagnostics.push(VerificationError::error(
-                            "invalid_midi_file",
-                            &audio_asset.id,
-                            format!(
-                                "audio file '{}' is not a valid MIDI file: {error}",
-                                audio_asset.path
-                            ),
-                        ));
-                    }
-                }
                 ModpackAudioSource::Pcm if !bytes.is_empty() => {
                     let Some(format) = &audio_asset.pcm_format else {
                         diagnostics.push(VerificationError::error(
@@ -1276,6 +1269,15 @@ fn verify_audio_assets(
                     &audio_asset.id,
                     format!("audio file '{}' is empty", audio_asset.path),
                 )),
+                ModpackAudioSource::Midi
+                    if bytes.len() >= 22
+                        && bytes.starts_with(b"MThd")
+                        && &bytes[14..18] == b"MTrk" => {}
+                ModpackAudioSource::Midi => diagnostics.push(VerificationError::error(
+                    "invalid_midi_file",
+                    &audio_asset.id,
+                    format!("audio file '{}' is not a valid MIDI file", audio_asset.path),
+                )),
             },
             Err(error) => diagnostics.push(VerificationError::error(
                 "unreadable_audio_file",
@@ -1301,7 +1303,9 @@ fn verify_map_music(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>
                 map_name,
                 format!("map music id must be an exact pack token, found {music_id:?}"),
             ));
-        } else if !music.contains(music_id) {
+        } else if music_id != crystal_core::systems::script_audio::MUSIC_NONE_ID
+            && !music.contains(music_id)
+        {
             diagnostics.push(VerificationError::error(
                 "unknown_map_music_id",
                 map_name,
@@ -1359,9 +1363,6 @@ fn verify_audio_asset_usage(data: &GameDataSet, diagnostics: &mut Vec<Verificati
         if is_exact_audio_reference_token(music_id) {
             used_music.insert(music_id.clone());
         }
-    }
-    if data.special_routines.contains_key("FadeOutMusic") {
-        used_music.insert("MUSIC_NONE".to_string());
     }
     if data.special_routines.contains_key("SnorlaxAwake") {
         used_music.insert("MUSIC_POKE_FLUTE_CHANNEL".to_string());
@@ -1931,11 +1932,43 @@ fn trainer_catalog_issue_diagnostic(issue: TrainerCatalogIssue) -> VerificationE
 }
 
 fn verify_runtime_title_screen(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    match data
-        .story_event_script_constants
-        .global
-        .get("SPAWN_HOME")
-    {
+    let presentation = &data.runtime_title_screen.program;
+    if presentation.schema_version != 1 {
+        diagnostics.push(VerificationError::error(
+            "invalid_runtime_title_program_schema",
+            "runtime_title_screen",
+            format!(
+                "runtime title presentation requires schema_version 1, found {}",
+                presentation.schema_version
+            ),
+        ));
+    } else {
+        for entrypoint in [
+            "boot",
+            "intro",
+            "title",
+            "main_menu",
+            "continue",
+            "new_game",
+            "delete_save",
+            "reset_clock",
+        ] {
+            match presentation.entrypoints.get(entrypoint) {
+                Some(target) if presentation.blocks.contains_key(target) => {}
+                Some(target) => diagnostics.push(VerificationError::error(
+                    "unknown_runtime_title_entrypoint_block",
+                    format!("runtime_title_screen:{entrypoint}"),
+                    format!("entrypoint targets missing block '{target}'"),
+                )),
+                None => diagnostics.push(VerificationError::error(
+                    "missing_runtime_title_entrypoint",
+                    format!("runtime_title_screen:{entrypoint}"),
+                    "runtime title presentation entrypoint is missing",
+                )),
+            }
+        }
+    }
+    match data.story_event_script_constants.global.get("SPAWN_HOME") {
         Some(value) => match u16::try_from(*value) {
             Ok(spawn_identifier)
                 if data
@@ -1944,9 +1977,7 @@ fn verify_runtime_title_screen(data: &GameDataSet, diagnostics: &mut Vec<Verific
             Ok(spawn_identifier) => diagnostics.push(VerificationError::error(
                 "unknown_runtime_title_spawn_identifier",
                 "SPAWN_HOME",
-                format!(
-                    "source constant SPAWN_HOME={spawn_identifier} has no runtime spawn point"
-                ),
+                format!("source constant SPAWN_HOME={spawn_identifier} has no runtime spawn point"),
             )),
             Err(_) => diagnostics.push(VerificationError::error(
                 "invalid_runtime_title_spawn_identifier",
@@ -2901,13 +2932,22 @@ fn verify_script_scene_commands(data: &GameDataSet, diagnostics: &mut Vec<Verifi
                     .map(|issue| script_scene_command_issue_diagnostic(&subject, command, issue)),
             );
             if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
-                if module.scenes.scenes.is_empty() {
-                    diagnostics.push(VerificationError::error(
-                        "missing_script_scene_table",
-                        &subject,
-                        "checkscene requires the current map to declare scenes",
-                    ));
+                // The ASM writes $ff when the current map has no scene-script table.
+            } else if SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS.contains(&command.command.as_str()) {
+                let Some(map_id) = command.map_id.as_deref() else {
+                    continue;
+                };
+                if !is_exact_script_scene_reference_token(map_id) {
+                    continue;
                 }
+                let Some((_, _target_module)) = scene_table_for_map_id(data, map_id) else {
+                    diagnostics.push(VerificationError::error(
+                        "unknown_script_scene_map",
+                        &subject,
+                        format!("checkmapscene references missing map id '{map_id}'"),
+                    ));
+                    continue;
+                };
             } else if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command.command.as_str())
             {
                 if command
@@ -4837,7 +4877,7 @@ fn non_executable_control_target(
     executable_positions: &BTreeSet<(String, usize)>,
     command: &ScriptControlCommand,
 ) -> Option<(String, String)> {
-    if command.command == "jumpstd" {
+    if matches!(command.command.as_str(), "jumpstd" | "callstd") {
         return None;
     }
     let target_script = command.resolved_target_script.as_ref()?;
@@ -5381,7 +5421,10 @@ fn verify_phone_contacts(data: &GameDataSet, diagnostics: &mut Vec<VerificationE
         for (script, diagnostic_name) in [
             ("LoadPhoneScriptBank", "pokegear_phone_callback_script"),
             ("LoadOutOfAreaScript", "pokegear_phone_callback_script"),
-            ("PhoneScript_JustTalkToThem", "pokegear_phone_same_map_script"),
+            (
+                "PhoneScript_JustTalkToThem",
+                "pokegear_phone_same_map_script",
+            ),
             ("PhoneOutOfAreaScript", "pokegear_phone_out_of_area_script"),
         ] {
             verify_dynamic_phone_script_root(
@@ -8193,21 +8236,11 @@ fn shuckie_gift_issue_diagnostic(issue: ShuckieGiftIssue) -> VerificationError {
 }
 
 fn verify_special_routines(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
-    let (music, _, _) = script_audio_catalog_ids(data);
     diagnostics.extend(
         special_routine_catalog_issues(&data.special_routines.keys().cloned().collect())
             .into_iter()
             .map(special_routine_catalog_issue_diagnostic),
     );
-    for routine in data.special_routines.keys() {
-        if routine == "FadeOutMusic" && !music.contains("MUSIC_NONE") {
-            diagnostics.push(VerificationError::error(
-                "missing_special_routine_music_id",
-                "special_routines:FadeOutMusic",
-                "FadeOutMusic requires the modpack to declare exact music id 'MUSIC_NONE'",
-            ));
-        }
-    }
     if data.special_routines.contains_key("InitRoamMons") && data.roaming_pokemon.is_empty() {
         diagnostics.push(VerificationError::error(
             "missing_roaming_pokemon_definitions",
@@ -9455,9 +9488,7 @@ fn verify_battle_reward_rules(data: &GameDataSet, diagnostics: &mut Vec<Verifica
         ),
     ] {
         for (index, rule) in rules.iter().enumerate() {
-            let subject = format!(
-                "battle_reward_rules:mom_{set_name}_items:{index}"
-            );
+            let subject = format!("battle_reward_rules:mom_{set_name}_items:{index}");
             match rule.kind {
                 MomPurchaseKind::Item => {
                     if !data.items.contains_key(&rule.target) {
@@ -9835,7 +9866,11 @@ fn verify_field_moves(data: &GameDataSet, diagnostics: &mut Vec<VerificationErro
 fn verify_story_key_rules(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (rule_id, expected_effect, rule) in [
         ("card_key", "CARD_KEY", &data.field_moves.card_key),
-        ("basement_key", "BASEMENT_KEY", &data.field_moves.basement_key),
+        (
+            "basement_key",
+            "BASEMENT_KEY",
+            &data.field_moves.basement_key,
+        ),
     ] {
         let subject = format!("field_moves:{rule_id}");
         if let Some(item) = data.items.get(&rule.item_id)

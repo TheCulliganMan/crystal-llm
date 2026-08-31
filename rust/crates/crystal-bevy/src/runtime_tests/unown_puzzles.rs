@@ -93,13 +93,6 @@ fn all_unown_puzzles_complete_the_authored_chamber_scripts() {
             format!("unown_layout_{puzzle_id}"),
             target_with_first_piece_misplaced.to_string(),
         );
-        scripts.variables.insert(
-            format!("unown_holding_piece_{puzzle_id}"),
-            "null".to_string(),
-        );
-        scripts
-            .variables
-            .insert(format!("unown_moves_{puzzle_id}"), "0".to_string());
         scripts
             .variables
             .insert("_value".to_string(), script_value.to_string());
@@ -156,7 +149,6 @@ fn all_unown_puzzles_complete_the_authored_chamber_scripts() {
             SpecialRoutineEffect::UnownPuzzle {
                 puzzle_id: ref id,
                 holding_piece: None,
-                moves: 1,
                 solved: true,
                 ..
             } if id == puzzle_id
@@ -197,7 +189,9 @@ fn all_unown_puzzles_complete_the_authored_chamber_scripts() {
             .clear();
         let emote = shell
             .run_compiled_script_until_boundary(
-                completed.next_cursor.expect("resume after first earthquake"),
+                completed
+                    .next_cursor
+                    .expect("resume after first earthquake"),
                 16,
                 ScriptRuntimeInputs::default(),
                 ScriptPhoneInputs::default(),
@@ -255,8 +249,7 @@ fn all_unown_puzzles_complete_the_authored_chamber_scripts() {
             runtime
                 .data()
                 .map_name_for_constant("RUINS_OF_ALPH_INNER_CHAMBER")
-                .expect("resolve inner chamber map constant")
-                ,
+                .expect("resolve inner chamber map constant"),
             "RuinsOfAlphInnerChamber",
             "the chamber door target must resolve to the loaded inner-chamber map"
         );

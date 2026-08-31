@@ -340,7 +340,7 @@ pub enum CaptureStorageLocation {
 }
 
 pub fn format_default_box_name(index: usize) -> String {
-    format!("BOX {:02}", index + 1)
+    format!("BOX{}", index + 1)
 }
 
 #[cfg(test)]
@@ -369,6 +369,14 @@ mod tests {
         assert_eq!(pc_box.slot_species[0], 152);
         assert_eq!(pc_box.slot_species[MAX_BOX_MONS], 0);
         pc_box.validate_metadata().expect("valid box metadata");
+    }
+
+    #[test]
+    fn default_box_names_match_set_default_box_names() {
+        assert_eq!(format_default_box_name(0), "BOX1");
+        assert_eq!(format_default_box_name(8), "BOX9");
+        assert_eq!(format_default_box_name(9), "BOX10");
+        assert_eq!(format_default_box_name(13), "BOX14");
     }
 
     #[test]
@@ -477,7 +485,7 @@ mod tests {
                 slot: 0
             }
         );
-        assert_eq!(storage.pc_boxes[0].name, "BOX 01");
+        assert_eq!(storage.pc_boxes[0].name, "BOX1");
     }
 
     #[test]

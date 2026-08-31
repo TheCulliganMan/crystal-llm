@@ -48,14 +48,23 @@ fn native_gameplay_tick_journals_vblank_before_the_injected_rtc_sample() {
     let timer_command =
         crystal_assets::decode_runtime_mutation_command_frame(timer_frame, &state_before)
             .expect("decode native VBlank command against the pre-tick state");
-    assert_eq!(
-        timer_command,
-        crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(
-            crystal_assets::RuntimeGameTimerAdvanceCommand { vblanks: 1 },
-        )
-    );
+    let crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(timer_command) =
+        timer_command
+    else {
+        panic!("native tick must journal a VBlank batch first");
+    };
+    assert_eq!(timer_command.vblanks, 1);
+    assert_eq!(timer_command.normal_divider_trace.samples.len(), 2);
 
     let mut state_after_vblank = state_before;
+    let mut divider = crystal_core::random::ReplayDivider::new(
+        timer_command.normal_divider_trace.samples.iter().copied(),
+    );
+    let mut rng =
+        crystal_core::random::CrystalRandom::new(state_after_vblank.random_state, &mut divider);
+    rng.random(false).expect("replay native VBlank_Normal");
+    state_after_vblank.random_state = rng.state();
+    state_after_vblank.vblank_counter = state_after_vblank.vblank_counter.wrapping_add(1);
     state_after_vblank.advance_game_timer_vblank();
     let clock_frame = &runtime_shell.shell.retained_runtime_commands()[retained_before + 1];
     let command =
@@ -231,12 +240,12 @@ fn native_catch_up_journals_one_exact_batched_game_timer_command() {
         let command =
             crystal_assets::decode_runtime_mutation_command_frame(&retained[0], &state_before)
                 .expect("decode batched catch-up VBlank command against pre-update state");
-        assert_eq!(
-            command,
-            crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(
-                crystal_assets::RuntimeGameTimerAdvanceCommand { vblanks: 120 },
-            )
-        );
+        let crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(command) = command
+        else {
+            panic!("catch-up tick must journal one VBlank batch");
+        };
+        assert_eq!(command.vblanks, 120);
+        assert_eq!(command.normal_divider_trace.samples.len(), 240);
         runtime_shell.shell.session().state().frame_counter
     };
     {
@@ -550,7 +559,10 @@ fn game_timer_batch_preserves_large_count_and_caps_in_one_command() {
         crystal_assets::decode_runtime_mutation_command_frame(&retained[0], &state_before)
             .expect("decode large batched VBlank command"),
         crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(
-            crystal_assets::RuntimeGameTimerAdvanceCommand { vblanks: u32::MAX },
+            crystal_assets::RuntimeGameTimerAdvanceCommand {
+                vblanks: u32::MAX,
+                normal_divider_trace: crystal_assets::RuntimeDividerTrace::new([]),
+            },
         )
     );
     assert!(
@@ -566,6 +578,193 @@ fn game_timer_batch_preserves_large_count_and_caps_in_one_command() {
         retained_before + 1,
         "a rejected zero batch must not enter the journal"
     );
+}
+
+#[test]
+fn normal_vblank_batch_records_div_and_replays_rng_with_the_timer() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    runtime_shell.shell.set_runtime_journal_enabled(true);
+    runtime_shell.shell.session_mut().divider =
+        crystal_core::random::RuntimeDividerSource::replay([0x12, 0x34, 0x56, 0x78]);
+    let state_before = runtime_shell.shell.session().state().clone();
+    let retained_before = runtime_shell.shell.retained_runtime_commands().len();
+
+    runtime_shell
+        .shell
+        .advance_vblanks(2, 2)
+        .expect("advance two VBlank_Normal frames");
+    assert_eq!(
+        runtime_shell.shell.session().state().vblank_counter,
+        state_before.vblank_counter.wrapping_add(2),
+    );
+
+    let command_frame = &runtime_shell.shell.retained_runtime_commands()[retained_before];
+    let command =
+        crystal_assets::decode_runtime_mutation_command_frame(command_frame, &state_before)
+            .expect("decode VBlank_Normal command against pre-update state");
+    assert_eq!(
+        command,
+        crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(
+            crystal_assets::RuntimeGameTimerAdvanceCommand {
+                vblanks: 2,
+                normal_divider_trace: crystal_assets::RuntimeDividerTrace::new([
+                    0x12, 0x34, 0x56, 0x78,
+                ]),
+            },
+        )
+    );
+
+    let mut expected_state = state_before.clone();
+    let mut divider = crystal_core::random::ReplayDivider::new([0x12, 0x34, 0x56, 0x78]);
+    let mut rng =
+        crystal_core::random::CrystalRandom::new(expected_state.random_state, &mut divider);
+    rng.random(false).expect("first VBlank_Normal Random");
+    rng.random(false).expect("second VBlank_Normal Random");
+    expected_state.random_state = rng.state();
+    expected_state.advance_game_timer_vblanks(2);
+    assert_eq!(
+        runtime_shell.shell.session().state().random_state,
+        expected_state.random_state,
+    );
+
+    let mut replay = core_modular_title_shell_for_test();
+    replay.intro_screen = None;
+    replay.title_menu = None;
+    *replay.shell.session_mut().state_mut() = state_before;
+    replay.shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay([]);
+    replay
+        .shell
+        .apply_runtime_command_frame(command_frame)
+        .expect("replay recorded VBlank_Normal batch without host DIV");
+    assert_eq!(
+        replay.shell.session().state().random_state,
+        expected_state.random_state,
+    );
+}
+
+#[test]
+fn battle_transition_vblank_uses_cutscene_handler_without_advancing_rng() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    runtime_shell.shell.set_runtime_journal_enabled(true);
+    runtime_shell.visible_battle_transition = Some(VisibleBattleTransition {
+        frame: 0,
+        stronger_enemy: false,
+        cave_environment: false,
+        trainer_battle: false,
+    });
+    runtime_shell.shell.session_mut().divider =
+        crystal_core::random::RuntimeDividerSource::replay([]);
+    let state_before = runtime_shell.shell.session().state().clone();
+    let retained_before = runtime_shell.shell.retained_runtime_commands().len();
+    let sample = RuntimeRtcSample {
+        date: GameDate::new(2000, 1, 1),
+        hour: 12,
+        minute: 0,
+        second: 0,
+    };
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(runtime_shell)
+        .insert_resource(NativeRtcSource::fixed(sample))
+        .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(RuntimeTickTimer::new(0.0))
+        .add_systems(Update, apply_keyboard_input);
+
+    app.update();
+
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+    assert_eq!(runtime_shell.last_error, None);
+    assert_eq!(
+        runtime_shell.shell.session().state().random_state,
+        state_before.random_state,
+    );
+    assert_eq!(
+        runtime_shell.shell.session().state().vblank_counter,
+        state_before.vblank_counter,
+        "VBlank_Cutscene does not increment hVBlankCounter"
+    );
+    let command = crystal_assets::decode_runtime_mutation_command_frame(
+        &runtime_shell.shell.retained_runtime_commands()[retained_before],
+        &state_before,
+    )
+    .expect("decode battle-transition VBlank command");
+    let crystal_assets::RuntimeMutationCommand::AdvanceGameTimerVBlanks(command) = command else {
+        panic!("battle transition must still advance the VBlank timer");
+    };
+    assert_eq!(command.vblanks, 1);
+    assert!(command.normal_divider_trace.samples.is_empty());
+}
+
+#[test]
+fn only_battle_anim_engine_frames_replace_vblank_normal() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+
+    runtime_shell.visible_frontpic_animation = Some(VisibleFrontpicAnimation {
+        species_id: "UNOWN".to_string(),
+        speed: 1,
+        pointer: 0,
+        repeat: 0,
+        wait: 0,
+        frame: 0,
+    });
+    assert!(
+        !visible_special_vblank_handler_active(&runtime_shell),
+        "AnimateFrontpic runs under VBlank_Normal"
+    );
+    runtime_shell.visible_frontpic_animation = None;
+    runtime_shell.visible_trainer_exit_animation = Some(VisibleTrainerExitAnimation {
+        side: crate::core::battle::turn::BattleSide::Enemy,
+        frame: 0,
+        send_out_after: false,
+    });
+    assert!(
+        !visible_special_vblank_handler_active(&runtime_shell),
+        "SlideBattlePicOut runs under VBlank_Normal"
+    );
+    runtime_shell.visible_trainer_exit_animation = None;
+    runtime_shell.visible_send_out_animation = Some(VisibleSendOutAnimation {
+        side: crate::core::battle::turn::BattleSide::Enemy,
+        frame: 0,
+        shiny: false,
+    });
+    assert!(
+        visible_special_vblank_handler_active(&runtime_shell),
+        "ANIM_SEND_OUT_MON installs VBlank_Cutscene"
+    );
+}
+
+#[test]
+fn trainer_card_phase_reads_hvblankcounter_not_gameplay_frame() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.shell.session_mut().state_mut().frame_counter = 63;
+    runtime_shell.shell.session_mut().state_mut().vblank_counter = 16;
+
+    open_visible_trainer_card(&mut runtime_shell).expect("open Trainer Card at VBlank 16");
+
+    assert!(!runtime_shell.trainer_card_colon_visible);
+    assert_eq!(runtime_shell.trainer_card_colon_ticks, 16);
+}
+
+#[test]
+fn unown_puzzle_cursor_blinks_from_hvblankcounter_unless_holding_piece() {
+    let mut puzzle = VisibleUnownPuzzle {
+        puzzle_id: "hooh".to_string(),
+        layout: [[0; 6]; 6],
+        holding_piece: None,
+        cursor_x: 0,
+        cursor_y: 0,
+        solved: false,
+    };
+    assert!(!visible_unown_puzzle_cursor_visible(&puzzle, 0x0f));
+    assert!(visible_unown_puzzle_cursor_visible(&puzzle, 0x10));
+    puzzle.holding_piece = Some(1);
+    assert!(visible_unown_puzzle_cursor_visible(&puzzle, 0));
 }
 
 fn core_modular_title_shell_for_test() -> BevyRuntimeShell {
@@ -591,6 +790,33 @@ fn core_modular_title_shell_for_test() -> BevyRuntimeShell {
         },
     )
     .expect("initialize title shell")
+}
+
+#[test]
+fn dontrestartmapmusic_is_not_auto_consumed_before_map_reload() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .map_music_restart_disabled = true;
+
+    let snapshot = runtime_shell.shell.snapshot().expect("runtime snapshot");
+    assert_eq!(visible_auto_runtime_flag(&snapshot), None);
+
+    runtime_shell
+        .shell
+        .session
+        .state
+        .script_runtime
+        .map_music_requested = true;
+    let snapshot = runtime_shell.shell.snapshot().expect("runtime snapshot");
+    assert_eq!(
+        visible_auto_runtime_flag(&snapshot),
+        Some(RuntimeScriptRuntimeFlag::MapMusicRequested)
+    );
+    assert!(snapshot.script_events.map_music_restart_disabled);
 }
 
 #[test]
@@ -629,6 +855,14 @@ fn retained_fullscreen_lcd_survives_title_setup_and_hands_off_to_complete_overwo
         title.scx = 0;
         title.frame = 0;
         title.title_timer = 10_000;
+        title
+            .presentation_machine
+            .memory
+            .insert("wJumptableIndex".to_string(), 2);
+        title
+            .presentation_machine
+            .memory
+            .insert("wTitleScreenTimer".to_string(), 10_000);
     }
     for _ in 0..40 {
         app.update();

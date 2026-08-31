@@ -1,6 +1,42 @@
 use crate::RuntimeCompiledScriptBoundary;
 
 #[test]
+fn seen_by_trainer_commits_the_approached_tile_to_raw_map_object_memory() {
+    let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
+    let object_id = "ROUTE36_YOUNGSTER1";
+    let approached_tile = TilePosition::new(22, 13);
+    runtime_shell
+        .shell
+        .session_mut()
+        .overworld
+        .set_object_runtime_tile(object_id, approached_tile)
+        .expect("move visible trainer to its approached tile");
+
+    retain_visible_seen_by_trainer_last_talked(&mut runtime_shell, object_id);
+    commit_visible_seen_by_trainer_object_coordinates(&mut runtime_shell, "Route36")
+        .expect("execute SeenByTrainerScript writeobjectxy");
+
+    let session = runtime_shell.shell.session();
+    assert_eq!(
+        session.state.script_runtime.last_talked_object.as_deref(),
+        Some(object_id)
+    );
+    assert_eq!(
+        session.overworld.last_talked_object_identifier.as_deref(),
+        Some(object_id)
+    );
+    assert_eq!(
+        session
+            .state
+            .map_object_overrides
+            .get("Route36")
+            .and_then(|memory| memory.objects.get(object_id))
+            .map(|object| (object.x, object.y, object.tile)),
+        Some((22, 13, Some(approached_tile)))
+    );
+}
+
+#[test]
 fn pitfall_skyfall_enters_the_fall_at_the_first_asm_sine_offset() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -523,29 +559,191 @@ fn item_ball_pickup_opens_the_canonical_found_item_notice() {
     );
     assert_eq!(
         runtime_shell
-            .visible_item_ball_notice
+            .visible_field_item_notice
             .as_ref()
             .map(|notice| &notice.phase),
-        Some(&VisibleItemBallPhase::FoundText)
+        Some(&VisibleFieldItemPhase::FoundText)
     );
     assert!(!visible_field_notice_uses_prompt_arrow(&runtime_shell));
 
-    begin_visible_item_ball_fanfare_pause(&mut runtime_shell)
+    begin_visible_field_item_sound(&mut runtime_shell)
         .expect("finish found-item text");
     assert!(runtime_shell
         .pending_audio
         .iter()
         .any(|audio| audio.audio_id == "SFX_ITEM"));
     for _ in 0..59 {
-        assert!(advance_visible_item_ball_fanfare_pause(&mut runtime_shell));
-        assert_eq!(runtime_shell.field_notice, None);
+        assert!(advance_visible_field_item_fanfare_pause(&mut runtime_shell));
+        assert_eq!(
+            runtime_shell.field_notice.as_deref(),
+            Some("KRIS found\nPOTION!")
+        );
     }
-    assert!(advance_visible_item_ball_fanfare_pause(&mut runtime_shell));
+    assert!(advance_visible_field_item_fanfare_pause(&mut runtime_shell));
     assert_eq!(
         runtime_shell.field_notice.as_deref(),
         Some("KRIS put the\nPOTION in\nthe ITEM POCKET.")
     );
     assert!(visible_field_notice_uses_prompt_arrow(&runtime_shell));
+}
+
+#[test]
+fn hidden_item_pickup_opens_found_text_before_specialsound_and_itemnotify() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGame { spawn_identifier },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize hidden-item shell");
+    runtime_shell
+        .shell
+        .set_trainer_identity("KRIS", 1)
+        .expect("set trainer identity");
+    let outcome = RuntimeMutationOutcome {
+        result: RuntimeMutationResult::ScriptFieldItemPickedUp(FieldItemPickupOutcome::Collected {
+            item_id: "POTION".to_string(),
+            quantity: 1,
+            event_flag: "EVENT_ROUTE_30_HIDDEN_POTION".to_string(),
+            source: crate::core::systems::field_items::FieldItemSource::HiddenItem,
+        }),
+        state_checksum: runtime_shell
+            .shell
+            .state_checksum()
+            .expect("state checksum"),
+    };
+
+    integrate_visible_script_mutation_outcome(&mut runtime_shell, &outcome)
+        .expect("integrate hidden-item pickup");
+
+    assert_eq!(
+        runtime_shell.field_notice.as_deref(),
+        Some("KRIS found\nPOTION!")
+    );
+    assert!(
+        !runtime_shell
+            .pending_audio
+            .iter()
+            .any(|audio| audio.audio_id == "SFX_ITEM"),
+        "HiddenItemScript reaches specialsound only after PlayerFoundItemText finishes"
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| &notice.phase),
+        Some(&VisibleFieldItemPhase::FoundText)
+    );
+
+    begin_visible_field_item_sound(&mut runtime_shell)
+        .expect("finish hidden-item found text");
+    assert_eq!(
+        runtime_shell.field_notice.as_deref(),
+        Some("KRIS found\nPOTION!")
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| &notice.phase),
+        Some(&VisibleFieldItemPhase::SpecialSoundWait)
+    );
+    assert!(runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| audio.audio_id == "SFX_ITEM"));
+    assert!(runtime_shell.visible_wait_sfx_boundary);
+    assert_eq!(
+        runtime_shell.wait_play_sfx_completion,
+        Some(VisibleWaitPlaySfxCompletion::FieldItemPocketText)
+    );
+
+    runtime_shell.pending_audio.clear();
+    runtime_shell.transient_audio_playing = false;
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("hidden-item presentation snapshot");
+    assert!(
+        advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+            .expect("finish hidden-item specialsound")
+    );
+    assert_eq!(
+        runtime_shell.field_notice.as_deref(),
+        Some("KRIS put the\nPOTION in\nthe ITEM POCKET.")
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| &notice.phase),
+        Some(&VisibleFieldItemPhase::PocketText)
+    );
+}
+
+#[test]
+fn full_hidden_item_prompts_after_found_text_without_specialsound_or_itemnotify() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGame { spawn_identifier },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize full hidden-item shell");
+    runtime_shell
+        .shell
+        .set_trainer_identity("KRIS", 1)
+        .expect("set trainer identity");
+    let outcome = RuntimeMutationOutcome {
+        result: RuntimeMutationResult::ScriptFieldItemPickedUp(FieldItemPickupOutcome::BagFull {
+            item_id: "POTION".to_string(),
+            quantity: 1,
+            event_flag: "EVENT_ROUTE_30_HIDDEN_POTION".to_string(),
+            source: crate::core::systems::field_items::FieldItemSource::HiddenItem,
+        }),
+        state_checksum: runtime_shell
+            .shell
+            .state_checksum()
+            .expect("state checksum"),
+    };
+
+    integrate_visible_script_mutation_outcome(&mut runtime_shell, &outcome)
+        .expect("integrate full hidden-item pickup");
+
+    assert_eq!(runtime_shell.field_notice.as_deref(), Some("KRIS found\nPOTION!"));
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| (&notice.phase, &notice.presentation)),
+        Some((
+            &VisibleFieldItemPhase::BagFullFoundText,
+            &VisibleFieldItemPresentation::HiddenItem { sound_id: None }
+        ))
+    );
+    assert!(visible_field_notice_uses_prompt_arrow(&runtime_shell));
+    assert!(!runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| matches!(audio.audio_id.as_str(), "SFX_ITEM" | "SFX_GET_TM")));
 }
 
 #[test]
@@ -571,17 +769,22 @@ fn full_item_ball_never_plays_success_fanfare_or_itemnotify() {
         .set_trainer_identity("KRIS", 1)
         .expect("set trainer identity");
 
-    show_visible_item_ball_notice(&mut runtime_shell, "POTION", true)
+    show_visible_field_item_notice(
+        &mut runtime_shell,
+        "POTION",
+        true,
+        VisibleFieldItemPresentation::ItemBall,
+    )
         .expect("show full item-ball path");
 
     assert_eq!(runtime_shell.field_notice.as_deref(), Some("KRIS found\nPOTION!"));
     assert_eq!(
         runtime_shell
-            .visible_item_ball_notice
+            .visible_field_item_notice
             .as_ref()
             .map(|notice| (&notice.phase, notice.pocket_text.as_str())),
         Some((
-            &VisibleItemBallPhase::BagFullFoundText,
+            &VisibleFieldItemPhase::BagFullFoundText,
             "But KRIS can't\ncarry any more\nitems."
         ))
     );
@@ -644,12 +847,168 @@ fn elms_aide_verbose_potion_stops_before_the_following_dialogue() {
         .expect("present the verbose Potion grant");
     assert_eq!(runtime_shell.field_notice.as_deref(), Some("KRIS received\nPOTION."));
     assert!(
-        runtime_shell
+        !runtime_shell
             .pending_audio
             .iter()
             .any(|audio| audio.audio_id == "SFX_ITEM"),
-        "the receive-item boundary must retain the canonical item fanfare",
+        "GiveItemScript reaches waitsfx only after ReceivedItemText finishes",
     );
+    begin_visible_field_item_sound(&mut runtime_shell)
+        .expect("finish verbose receive text");
+    assert_eq!(
+        runtime_shell.pending_wait_play_sfx.front().map(String::as_str),
+        Some("SFX_ITEM"),
+        "GiveItemScript waits for prior audio before starting specialsound",
+    );
+    assert_eq!(
+        runtime_shell.wait_play_sfx_completion,
+        Some(VisibleWaitPlaySfxCompletion::VerboseItemPrompt)
+    );
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("verbose item presentation snapshot");
+    assert!(
+        advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+            .expect("advance GiveItemScript waitsfx")
+    );
+    assert!(runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| audio.audio_id == "SFX_ITEM"));
+    runtime_shell.pending_audio.clear();
+    runtime_shell.transient_audio_playing = false;
+    assert!(
+        advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+            .expect("finish GiveItemScript specialsound")
+    );
+    assert_eq!(
+        runtime_shell.field_notice.as_deref(),
+        Some("KRIS received\nPOTION.")
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| &notice.phase),
+        Some(&VisibleFieldItemPhase::AwaitingPrompt)
+    );
+    assert!(visible_field_notice_uses_prompt_arrow(&runtime_shell));
+}
+
+#[test]
+fn verbose_tm_grant_uses_specialsounds_exact_tm_hm_fanfare() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGame { spawn_identifier },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize verbose TM shell");
+    let outcome = RuntimeMutationOutcome {
+        result: RuntimeMutationResult::ScriptItemGranted(
+            crate::core::systems::script_items::ScriptItemGrantOutcome::Granted {
+                item_id: "TM_ROCK_SMASH".to_string(),
+                quantity: 1,
+                source_script: "Route36RockSmashGuyScript".to_string(),
+                command_index: 8,
+                verbose: true,
+            },
+        ),
+        state_checksum: runtime_shell
+            .shell
+            .state_checksum()
+            .expect("state checksum"),
+    };
+
+    integrate_visible_script_mutation_outcome(&mut runtime_shell, &outcome)
+        .expect("integrate verbose TM grant");
+
+    assert!(!runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| audio.audio_id == "SFX_GET_TM"));
+    begin_visible_field_item_sound(&mut runtime_shell)
+        .expect("finish verbose TM receive text");
+    assert_eq!(
+        runtime_shell.pending_wait_play_sfx.front().map(String::as_str),
+        Some("SFX_GET_TM")
+    );
+    assert!(!runtime_shell
+        .pending_wait_play_sfx
+        .iter()
+        .any(|audio| audio == "SFX_ITEM"));
+}
+
+#[test]
+fn full_verbose_grant_shows_received_text_then_the_exact_pocket_full_text() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let spawn_identifier = runtime
+        .title_new_game_spawn_identifier()
+        .expect("title new-game spawn");
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGame { spawn_identifier },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize full verbose-item shell");
+    runtime_shell
+        .shell
+        .set_trainer_identity("KRIS", 1)
+        .expect("set trainer identity");
+    let outcome = RuntimeMutationOutcome {
+        result: RuntimeMutationResult::ScriptItemGranted(
+            crate::core::systems::script_items::ScriptItemGrantOutcome::BagFull {
+                item_id: "POTION".to_string(),
+                quantity: 1,
+                source_script: "GiftScript".to_string(),
+                command_index: 3,
+                verbose: true,
+            },
+        ),
+        state_checksum: runtime_shell
+            .shell
+            .state_checksum()
+            .expect("state checksum"),
+    };
+
+    integrate_visible_script_mutation_outcome(&mut runtime_shell, &outcome)
+        .expect("integrate full verbose grant");
+
+    assert_eq!(
+        runtime_shell.field_notice.as_deref(),
+        Some("KRIS received\nPOTION.")
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| (&notice.phase, notice.pocket_text.as_str())),
+        Some((
+            &VisibleFieldItemPhase::BagFullFoundText,
+            "The ITEM POCKET\nis full…"
+        ))
+    );
+    assert!(visible_field_notice_uses_prompt_arrow(&runtime_shell));
+    assert!(!runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| matches!(audio.audio_id.as_str(), "SFX_ITEM" | "SFX_GET_TM")));
 }
 
 #[test]
@@ -711,12 +1070,46 @@ fn route29_fruit_tree_interaction_grants_and_presents_the_berry() {
         vec![
             "Hey! It's\nBERRY!".to_string(),
             "Obtained\nBERRY!".to_string(),
-            "KRIS put the\nBERRY in\nthe ITEM POCKET.".to_string(),
         ],
+    );
+    assert!(!runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| audio.audio_id == "SFX_ITEM"));
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| notice.sound_trigger_text.as_str()),
+        Some("Obtained\nBERRY!")
+    );
+    assert!(
+        visible_field_notice_uses_prompt_arrow(&runtime_shell),
+        "FruitTreeScript executes promptbutton after FruitBearingTreeText"
+    );
+
+    runtime_shell.field_notice = Some("Obtained\nBERRY!".to_string());
+    assert!(
+        !visible_field_notice_uses_prompt_arrow(&runtime_shell),
+        "ObtainedFruitText flows directly into specialsound without a button"
+    );
+    begin_visible_field_item_sound(&mut runtime_shell)
+        .expect("finish obtained-fruit text");
+    assert!(runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| audio.audio_id == "SFX_ITEM"));
+    assert_eq!(
+        runtime_shell.wait_play_sfx_completion,
+        Some(VisibleWaitPlaySfxCompletion::FieldItemPocketText)
     );
 
     runtime_shell.field_notice = None;
     runtime_shell.field_notice_queue.clear();
+    runtime_shell.visible_field_item_notice = None;
+    runtime_shell.pending_audio.clear();
+    runtime_shell.visible_wait_sfx_boundary = false;
+    runtime_shell.wait_play_sfx_completion = None;
     let interaction = runtime_shell
         .shell
         .current_overworld_interaction()
@@ -745,6 +1138,42 @@ fn route29_fruit_tree_interaction_grants_and_presents_the_berry() {
             .collect::<Vec<_>>(),
         vec!["There's nothing\nhere…".to_string()],
     );
+    assert!(
+        visible_field_notice_uses_prompt_arrow(&runtime_shell),
+        "the already-picked branch still executes its opening promptbutton"
+    );
+
+    runtime_shell.field_notice = None;
+    runtime_shell.field_notice_queue.clear();
+    runtime_shell.visible_field_item_notice = None;
+    show_visible_fruit_tree_notice(
+        &mut runtime_shell,
+        VisibleFruitTreeOutcome::BagFull("BERRY"),
+    )
+    .expect("present full fruit-tree branch");
+    assert_eq!(
+        runtime_shell
+            .field_notice_queue
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            "Hey! It's\nBERRY!".to_string(),
+            "But the PACK is\nfull…".to_string(),
+        ]
+    );
+    assert_eq!(
+        runtime_shell
+            .visible_field_item_notice
+            .as_ref()
+            .map(|notice| &notice.phase),
+        Some(&VisibleFieldItemPhase::PromptEachQueuedPage)
+    );
+    assert!(visible_field_notice_uses_prompt_arrow(&runtime_shell));
+    assert!(!runtime_shell
+        .pending_audio
+        .iter()
+        .any(|audio| matches!(audio.audio_id.as_str(), "SFX_ITEM" | "SFX_GET_TM")));
 }
 
 #[test]
@@ -2469,7 +2898,7 @@ fn visible_new_game_completes_mom_walks_to_elms_lab_and_gets_rendered_starter() 
 }
 
 #[test]
-fn givepoke_enters_nickname_prompt_without_an_invented_gift_selection() {
+fn pressing_z_on_end_stores_the_gift_pokemon_nickname() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -2577,7 +3006,7 @@ fn givepoke_enters_nickname_prompt_without_an_invented_gift_selection() {
             "Start must move the cursor to END"
         );
     }
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     app.update();
     app.update();
 
@@ -2587,7 +3016,10 @@ fn givepoke_enters_nickname_prompt_without_an_invented_gift_selection() {
         .snapshot()
         .expect("named starter snapshot");
     assert_eq!(snapshot.party.slots.len(), 1);
-    assert_eq!(snapshot.party.slots[0].pokemon.nickname, "AA");
+    assert_eq!(
+        snapshot.party.slots[0].pokemon.nickname, "AA",
+        "pressing Z on END must store the entered nickname on the gifted Pokemon"
+    );
     assert!(runtime_shell.pending_gift_pokemon_nickname.is_none());
     {
         let world = app.world_mut();

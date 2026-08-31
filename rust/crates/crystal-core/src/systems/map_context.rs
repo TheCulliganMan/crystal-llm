@@ -397,6 +397,7 @@ mod tests {
     fn test_object(object_id: &str, x: u16, y: u16) -> ObjectEvent {
         ObjectEvent {
             sprite: "SPRITE_YOUNGSTER".to_string(),
+            sprite_has_facings: true,
             x,
             y,
             spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN".to_string(),

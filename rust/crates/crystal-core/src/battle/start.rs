@@ -2,12 +2,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::battle::turn::{BattleSide, switch_battle_combat_pokemon};
+use crate::battle::turn::{
+    BattleSide, SwitchInSpikesOutcome, apply_switch_in_spikes_damage, switch_battle_combat_pokemon,
+};
 use crate::models::{
     Dv, Move, Pokemon, PokemonBuildError, PokemonSpecies, Trainer, TrainerCatalog,
     TrainerPartyPokemon, calculate_stats, create_pokemon_from_known_dvs,
 };
-use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, Random};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::random::Random;
+use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, LinkBattleRandomState};
 use crate::state::{
     BattleMemory, EventFlagError, GameState, PendingStaticWildBattleTerminal, RoamingPokemonState,
 };
@@ -154,6 +158,34 @@ pub struct TrainerBattleStart {
     pub ai_move_flags: u32,
     pub ai_item_switch_flags: u32,
     pub ai_layers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkBattleStart {
+    pub opponent_player_id: u64,
+    pub opponent_name: String,
+    pub enemy_party: Vec<Pokemon>,
+    pub random_state: LinkBattleRandomState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LinkBattleStartError {
+    #[error("link battle requires the Colosseum link mode")]
+    WrongLinkMode,
+    #[error("link battle requires an established serial clock owner")]
+    SerialNotEstablished,
+    #[error("link battle opponent player id must be nonzero")]
+    InvalidOpponentPlayer,
+    #[error("link battle opponent name must be exact and non-empty")]
+    InvalidOpponentName,
+    #[error("link battle opponent party must contain a usable Pokemon")]
+    NoUsableOpponentPokemon,
+    #[error("link battle cannot start before the pending static-wild terminal resumes")]
+    PendingStaticWildTerminal,
+    #[error("link battle random state is invalid: {0}")]
+    InvalidRandomState(String),
+    #[error("link battle opponent party is invalid: {0}")]
+    InvalidPokemon(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +336,10 @@ pub enum ActiveBattleEnemyError {
     MissingActiveEnemyPartyIndex,
     #[error("active enemy party index {index} is outside battle enemy party")]
     EnemyPartyIndexOutOfRange { index: usize },
+    #[error("active enemy party index {index} is fainted")]
+    FaintedEnemyPartySlot { index: usize },
+    #[error("active enemy party index {index} is an egg")]
+    EggEnemyPartySlot { index: usize },
     #[error("cannot update inactive battle enemy")]
     InactiveBattle,
     #[error("cannot advance trainer battle without an active trainer battle")]
@@ -321,6 +357,14 @@ pub enum ActiveBattleEnemyError {
 pub struct TrainerBattleAdvanceOutcome {
     pub next_enemy: Option<Pokemon>,
     pub trainer_defeated: bool,
+    pub spikes: Option<SwitchInSpikesOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveBattlePartySwitchOutcome {
+    pub party_index: usize,
+    pub spikes: Option<SwitchInSpikesOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -435,6 +479,7 @@ pub enum WildBattleMaterializationError {
 const WILD_NO_ITEM_THRESHOLD: u8 = 192;
 const WILD_RARE_ITEM_THRESHOLD: u8 = 20;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 fn wild_held_item_from_rng(
     species: &PokemonSpecies,
     battle_type: &str,
@@ -455,6 +500,7 @@ fn wild_held_item_from_rng(
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn wild_dvs_from_rng(rng: &mut Random) -> Dv {
     let attack_defense = rng.battle_random_byte();
     let speed_special = rng.battle_random_byte();
@@ -888,6 +934,7 @@ where
     })
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn wild_battle_start_from_encounter(
     encounter: WildEncounterRoll,
     battle_music: String,
@@ -1316,6 +1363,70 @@ pub fn activate_trainer_battle_start_status(
     Ok(())
 }
 
+pub fn activate_link_battle_start(
+    state: &mut GameState,
+    start: &LinkBattleStart,
+) -> Result<(), LinkBattleStartError> {
+    if state.pending_static_wild_terminal.is_some() {
+        return Err(LinkBattleStartError::PendingStaticWildTerminal);
+    }
+    if state.link_session.link_mode != 3 {
+        return Err(LinkBattleStartError::WrongLinkMode);
+    }
+    if !state.link_session.serial_connection_status.is_established() {
+        return Err(LinkBattleStartError::SerialNotEstablished);
+    }
+    if start.opponent_player_id == 0 {
+        return Err(LinkBattleStartError::InvalidOpponentPlayer);
+    }
+    if start.opponent_name.is_empty()
+        || start.opponent_name.trim() != start.opponent_name
+        || !start
+            .opponent_name
+            .chars()
+            .all(|character| !character.is_control())
+    {
+        return Err(LinkBattleStartError::InvalidOpponentName);
+    }
+    crate::random::LinkBattleRandom::from_state(&start.random_state)
+        .map_err(|error| LinkBattleStartError::InvalidRandomState(error.to_string()))?;
+    let active_enemy_index = start
+        .enemy_party
+        .iter()
+        .position(|pokemon| !pokemon.is_egg && pokemon.hp > 0)
+        .ok_or(LinkBattleStartError::NoUsableOpponentPokemon)?;
+    for pokemon in &start.enemy_party {
+        pokemon
+            .validate_saved_state()
+            .map_err(LinkBattleStartError::InvalidPokemon)?;
+    }
+    let enemy_pokemon = start.enemy_party[active_enemy_index].clone();
+    state.link_session.battle_random = Some(start.random_state.clone());
+    state.battle = BattleMemory::Trainer {
+        battle_type: "BATTLETYPE_LINK".to_string(),
+        trainer_class: "LINK".to_string(),
+        trainer_id: format!("LINK_PLAYER_{}", start.opponent_player_id),
+        trainer_name: start.opponent_name.clone(),
+        event_flag: String::new(),
+        seen_text: String::new(),
+        win_text: String::new(),
+        loss_text: String::new(),
+        callback: String::new(),
+        source_script: "LinkBattle".to_string(),
+        enemy_pokemon: enemy_pokemon.clone(),
+        enemy_party: start.enemy_party.clone(),
+        reward: 0,
+        encounter_music: "MUSIC_JOHTO_TRAINER_BATTLE".to_string(),
+        ai_move_flags: 0,
+        ai_item_switch_flags: 0,
+        ai_layers: Vec::new(),
+    };
+    state.pokedex.record_seen_pokemon(&enemy_pokemon);
+    reset_active_battle_slots(state);
+    state.battle_active_enemy_party_index = Some(active_enemy_index);
+    Ok(())
+}
+
 pub fn first_available_battle_party_index(state: &GameState) -> Option<usize> {
     state
         .storage
@@ -1332,18 +1443,38 @@ pub fn first_available_battle_party_index(state: &GameState) -> Option<usize> {
 pub fn require_active_battle_party_index(
     state: &GameState,
 ) -> Result<usize, ActiveBattlePartyError> {
+    let index = require_active_battle_party_slot_index(state)?;
+    let pokemon = state.storage.party.pokemon[index]
+        .as_ref()
+        .ok_or(ActiveBattlePartyError::EmptyPartySlot { index })?;
+    if pokemon.hp == 0 {
+        return Err(ActiveBattlePartyError::FaintedPartySlot { index });
+    }
+    Ok(index)
+}
+
+pub fn require_active_battle_party_slot_index(
+    state: &GameState,
+) -> Result<usize, ActiveBattlePartyError> {
     let index = state
         .battle_active_party_index
         .ok_or(ActiveBattlePartyError::MissingActivePartyIndex)?;
-    validate_active_battle_party_index(state, index)?;
+    if index >= state.storage.party.pokemon.len() {
+        return Err(ActiveBattlePartyError::PartyIndexOutOfRange { index });
+    }
+    state.storage.party.pokemon[index]
+        .as_ref()
+        .ok_or(ActiveBattlePartyError::EmptyPartySlot { index })?;
     Ok(index)
 }
 
 pub fn switch_active_battle_party_index(
     state: &mut GameState,
     index: usize,
-) -> Result<usize, ActiveBattlePartyError> {
+) -> Result<ActiveBattlePartySwitchOutcome, ActiveBattlePartyError> {
     validate_active_battle_party_index(state, index)?;
+    let mut switched_hp = None;
+    let mut spikes = None;
     if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
         // A forced replacement and a Shift-style pre-turn switch do not pass
         // through BattleAction::Switch. Keep the authoritative combat battler
@@ -1351,11 +1482,27 @@ pub fn switch_active_battle_party_index(
         // with the fainted/outgoing Pokemon.
         switch_battle_combat_pokemon(combat, BattleSide::Player, index)
             .map_err(|_| ActiveBattlePartyError::PartyIndexOutOfRange { index })?;
+        spikes = apply_switch_in_spikes_damage(combat, BattleSide::Player);
+        if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
+            combat.player_party[index].hp = *hp_after;
+            combat.player_spikes_zero_hp_unchecked = *hp_after == 0;
+            switched_hp = Some(*hp_after);
+        }
+    }
+    if let Some(hp) = switched_hp {
+        state.storage.party.pokemon[index]
+            .as_mut()
+            .expect("validated active battle party slot became empty")
+            .hp = hp;
+        state.sync_party_from_storage();
     }
     state.battle_active_party_index = Some(index);
     mark_active_party_participant(state);
     activate_amulet_coin_for_active_party(state);
-    Ok(index)
+    Ok(ActiveBattlePartySwitchOutcome {
+        party_index: index,
+        spikes,
+    })
 }
 
 pub fn validate_active_battle_party_index(
@@ -1416,6 +1563,56 @@ pub fn update_active_battle_enemy(
     }
 }
 
+/// Apply the opponent's explicitly selected forced replacement in a link
+/// battle. Unlike trainer-battle advancement, this never chooses a party slot
+/// locally: both peers must use the exact index selected by that opponent.
+pub fn switch_active_battle_enemy_party_index(
+    state: &mut GameState,
+    index: usize,
+) -> Result<ActiveBattlePartySwitchOutcome, ActiveBattleEnemyError> {
+    let BattleMemory::Trainer {
+        enemy_pokemon,
+        enemy_party,
+        battle_type,
+        ..
+    } = &mut state.battle
+    else {
+        return Err(ActiveBattleEnemyError::MissingActiveTrainerBattle);
+    };
+    if battle_type != "BATTLETYPE_LINK" {
+        return Err(ActiveBattleEnemyError::MissingActiveTrainerBattle);
+    }
+    let selected = enemy_party
+        .get(index)
+        .ok_or(ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
+    if selected.is_egg || selected.species.id == "EGG" {
+        return Err(ActiveBattleEnemyError::EggEnemyPartySlot { index });
+    }
+    if selected.hp == 0 {
+        return Err(ActiveBattleEnemyError::FaintedEnemyPartySlot { index });
+    }
+    let mut entered = selected.clone();
+    state.battle_active_enemy_party_index = Some(index);
+    let mut spikes = None;
+    if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
+        switch_battle_combat_pokemon(combat, BattleSide::Enemy, index)
+            .map_err(|_| ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
+        spikes = apply_switch_in_spikes_damage(combat, BattleSide::Enemy);
+        if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
+            combat.enemy_party[index].hp = *hp_after;
+            combat.enemy_spikes_zero_hp_unchecked = *hp_after == 0;
+            entered.hp = *hp_after;
+        }
+    }
+    *enemy_pokemon = entered.clone();
+    enemy_party[index] = entered.clone();
+    state.pokedex.record_seen_pokemon(&entered);
+    Ok(ActiveBattlePartySwitchOutcome {
+        party_index: index,
+        spikes,
+    })
+}
+
 pub fn advance_active_trainer_battle(
     state: &mut GameState,
 ) -> Result<TrainerBattleAdvanceOutcome, ActiveBattleEnemyError> {
@@ -1449,21 +1646,32 @@ pub fn advance_active_trainer_battle(
         (index != current_enemy_index && pokemon.hp > 0).then_some((index, pokemon.clone()))
     });
     if let Some((index, pokemon)) = next {
-        *enemy_pokemon = pokemon.clone();
+        let mut entered = pokemon;
         state.battle_active_enemy_party_index = Some(index);
+        let mut spikes = None;
         if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
             switch_battle_combat_pokemon(combat, BattleSide::Enemy, index)
                 .map_err(|_| ActiveBattleEnemyError::EnemyPartyIndexOutOfRange { index })?;
+            spikes = apply_switch_in_spikes_damage(combat, BattleSide::Enemy);
+            if let Some(SwitchInSpikesOutcome::Damaged { hp_after, .. }) = &spikes {
+                combat.enemy_party[index].hp = *hp_after;
+                combat.enemy_spikes_zero_hp_unchecked = *hp_after == 0;
+                entered.hp = *hp_after;
+            }
         }
-        state.pokedex.record_seen_pokemon(&pokemon);
+        *enemy_pokemon = entered.clone();
+        enemy_party[index] = entered.clone();
+        state.pokedex.record_seen_pokemon(&entered);
         Ok(TrainerBattleAdvanceOutcome {
-            next_enemy: Some(pokemon),
+            next_enemy: Some(entered),
             trainer_defeated: false,
+            spikes,
         })
     } else {
         Ok(TrainerBattleAdvanceOutcome {
             next_enemy: None,
             trainer_defeated: true,
+            spikes: None,
         })
     }
 }
@@ -1809,6 +2017,60 @@ mod tests {
             rng.battle_random_byte();
         }
         rng.seed()
+    }
+
+    #[test]
+    fn link_battle_start_uses_the_peer_party_and_shared_colosseum_rng() {
+        let local = Pokemon::new_for_tests(species(), 12, Dv::from_non_hp(1, 2, 3, 4));
+        let mut remote = Pokemon::new_for_tests(species(), 14, Dv::from_non_hp(4, 3, 2, 1));
+        remote.nickname = "PEERMON".to_string();
+        let mut state = GameState::default();
+        state.storage.party.pokemon[0] = Some(local);
+        state.sync_party_from_storage();
+        state.link_session.link_mode = 3;
+        state.link_session.serial_connection_status =
+            crate::state::LinkSerialConnectionStatus::UsingInternalClock;
+        let random_state = LinkBattleRandomState {
+            seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            count: 0,
+        };
+
+        activate_link_battle_start(
+            &mut state,
+            &LinkBattleStart {
+                opponent_player_id: 2,
+                opponent_name: "PEER".to_string(),
+                enemy_party: vec![remote.clone()],
+                random_state: random_state.clone(),
+            },
+        )
+        .expect("link battle starts");
+
+        assert_eq!(state.link_session.battle_random, Some(random_state));
+        assert_eq!(state.battle_active_party_index, Some(0));
+        assert_eq!(state.battle_active_enemy_party_index, Some(0));
+        let BattleMemory::Trainer {
+            battle_type,
+            trainer_name,
+            enemy_party,
+            reward,
+            ..
+        } = &state.battle
+        else {
+            panic!("link battle did not create trainer-facing battle memory");
+        };
+        assert_eq!(battle_type, "BATTLETYPE_LINK");
+        assert_eq!(trainer_name, "PEER");
+        assert_eq!(enemy_party, &vec![remote]);
+        assert_eq!(*reward, 0);
+        assert!(
+            active_battle_combat_state(&state)
+                .expect("link combat")
+                .link_battle
+        );
+        state
+            .validate_saved_state()
+            .expect("link battle is saveable");
     }
 
     fn divider_trace_for_sub_values(values: impl IntoIterator<Item = u8>) -> Vec<u8> {
@@ -2480,7 +2742,10 @@ mod tests {
             )
             .expect("store third");
 
-        assert_eq!(switch_active_battle_party_index(&mut state, 2), Ok(2));
+        assert_eq!(
+            switch_active_battle_party_index(&mut state, 2).map(|outcome| outcome.party_index),
+            Ok(2)
+        );
         assert_eq!(require_active_battle_party_index(&state), Ok(2));
     }
 
@@ -2503,13 +2768,20 @@ mod tests {
             crate::battle::turn::BattleCombatState::new(
                 fainted.clone(),
                 Pokemon::new_for_tests(species(), 3, Dv::from_non_hp(1, 1, 1, 1)),
-                0,
             )
             .with_parties(vec![fainted, replacement.clone()], Vec::new())
             .with_party_indices(0, 0),
         );
 
-        assert_eq!(switch_active_battle_party_index(&mut state, 1), Ok(1));
+        assert_eq!(require_active_battle_party_slot_index(&state), Ok(0));
+        assert_eq!(
+            require_active_battle_party_index(&state),
+            Err(ActiveBattlePartyError::FaintedPartySlot { index: 0 })
+        );
+        assert_eq!(
+            switch_active_battle_party_index(&mut state, 1).map(|outcome| outcome.party_index),
+            Ok(1)
+        );
         let combat = state
             .script_runtime
             .active_battle_combat
@@ -2518,6 +2790,67 @@ mod tests {
         assert_eq!(combat.player_party_index, 1);
         assert_eq!(combat.player.hp, replacement.hp);
         assert_eq!(combat.player.level, replacement.level);
+    }
+
+    #[test]
+    fn forced_replacement_takes_spikes_damage_without_a_second_faint_check() {
+        let mut state = GameState::default();
+        let mut fainted = Pokemon::new_for_tests(species(), 2, Dv::from_non_hp(0, 0, 0, 0));
+        fainted.hp = 0;
+        let mut replacement = Pokemon::new_for_tests(species(), 4, Dv::from_non_hp(2, 2, 2, 2));
+        replacement.max_hp = 8;
+        replacement.hp = 1;
+        state.storage.party.pokemon[0] = Some(fainted.clone());
+        state.storage.party.pokemon[1] = Some(replacement.clone());
+        state.sync_party_from_storage();
+        state.battle_active_party_index = Some(0);
+        state.script_runtime.active_battle_combat = Some(
+            crate::battle::turn::BattleCombatState::new(
+                fainted.clone(),
+                Pokemon::new_for_tests(species(), 3, Dv::from_non_hp(1, 1, 1, 1)),
+            )
+            .with_parties(vec![fainted, replacement], Vec::new())
+            .with_party_indices(0, 0),
+        );
+        state
+            .script_runtime
+            .active_battle_combat
+            .as_mut()
+            .expect("active combat")
+            .player_spikes = true;
+
+        let switch =
+            switch_active_battle_party_index(&mut state, 1).expect("switch to replacement");
+        assert_eq!(switch.party_index, 1);
+        assert_eq!(
+            switch.spikes,
+            Some(SwitchInSpikesOutcome::Damaged {
+                damage: 1,
+                hp_before: 1,
+                hp_after: 0,
+            })
+        );
+
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("active combat");
+        assert_eq!(combat.player.hp, 0);
+        assert_eq!(combat.player_party[1].hp, 0);
+        assert!(combat.player_spikes_zero_hp_unchecked);
+        assert_eq!(
+            state.storage.party.pokemon[1]
+                .as_ref()
+                .expect("stored replacement")
+                .hp,
+            0
+        );
+        assert_eq!(state.battle_active_party_index, Some(1));
+        assert_eq!(
+            require_active_battle_party_index(&state),
+            Err(ActiveBattlePartyError::FaintedPartySlot { index: 1 })
+        );
     }
 
     #[test]
@@ -2602,13 +2935,9 @@ mod tests {
         state.battle_active_enemy_party_index = Some(0);
         let player = Pokemon::new_for_tests(species(), 10, Dv::from_non_hp(2, 2, 2, 2));
         state.script_runtime.active_battle_combat = Some(
-            crate::battle::turn::BattleCombatState::new(
-                player.clone(),
-                first.clone(),
-                state.rng_seed,
-            )
-            .with_parties(vec![player], vec![first.clone(), second.clone()])
-            .with_party_indices(0, 0),
+            crate::battle::turn::BattleCombatState::new(player.clone(), first.clone())
+                .with_parties(vec![player], vec![first.clone(), second.clone()])
+                .with_party_indices(0, 0),
         );
 
         assert_eq!(
@@ -2636,6 +2965,7 @@ mod tests {
             TrainerBattleAdvanceOutcome {
                 next_enemy: Some(second.clone()),
                 trainer_defeated: false,
+                spikes: None,
             }
         );
         assert_eq!(state.battle_active_enemy_party_index, Some(1));
@@ -2690,6 +3020,85 @@ mod tests {
         assert_eq!(reordered.next_enemy, Some(first));
         assert!(!reordered.trainer_defeated);
         assert_eq!(state.battle_active_enemy_party_index, Some(0));
+    }
+
+    #[test]
+    fn trainer_replacement_takes_spikes_damage_without_a_second_faint_check() {
+        let mut first = Pokemon::new_for_tests(species(), 7, Dv::from_non_hp(0, 0, 0, 0));
+        first.hp = 0;
+        let mut second = Pokemon::new_for_tests(species(), 9, Dv::from_non_hp(1, 1, 1, 1));
+        second.max_hp = 8;
+        second.hp = 1;
+        let start = TrainerBattleStart {
+            battle_type: "BATTLETYPE_TRAINER".to_string(),
+            trainer_class: "FALKNER".to_string(),
+            trainer_id: "FALKNER1".to_string(),
+            trainer_name: "FALKNER@".to_string(),
+            event_flag: "EVENT_BEAT_FALKNER".to_string(),
+            seen_text: String::new(),
+            win_text: String::new(),
+            loss_text: String::new(),
+            callback: String::new(),
+            source_script: "BattleScript".to_string(),
+            enemy_pokemon: first.clone(),
+            enemy_party: vec![first.clone(), second.clone()],
+            reward: 50,
+            encounter_music: "MUSIC_HIKER_ENCOUNTER".to_string(),
+            ai_move_flags: 0,
+            ai_item_switch_flags: 0,
+            ai_layers: Vec::new(),
+        };
+        let mut state = GameState::default();
+        state.battle = BattleMemory::from(&start);
+        state.battle_active_enemy_party_index = Some(0);
+        state.battle_rewarded_enemy_party_indices.insert(0);
+        let player = Pokemon::new_for_tests(species(), 10, Dv::from_non_hp(2, 2, 2, 2));
+        state.script_runtime.active_battle_combat = Some(
+            crate::battle::turn::BattleCombatState::new(player.clone(), first.clone())
+                .with_parties(vec![player], vec![first, second])
+                .with_party_indices(0, 0),
+        );
+        state
+            .script_runtime
+            .active_battle_combat
+            .as_mut()
+            .expect("active combat")
+            .enemy_spikes = true;
+
+        let outcome = advance_active_trainer_battle(&mut state).expect("advance trainer battle");
+
+        assert!(!outcome.trainer_defeated);
+        assert_eq!(
+            outcome.next_enemy.as_ref().map(|pokemon| pokemon.hp),
+            Some(0)
+        );
+        assert_eq!(
+            outcome.spikes,
+            Some(SwitchInSpikesOutcome::Damaged {
+                damage: 1,
+                hp_before: 1,
+                hp_after: 0,
+            })
+        );
+        assert_eq!(state.battle_active_enemy_party_index, Some(1));
+        let BattleMemory::Trainer {
+            enemy_pokemon,
+            enemy_party,
+            ..
+        } = &state.battle
+        else {
+            panic!("expected trainer battle");
+        };
+        assert_eq!(enemy_pokemon.hp, 0);
+        assert_eq!(enemy_party[1].hp, 0);
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("active combat");
+        assert_eq!(combat.enemy.hp, 0);
+        assert_eq!(combat.enemy_party[1].hp, 0);
+        assert!(combat.enemy_spikes_zero_hp_unchecked);
     }
 
     #[test]

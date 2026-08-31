@@ -47,6 +47,7 @@ export class PlayerCharacter extends OverworldObject {
     super(
       ObjectEvent.parse({
         sprite: "PLAYER",
+        sprite_has_facings: true,
         x: 0,
         y: 0,
         pal: 0,

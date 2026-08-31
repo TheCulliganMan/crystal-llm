@@ -68,6 +68,9 @@ export const _CUT_BLOCKS: Record<string, Record<number, CutReplacement>> = {
     "johto_modern": {
         0x03: [0x02, "grass"],
     },
+    "johto_modern_generated": {
+        0x03: [0x02, "grass"],
+    },
     "kanto": {
         0x0B: [0x0A, "grass"],
         0x32: [0x6D, "tree"],

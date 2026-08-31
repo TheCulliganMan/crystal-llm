@@ -11,28 +11,523 @@ fn intro_trigonometry_matches_the_asm_fixed_point_wave() {
 }
 #[test]
 fn intro_framesets_preserve_asm_durations() {
-    let unown =
-        visible_intro_frameset_steps("SPRITE_ANIM_FRAMESET_INTRO_UNOWN_1").expect("Unown frameset");
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = load_intro_sprite_anim_bundle(
+        runtime_shell
+            .shell
+            .runtime()
+            .data()
+            .sprite_anim_bundle
+            .as_str(),
+    )
+    .expect("load pack-owned sprite animation bundle");
+    let unown = visible_intro_frameset_steps(&bundle, "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_1")
+        .expect("Unown frameset");
     assert_eq!(
         unown.iter().map(|step| step.duration).collect::<Vec<_>>(),
         vec![3, 3, 7, 0]
     );
-    let pichu =
-        visible_intro_frameset_steps("SPRITE_ANIM_FRAMESET_INTRO_PICHU").expect("Pichu frameset");
+    let pichu = visible_intro_frameset_steps(&bundle, "SPRITE_ANIM_FRAMESET_INTRO_PICHU")
+        .expect("Pichu frameset");
     assert_eq!(
         pichu.iter().map(|step| step.duration).collect::<Vec<_>>(),
         vec![32, 7, 7, 0]
     );
-    assert!(matches!(
-        pichu.last().map(|step| step.command),
-        Some(IntroFrameCommand::End)
-    ));
-    let unown_f = visible_intro_frameset_steps("SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F_2")
+    assert_eq!(pichu.last().map(|step| step.command.as_str()), Some("end"));
+    let unown_f = visible_intro_frameset_steps(&bundle, "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F_2")
         .expect("Unown F frameset");
     assert_eq!(
         unown_f.iter().map(|step| step.duration).collect::<Vec<_>>(),
         vec![3, 3, 3, 7, 7, 0]
     );
+}
+
+#[test]
+fn visible_intro_framesets_match_every_pack_owned_asm_step() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = load_intro_sprite_anim_bundle(
+        runtime_shell
+            .shell
+            .runtime()
+            .data()
+            .sprite_anim_bundle
+            .as_str(),
+    )
+    .expect("load pack-owned sprite animation bundle");
+
+    for object in bundle.objects.values() {
+        let Some(frameset_name) = object
+            .get("frameset")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| name.starts_with("SPRITE_ANIM_FRAMESET_INTRO_"))
+        else {
+            continue;
+        };
+        let exported = bundle
+            .framesets
+            .get(frameset_name)
+            .unwrap_or_else(|| panic!("pack object references missing frameset {frameset_name}"));
+        let consumed = visible_intro_frameset_steps(&bundle, frameset_name)
+            .unwrap_or_else(|_| panic!("visible intro omits pack frameset {frameset_name}"));
+        let exported_steps = exported
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.oam_set.as_deref(),
+                    step.duration,
+                    step.attr_flags,
+                    step.command.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let consumed_steps = consumed
+            .iter()
+            .map(|step| {
+                (
+                    step.oam_set.as_deref(),
+                    step.duration,
+                    step.attr_flags,
+                    step.command.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            consumed_steps, exported_steps,
+            "visible intro must consume pack data for {frameset_name}"
+        );
+    }
+}
+
+#[test]
+fn visible_intro_animation_timing_is_driven_by_the_pack_frameset() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut bundle = load_intro_sprite_anim_bundle(
+        runtime_shell
+            .shell
+            .runtime()
+            .data()
+            .sprite_anim_bundle
+            .as_str(),
+    )
+    .expect("load pack-owned sprite animation bundle");
+    bundle
+        .framesets
+        .get_mut("SPRITE_ANIM_FRAMESET_INTRO_SUICUNE")
+        .expect("Suicune frameset")
+        .steps[0]
+        .duration = 9;
+
+    let mut intro = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite(
+        &mut intro,
+        &bundle,
+        "SPRITE_ANIM_OBJ_INTRO_SUICUNE",
+        10 * 8,
+        9 * 8,
+    )
+    .expect("spawn Suicune intro sprite");
+    update_visible_intro_sprite_animations(&mut intro, &bundle)
+        .expect("advance pack-owned Suicune frameset");
+
+    assert_eq!(intro.sprites[0].frame_timer, 8);
+    assert_eq!(
+        intro.sprites[0].current_oam_set.as_deref(),
+        Some("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_1")
+    );
+}
+
+#[test]
+fn visible_intro_sprite_initialization_uses_the_pack_object_definition() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let program = runtime_shell
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let mut bundle = load_intro_sprite_anim_bundle(
+        runtime_shell
+            .shell
+            .runtime()
+            .data()
+            .sprite_anim_bundle
+            .as_str(),
+    )
+    .expect("load pack-owned sprite animation bundle");
+    let object = bundle
+        .objects
+        .get_mut("SPRITE_ANIM_OBJ_INTRO_SUICUNE")
+        .expect("Suicune object")
+        .as_object_mut()
+        .expect("typed Suicune object");
+    object.insert(
+        "frameset".to_string(),
+        serde_json::Value::String("SPRITE_ANIM_FRAMESET_INTRO_PICHU".to_string()),
+    );
+    object.insert(
+        "function".to_string(),
+        serde_json::Value::String("SPRITE_ANIM_FUNC_SOURCE_TEST".to_string()),
+    );
+
+    let mut intro = VisibleIntroScreen::new();
+    let sprite = spawn_visible_intro_sprite(
+        &mut intro,
+        &bundle,
+        "SPRITE_ANIM_OBJ_INTRO_SUICUNE",
+        10 * 8,
+        9 * 8,
+    )
+    .expect("spawn pack-owned Suicune object");
+
+    assert_eq!(sprite.frameset_name, "SPRITE_ANIM_FRAMESET_INTRO_PICHU");
+    assert_eq!(sprite.anim_function, "SPRITE_ANIM_FUNC_SOURCE_TEST");
+    let error = apply_visible_intro_sprite_pipeline(&mut intro, &bundle, &program)
+        .expect_err("unknown pack animation functions must fail closed")
+        .to_string();
+    assert!(error.contains("SPRITE_ANIM_FUNC_SOURCE_TEST"), "{error}");
+}
+
+#[test]
+fn intro_scene_thirteen_uses_the_asm_suicune_initial_position() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .expect("title startup has an intro screen");
+    intro.jumptable_index = 12;
+
+    assert!(step_visible_intro_scene(&mut runtime_shell).expect("initialize IntroScene13"));
+
+    let intro = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("IntroScene13 remains active");
+    assert_eq!(intro.sprites.len(), 1);
+    assert_eq!(
+        (intro.sprites[0].x, intro.sprites[0].y),
+        (88, 108),
+        "IntroScene13 must use the initial x/y written by engine/movie/intro.asm"
+    );
+}
+
+#[test]
+fn intro_sprite_initial_registers_are_driven_by_the_presentation_program() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .expect("title startup has the sprite bundle");
+    let mut program = runtime_shell
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let sprite_program = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .sprite_programs
+        .iter_mut()
+        .find(|sprite_program| {
+            sprite_program
+                .pointer("/allocation_source_span/start_line")
+                .and_then(serde_json::Value::as_u64)
+                == Some(673)
+        })
+        .expect("IntroScene13 Suicune program");
+    sprite_program["initial_memory"]["xcoord"] = serde_json::json!(77);
+    sprite_program["initial_memory"]["ycoord"] = serde_json::json!(66);
+    sprite_program["initial_memory"]["tile_id"] = serde_json::json!(55);
+    sprite_program["initial_memory"]["var2"] = serde_json::json!(9);
+
+    let mut intro = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite_program_group(&mut intro, bundle, &program, 673)
+        .expect("spawn mutated pack-owned sprite program");
+
+    assert_eq!((intro.sprites[0].x, intro.sprites[0].y), (77, 66));
+    assert_eq!(intro.sprites[0].tile_id, 55);
+    assert_eq!(intro.sprites[0].var2, 9);
+}
+
+#[test]
+fn intro_sprite_graphics_are_driven_by_the_allocation_vram_binding() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .expect("title startup has the sprite bundle");
+    let program = &runtime_shell.runtime.data().runtime_title_screen.program;
+
+    let mut jump_scene = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite_program_group(&mut jump_scene, bundle, program, 787)
+        .expect("spawn Scene15 grass streak");
+    assert_eq!(jump_scene.sprites[0].gfx_name, "grass4");
+
+    let mut back_scene = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite_program_group(&mut back_scene, bundle, program, 936)
+        .expect("spawn Scene19 grass streak");
+    assert_eq!(back_scene.sprites[0].gfx_name, "grass4");
+
+    let mut mutated_program = program.clone();
+    let binding = mutated_program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .sprite_programs
+        .iter_mut()
+        .find(|sprite_program| {
+            sprite_program
+                .pointer("/allocation_source_span/start_line")
+                .and_then(serde_json::Value::as_u64)
+                == Some(787)
+        })
+        .expect("Scene15 streak program");
+    binding["graphic_binding"]["resource"] =
+        serde_json::json!("gfx/intro/pulse.2bpp.lz");
+    binding["graphic_binding"]["tile_base"] = serde_json::json!(7);
+    let mut source_probe = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite_program_group(&mut source_probe, bundle, &mutated_program, 787)
+        .expect("spawn mutated source-bound sprite");
+    assert_eq!(source_probe.sprites[0].gfx_name, "pulse");
+    assert_eq!(source_probe.sprites[0].gfx_tile_base, 7);
+}
+
+#[test]
+fn intro_background_resources_are_driven_by_exported_vram_bindings() {
+    let mut program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let binding = program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .phases
+        .iter_mut()
+        .find(|phase| phase.id == "scene_dispatch")
+        .expect("scene dispatch phase")
+        .operations
+        .iter_mut()
+        .find(|operation| {
+            operation.op == "intro_background_binding"
+                && operation
+                    .fields
+                    .get("dispatcher_entry")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(14)
+        })
+        .expect("IntroScene15 background binding");
+    binding.fields.insert(
+        "tilemap_resource".to_string(),
+        serde_json::json!("gfx/intro/unown_a.tilemap.lz"),
+    );
+    binding.fields.insert(
+        "palette_resource".to_string(),
+        serde_json::json!("gfx/intro/unowns.pal"),
+    );
+
+    let mut intro = VisibleIntroScreen::new();
+    intro.jumptable_index = 14;
+    apply_visible_intro_background_binding(&mut intro, &program)
+        .expect("apply mutated pack background binding");
+    let background = intro
+        .background_binding
+        .expect("source-derived background binding");
+    assert_eq!(background.tilemap_resource, "gfx/intro/unown_a.tilemap.lz");
+    assert_eq!(background.palette_resource, "gfx/intro/unowns.pal");
+    assert!(
+        background
+            .tile_bindings
+            .iter()
+            .any(|tiles| tiles.resource == "gfx/intro/suicune_jump.2bpp.lz")
+    );
+}
+
+#[test]
+fn intro_scene_nineteen_preserves_the_asm_departing_suicune_tile_base() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .expect("title startup has an intro screen");
+    intro.jumptable_index = 18;
+
+    assert!(step_visible_intro_scene(&mut runtime_shell).expect("initialize IntroScene19"));
+
+    let sprite = &runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("IntroScene19 remains active")
+        .sprites[0];
+    assert_eq!(sprite.tile_id, 0x7f);
+}
+
+#[test]
+fn intro_unown_f_callback_uses_the_wslotsdelay_frame_counter_alias() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .expect("title startup has an intro screen");
+    intro.jumptable_index = 14;
+    assert!(step_visible_intro_scene(&mut runtime_shell).expect("initialize IntroScene15"));
+
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .expect("IntroScene15 remains active");
+    intro.scene_frame_counter = 0x40;
+    apply_visible_intro_sprite_pipeline_for_shell(&mut runtime_shell)
+        .expect("run the exported intro sprite callbacks");
+
+    let unown_f = runtime_shell
+        .intro_screen
+        .as_ref()
+        .expect("IntroScene15 remains active")
+        .sprites
+        .iter()
+        .find(|sprite| sprite.object_name == "SPRITE_ANIM_OBJ_INTRO_UNOWN_F")
+        .expect("Unown F sprite");
+    assert_eq!(
+        unown_f.frameset_name,
+        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F_2"
+    );
+    assert_eq!(unown_f.frameset_step, 0);
+}
+
+#[test]
+fn intro_callback_frameset_reinitialization_is_driven_by_exported_instructions() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .expect("title startup has the sprite bundle");
+    let mut program = runtime_shell
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
+    let sprite_programs = &mut program
+        .subprograms
+        .iter_mut()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .expect("crystal intro subprogram")
+        .sprite_programs;
+    let mut mutated = 0;
+    for callback in sprite_programs.iter_mut().filter_map(|sprite_program| {
+        let callback = sprite_program.get_mut("callback")?;
+        (callback.get("symbol")?.as_str()? == "SPRITE_ANIM_FUNC_INTRO_SUICUNE").then_some(callback)
+    }) {
+        let instruction = callback["instructions"]
+            .as_array_mut()
+            .expect("callback instruction list")
+            .iter_mut()
+            .find(|instruction| {
+                instruction["opcode"] == "ld"
+                    && instruction["args"]
+                        == serde_json::json!(["a", "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_2"])
+            })
+            .expect("Suicune frameset load instruction");
+        instruction["args"][1] = serde_json::json!("SPRITE_ANIM_FRAMESET_INTRO_PICHU");
+        mutated += 1;
+    }
+    assert!(mutated > 0, "Suicune callback program");
+
+    let mut intro = VisibleIntroScreen::new();
+    intro.scene_timer = 1;
+    let sprite = spawn_visible_intro_sprite(
+        &mut intro,
+        bundle,
+        "SPRITE_ANIM_OBJ_INTRO_SUICUNE",
+        10 * 8,
+        9 * 8,
+    )
+    .expect("spawn Suicune intro sprite");
+    sprite.frameset_step = 2;
+    sprite.frame_timer = 4;
+
+    apply_visible_intro_sprite_pipeline(&mut intro, bundle, &program)
+        .expect("execute mutated exported callback instructions");
+
+    assert_eq!(
+        intro.sprites[0].frameset_name,
+        "SPRITE_ANIM_FRAMESET_INTRO_PICHU"
+    );
+    assert_eq!(intro.sprites[0].frameset_step, 0);
+}
+
+#[test]
+fn intro_suicune_away_callback_wraps_its_byte_sized_y_coordinate() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .expect("title startup has the sprite bundle");
+    let program = &runtime_shell.runtime.data().runtime_title_screen.program;
+    let mut intro = VisibleIntroScreen::new();
+    spawn_visible_intro_sprite(
+        &mut intro,
+        bundle,
+        "SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY",
+        0,
+        0xf0,
+    )
+    .expect("spawn departing Suicune");
+
+    apply_visible_intro_sprite_pipeline(&mut intro, bundle, program)
+        .expect("run departing Suicune callback");
+
+    assert_eq!(intro.sprites[0].y, 0);
+}
+
+#[test]
+fn intro_callback_interpreter_executes_source_branches_stack_and_math() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .expect("title startup has the sprite bundle");
+    let program = &runtime_shell.runtime.data().runtime_title_screen.program;
+
+    let mut pichu = VisibleIntroScreen::new();
+    let sprite =
+        spawn_visible_intro_sprite(&mut pichu, bundle, "SPRITE_ANIM_OBJ_INTRO_PICHU", 0, 0)
+            .expect("spawn Pichu");
+    sprite.var1 = 20;
+    sprite.y_offset = 7;
+    apply_visible_intro_sprite_pipeline(&mut pichu, bundle, program)
+        .expect("execute Pichu callback");
+    assert_eq!(pichu.sprites[0].var1, 20);
+    assert_eq!(pichu.sprites[0].y_offset, 7);
+
+    let mut suicune = VisibleIntroScreen::new();
+    let sprite =
+        spawn_visible_intro_sprite(&mut suicune, bundle, "SPRITE_ANIM_OBJ_INTRO_SUICUNE", 0, 0)
+            .expect("spawn Suicune");
+    sprite.y_offset = 9;
+    apply_visible_intro_sprite_pipeline(&mut suicune, bundle, program)
+        .expect("execute inactive Suicune callback");
+    assert_eq!(suicune.sprites[0].y_offset, 9);
+
+    let mut unown = VisibleIntroScreen::new();
+    let sprite =
+        spawn_visible_intro_sprite(&mut unown, bundle, "SPRITE_ANIM_OBJ_INTRO_UNOWN", 0, 0)
+            .expect("spawn Unown");
+    sprite.var1 = 0x10;
+    sprite.jumptable_index = 5;
+    apply_visible_intro_sprite_pipeline(&mut unown, bundle, program)
+        .expect("execute Unown callback");
+    assert_eq!(unown.sprites[0].jumptable_index, 8);
+    assert_eq!(unown.sprites[0].y_offset, 5);
+    assert_eq!(unown.sprites[0].x_offset, 0);
 }
 
 #[test]
@@ -58,6 +553,23 @@ fn title_art_loads_real_runtime_assets() {
     assert_eq!(suicune.size, Vec2::new(128.0, 128.0));
     assert_eq!(copyright.size, Vec2::new(232.0, 8.0));
     assert_eq!(images.len(), 4);
+}
+
+#[test]
+fn title_art_rejects_an_out_of_range_palette_instead_of_using_the_first_bank() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut images = Assets::<Image>::default();
+
+    let error = match load_title_frame(&asset_root, "logo", u8::MAX, true, &mut images) {
+        Ok(_) => panic!("an invalid title palette must fail closed"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("title asset logo references palette 255"));
+    assert_eq!(images.len(), 0);
 }
 
 #[test]
@@ -332,6 +844,18 @@ fn native_title_crystal_pixels_respect_bg_window_priority() {
         &[240, 16, 32, 255],
         "Title crystal pixels should draw over BG/WIN color index zero"
     );
+}
+
+#[test]
+fn native_title_suicune_uses_the_source_preincrement_frame_counter() {
+    let index = |ticks| native_title_suicune_frame_index(ticks, 0x18, 1, true);
+    assert_eq!(index(0), 0);
+    assert_eq!(index(1), 0);
+    assert_eq!(index(8), 0);
+    assert_eq!(index(9), 1);
+    assert_eq!(index(17), 2);
+    assert_eq!(index(25), 3);
+    assert_eq!(index(33), 0);
 }
 
 #[test]
@@ -682,11 +1206,25 @@ fn intro_suicune_close_head_uses_its_asm_palette_banks() {
 
 #[test]
 fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
+    let program = core_modular_title_shell_for_test()
+        .runtime
+        .data()
+        .runtime_title_screen
+        .program
+        .clone();
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
         .expect("repository root");
     let asset_root = AssetRoot::new(repo_root);
+    let sprite_bundle_text = crate::read_runtime_asset_to_string(
+        &asset_root
+            .runtime_assets()
+            .join("data/sprite_anim_bundle.json"),
+    )
+    .expect("read runtime sprite animation bundle");
+    let sprite_bundle = load_intro_sprite_anim_bundle(&sprite_bundle_text)
+        .expect("load runtime sprite animation bundle");
     let mut rendered_art = RenderedTilesetArt::default();
     let mut images = Assets::<Image>::default();
 
@@ -706,14 +1244,12 @@ fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
         .clone();
 
     let mut with_sprite = background_only.clone();
-    spawn_visible_intro_sprite(
-        &mut with_sprite,
-        "SPRITE_ANIM_OBJ_INTRO_SUICUNE",
-        10 * 8,
-        9 * 8,
-    )
-    .expect("spawn Suicune intro sprite");
-    apply_visible_intro_sprite_pipeline(&mut with_sprite);
+    spawn_visible_intro_sprite_program_group(&mut with_sprite, &sprite_bundle, &program, 393)
+        .expect("spawn source-bound Suicune intro sprite");
+    with_sprite.sprites[0].x = 10 * 8;
+    with_sprite.sprites[0].y = 9 * 8;
+    apply_visible_intro_sprite_pipeline(&mut with_sprite, &sprite_bundle, &program)
+        .expect("advance Suicune through pack-owned frameset");
     let sprite_frame =
         intro_scene_frame_for_art(&mut rendered_art, &asset_root, &with_sprite, &mut images)
             .expect("render intro scene with sprite OAM");
@@ -774,7 +1310,7 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
     let mut rendered_art = RenderedTilesetArt::default();
     let mut images = Assets::<Image>::default();
 
-    let base = VisibleIntroScreen::new_for_presentation();
+    let base = VisibleIntroScreen::new();
     let base_frame = intro_scene_frame_for_art(&mut rendered_art, &asset_root, &base, &mut images)
         .expect("render base Unown intro frame");
     let base_data = images
@@ -782,7 +1318,13 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
         .expect("base intro image")
         .data
         .clone();
-    assert_opaque_nonblack_lcd_pixels(&base_data, "initial packaged-game intro");
+    assert_eq!(base_data.len(), 160 * 144 * 4);
+    assert!(
+        base_data
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255]),
+        "IntroScene1 must begin on the source black LCD before the Unown fade"
+    );
 
     let mut faded = base.clone();
     faded.jumptable_index = 1;
@@ -885,6 +1427,46 @@ fn intro_unown_fade_does_not_recolor_obj_pulses() {
         pulse_palette, base_palette,
         "the BG-only Unown fade must not recolor the pulse OBJ palette"
     );
+}
+
+#[test]
+fn intro_sprite_bundle_rejects_missing_oam_fields_instead_of_defaulting_them() {
+    let malformed = serde_json::json!({
+        "oam_sets": {
+            "SPRITE_ANIM_OAMSET_TEST": {
+                "name": "SPRITE_ANIM_OAMSET_TEST",
+                "tile_offset": 0,
+                "pieces": [{ "y": 0, "tile": 0, "attributes": 0 }]
+            }
+        },
+        "framesets": {
+            "Frameset_Test": {
+                "name": "Frameset_Test",
+                "steps": [{
+                    "oam_set": "SPRITE_ANIM_OAMSET_TEST",
+                    "duration": 1,
+                    "attr_flags": 0,
+                    "command": "frame"
+                }]
+            }
+        },
+        "objects": { "SPRITE_ANIM_OBJ_TEST": {} }
+    });
+
+    let error = load_intro_sprite_anim_bundle(&malformed.to_string())
+        .expect_err("an OAM piece without X must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("parse packed sprite animation bundle")
+    );
+}
+
+#[test]
+fn intro_tile_resolution_rejects_missing_source_tiles_instead_of_wrapping() {
+    let error = resolve_intro_tile_index(7, 0, IntroTileIndexMode::Offset, 4)
+        .expect_err("tile ids outside the source sheet must not wrap");
+    assert!(error.to_string().contains("outside 4 source tiles"));
 }
 
 #[test]
@@ -1031,6 +1613,10 @@ fn credits_screen_opens_from_asm_and_reaches_music_opcode_by_tick() {
     assert_eq!(credits.timer, 10);
     assert_eq!(visible_credits_step_index(credits), 1);
     assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_CREDITS"));
+    assert!(
+        runtime_shell.pending_full_audio_reset,
+        "the source MUSIC_NONE reset must survive the following credits-music request"
+    );
     assert!(
         runtime_shell
             .pending_audio

@@ -186,6 +186,13 @@ pub enum ScriptPhoneOutcome {
         source_script: String,
         command_index: usize,
     },
+    DelCellNum {
+        contact_id: String,
+        removed: bool,
+        script_value: String,
+        source_script: String,
+        command_index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,10 +408,12 @@ pub fn phone_contact_catalog_issues(
 
 pub const SCRIPT_PHONE_REGISTRATION_COMMANDS: &[&str] = &["askforphonenumber"];
 pub const SCRIPT_PHONE_CHECK_COMMANDS: &[&str] = &["checkcellnum"];
+pub const SCRIPT_PHONE_MUTATION_COMMANDS: &[&str] = &["delcellnum"];
 
 pub fn is_known_script_phone_command(command: &str) -> bool {
     SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&command)
         || SCRIPT_PHONE_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_PHONE_MUTATION_COMMANDS.contains(&command)
 }
 
 pub fn apply_script_phone_command(
@@ -420,8 +429,7 @@ pub fn apply_script_phone_command(
 
     match command.command.as_str() {
         "checkcellnum" => {
-            let registered =
-                has_phone_number(state, permanent_phone_numbers, command.contact_id.as_str());
+            let registered = has_phone_number(state, command.contact_id.as_str());
             let script_value = if registered { "1" } else { "0" }.to_string();
             state.script_runtime.script_value = Some(script_value.clone());
             Ok(ScriptPhoneOutcome::CheckCellNum {
@@ -464,6 +472,30 @@ pub fn apply_script_phone_command(
             Ok(ScriptPhoneOutcome::AskForPhoneNumber {
                 contact_id: command.contact_id,
                 result,
+                script_value,
+                source_script: command.source_script,
+                command_index: command.command_index,
+            })
+        }
+        "delcellnum" => {
+            let removed = state
+                .script_runtime
+                .phone_numbers
+                .remove(command.contact_id.as_str());
+            if removed
+                && let Some(slot) = state
+                    .script_runtime
+                    .phone_number_order
+                    .iter_mut()
+                    .find(|slot| slot.as_deref() == Some(command.contact_id.as_str()))
+            {
+                *slot = None;
+            }
+            let script_value = u8::from(!removed).to_string();
+            state.script_runtime.script_value = Some(script_value.clone());
+            Ok(ScriptPhoneOutcome::DelCellNum {
+                contact_id: command.contact_id,
+                removed,
                 script_value,
                 source_script: command.source_script,
                 command_index: command.command_index,
@@ -517,7 +549,7 @@ pub fn register_phone_number(
     validate_saved_phone_numbers(phone_numbers, catalog)?;
     validate_permanent_phone_numbers(permanent_phone_numbers, catalog)?;
 
-    if phone_numbers.contains(contact_id) || permanent_phone_numbers.contains_key(contact_id) {
+    if phone_numbers.contains(contact_id) {
         return Ok(PhoneRegistrationResult::AlreadyRegistered);
     }
 
@@ -564,7 +596,7 @@ pub fn validate_script_phone_command(
     validate_script_phone_command_token(&command.command)?;
     validate_phone_source_script(&command.source_script)?;
     match command.command.as_str() {
-        "askforphonenumber" | "checkcellnum" => {
+        "askforphonenumber" | "checkcellnum" | "delcellnum" => {
             validate_contact_id(&command.command, &command.contact_id, catalog)
         }
         other => Err(ScriptPhoneError::UnknownCommand {
@@ -639,13 +671,8 @@ fn is_exact_script_phone_command_token(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
-fn has_phone_number(
-    state: &GameState,
-    permanent_phone_numbers: &BTreeMap<String, PermanentPhoneNumberRule>,
-    contact_id: &str,
-) -> bool {
+fn has_phone_number(state: &GameState, contact_id: &str) -> bool {
     state.script_runtime.phone_numbers.contains(contact_id)
-        || permanent_phone_numbers.contains_key(contact_id)
 }
 
 fn validate_contact_id(
@@ -1030,6 +1057,7 @@ mod tests {
     fn exported_phone_command_sets_are_exact() {
         assert!(SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&"askforphonenumber"));
         assert!(SCRIPT_PHONE_CHECK_COMMANDS.contains(&"checkcellnum"));
+        assert!(is_known_script_phone_command("delcellnum"));
         assert!(is_known_script_phone_command("checkcellnum"));
         assert!(!is_known_script_phone_command("CheckCellNum"));
         assert!(!is_known_script_phone_command("deletecellnum"));
@@ -1141,6 +1169,8 @@ mod tests {
     fn checkcellnum_sets_exact_numeric_script_value() {
         let mut state = GameState::default();
         let permanent = permanent_numbers(["PHONE_MOM"]);
+        initialize_permanent_phone_numbers(&mut state, &catalog(), &permanent)
+            .expect("source initialization writes permanent contact into wPhoneList");
         let outcome = apply_script_phone_command(
             &mut state,
             command("checkcellnum", "PHONE_MOM"),
@@ -1186,6 +1216,69 @@ mod tests {
             })
         );
         assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn delcellnum_clears_only_the_matching_phone_slot_and_reports_carry() {
+        let mut state = GameState::default();
+        state.script_runtime.phone_numbers =
+            BTreeSet::from(["PHONE_MOM".to_string(), "PHONE_JOEY".to_string()]);
+        state.script_runtime.phone_number_order = vec![
+            Some("PHONE_MOM".to_string()),
+            Some("PHONE_JOEY".to_string()),
+            None,
+        ];
+
+        apply_script_phone_command(
+            &mut state,
+            command("delcellnum", "PHONE_JOEY"),
+            &catalog(),
+            &permanent_numbers(["PHONE_MOM"]),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("delete registered contact");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert_eq!(
+            state.script_runtime.phone_number_order,
+            vec![Some("PHONE_MOM".to_string()), None, None]
+        );
+        assert!(!state.script_runtime.phone_numbers.contains("PHONE_JOEY"));
+
+        apply_script_phone_command(
+            &mut state,
+            command("delcellnum", "PHONE_JOEY"),
+            &catalog(),
+            &permanent_numbers(["PHONE_MOM"]),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("delete absent contact returns carry");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(
+            state.script_runtime.phone_number_order,
+            vec![Some("PHONE_MOM".to_string()), None, None]
+        );
+
+        apply_script_phone_command(
+            &mut state,
+            command("delcellnum", "PHONE_MOM"),
+            &catalog(),
+            &permanent_numbers(["PHONE_MOM"]),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("delete a source-initialized permanent contact");
+        apply_script_phone_command(
+            &mut state,
+            command("checkcellnum", "PHONE_MOM"),
+            &catalog(),
+            &permanent_numbers(["PHONE_MOM"]),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("check deleted permanent contact");
+        assert_eq!(
+            state.script_runtime.script_value.as_deref(),
+            Some("0"),
+            "CheckCellNum reads only wPhoneList, not pack initialization rules"
+        );
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 import {
   useConnectionState,
+  useIsInQueue,
   useMultiplayerError,
 } from "@pokecrystal/core/multiplayer/multiplayer-store";
+import type { MatchmakingMode } from "@pokecrystal/core/multiplayer/matchmaking-service";
 import type { RemoteOverworldPlayer } from "@pokecrystal/core/types/overworld";
 
 export type MultiplayerLeaderboardEntry = {
@@ -27,6 +29,8 @@ export type MultiplayerMenuProps = {
   onSelectRemotePlayer?: (userId: string) => void;
   onAcceptRequest?: () => void;
   onDeclineRequest?: () => void;
+  onJoinMatchmaking?: (mode: MatchmakingMode) => void;
+  onLeaveMatchmaking?: () => void;
   isAuthenticated?: boolean;
   authLabel?: string | null;
   remotePlayers?: RemoteOverworldPlayer[];
@@ -40,6 +44,7 @@ export type MultiplayerMenuProps = {
   pendingOutgoingLabel?: string | null;
   incomingRequestLabel?: string | null;
   interactionStatusLabel?: string | null;
+  queueMode?: MatchmakingMode | null;
 };
 
 const interactionStatusChip = (state: string | null | undefined) => {
@@ -62,6 +67,7 @@ const getPlayerDistanceLabel = (player: RemoteOverworldPlayer) =>
 export function MultiplayerMenu(props: MultiplayerMenuProps) {
   const connectionState = useConnectionState();
   const error = useMultiplayerError();
+  const inQueue = useIsInQueue();
 
   const isConnected = connectionState === "connected";
   const isConnecting = connectionState === "connecting";
@@ -151,6 +157,46 @@ export function MultiplayerMenu(props: MultiplayerMenuProps) {
         <div className="divider my-0" />
 
         <div className="flex flex-col gap-2">
+          {sectionLabel("Global Matchmaking")}
+          <p className="text-xs text-base-content/70">
+            Ranked queues only match trainers running this exact modpack.
+          </p>
+          {inQueue ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-warning btn-outline w-full"
+              onClick={props.onLeaveMatchmaking}
+              data-testid="leave-matchmaking"
+            >
+              Leave {props.queueMode ?? "multiplayer"} Queue
+            </button>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => props.onJoinMatchmaking?.("battle")}
+                disabled={!isAuthenticated}
+                data-testid="join-battle-queue"
+              >
+                Find Battle
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={() => props.onJoinMatchmaking?.("trade")}
+                disabled={!isAuthenticated}
+                data-testid="join-trade-queue"
+              >
+                Find Trade
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="divider my-0" />
+
+        <div className="flex flex-col gap-2">
           {sectionLabel("Online Trainers")}
           {remotePlayers.length ? (
             <div className="grid gap-2" data-testid="remote-player-list">
@@ -205,7 +251,7 @@ export function MultiplayerMenu(props: MultiplayerMenuProps) {
         <div className="divider my-0" />
 
         <div className="flex flex-col gap-2">
-          {sectionLabel("Challenge Nearby Players")}
+          {sectionLabel("Trade or Battle")}
           {selectedRemotePlayer ? (
             <p className="text-xs text-base-content/70" data-testid="selected-remote-player">
               Targeting {selectedRemotePlayer.playerName} on {selectedRemotePlayer.mapName}.
@@ -316,7 +362,7 @@ export function MultiplayerMenu(props: MultiplayerMenuProps) {
             {isConnected ? "Connected: trainers are live on your map." : "Connect to place your trainer into the shared world."}
           </p>
           <p className="mt-1 text-[0.7rem] text-base-content/80">
-            Walk next to a trainer, then send Battle or Trade.
+            Select a trainer on this map to talk, trade, or battle.
           </p>
         </div>
       </div>

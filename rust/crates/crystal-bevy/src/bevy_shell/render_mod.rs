@@ -6,11 +6,17 @@
 fn publish_visual_world_frame(
     rendered: Res<RenderedViewport>,
     runtime_shell: Res<BevyRuntimeShell>,
+    #[cfg(feature = "voxel-view")]
+    settings: Option<Res<crystal_voxel_view::VoxelViewSettings>>,
     map_sprites: Query<
         (&Handle<Image>, &Transform),
         (With<PlayfieldTile>, Without<PlayfieldPriorityTile>),
     >,
     players: Query<(&Handle<Image>, &Sprite, &Transform), With<PlayerMarker>>,
+    multiplayer_ghosts: Query<
+        (&MultiplayerGhost, &Handle<Image>, &Sprite, &Transform),
+        Without<PlayerMarker>,
+    >,
     grass_rustles: Query<
         (&Handle<Image>, &Sprite, &Transform),
         (With<GrassRustleMarker>, Without<PlayerMarker>),
@@ -29,6 +35,18 @@ fn publish_visual_world_frame(
     fullscreen_entities: Query<(), Or<(With<TitleScreenMarker>, With<VisibleIntroSurface>)>>,
     mut published: ResMut<crystal_render_api::VisualWorldFrame>,
 ) {
+    // A feature-enabled browser normally starts in classic 2D mode. Do not
+    // enumerate, sort, and clone every visible actor for an optional renderer
+    // the player has not selected. Tests that exercise extraction in
+    // isolation intentionally omit the settings resource.
+    #[cfg(feature = "voxel-view")]
+    {
+        if settings.as_ref().is_some_and(|settings| !settings.enabled) {
+            clear_published_visual_world(&mut published);
+            return;
+        }
+    }
+
     // These short effects are still authored in classic screen coordinates.
     // Keep the last complete optional-renderer frame underneath them instead
     // of clearing it: clearing deactivates the optional world and visibly
@@ -98,7 +116,10 @@ fn publish_visual_world_frame(
     );
 
     let mut actors = Vec::with_capacity(
-        players.iter().count() + objects.iter().count() + grass_rustles.iter().count(),
+        players.iter().count()
+            + multiplayer_ghosts.iter().count()
+            + objects.iter().count()
+            + grass_rustles.iter().count(),
     );
     let mut player_iter = players.iter();
     if let Some((texture, sprite, transform)) = player_iter.next() {
@@ -120,6 +141,27 @@ fn publish_visual_world_frame(
             return;
         };
         actors.push(actor);
+    }
+
+    let mut visible_ghosts = multiplayer_ghosts.iter().collect::<Vec<_>>();
+    visible_ghosts.sort_by(|left, right| left.0.user_id.cmp(&right.0.user_id));
+    for (ghost, texture, sprite, transform) in visible_ghosts {
+        let Some(actor) = visual_actor(
+            crystal_render_api::VisualActorId::RemotePlayer(remote_player_visual_id(
+                &ghost.user_id,
+            )),
+            Arc::from("remote_player"),
+            texture,
+            sprite,
+            transform,
+            false,
+        ) else {
+            clear_published_visual_world(&mut published);
+            return;
+        };
+        if visual_actor_intersects_grid(&actor, center, published_grid_size) {
+            actors.push(actor);
+        }
     }
 
     // ECS query order is not a presentation contract.  Publish objects in
@@ -215,6 +257,18 @@ fn publish_visual_world_frame(
     } else {
         clear_published_visual_world(&mut published);
     }
+}
+
+fn remote_player_visual_id(user_id: &str) -> u64 {
+    if let Some(id) = user_id
+        .strip_prefix("player-")
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return id;
+    }
+    user_id.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn clear_published_visual_world(published: &mut crystal_render_api::VisualWorldFrame) {
@@ -326,6 +380,19 @@ fn visual_terrain_revision(
 #[cfg(test)]
 mod render_mod_tests {
     use super::*;
+
+    #[test]
+    fn remote_player_visual_ids_are_stable() {
+        assert_eq!(remote_player_visual_id("player-42"), 42);
+        assert_eq!(
+            remote_player_visual_id("custom-user"),
+            remote_player_visual_id("custom-user")
+        );
+        assert_ne!(
+            remote_player_visual_id("custom-user"),
+            remote_player_visual_id("other-user")
+        );
+    }
 
     fn complete_visual_grid() -> Vec<crystal_render_api::VisualTile> {
         (0..VISUAL_WORLD_TILES_Y as u32)

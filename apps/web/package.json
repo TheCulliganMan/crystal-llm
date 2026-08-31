@@ -10,7 +10,6 @@
     "dev": "POKECRYSTAL_REQUIRE_SESSION_SECRET=false node scripts/run-with-bundled-node.js scripts/dev-with-logs.js",
     "build": "POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js scripts/clean-next-artifacts.js && POKECRYSTAL_NEXT_DIST_DIR=${POKECRYSTAL_NEXT_DIST_DIR:-.next-build} node scripts/run-with-bundled-node.js ../../node_modules/next/dist/bin/next build --webpack",
     "build:node": "npm run build",
-    "audio:bundle": "node scripts/run-with-bundled-node.js scripts/generate-audio-bundle.js",
     "export:core": "../../export",
     "export:runtime-fallbacks": "node scripts/run-with-bundled-node.js scripts/export-runtime-fallbacks.js",
     "smoke:assets": "node scripts/run-with-bundled-node.js scripts/smoke-runtime-assets.js",
@@ -36,7 +35,6 @@
     "pw:game:debug": "node scripts/run-with-bundled-node.js scripts/playwright-debug-game.mjs",
     "pw:intro:capture": "node scripts/run-with-bundled-node.js scripts/playwright-capture-intro.mjs",
     "pw:oak:capture": "node scripts/run-with-bundled-node.js scripts/playwright-capture-oak-intro.mjs",
-    "smoke:audio": "bash scripts/smoke-audio-convert.sh",
     "playtest:ai:mcp": "bash scripts/playtest-ai-skill-mcp.sh"
   },
   "keywords": [],
@@ -54,8 +52,6 @@
     "npm": ">=10.5.0"
   },
   "dependencies": {
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/util": "^0.12.2",
     "@fortawesome/fontawesome-svg-core": "^6.7.2",
     "@fortawesome/free-solid-svg-icons": "^6.7.2",
     "@fortawesome/react-fontawesome": "^3.3.0",
@@ -65,7 +61,6 @@
     "@pokecrystal/exporters": "file:../../packages/exporters",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.89.0",
-    "@tonejs/midi": "^2.0.28",
     "@vercel/speed-insights": "^1.3.1",
     "buffer": "^6.0.3",
     "dompurify": "^3.4.0",

@@ -136,12 +136,12 @@ pub mod permissions {
 }
 
 pub const fn is_grass_encounter_permission(permission: u8) -> bool {
+    // Exact CheckGrassCollision.blocks entries except COLL_WATER, which the
+    // encounter-surface resolver handles first as the water table.
     matches!(
         permission,
         permissions::CUT_GRASS
-            | permissions::TALL_GRASS_10
             | permissions::LONG_GRASS
-            | permissions::LONG_GRASS_1C
             | permissions::TALL_GRASS
             | permissions::CUT_GRASS_28
             | permissions::GRASS_48
@@ -617,6 +617,33 @@ mod tests {
     }
 
     #[test]
+    fn grass_encounter_permissions_match_check_grass_collision_table_exactly() {
+        let source_table = [
+            permissions::CUT_GRASS,
+            permissions::TALL_GRASS,
+            permissions::LONG_GRASS,
+            permissions::CUT_GRASS_28,
+            permissions::WATER,
+            permissions::GRASS_48,
+            permissions::GRASS_49,
+            permissions::GRASS_4A,
+            permissions::GRASS_4B,
+            permissions::GRASS_4C,
+        ];
+
+        for permission in u8::MIN..=u8::MAX {
+            // Water is present in CheckGrassCollision.blocks but is resolved
+            // by the dedicated water branch before this grass predicate.
+            let expected = permission != permissions::WATER && source_table.contains(&permission);
+            assert_eq!(
+                is_grass_encounter_permission(permission),
+                expected,
+                "collision {permission:#04x}"
+            );
+        }
+    }
+
+    #[test]
     fn samples_collision_by_metatile_and_quadrant() {
         let sample = sample_collision(&test_map(), &test_tileset(), TilePosition::new(0, 1))
             .expect("collision sample");
@@ -666,6 +693,57 @@ mod tests {
     }
 
     #[test]
+    fn all_collision_attributes_match_the_asm_permission_table() {
+        for permission in u8::MIN..=u8::MAX {
+            let expected_terrain = if matches!(
+                permission,
+                0x07
+                    | 0x0f
+                    | 0x12
+                    | 0x15
+                    | 0x1a
+                    | 0x1d
+                    | 0x27
+                    | 0x2f
+                    | 0x62
+                    | 0x6a
+                    | 0x80..=0x84
+                    | 0x88..=0x8c
+                    | 0x90..=0x9f
+                    | 0xff
+            ) {
+                Terrain::Wall
+            } else if matches!(
+                permission,
+                0x20..=0x22
+                    | 0x24..=0x26
+                    | 0x28..=0x2a
+                    | 0x2c..=0x2e
+                    | 0x30..=0x3f
+                    | 0xc0..=0xcf
+            ) {
+                Terrain::Water
+            } else {
+                Terrain::Land
+            };
+            let expected_talk = matches!(
+                permission,
+                0x12 | 0x15 | 0x1a | 0x1d | 0x22 | 0x24 | 0x2a | 0x2c
+            );
+
+            assert_eq!(
+                describe_collision(permission),
+                CollisionAttributes {
+                    value: permission,
+                    terrain: expected_terrain,
+                    talk: expected_talk,
+                },
+                "collision permission {permission:#04x}"
+            );
+        }
+    }
+
+    #[test]
     fn directional_walls_block_entry_from_matching_direction() {
         assert!(is_direction_blocked(permissions::UP_WALL, Direction::Down));
         assert!(!is_direction_blocked(permissions::UP_WALL, Direction::Up));
@@ -673,6 +751,36 @@ mod tests {
             permissions::RIGHT_WALL,
             Direction::Left
         ));
+    }
+
+    #[test]
+    fn every_side_wall_and_buoy_mask_blocks_the_matching_exit_directions() {
+        for high_nibble in [0xb0, 0xc0] {
+            for (low_nibble, blocked_directions) in [
+                (0, &[Direction::Right][..]),
+                (1, &[Direction::Left][..]),
+                (2, &[Direction::Up][..]),
+                (3, &[Direction::Down][..]),
+                (4, &[Direction::Down, Direction::Right][..]),
+                (5, &[Direction::Down, Direction::Left][..]),
+                (6, &[Direction::Up, Direction::Right][..]),
+                (7, &[Direction::Up, Direction::Left][..]),
+            ] {
+                let permission = high_nibble | low_nibble;
+                for direction in [
+                    Direction::Down,
+                    Direction::Up,
+                    Direction::Left,
+                    Direction::Right,
+                ] {
+                    assert_eq!(
+                        is_direction_blocked_leaving(permission, direction),
+                        blocked_directions.contains(&direction),
+                        "permission {permission:#04x}, direction {direction:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

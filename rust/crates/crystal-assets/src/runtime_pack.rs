@@ -428,60 +428,22 @@ fn compile_audio_payloads(
                 audio_asset.id, audio_asset.path
             )
         })?;
-        let bytes = prepare_pcm_for_runtime(audio_asset, source_bytes)?;
-        validate_compiled_audio_payload(audio_asset, &bytes).with_context(|| {
+        validate_compiled_audio_payload(audio_asset, &source_bytes).with_context(|| {
             format!(
                 "validate compiled audio payload {} ({} bytes at {})",
                 audio_asset.id,
-                bytes.len(),
+                source_bytes.len(),
                 path.display()
             )
         })?;
         if compiled_audio
-            .insert(audio_asset.id.clone(), bytes)
+            .insert(audio_asset.id.clone(), source_bytes)
             .is_some()
         {
             anyhow::bail!("duplicate compiled audio payload '{}'", audio_asset.id);
         }
     }
     Ok(compiled_audio)
-}
-
-fn prepare_pcm_for_runtime(audio_asset: &mut ModpackAudioAsset, bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let Some(format) = audio_asset.pcm_format.as_ref() else {
-        return Ok(bytes);
-    };
-    if !matches!(audio_asset.source, ModpackAudioSource::Pcm)
-        || format.sample_rate_hz != 44_100
-        || format.channels != 2
-        || format.bits_per_sample != 16
-    {
-        return Ok(bytes);
-    }
-    let frame_size = 4usize;
-    if bytes.len() % frame_size != 0 {
-        return Ok(bytes);
-    }
-    let input_frames = bytes.len() / frame_size;
-    let output_frames = input_frames.div_ceil(2);
-    let mut output = Vec::with_capacity(output_frames * 2);
-    for frame in (0..input_frames).step_by(2) {
-        let offset = frame * frame_size;
-        let left = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as i32;
-        let right = i16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]) as i32;
-        let mono = ((left + right) / 2) as i16;
-        output.extend_from_slice(&mono.to_le_bytes());
-    }
-    audio_asset.pcm_format = Some(ModpackPcmAudioFormat {
-        sample_rate_hz: 22_050,
-        channels: 1,
-        bits_per_sample: 16,
-    });
-    audio_asset.pcm_frame_count = Some(output_frames);
-    audio_asset.payload_hash = Some(format!("{:08x}", fnv1a32_bytes(&output)));
-    audio_asset.loop_start_sample = audio_asset.loop_start_sample.map(|sample| sample / 2);
-    audio_asset.loop_end_sample = audio_asset.loop_end_sample.map(|sample| sample / 2);
-    Ok(output)
 }
 
 pub const REQUIRED_VENDOR_RUNTIME_FILE_KEYS: &[&str] = &[
@@ -596,20 +558,14 @@ fn synthetic_compiled_audio_for_tests(data: &GameDataSet) -> BTreeMap<String, Ve
             asset
                 .validate()
                 .unwrap_or_else(|error| panic!("invalid test audio asset {}: {error:#}", asset.id));
-            let bytes = match asset.source {
-                ModpackAudioSource::Midi => {
-                    b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec()
-                }
-                ModpackAudioSource::Pcm => {
-                    let format = asset.pcm_format.as_ref().unwrap_or_else(|| {
-                        panic!("test PCM audio asset {} missing format", asset.id)
-                    });
-                    let frame_size = format.frame_size_bytes(&asset.id).unwrap_or_else(|error| {
-                        panic!("invalid test PCM audio asset {}: {error:#}", asset.id)
-                    });
-                    vec![0; frame_size]
-                }
-            };
+            let format = asset
+                .pcm_format
+                .as_ref()
+                .unwrap_or_else(|| panic!("test PCM audio asset {} missing format", asset.id));
+            let frame_size = format.frame_size_bytes(&asset.id).unwrap_or_else(|error| {
+                panic!("invalid test PCM audio asset {}: {error:#}", asset.id)
+            });
+            let bytes = vec![0; frame_size];
             (asset.id.clone(), bytes)
         })
         .collect()
@@ -634,9 +590,6 @@ fn normalize_test_pcm_audio_metadata(data: &mut GameDataSet) {
 
 pub fn validate_compiled_audio_payload(asset: &ModpackAudioAsset, bytes: &[u8]) -> Result<()> {
     match asset.source {
-        ModpackAudioSource::Midi => {
-            validate_standard_midi_payload(&asset.id, bytes)?;
-        }
         ModpackAudioSource::Pcm => {
             if bytes.is_empty() {
                 anyhow::bail!("compiled PCM audio asset '{}' is empty", asset.id);
@@ -657,241 +610,13 @@ pub fn validate_compiled_audio_payload(asset: &ModpackAudioAsset, bytes: &[u8]) 
                 );
             }
         }
-    }
-    Ok(())
-}
-
-fn validate_standard_midi_payload(id: &str, bytes: &[u8]) -> Result<()> {
-    let mut offset = 0usize;
-    read_audio_chunk_tag(id, bytes, &mut offset, b"MThd")?;
-    let header_len = read_audio_be_u32(id, bytes, &mut offset)? as usize;
-    if header_len != 6 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' header length {header_len} is not 6");
-    }
-    let format = read_audio_be_u16(id, bytes, &mut offset)?;
-    let track_count = read_audio_be_u16(id, bytes, &mut offset)?;
-    let division = read_audio_be_u16(id, bytes, &mut offset)?;
-    if format > 1 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' format {format} is not supported");
-    }
-    if format == 0 && track_count != 1 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' format 0 must contain exactly one track");
-    }
-    if track_count == 0 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' has no tracks");
-    }
-    if division & 0x8000 != 0 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' uses unsupported SMPTE timing");
-    }
-    if division == 0 {
-        anyhow::bail!("compiled MIDI audio asset '{id}' ticks_per_quarter must be positive");
-    }
-    let mut has_note_event = false;
-    for track_index in 0..track_count {
-        read_audio_chunk_tag(id, bytes, &mut offset, b"MTrk")?;
-        let track_len = read_audio_be_u32(id, bytes, &mut offset)? as usize;
-        let track_end = offset.checked_add(track_len).ok_or_else(|| {
-            anyhow::anyhow!("compiled MIDI audio asset '{id}' track {track_index} length overflow")
-        })?;
-        if track_end > bytes.len() {
-            anyhow::bail!(
-                "compiled MIDI audio asset '{id}' track {track_index} exceeds payload length"
-            );
-        }
-        if validate_standard_midi_track_has_note(id, bytes, offset, track_end)? {
-            has_note_event = true;
-        }
-        offset = track_end;
-    }
-    if offset != bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' has trailing bytes after declared tracks");
-    }
-    if !has_note_event {
-        anyhow::bail!("compiled MIDI audio asset '{id}' contains no note events");
-    }
-    Ok(())
-}
-
-fn validate_standard_midi_track_has_note(
-    id: &str,
-    bytes: &[u8],
-    start: usize,
-    end: usize,
-) -> Result<bool> {
-    let mut offset = start;
-    let mut absolute_tick = 0u64;
-    let mut running_status: Option<u8> = None;
-    let mut active_notes = BTreeMap::<(u8, u8), Vec<u64>>::new();
-    while offset < end {
-        absolute_tick = absolute_tick
-            .checked_add(read_audio_var_len(id, bytes, &mut offset, end)? as u64)
-            .ok_or_else(|| {
-                anyhow::anyhow!("compiled MIDI audio asset '{id}' absolute tick overflow")
-            })?;
-        let first = read_audio_u8(id, bytes, &mut offset, end)?;
-        let status = if first & 0x80 != 0 {
-            first
-        } else {
-            running_status.with_context(|| {
-                format!("compiled MIDI audio asset '{id}' uses running status before status byte")
-            })?
-        };
-        let first_data = if first & 0x80 == 0 { Some(first) } else { None };
-        match status {
-            0xff => {
-                running_status = None;
-                let meta_type = read_audio_u8(id, bytes, &mut offset, end)?;
-                let len = read_audio_var_len(id, bytes, &mut offset, end)? as usize;
-                skip_audio_bytes(id, bytes, &mut offset, end, len)?;
-                if meta_type == 0x2f {
-                    break;
-                }
+        ModpackAudioSource::Midi => {
+            if bytes.len() < 22 || !bytes.starts_with(b"MThd") || &bytes[14..18] != b"MTrk" {
+                anyhow::bail!("compiled MIDI audio asset '{}' is invalid", asset.id);
             }
-            0xf0 | 0xf7 => {
-                running_status = None;
-                let len = read_audio_var_len(id, bytes, &mut offset, end)? as usize;
-                skip_audio_bytes(id, bytes, &mut offset, end, len)?;
-            }
-            0x80..=0xef => {
-                running_status = Some(status);
-                let channel = status & 0x0f;
-                let command = status & 0xf0;
-                let data_len = midi_audio_channel_data_len(id, command)?;
-                let data1 = match first_data {
-                    Some(value) => value,
-                    None => read_audio_u8(id, bytes, &mut offset, end)?,
-                };
-                let data2 = if data_len == 2 {
-                    Some(read_audio_u8(id, bytes, &mut offset, end)?)
-                } else {
-                    None
-                };
-                match (command, data2) {
-                    (0x80, Some(_)) | (0x90, Some(0)) => {
-                        let key = (channel, data1);
-                        if let Some(stack) = active_notes.get_mut(&key) {
-                            if let Some(start_tick) = stack.pop() {
-                                if absolute_tick > start_tick {
-                                    return Ok(true);
-                                }
-                            }
-                            if stack.is_empty() {
-                                active_notes.remove(&key);
-                            }
-                        }
-                    }
-                    (0x90, Some(_velocity)) => {
-                        active_notes
-                            .entry((channel, data1))
-                            .or_default()
-                            .push(absolute_tick);
-                    }
-                    _ => {}
-                }
-            }
-            _ => anyhow::bail!(
-                "compiled MIDI audio asset '{id}' has invalid status byte {status:#04x}"
-            ),
         }
     }
-    Ok(false)
-}
-
-fn midi_audio_channel_data_len(id: &str, command: u8) -> Result<usize> {
-    match command {
-        0xc0 | 0xd0 => Ok(1),
-        0x80 | 0x90 | 0xa0 | 0xb0 | 0xe0 => Ok(2),
-        _ => anyhow::bail!(
-            "compiled MIDI audio asset '{id}' has invalid channel command {command:#04x}"
-        ),
-    }
-}
-
-fn read_audio_chunk_tag(
-    id: &str,
-    bytes: &[u8],
-    offset: &mut usize,
-    expected: &[u8; 4],
-) -> Result<()> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' chunk offset overflow"))?;
-    if end > bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' ended before chunk tag");
-    }
-    if &bytes[*offset..end] != expected {
-        anyhow::bail!(
-            "compiled MIDI audio asset '{id}' expected {} chunk",
-            std::str::from_utf8(expected).unwrap_or("MIDI")
-        );
-    }
-    *offset = end;
     Ok(())
-}
-
-fn read_audio_u8(id: &str, bytes: &[u8], offset: &mut usize, limit: usize) -> Result<u8> {
-    if *offset >= limit || *offset >= bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside track event");
-    }
-    let value = bytes[*offset];
-    *offset += 1;
-    Ok(value)
-}
-
-fn read_audio_var_len(id: &str, bytes: &[u8], offset: &mut usize, limit: usize) -> Result<u32> {
-    let mut value = 0u32;
-    for _ in 0..4 {
-        let byte = read_audio_u8(id, bytes, offset, limit)?;
-        value = value
-            .checked_shl(7)
-            .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' varlen overflow"))?
-            | u32::from(byte & 0x7f);
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    anyhow::bail!("compiled MIDI audio asset '{id}' has overlong variable-length value")
-}
-
-fn skip_audio_bytes(
-    id: &str,
-    bytes: &[u8],
-    offset: &mut usize,
-    limit: usize,
-    len: usize,
-) -> Result<()> {
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' event length overflow"))?;
-    if end > limit || end > bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' event exceeds track length");
-    }
-    *offset = end;
-    Ok(())
-}
-
-fn read_audio_be_u16(id: &str, bytes: &[u8], offset: &mut usize) -> Result<u16> {
-    let end = offset
-        .checked_add(2)
-        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' read offset overflow"))?;
-    if end > bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside u16 field");
-    }
-    let value = u16::from_be_bytes(bytes[*offset..end].try_into()?);
-    *offset = end;
-    Ok(value)
-}
-
-fn read_audio_be_u32(id: &str, bytes: &[u8], offset: &mut usize) -> Result<u32> {
-    let end = offset
-        .checked_add(4)
-        .ok_or_else(|| anyhow::anyhow!("compiled MIDI audio asset '{id}' read offset overflow"))?;
-    if end > bytes.len() {
-        anyhow::bail!("compiled MIDI audio asset '{id}' ended inside u32 field");
-    }
-    let value = u32::from_be_bytes(bytes[*offset..end].try_into()?);
-    *offset = end;
-    Ok(value)
 }
 
 fn validate_manifest_shape(manifest: &ModpackManifest) -> Result<()> {

@@ -59,19 +59,17 @@ gfx/pokemon/*/frames.asm
 
 # Python build artifacts
 *.egg-info
-# Generated web runtime assets. Recreate with `npm run export:core`
-# and `npm run audio:bundle --workspace @pokecrystal/web`.
+# Generated web runtime assets. Recreate with `npm run export:core`.
 apps/web/assets/
 apps/web/assets.manifest.json
+apps/web/.cache/
 packages/core/assets.manifest.json
 packages/assets/dist/
 
-# Generated audio bundle
-apps/web/assets/audio/**/*.mp3
-apps/web/assets/audio/manifests/**/*.json
-.asm_to_wav_manifest.json
 content-packs/test/
 /content-packs/core-modular.crystalpack
+/content-packs/gen3.crystalpack
+*.crystalpack
 .DS_Store
 pokecrystal_disassembly/gfx/*
 .coverage
@@ -156,7 +154,6 @@ apps/web/output/web-game/*
 apps/electron/dist/
 apps/electron/release/
 apps/electron/.webpack/
-apps/web/public/ffmpeg/ffmpeg-core.wasm
 apps/web/.next_stale*
 apps/web/output/*
 mcp-*

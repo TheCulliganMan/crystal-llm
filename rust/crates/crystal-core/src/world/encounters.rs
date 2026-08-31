@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-use crate::random::{CrystalRandom, CrystalRandomState, DividerSource, Random};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::random::Random;
+use crate::random::{CrystalRandom, CrystalRandomState, DividerSource};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EncounterSurface {
@@ -84,16 +86,6 @@ pub enum EncounterError {
     MissingEncounterSlotTable { surface: EncounterSurface },
     #[error("encounter music modifier for '{music_id}' has invalid denominator 0")]
     InvalidEncounterMusicModifier { music_id: String },
-    #[error(
-        "encounter music modifier for '{music_id}' overflows encounter threshold byte: {threshold} * {numerator} / {denominator} = {adjusted}"
-    )]
-    EncounterMusicModifierOverflow {
-        music_id: String,
-        threshold: u8,
-        numerator: u8,
-        denominator: u8,
-        adjusted: u16,
-    },
     #[error("map {map_name} runtime tile bounds overflow supported encounter coordinates")]
     RuntimeTileBoundsOverflow { map_name: String },
     #[error(
@@ -216,6 +208,66 @@ pub struct WildEncounterData {
     pub water_rate: Option<u8>,
     pub grass: Option<WildEncounterTable>,
     pub water: Option<WildEncounterTable>,
+    /// Source `SwarmGrassWildMons` entries keyed by the exact script swarm
+    /// token. Active swarms replace only the grass rate/table; water continues
+    /// through Crystal's normal water lookup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub swarm_overrides: BTreeMap<String, WildEncounterSwarmOverride>,
+    /// Optional map-local encounter rooms in runtime-tile coordinates. This
+    /// keeps surface biomes honest without changing encounters everywhere on
+    /// a large generated map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<WildEncounterZone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WildEncounterSwarmOverride {
+    pub engine_flag: String,
+    pub grass_rates: BTreeMap<String, u8>,
+    pub grass: WildEncounterTable,
+}
+
+impl<'de> Deserialize<'de> for WildEncounterSwarmOverride {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawWildEncounterSwarmOverride {
+            #[serde(deserialize_with = "required_encounter_token")]
+            engine_flag: String,
+            #[serde(deserialize_with = "required_grass_rates")]
+            grass_rates: BTreeMap<String, u8>,
+            grass: WildEncounterTable,
+        }
+
+        let raw = RawWildEncounterSwarmOverride::deserialize(deserializer)?;
+        Ok(Self {
+            engine_flag: raw.engine_flag,
+            grass_rates: raw.grass_rates,
+            grass: raw.grass,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WildEncounterZone {
+    pub id: String,
+    pub min_x: i16,
+    pub min_y: i16,
+    pub max_x: i16,
+    pub max_y: i16,
+    pub grass_rates: BTreeMap<String, u8>,
+    pub grass: WildEncounterTable,
+}
+
+impl WildEncounterZone {
+    pub fn contains(&self, x: i16, y: i16) -> bool {
+        (self.min_x..=self.max_x).contains(&x) && (self.min_y..=self.max_y).contains(&y)
+    }
 }
 
 impl<'de> Deserialize<'de> for WildEncounterData {
@@ -244,16 +296,37 @@ impl<'de> Deserialize<'de> for WildEncounterData {
             grass: Option<WildEncounterTable>,
             #[serde(deserialize_with = "required_nullable")]
             water: Option<WildEncounterTable>,
+            #[serde(default)]
+            swarm_overrides: BTreeMap<String, WildEncounterSwarmOverride>,
+            #[serde(default)]
+            zones: Vec<WildEncounterZone>,
         }
 
         let raw = RawWildEncounterData::deserialize(deserializer)?;
+        if let Some(token) = raw
+            .swarm_overrides
+            .keys()
+            .find(|token| !is_exact_nonempty_encounter_token(token))
+        {
+            return Err(D::Error::custom(format!(
+                "encounter token must be exact ASCII alphanumeric/underscore, found {token:?}"
+            )));
+        }
         Ok(Self {
             map_name: raw.map_name,
             grass_rates: raw.grass_rates,
             water_rate: raw.water_rate,
             grass: raw.grass,
             water: raw.water,
+            swarm_overrides: raw.swarm_overrides,
+            zones: raw.zones,
         })
+    }
+}
+
+impl WildEncounterData {
+    pub fn zone_at(&self, x: i16, y: i16) -> Option<&WildEncounterZone> {
+        self.zones.iter().find(|zone| zone.contains(x, y))
     }
 }
 
@@ -289,6 +362,22 @@ where
         }
     }
     Ok(value)
+}
+
+fn required_grass_rates<'de, D>(deserializer: D) -> Result<BTreeMap<String, u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rates = BTreeMap::<String, u8>::deserialize(deserializer)?;
+    if let Some(key) = rates
+        .keys()
+        .find(|key| !is_exact_nonempty_encounter_token(key))
+    {
+        return Err(serde::de::Error::custom(format!(
+            "encounter token must be exact ASCII alphanumeric/underscore, found {key:?}"
+        )));
+    }
+    Ok(rates)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1143,6 +1232,8 @@ fn wild_encounter_species(data: &WildEncounterData) -> BTreeSet<String> {
     for table in [data.grass.as_ref(), data.water.as_ref()]
         .into_iter()
         .flatten()
+        .chain(data.zones.iter().map(|zone| &zone.grass))
+        .chain(data.swarm_overrides.values().map(|swarm| &swarm.grass))
     {
         for encounter in table
             .morning
@@ -1185,6 +1276,15 @@ fn push_wild_encounter_table_issues(
     encounters: &WildEncounterData,
     issues: &mut Vec<WildEncounterCatalogIssue>,
 ) {
+    for swarm in encounters.swarm_overrides.values() {
+        let swarm_data = WildEncounterData {
+            map_name: encounters.map_name.clone(),
+            grass_rates: Some(swarm.grass_rates.clone()),
+            grass: Some(swarm.grass.clone()),
+            ..WildEncounterData::default()
+        };
+        push_wild_encounter_table_issues(map_name, &swarm_data, issues);
+    }
     if let Some(rates) = encounters.grass_rates.as_ref() {
         for time_key in rates.keys() {
             if !is_exact_nonempty_encounter_token(time_key) {
@@ -1431,13 +1531,10 @@ pub fn apply_encounter_music_effect(
     }
     let adjusted =
         (u16::from(threshold) * u16::from(modifier.numerator)) / u16::from(modifier.denominator);
-    u8::try_from(adjusted).map_err(|_| EncounterError::EncounterMusicModifierOverflow {
-        music_id: music_id.to_string(),
-        threshold,
-        numerator: modifier.numerator,
-        denominator: modifier.denominator,
-        adjusted,
-    })
+    // ApplyMusicEffectOnEncounterRate doubles with `sla b` and halves with
+    // `srl b`; the result remains an eight-bit register rather than becoming
+    // an overflow error.
+    Ok(adjusted as u8)
 }
 
 pub fn apply_cleanse_tag_effect(threshold: u8, has_cleanse_tag: bool) -> u8 {
@@ -1465,6 +1562,7 @@ pub fn passes_encounter_roll(threshold: u8, roll_byte: u8) -> bool {
     threshold > 0 && roll_byte < threshold
 }
 
+#[cfg(test)]
 pub fn random_percent_from_bytes<I>(bytes: I) -> Option<u8>
 where
     I: IntoIterator<Item = u8>,
@@ -1507,7 +1605,7 @@ pub fn apply_surf_level_variance(base_level: u8, surface: EncounterSurface, roll
         }
         extra += 1;
     }
-    base_level.saturating_add(extra)
+    base_level.wrapping_add(extra)
 }
 
 pub fn select_wild_encounter(
@@ -1535,6 +1633,12 @@ pub fn select_wild_encounter(
         });
     }
     let level = apply_surf_level_variance(encounter.level, surface, level_roll_byte);
+    // `ChooseWildEncounter` mistakenly calls `ValidateTempWildMonSpecies`
+    // with the selected level still in A. Preserve that cartridge bug: level
+    // 0 and byte values at or above NUM_POKEMON + 1 cancel the encounter.
+    if !(1..=251).contains(&level) {
+        return Ok(None);
+    }
     Ok(Some(ResolvedWildEncounter {
         encounter,
         slot,
@@ -1640,6 +1744,7 @@ pub fn select_headbutt_encounter(
     })
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn roll_headbutt_encounter(
     data: &FieldEncounterData,
     target_tile_x: i16,
@@ -1872,6 +1977,8 @@ mod tests {
                 .collect(),
             ),
             water_rate: Some(15),
+            swarm_overrides: BTreeMap::new(),
+            zones: Vec::new(),
             grass: Some(WildEncounterTable {
                 morning: vec![
                     WildEncounter {
@@ -2270,6 +2377,8 @@ mod tests {
             map_name: " route_29".to_string(),
             grass_rates: None,
             water_rate: None,
+            swarm_overrides: BTreeMap::new(),
+            zones: Vec::new(),
             grass: None,
             water: None,
         };
@@ -2566,7 +2675,7 @@ mod tests {
     }
 
     #[test]
-    fn encounter_music_modifier_overflow_rejects_pack_ratio_without_threshold_truncation() {
+    fn encounter_music_double_wraps_like_the_asm_sla_instruction() {
         let modifiers = EncounterMusicModifiers {
             modifiers: BTreeMap::from([(
                 "MUSIC_POKEMON_MARCH".to_string(),
@@ -2579,13 +2688,7 @@ mod tests {
 
         assert_eq!(
             apply_encounter_music_effect(200, Some("MUSIC_POKEMON_MARCH"), &modifiers),
-            Err(EncounterError::EncounterMusicModifierOverflow {
-                music_id: "MUSIC_POKEMON_MARCH".to_string(),
-                threshold: 200,
-                numerator: 2,
-                denominator: 1,
-                adjusted: 400,
-            })
+            Ok(144)
         );
     }
 
@@ -2655,6 +2758,48 @@ mod tests {
         assert_eq!(
             apply_surf_level_variance(5, EncounterSurface::Water, 243),
             9
+        );
+        assert_eq!(
+            apply_surf_level_variance(255, EncounterSurface::Water, 90),
+            0
+        );
+        assert_eq!(
+            apply_surf_level_variance(253, EncounterSurface::Water, 243),
+            1
+        );
+    }
+
+    #[test]
+    fn chooser_rejects_levels_outside_crystals_mistaken_species_validation_range() {
+        let mut data = sample_data();
+        let water = data.water.as_mut().unwrap();
+        water.morning[0].level = 255;
+        assert_eq!(
+            select_wild_encounter(
+                &data,
+                &slot_tables(),
+                EncounterSurface::Water,
+                TimeOfDay::Morning,
+                1,
+                90,
+            )
+            .unwrap(),
+            None
+        );
+
+        let grass = data.grass.as_mut().unwrap();
+        grass.morning[0].level = 252;
+        assert_eq!(
+            select_wild_encounter(
+                &data,
+                &slot_tables(),
+                EncounterSurface::Grass,
+                TimeOfDay::Morning,
+                1,
+                0,
+            )
+            .unwrap(),
+            None
         );
     }
 

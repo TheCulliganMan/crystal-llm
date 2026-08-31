@@ -4,13 +4,16 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crystal_core::battle::capture::throw_ball_from_bag as core_throw_ball_from_bag;
 use crystal_core::battle::capture::{
     CaptureAttemptContext, CaptureBallRule, CaptureBallRuleIssue, CaptureCompletion,
     CaptureOutcome, CaptureRulesIssue, CaptureWobbleProbability, CaptureWobbleProbabilityIssue,
     capture_rules_issues, capture_wobble_probability_issues,
-    complete_active_wild_capture_result as core_complete_active_wild_capture,
+    complete_active_wild_capture_result_with_transformed_replacement as core_complete_active_wild_capture,
     resolve_capture_attempt_exact as core_resolve_capture_attempt_exact,
-    throw_ball_from_bag as core_throw_ball_from_bag, validate_capture_ball_item,
+    resolve_capture_attempt_with_battle_rng as core_resolve_capture_attempt_with_battle_rng,
+    validate_capture_ball_item,
 };
 use crystal_core::battle::damage::{
     TypeCategories, TypeCategoryIssue, TypeEffectivenessTable, TypeEffectivenessTableIssue,
@@ -19,32 +22,37 @@ use crystal_core::battle::damage::{
 };
 use crystal_core::battle::start::require_active_battle_for_state_item;
 use crystal_core::battle::start::{
-    BattleStatDropGuardOutcome, StaticWildBattleOrigin, StaticWildBattleRequest,
-    StaticWildBattleStart, TrainerBattleAdvanceOutcome, TrainerBattleCompletion,
-    TrainerBattleCompletionOutcome, TrainerBattleRequest, TrainerBattleStartStatus,
-    WildBattleStart, activate_static_wild_battle_start, activate_trainer_battle_start_status,
-    activate_wild_battle_start,
+    ActiveBattlePartySwitchOutcome, BattleStatDropGuardOutcome, StaticWildBattleOrigin,
+    StaticWildBattleRequest, StaticWildBattleStart, TrainerBattleAdvanceOutcome,
+    TrainerBattleCompletion, TrainerBattleCompletionOutcome, TrainerBattleRequest,
+    TrainerBattleStartStatus, WildBattleStart, activate_static_wild_battle_start,
+    activate_trainer_battle_start_status, activate_wild_battle_start,
     advance_active_trainer_battle as core_advance_active_trainer_battle,
     apply_battle_stat_drop_guard_turns, complete_trainer_battle as core_complete_trainer_battle,
     first_available_battle_party_index, materialize_non_roaming_wild_battle_with_rng,
     materialize_roaming_wild_battle_with_rng, materialize_staged_roaming_wild_battle_with_rng,
     materialize_trainer_party, require_active_battle_enemy_party_index,
-    require_active_battle_party_index, static_wild_battle_start, switch_active_battle_party_index,
-    trainer_battle_start,
+    require_active_battle_party_index, require_active_battle_party_slot_index,
+    static_wild_battle_start, switch_active_battle_party_index, trainer_battle_start,
 };
 use crystal_core::battle::stats::{
     BattleStatMultiplier, BattleStatMultiplierTableIssue, BattleStatMultiplierTables,
     battle_stat_multiplier_table_issues,
 };
 use crystal_core::battle::turn::{
-    BattleAction, BattleCombatState, BattleEscapeTrapState, BattleEvent, BattleSide,
-    BattleTurnInput, BattleTurnOutcome, MovePriorityTable, MovePriorityTableIssue,
-    active_battle_combat_state, battle_move_effect_is_supported, commit_battle_turn_outcome,
+    BattleAction, BattleCombatState, BattleEvent, BattleSide, BattleTurnError, BattleTurnInput,
+    BattleTurnOutcome, EnemyMoveSelector, EnemyPostOrderActionSelector, MovePriorityTable,
+    MovePriorityTableIssue, active_battle_combat_state, battle_action_locked_before_menu,
+    battle_move_effect_is_supported, battle_moves, battle_speed, commit_battle_turn_outcome,
     commit_wild_battle_escape_attempt, move_priority_table_issues,
     resolve_battle_enemy_action_with_items as core_resolve_battle_enemy_action_with_items,
+    resolve_battle_turn_with_ball_action_and_enemy_ai_actions as core_resolve_battle_turn_with_ball_action_and_enemy_ai_actions,
+    resolve_battle_turn_with_enemy_ai_actions as core_resolve_battle_turn_with_enemy_ai_actions,
     resolve_battle_turn_with_items as core_resolve_battle_turn_with_items,
     resolve_wild_battle_run as core_resolve_wild_battle_run,
+    resolve_wild_battle_turn_with_enemy_ai_actions as core_resolve_wild_battle_turn_with_enemy_ai_actions,
     resolve_wild_battle_turn_with_items as core_resolve_wild_battle_turn_with_items,
+    select_wild_enemy_move_slot as core_select_wild_enemy_move_slot,
 };
 use crystal_core::input::{B_PAD_A, GameButton, JoypadState, direction_from_pad_mask};
 use crystal_core::map::{
@@ -81,16 +89,18 @@ use crystal_core::multiplayer::{
     RuntimeCommandResultFrame, StateChecksum, StateChecksumFrame, fnv1a32_bytes,
     game_state_checksum, game_state_checksum_unchecked,
 };
+#[cfg(any(test, feature = "test-fixtures"))]
+use crystal_core::random::Random;
 use crystal_core::random::{
-    BattleRandomSource, CrystalRandom, DividerSource, ExactBattleRandom, Random, ReplayDivider,
+    BattleRandomSource, CrystalRandom, DividerSource, ExactBattleRandom, ReplayDivider,
     RuntimeDividerSource,
 };
 use crystal_core::save::SaveModpackIdentity;
 use crystal_core::state::{
-    BattleMemory, BattleTowerState, BuenasPasswordState, BugContestState, DayCareState,
-    EventFlagMemory, FishingMemory, GameState, ItemUseRuntimeEvent, LINK_MODE_COLOSSEUM,
-    LinkSerialConnectionStatus, LinkSessionState, MagikarpRecordState, MysteryGiftState, Options,
-    OverworldMemory, OverworldObjectMapMemory, PendingFieldTravel, PendingMoveLearn,
+    BattleMemory, BattleTowerState, BuenasPasswordState, BugContestState, DayCareInput,
+    DayCareState, EventFlagMemory, FishingMemory, GameState, ItemUseRuntimeEvent,
+    LINK_MODE_COLOSSEUM, LinkSerialConnectionStatus, MagikarpRecordState, MysteryGiftState,
+    Options, OverworldMemory, OverworldObjectMapMemory, PendingFieldTravel, PendingMoveLearn,
     RoamingPokemonState, SavedTrainerBattleFields, SceneMemory, ScriptAudioRuntimeEvent,
     ScriptAudioRuntimeKind, ScriptControlRuntimeEvent, ScriptControlRuntimeKind, ScriptEndState,
     ScriptGraphicsRuntimeEvent, ScriptLocation, ScriptMapLoadRequest, ScriptMapRefreshRequest,
@@ -115,7 +125,6 @@ use crystal_core::state::{
     validate_saved_flag_references as core_validate_saved_flag_references,
     validate_saved_graphics_runtime_event_shape,
     validate_saved_last_talked_object_reference as core_validate_saved_last_talked_object_reference,
-    validate_saved_link_session_references as core_validate_saved_link_session_references,
     validate_saved_map_object_reference as core_validate_saved_map_object_reference,
     validate_saved_map_reference as core_validate_saved_map_reference,
     validate_saved_money_runtime_event_shape,
@@ -138,7 +147,7 @@ use crystal_core::state::{
 };
 use crystal_core::systems::battle_escape::{
     BattleEscapeAttempt, BattleEscapeRules, BattleEscapeRulesIssue,
-    attempt_wild_battle_escape_exact as core_attempt_wild_battle_escape_exact,
+    attempt_wild_battle_escape_exact_with_loaded_speeds as core_attempt_wild_battle_escape_exact_with_loaded_speeds,
     battle_escape_rules_issues,
 };
 use crystal_core::systems::battle_items::{
@@ -221,6 +230,7 @@ use crystal_core::systems::item_use::{
 };
 use crystal_core::systems::learnsets::{
     LearnsetCatalogIssue, LearnsetEntry, SpeciesLearnsets, learnset_catalog_issues,
+    level_up_moves_for_species,
 };
 use crystal_core::systems::map_context::{
     SpawnMemoryUpdate, apply_map_music_context, apply_map_scene_context,
@@ -229,8 +239,9 @@ use crystal_core::systems::map_context::{
 };
 use crystal_core::systems::phone::{
     PermanentPhoneNumberRule, PhoneContactCatalog, PhoneContactCatalogIssue, PhoneContactRecord,
-    SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_REGISTRATION_COMMANDS, ScriptPhoneCommand,
-    ScriptPhoneCommandIssue, ScriptPhoneError, ScriptPhoneInputs, ScriptPhoneOutcome,
+    SCRIPT_PHONE_CHECK_COMMANDS, SCRIPT_PHONE_MUTATION_COMMANDS,
+    SCRIPT_PHONE_REGISTRATION_COMMANDS, ScriptPhoneCommand, ScriptPhoneCommandIssue,
+    ScriptPhoneError, ScriptPhoneInputs, ScriptPhoneOutcome,
     apply_script_phone_command as core_apply_script_phone_command,
     initialize_permanent_phone_numbers as core_initialize_permanent_phone_numbers,
     phone_contact_catalog_issues, script_phone_command_issues,
@@ -275,9 +286,10 @@ use crystal_core::systems::script_objects::{
     SCRIPT_OBJECT_DIRECTION_COMMANDS, SCRIPT_OBJECT_EMOTE_COMMANDS,
     SCRIPT_OBJECT_LAST_TALKED_MOVEMENT_COMMANDS, SCRIPT_OBJECT_MOVEMENT_COMMANDS,
     SCRIPT_OBJECT_NO_PAYLOAD_COMMANDS, SCRIPT_OBJECT_TARGET_COMMANDS,
-    SCRIPT_OBJECT_VISIBILITY_COMMANDS, ScriptMovement, ScriptMovementOutcome, ScriptMovementStep,
-    ScriptMovementStepIssue, ScriptObjectCommand, ScriptObjectCommandIssue,
-    ScriptObjectMutationOutcome, apply_script_movement as core_apply_script_movement,
+    SCRIPT_OBJECT_VISIBILITY_COMMANDS, SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS, ScriptMovement,
+    ScriptMovementOutcome, ScriptMovementStep, ScriptMovementStepIssue, ScriptObjectCommand,
+    ScriptObjectCommandIssue, ScriptObjectMutationOutcome,
+    apply_script_movement as core_apply_script_movement,
     apply_script_object_mutation as core_apply_script_object_mutation,
     is_hideable_object_event_flag, is_known_script_movement_command, is_script_movement_terminator,
     script_movement_step_issues, script_movement_step_runtime_stride, script_object_command_issues,
@@ -298,9 +310,9 @@ use crystal_core::systems::script_runtime::{
 };
 use crystal_core::systems::script_scenes::{
     SCRIPT_SCENE_CHECK_COMMANDS, SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS,
-    SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS, ScriptSceneCommand, ScriptSceneCommandIssue,
-    ScriptSceneOutcome, apply_script_scene_command as core_apply_script_scene_command,
-    script_scene_command_issues,
+    SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS, SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS,
+    ScriptSceneCommand, ScriptSceneCommandIssue, ScriptSceneOutcome,
+    apply_script_scene_command as core_apply_script_scene_command, script_scene_command_issues,
 };
 use crystal_core::systems::script_swarms::{
     ScriptSwarmCommand, ScriptSwarmCommandIssue, ScriptSwarmOutcome,
@@ -380,6 +392,8 @@ use crystal_core::world::collision::{
     describe_collision, is_permission_passable, permissions, sample_collision,
     standard_interaction_script,
 };
+#[cfg(any(test, feature = "test-fixtures"))]
+use crystal_core::world::encounters::roll_headbutt_encounter as core_roll_headbutt_encounter;
 use crystal_core::world::encounters::{
     ENCOUNTER_TIME_KEYS, EncounterMusicModifierIssue, EncounterMusicModifiers, EncounterSlotChance,
     EncounterSlotTableIssue, EncounterSlotTables, EncounterSurface, FieldEncounterCatalogIssue,
@@ -388,8 +402,7 @@ use crystal_core::world::encounters::{
     WildEncounterData, WildEncounterTable, apply_surf_level_variance,
     encounter_music_modifier_issues, encounter_slot_table_issues, field_encounter_catalog_issues,
     resolve_headbutt_encounter as core_resolve_headbutt_encounter,
-    resolve_rock_mon_encounter as core_resolve_rock_mon_encounter,
-    roll_headbutt_encounter as core_roll_headbutt_encounter, select_wild_encounter,
+    resolve_rock_mon_encounter as core_resolve_rock_mon_encounter, select_wild_encounter,
     table_for_surface, wild_encounter_catalog_issues,
 };
 use crystal_core::world::fishing::{
@@ -411,8 +424,9 @@ use crystal_core::world::session::{
     ConnectionDestination, ConnectionTransition, ConnectionTrigger, CoordEventTrigger,
     EncounterCheckOptions, ExactEncounterContext, OverworldInteraction, OverworldInteractionTarget,
     OverworldSession, OverworldSnapshot, WarpDestination, WarpTransition, WarpTrigger,
-    WildEncounterRoll, leading_usable_party_level, object_event_initial_facing,
-    raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
+    WildEncounterRoll, leading_usable_party_ability, leading_usable_party_level,
+    object_event_initial_facing, raw_event_tile_to_runtime_tile_checked,
+    runtime_tile_to_raw_event_tile,
 };
 use crystal_core::world::session::{
     background_event_tile_position_checked, warp_tile_position_checked,
@@ -424,6 +438,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use crystal_core::battle::capture::CaptureRules;
+
+mod gen3_modpack;
+pub use gen3_modpack::{GEN3_MANIFEST_ID, GEN3_SPECIES_COUNT, build_gen3_modpack};
+mod nuzlocke;
+pub use nuzlocke::{NUZLOCKE_MANIFEST_ID, NuzlockeRules};
+mod nuzlocke_modpack;
+pub use nuzlocke_modpack::build_nuzlocke_modpack;
 
 pub mod modpack {
     pub use super::ScriptElevatorDefinition;
@@ -468,23 +489,26 @@ pub mod modpack {
 
     pub use super::{
         COMPILED_GAME_PACK_EXTENSION, COMPILED_GAME_PACK_FORMAT_VERSION, CompiledGamePack,
-        CompiledGamePackIdentity, CompiledModpack, ContentPack, ContentPackCategory,
-        ContentPackFiles, ContentPackIndex, GameDataSet, LoadedCompiledGamePack, MapAccessRule,
-        MapModule, ModpackAudioAsset, ModpackAudioKind, ModpackAudioLoopPolicy,
-        ModpackAudioManifest, ModpackAudioManifestEntry, ModpackAudioPlaybackEntry,
-        ModpackAudioPlaybackMode, ModpackAudioPlaybackPlan, ModpackAudioSource,
-        ModpackCompileOptions, ModpackCompileReport, ModpackCompiler, ModpackManifest,
-        ModpackMetadata, ModpackPayload, PACK_AUDIO_COMPRESSION_GZIP,
-        PACK_AUDIO_COMPRESSION_GZIP_SIDECAR, PlayabilityGraphEdge, PlayabilityRules,
-        PlayabilityStart, ProgressionGrants, ProgressionRequirements, ProgressionRule,
+        CompiledGamePackIdentity, CompiledMapExtension, CompiledModpack, CompiledTilesetExtension,
+        ContentPack, ContentPackCategory, ContentPackFiles, ContentPackIndex, GameDataSet,
+        LoadedCompiledGamePack, MapAccessRule, MapModule, ModpackAudioAsset, ModpackAudioKind,
+        ModpackAudioLoopPolicy, ModpackAudioManifest, ModpackAudioManifestEntry,
+        ModpackAudioPlaybackEntry, ModpackAudioPlaybackMode, ModpackAudioPlaybackPlan,
+        ModpackAudioSource, ModpackCompileOptions, ModpackCompileReport, ModpackCompiler,
+        ModpackManifest, ModpackMetadata, ModpackPayload, PACK_AUDIO_COMPRESSION_GZIP,
+        PACK_AUDIO_COMPRESSION_MIDI, PlayabilityGraphEdge, PlayabilityRules, PlayabilityStart,
+        ProgressionGrants, ProgressionRequirements, ProgressionRule,
         REQUIRED_VENDOR_RUNTIME_FILE_KEYS, VerificationError, VerificationSeverity,
-        load_verified_compiled_game_pack_bytes, pcm_gzip_sidecar_path,
-        read_loaded_verified_compiled_game_pack, read_verified_compiled_game_pack,
-        validate_compiled_runtime_files,
+        load_verified_compiled_game_pack_bytes, read_loaded_verified_compiled_game_pack,
+        read_verified_compiled_game_pack, validate_compiled_runtime_files,
+    };
+    pub use super::{
+        GEN3_MANIFEST_ID, GEN3_SPECIES_COUNT, NUZLOCKE_MANIFEST_ID, NuzlockeRules,
+        build_gen3_modpack, build_nuzlocke_modpack,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use super::{
-        write_compiled_game_pack_for_tests, write_compiled_game_pack_with_pcm_sidecars_for_tests,
+        write_compiled_game_pack_for_tests, write_compiled_game_pack_with_midi_audio_for_tests,
     };
     pub use crystal_core::models::{Trainer, TrainerCatalog};
     pub use crystal_core::systems::special_routines::{

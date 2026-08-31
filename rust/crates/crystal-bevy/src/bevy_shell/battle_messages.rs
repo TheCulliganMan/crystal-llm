@@ -10,6 +10,35 @@ fn visible_battle_player_name(snapshot: &RuntimeShellSnapshot) -> &str {
     }
 }
 
+fn visible_direct_spikes_message(
+    snapshot: &RuntimeShellSnapshot,
+    side: crate::core::battle::turn::BattleSide,
+    outcome: &Option<crate::core::battle::turn::SwitchInSpikesOutcome>,
+) -> Option<String> {
+    if !matches!(
+        outcome,
+        Some(crate::core::battle::turn::SwitchInSpikesOutcome::Damaged { .. })
+    ) {
+        return None;
+    }
+    let battle = snapshot.battle.as_ref()?;
+    let nickname = match side {
+        crate::core::battle::turn::BattleSide::Player => {
+            let active_index = battle.active_player_party_index?;
+            snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.index == active_index)?
+                .pokemon
+                .nickname
+                .as_str()
+        }
+        crate::core::battle::turn::BattleSide::Enemy => battle.enemy_pokemon.nickname.as_str(),
+    };
+    Some(format!("{nickname}'s\nhurt by SPIKES!"))
+}
+
 fn visible_player_withdraw_message(
     runtime_shell: &BevyRuntimeShell,
     snapshot: &RuntimeShellSnapshot,
@@ -412,6 +441,9 @@ fn stage_visible_battle_messages(
                 side, move_name, ..
             }
             | BattleEvent::AttractFailed {
+                side, move_name, ..
+            }
+            | BattleEvent::EscapeTrapFailed {
                 side, move_name, ..
             }
             | BattleEvent::OhkoFailed {
@@ -1092,6 +1124,9 @@ fn stage_visible_battle_messages(
                 crate::core::battle::turn::OhkoFailureReason::Missed { .. } => {
                     "The attack missed!".to_string()
                 }
+                crate::core::battle::turn::OhkoFailureReason::AbilityBlocked { .. } => {
+                    format!("It doesn't affect\n{}!", name(side.other()))
+                }
             }),
             BattleEvent::Disobeyed { .. } if disobedience_nap => None,
             BattleEvent::Disobeyed { side } if disobedience_self_hit => {
@@ -1536,6 +1571,7 @@ fn stage_visible_battle_messages(
             BattleEvent::EscapeTrapApplied { target, .. } => {
                 Some(format!("{}\ncan't escape now!", name(*target)))
             }
+            BattleEvent::EscapeTrapFailed { .. } => Some("But it failed!".to_string()),
             BattleEvent::EscapeTrapEnded { .. } => None,
             BattleEvent::ConfusionApplied { side, target, .. } => {
                 if let Some(trigger_message) = last_move_message_by_side.get(side) {
@@ -2914,9 +2950,7 @@ fn visible_battle_animation_definition(
                     // plus its setup and three-state cadence to terminate.
                     37
                 }
-                "BATTLE_BG_EFFECT_FAINT_MON" => {
-                    14
-                }
+                "BATTLE_BG_EFFECT_FAINT_MON" => 14,
                 "BATTLE_BG_EFFECT_BETA_SEND_OUT_MON1" => {
                     let second_increment = bg_events
                         .iter()
@@ -4389,8 +4423,7 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
         &runtime_shell.shell,
         "headbutt",
         permission,
-    )?
-        && snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "headbutt")?
+    )? && snapshot_has_field_move_actor_and_badge(&snapshot, &runtime_shell.shell, "headbutt")?
     {
         open_visible_contextual_field_move_prompt(
             runtime_shell,
@@ -4402,12 +4435,8 @@ fn execute_visible_contextual_field_move(runtime_shell: &mut BevyRuntimeShell) -
     Ok(false)
 }
 
-fn source_allows_contextual_surf_prompt(
-    movement_mode: MovementMode,
-    always_on_bike: bool,
-) -> bool {
-    !always_on_bike
-        && !matches!(movement_mode, MovementMode::Surf | MovementMode::SurfPika)
+fn source_allows_contextual_surf_prompt(movement_mode: MovementMode, always_on_bike: bool) -> bool {
+    !always_on_bike && !matches!(movement_mode, MovementMode::Surf | MovementMode::SurfPika)
 }
 
 fn source_allows_contextual_block_field_move_prompt(
@@ -4741,7 +4770,9 @@ fn use_visible_cut(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         frame: 0,
     });
     runtime_shell.pending_field_notice_sound = Some("SFX_PLACE_PUZZLE_PIECE_DOWN".to_string());
-    runtime_shell.pending_field_notice_effect_frames = Some(32);
+    // OWCutAnimation spends one DelayFrame spawning the object, 32 more
+    // decrementing wFrameCounter, and one final DelayFrame setting EXIT.
+    runtime_shell.pending_field_notice_effect_frames = Some(34);
     runtime_shell.last_audio_events.push(format!(
         "field cut party_index={} target=({}, {}) outcome={:?} checksum={:?}",
         party_index, metatile_x, metatile_y, field_move.outcome, field_move.state_checksum
@@ -4762,7 +4793,6 @@ fn use_visible_cut(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 
 fn use_visible_whirlpool(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let target_tile = facing_runtime_tile(&snapshot)?;
     let party_index = party_index_for_field_move_rule(
         &snapshot,
         &runtime_shell.shell,
@@ -4797,11 +4827,7 @@ fn use_visible_whirlpool(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         "WHIRLPOOL",
     )?);
     runtime_shell.pending_field_notice_sound = Some("SFX_SURF".to_string());
-    runtime_shell.pending_field_notice_effect_frames = Some(32);
-    runtime_shell.visible_whirlpool_animation = Some(VisibleWhirlpoolAnimation {
-        target_tile,
-        frame: 0,
-    });
+    runtime_shell.pending_whirlpool_sound_wait = true;
     continue_visible_script_after_prompt(runtime_shell)?;
     Ok(())
 }
@@ -4820,10 +4846,7 @@ fn use_visible_strength(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         "field strength party_index={} script={} checksum={:?}",
         party_index, dispatch.next_script, dispatch.state_checksum
     ));
-    set_shell_action_status(
-        runtime_shell,
-        format!("STRENGTH {}", dispatch.next_script),
-    );
+    set_shell_action_status(runtime_shell, format!("STRENGTH {}", dispatch.next_script));
     consume_visible_dispatched_field_script(runtime_shell)
 }
 
@@ -4853,7 +4876,6 @@ fn use_visible_flash(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     )?);
     runtime_shell.visible_flash_animation = Some(VisibleFlashAnimation { frame: 0 });
     runtime_shell.pending_field_notice_sound = Some("SFX_FLASH".to_string());
-    runtime_shell.pending_field_notice_effect_frames = Some(16);
     continue_visible_script_after_prompt(runtime_shell)?;
     Ok(())
 }
@@ -4961,6 +4983,7 @@ fn use_visible_fly(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.visible_fly_animation = Some(VisibleFlyAnimation {
         phase: VisibleFlyAnimationPhase::From,
         frame: 0,
+        actor_party_index: party_index,
     });
     let BevyRuntimeShell {
         shell,
@@ -5109,10 +5132,7 @@ fn use_visible_headbutt(runtime_shell: &mut BevyRuntimeShell, from_menu: bool) -
         "headbutt",
         runtime_shell.party_cursor,
     )?;
-    record_visible_runtime_action(
-        runtime_shell,
-        format!("field_move:headbutt:{party_index}"),
-    )?;
+    record_visible_runtime_action(runtime_shell, format!("field_move:headbutt:{party_index}"))?;
     let dispatch = runtime_shell
         .shell
         .queue_headbutt_script(party_index, from_menu)?;
@@ -5125,10 +5145,7 @@ fn use_visible_headbutt(runtime_shell: &mut BevyRuntimeShell, from_menu: bool) -
         "field headbutt party_index={} script={} checksum={:?}",
         party_index, dispatch.next_script, dispatch.state_checksum
     ));
-    set_shell_action_status(
-        runtime_shell,
-        format!("HEADBUTT {}", dispatch.next_script),
-    );
+    set_shell_action_status(runtime_shell, format!("HEADBUTT {}", dispatch.next_script));
     consume_visible_dispatched_field_script(runtime_shell)
 }
 
@@ -5683,15 +5700,17 @@ fn resolve_visible_battle_move_switch_to(
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+    let Some((enemy_action, turn)) = resolve_active_battle_turn_with_enemy_ai(
         runtime_shell,
-        &snapshot,
         battle,
         BattleAction::MoveSwitch {
             slot: move_slot,
             party_index,
         },
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         _ => None,
@@ -5756,12 +5775,14 @@ fn switch_visible_battle_pokemon_to(
     if visible_active_battle_player_fainted(&snapshot) {
         return switch_visible_battle_party_without_turn(runtime_shell, party_index);
     }
-    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+    let Some((enemy_action, turn)) = resolve_active_battle_turn_with_enemy_ai(
         runtime_shell,
-        &snapshot,
         battle,
         BattleAction::Switch { party_index },
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         _ => None,
@@ -5800,14 +5821,26 @@ fn settle_visible_battle_after_action(runtime_shell: &mut BevyRuntimeShell) -> R
     for _ in 0..MAX_BATTLE_SETTLE_STEPS {
         let snapshot = runtime_shell.shell.snapshot()?;
         let Some(battle) = snapshot.battle.as_ref() else {
-            runtime_shell.trainer_items_used.clear();
             return Ok(());
         };
+        if battle.battle_type == "BATTLETYPE_LINK" {
+            if visible_active_battle_player_fainted(&snapshot)
+                && !battle.commands.switch_party_indices.is_empty()
+            {
+                handle_visible_player_fainted_battle_boundary(runtime_shell, &snapshot, battle)?;
+            }
+            // Link replacements are selected by the fainted player and arrive
+            // over the synchronized action channel. A terminal party knockout
+            // is completed by the hosted session after both deterministic
+            // clients observe the same result; never run blackout or trainer
+            // AI's first-usable-party fallback here.
+            return Ok(());
+        }
         if visible_active_battle_player_fainted(&snapshot) {
             handle_visible_player_fainted_battle_boundary(runtime_shell, &snapshot, battle)?;
             return Ok(());
         }
-        if battle.enemy_pokemon.hp != 0 {
+        if battle.enemy_pokemon.hp != 0 || battle.enemy_spikes_zero_hp_unchecked {
             return Ok(());
         }
         match battle.kind {
@@ -5842,11 +5875,11 @@ fn visible_active_battle_player_fainted(snapshot: &RuntimeShellSnapshot) -> bool
         .slots
         .iter()
         .find(|slot| slot.is_active_battle_pokemon);
-    if snapshot.battle.is_some() {
-        active.is_some_and(|slot| slot.pokemon.hp == 0)
-    } else {
-        active.is_some_and(|slot| slot.pokemon.hp == 0)
-    }
+    active.is_some_and(|slot| slot.pokemon.hp == 0)
+        && snapshot
+            .battle
+            .as_ref()
+            .is_none_or(|battle| !battle.player_spikes_zero_hp_unchecked)
 }
 
 fn should_offer_trainer_shift_switch(
@@ -6064,6 +6097,12 @@ fn switch_visible_battle_party_without_turn(
     runtime_shell: &mut BevyRuntimeShell,
     party_index: usize,
 ) -> Result<()> {
+    let is_link_battle = runtime_shell
+        .shell
+        .snapshot()?
+        .battle
+        .as_ref()
+        .is_some_and(|battle| battle.battle_type == "BATTLETYPE_LINK");
     record_visible_runtime_action(runtime_shell, format!("battle:replacement:{party_index}"))?;
     let switched = runtime_shell
         .shell
@@ -6078,6 +6117,13 @@ fn switch_visible_battle_party_without_turn(
     runtime_shell
         .battle_messages
         .push_back(send_out_message.clone());
+    if let Some(message) = visible_direct_spikes_message(
+        &replacement,
+        crate::core::battle::turn::BattleSide::Player,
+        &switched.spikes,
+    ) {
+        runtime_shell.battle_messages.push_back(message);
+    }
     runtime_shell.battle_player_send_out_pending = true;
     runtime_shell.battle_message_scene = Some(Box::new(replacement));
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -6107,7 +6153,22 @@ fn switch_visible_battle_party_without_turn(
         format!("SENT PARTY #{}", switched.party_index),
     );
     trim_event_log(&mut runtime_shell.last_audio_events);
-    settle_visible_battle_after_action(runtime_shell)?;
+    if is_link_battle {
+        queue_visible_link_battle_replacement(runtime_shell, switched.party_index)?;
+        if matches!(
+            switched.spikes,
+            Some(crate::core::battle::turn::SwitchInSpikesOutcome::Damaged { hp_after: 0, .. })
+        ) {
+            settle_visible_battle_after_action(runtime_shell)?;
+        }
+        return Ok(());
+    }
+    if !matches!(
+        switched.spikes,
+        Some(crate::core::battle::turn::SwitchInSpikesOutcome::Damaged { hp_after: 0, .. })
+    ) {
+        settle_visible_battle_after_action(runtime_shell)?;
+    }
     Ok(())
 }
 
@@ -6155,6 +6216,13 @@ fn switch_visible_trainer_shift_party_without_turn(
     runtime_shell
         .battle_messages
         .push_back(send_out_message.clone());
+    if let Some(message) = visible_direct_spikes_message(
+        &replacement,
+        crate::core::battle::turn::BattleSide::Player,
+        &switched.spikes,
+    ) {
+        runtime_shell.battle_messages.push_back(message);
+    }
     runtime_shell.battle_player_send_out_pending = false;
     runtime_shell
         .battle_message_scenes
@@ -6277,12 +6345,7 @@ fn throw_visible_battle_ball_id(
         runtime_shell,
         format!("battle:ball:{ball_id}:index:{}", ball_index + 1),
     )?;
-    let capture = runtime_shell.shell.throw_ball_at_active_battle(&ball_id)?;
-    if capture
-        .outcome
-        .as_ref()
-        .is_some_and(|outcome| outcome.storage_full)
-    {
+    if runtime_shell.shell.active_battle_capture_storage_full()? {
         runtime_shell
             .battle_messages
             .push_back("The <PKMN> BOX\nis full. That\ncan't be used now.".to_string());
@@ -6298,7 +6361,19 @@ fn throw_visible_battle_ball_id(
         set_shell_action_status(runtime_shell, "BOX FULL");
         return Ok(());
     }
-    record_visible_battle_item_action_frame(runtime_shell, &ball_id)?;
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("Ball throw lost its active battle")?;
+    let battle_before_turn = battle.clone();
+    let used = resolve_active_battle_ball_turn_with_enemy_ai(runtime_shell, battle, &ball_id)?;
+    let outcome = &used.capture;
+    record_visible_battle_action_frame(
+        runtime_shell,
+        BattleAction::Ball {
+            item_id: ball_id.clone(),
+        },
+    )?;
     let use_message = format!(
         "{} used the {}.",
         visible_battle_player_name(&snapshot),
@@ -6311,15 +6386,15 @@ fn throw_visible_battle_ball_id(
         "threw ball_index={} ball={} outcome={:?} checksum={:?}",
         ball_index + 1,
         ball_id,
-        capture.outcome,
-        capture.state_checksum
+        outcome,
+        used.turn.state_checksum
     ));
     set_shell_action_status(
         runtime_shell,
-        visible_capture_attempt_status(&ball_id, capture.outcome.as_ref()),
+        visible_capture_attempt_status(&ball_id, Some(outcome)),
     );
     reset_visible_battle_action_cursors(runtime_shell);
-    if let Some(outcome) = capture.outcome.as_ref() {
+    {
         runtime_shell.visible_capture_animation = Some(VisibleCaptureAnimation {
             trigger_message: use_message,
             ball_id: ball_id.clone(),
@@ -6338,8 +6413,6 @@ fn throw_visible_battle_ball_id(
             runtime_shell
                 .battle_messages
                 .push_back("Don't be a thief!".to_string());
-            runtime_shell.pending_enemy_response_after_capture =
-                Some((ball_id.clone(), "Don't be a thief!".to_string()));
             record_visible_runtime_action(
                 runtime_shell,
                 format!("battle:capture_blocked:{ball_id}:index:{}", ball_index + 1),
@@ -6404,7 +6477,26 @@ fn throw_visible_battle_ball_id(
                 _ => "Shoot! It was so\nclose too!".to_string(),
             };
             runtime_shell.battle_messages.push_back(text.clone());
-            runtime_shell.pending_enemy_response_after_capture = Some((ball_id.clone(), text));
+        }
+        let response_events = used
+            .turn
+            .outcome
+            .events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event,
+                    crate::core::battle::turn::BattleEvent::BallThrown {
+                        side: crate::core::battle::turn::BattleSide::Player,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        stage_visible_battle_messages(runtime_shell, &snapshot, &response_events);
+        if !outcome.caught {
+            settle_visible_resolved_battle_turn(runtime_shell, &battle_before_turn)?;
         }
         mark_runtime_snapshot_dirty(runtime_shell);
     }
@@ -6972,13 +7064,13 @@ fn push_visible_battle_reward_events(
             .iter()
             .any(|evolution_move| evolution_move.name == learned.name)
     }) {
-        runtime_shell.battle_messages.extend(
-            visible_pending_move_learn_intro_pages(
+        runtime_shell
+            .battle_messages
+            .extend(visible_pending_move_learn_intro_pages(
                 runtime_shell,
                 recipient_name,
                 &learned.name,
-            )?,
-        );
+            )?);
         runtime_shell
             .last_audio_events
             .push(format!("battle reward pending move learn {}", learned.name));
@@ -7103,6 +7195,13 @@ fn advance_visible_trainer_battle(runtime_shell: &mut BevyRuntimeShell) -> Resul
         runtime_shell
             .battle_messages
             .push_back(send_out_message.clone());
+        if let Some(message) = visible_direct_spikes_message(
+            &replacement,
+            crate::core::battle::turn::BattleSide::Enemy,
+            &advance.spikes,
+        ) {
+            runtime_shell.battle_messages.push_back(message);
+        }
         runtime_shell.battle_enemy_send_out_pending = true;
         defer_visible_battle_cry_after_message(
             runtime_shell,
@@ -7436,12 +7535,9 @@ fn sell_selected_bag_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let selected_index = strict_readonly_cursor_index(
-        &runtime_shell.sell_cursor,
-        "sell:bag",
-        sellable.len(),
-    )
-    .context("shop sell surface sell:bag is active without a valid cursor")?;
+    let selected_index =
+        strict_readonly_cursor_index(&runtime_shell.sell_cursor, "sell:bag", sellable.len())
+            .context("shop sell surface sell:bag is active without a valid cursor")?;
     begin_visible_shop_quantity(
         runtime_shell,
         snapshot.pending_shop.as_ref().context("no active shop")?,
@@ -7707,9 +7803,8 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
         VisibleBillPcAction::MoveWithoutMail => {
             let snapshot = runtime_shell.shell.snapshot()?;
             if visible_storage_contains_mail(&snapshot) {
-                runtime_shell.pc_notice = Some(
-                    "There is a #MON holding MAIL.\n\nPlease remove the MAIL.".to_string(),
-                );
+                runtime_shell.pc_notice =
+                    Some("There is a #MON holding MAIL.\n\nPlease remove the MAIL.".to_string());
                 runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
                     surface_id: "pc:bill-actions".to_string(),
                     option_index: 3,
@@ -7725,7 +7820,11 @@ fn confirm_visible_bill_pc_action(runtime_shell: &mut BevyRuntimeShell) -> Resul
             runtime_shell.save_flow = Some(VisibleSaveFlow {
                 stage: VisibleSaveFlowStage::Prompt,
                 origin: VisibleSaveFlowOrigin::BillsPcMove,
-                save_exists: path.exists(),
+                save_exists: runtime_shell
+                    .shell
+                    .runtime()
+                    .load_save_summary(path)
+                    .is_ok(),
                 yes_no_index: 0,
             });
             set_shell_action_status(runtime_shell, "MOVE POKEMON SAVE");
@@ -7798,12 +7897,11 @@ fn confirm_visible_bill_pc_box_action(runtime_shell: &mut BevyRuntimeShell) -> R
                 )?;
                 set_shell_action_status(runtime_shell, "THERE'S NO POKEMON");
             } else {
-                runtime_shell.pc_notice = Some(
-                    "Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.".to_string(),
-                );
-                runtime_shell.last_audio_events.push(
-                    "Game Boy Printer link unavailable: source Printer Error 2".to_string(),
-                );
+                runtime_shell.pc_notice =
+                    Some("Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.".to_string());
+                runtime_shell
+                    .last_audio_events
+                    .push("Game Boy Printer link unavailable: source Printer Error 2".to_string());
                 set_shell_action_status(runtime_shell, "PRINTER ERROR 2");
                 mark_runtime_presentation_dirty(runtime_shell);
             }
@@ -7839,7 +7937,11 @@ fn begin_visible_bill_pc_box_switch(
         origin: VisibleSaveFlowOrigin::BillsPcChangeBox {
             box_index: selected,
         },
-        save_exists: path.exists(),
+        save_exists: runtime_shell
+            .shell
+            .runtime()
+            .load_save_summary(path)
+            .is_ok(),
         yes_no_index: 0,
     });
     set_shell_action_status(runtime_shell, "CHANGE BOX SAVE");
@@ -7930,8 +8032,7 @@ fn commit_visible_bill_pc_move_save(runtime_shell: &mut BevyRuntimeShell) -> Res
         .bill_pc_move_save
         .as_ref()
         .filter(|pending| {
-            pending.phase == VisibleBillPcMoveSavePhase::BeforeMove
-                && pending.frames_remaining == 0
+            pending.phase == VisibleBillPcMoveSavePhase::BeforeMove && pending.frames_remaining == 0
         })
         .cloned()
         .context("Bill's PC MOVE save reached commit without its completed 20-frame hold")?;
@@ -8085,7 +8186,9 @@ fn confirm_visible_pc_hub(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 .special_boundary
                 .take()
                 .context("Prof. Oak PC did not open its rating boundary")?;
-            runtime_shell.special_boundary_queue.push_front(rating_boundary);
+            runtime_shell
+                .special_boundary_queue
+                .push_front(rating_boundary);
             runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
                 label: "PokecenterOaksPCText".to_string(),
                 details: vec![
@@ -8445,9 +8548,8 @@ fn confirm_visible_decoration_menu(runtime_shell: &mut BevyRuntimeShell) -> Resu
             item_cursor_index,
             cursor,
         } => {
-            let selected =
-                strict_readonly_cursor_index(&Some(cursor), "pc:decorations:side", 3)
-                    .context("decoration side menu requires a valid cursor")?;
+            let selected = strict_readonly_cursor_index(&Some(cursor), "pc:decorations:side", 3)
+                .context("decoration side menu requires a valid cursor")?;
             if selected == 2 {
                 return return_visible_decoration_to_items(
                     runtime_shell,
@@ -8460,15 +8562,18 @@ fn confirm_visible_decoration_menu(runtime_shell: &mut BevyRuntimeShell) -> Resu
             } else {
                 DecorationSide::Left
             };
-            let selected_name = decoration_id.as_deref().map(|id| {
-                visible_decoration_entries(runtime_shell, category).and_then(|decorations| {
-                    Ok(decorations
-                        .into_iter()
-                        .find(|decoration| decoration.id == id)
-                        .with_context(|| format!("decoration menu is missing {id}"))?
-                        .display_name)
+            let selected_name = decoration_id
+                .as_deref()
+                .map(|id| {
+                    visible_decoration_entries(runtime_shell, category).and_then(|decorations| {
+                        Ok(decorations
+                            .into_iter()
+                            .find(|decoration| decoration.id == id)
+                            .with_context(|| format!("decoration menu is missing {id}"))?
+                            .display_name)
+                    })
                 })
-            }).transpose()?;
+                .transpose()?;
             let outcome = if let Some(decoration_id) = decoration_id {
                 runtime_shell
                     .shell
@@ -8739,7 +8844,8 @@ fn resolve_visible_pc_confirmation(
     if !accepted
         && !matches!(
             &confirmation,
-            VisiblePcConfirmation::NpcTrade(_)
+            VisiblePcConfirmation::LinkTrade
+                | VisiblePcConfirmation::NpcTrade(_)
                 | VisiblePcConfirmation::ScriptPartyIntro(_)
                 | VisiblePcConfirmation::NameRaterRename
                 | VisiblePcConfirmation::MoveDeletion { .. }
@@ -8752,6 +8858,14 @@ fn resolve_visible_pc_confirmation(
         return Ok(());
     }
     match confirmation {
+        VisiblePcConfirmation::LinkTrade => {
+            runtime_shell.pending_link_trade_confirmation = Some(accepted);
+            runtime_shell.last_action_status = Some(if accepted {
+                "Link trade confirmed".to_string()
+            } else {
+                "Link trade declined".to_string()
+            });
+        }
         VisiblePcConfirmation::TossItem {
             item_id,
             stack_index,
@@ -9006,13 +9120,8 @@ fn resolve_visible_pc_confirmation(
                         }
                     })
                     .context("Move Tutor party selection is no longer present")?;
-                let retained_move_id = match runtime_shell
-                    .pending_script_party_selection
-                    .as_ref()
-                {
-                    Some(PendingScriptPartySelection::MoveTutor { move_id, .. }) => {
-                        move_id.clone()
-                    }
+                let retained_move_id = match runtime_shell.pending_script_party_selection.as_ref() {
+                    Some(PendingScriptPartySelection::MoveTutor { move_id, .. }) => move_id.clone(),
                     _ => unreachable!("Move Tutor selection was just retained"),
                 };
                 let mut prompt = visible_move_tutor_text_boundaries(
@@ -9197,15 +9306,17 @@ fn resolve_visible_pc_confirmation(
                 .as_ref()
                 .context("Day-Care withdrawal confirmation has no resident Pokemon")?;
             let nickname = pokemon.nickname.clone();
-            let gained = pokemon.level.saturating_sub(resident.initial_level);
+            let current_level =
+                crate::core::systems::special_routines::day_care_level_from_experience(
+                    pokemon,
+                    runtime_shell.shell.runtime().growth_rates(),
+                )?;
+            let gained = current_level.saturating_sub(pokemon.level);
             if !confirm_withdrawal {
                 let fee = 100u32.saturating_add(u32::from(gained) * 100);
                 let mut named_buffers = before.script_events.named_buffers.clone();
                 named_buffers.insert("STRING_BUFFER_1".to_string(), nickname.clone());
-                named_buffers.insert(
-                    "wStringBuffer2 + 1".to_string(),
-                    gained.to_string(),
-                );
+                named_buffers.insert("wStringBuffer2 + 1".to_string(), gained.to_string());
                 named_buffers.insert("wStringBuffer2 + 2".to_string(), fee.to_string());
                 let mut boundaries = visible_exported_special_text_boundaries_with_named_buffers(
                     runtime_shell,
@@ -9242,30 +9353,26 @@ fn resolve_visible_pc_confirmation(
                 RuntimeDayCareAction::Withdraw,
                 None,
             )?;
-            let snapshot = runtime_shell.shell.snapshot()?;
-            let interaction = snapshot
-                .day_care
-                .last_interaction
-                .as_ref()
-                .context("Day-Care withdrawal produced no result")?;
+            let SpecialRoutineEffect::DayCareInteraction {
+                success,
+                pokemon,
+                reason,
+                ..
+            } = &used.outcome.effect
+            else {
+                anyhow::bail!("Day-Care withdrawal returned {:?}", used.outcome.effect);
+            };
             runtime_shell.special_boundary_queue.clear();
-            let (label, text_target) = match interaction.reason.as_deref() {
-                None if interaction.success => {
-                    ("DayCareWithdrawText", "_PerfectHeresYourMonText")
-                }
+            let (label, text_target) = match reason.as_deref() {
+                None if *success => ("DayCareWithdrawText", "_PerfectHeresYourMonText"),
                 Some("party_full") => ("DayCarePartyFullText", "_HaveNoRoomText"),
-                Some("not_enough_money") => {
-                    ("DayCareNotEnoughMoneyText", "_NotEnoughMoneyText")
-                }
+                Some("not_enough_money") => ("DayCareNotEnoughMoneyText", "_NotEnoughMoneyText"),
                 _ => ("DayCareOhFineText", "_OhFineThenText"),
             };
-            let mut boundaries = visible_exported_special_text_boundaries(
-                runtime_shell,
-                label,
-                text_target,
-            )?;
-            if interaction.success {
-                runtime_shell.pending_special_cry = interaction.pokemon.clone();
+            let mut boundaries =
+                visible_exported_special_text_boundaries(runtime_shell, label, text_target)?;
+            if *success {
+                runtime_shell.pending_special_cry = pokemon.clone();
                 boundaries.extend(visible_exported_special_text_boundaries_with_buffer(
                     runtime_shell,
                     "DayCareGotBackText",
@@ -9306,16 +9413,13 @@ fn resolve_visible_pc_confirmation(
                 RuntimeDayCareAction::CollectEgg,
                 None,
             )?;
-            let success = runtime_shell
-                .shell
-                .snapshot()?
-                .day_care
-                .last_interaction
-                .as_ref()
-                .is_some_and(|interaction| interaction.success);
+            let SpecialRoutineEffect::DayCareInteraction { success, .. } = &used.outcome.effect
+            else {
+                anyhow::bail!("Day-Care Egg pickup returned {:?}", used.outcome.effect);
+            };
             runtime_shell
                 .shell
-                .set_script_runtime_accumulator(if success { "FALSE" } else { "TRUE" })?;
+                .set_script_runtime_accumulator(if *success { "FALSE" } else { "TRUE" })?;
             runtime_shell.last_audio_events.push(format!(
                 "day-care egg pickup outcome={:?}",
                 used.outcome.effect

@@ -1,0 +1,4 @@
+- navigation "Display controls" [ref=e3]:
+  - button "Switch to 2.5D" [ref=e4] [cursor=pointer]: 2D
+  - button "Fullscreen" [ref=e5] [cursor=pointer]: ⛶
+  - button "Controls" [ref=e6] [cursor=pointer]: "?"

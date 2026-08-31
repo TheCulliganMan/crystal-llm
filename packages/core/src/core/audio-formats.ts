@@ -1,16 +1,16 @@
 /**
  * Shared audio helpers for locating assets with multiple extensions.
  *
- * This keeps the midi/wav discovery logic centralized so the game,
+ * This keeps canonical PCM discovery logic centralized so the game,
  * exporters, and dataset builders all agree on available audio formats.
  */
 
 import * as path from 'path';
 import * as fs from 'fs';
 
-export const AUDIO_EXTENSIONS = ['.mid', '.midi', '.wav'];
-export const MUSIC_AUDIO_EXTENSIONS = ['.mid', '.midi', '.wav'];
-export const PCM_AUDIO_EXTENSIONS = ['.wav'];
+export const AUDIO_EXTENSIONS = ['.pcm'];
+export const MUSIC_AUDIO_EXTENSIONS = ['.pcm'];
+export const PCM_AUDIO_EXTENSIONS = ['.pcm'];
 
 const _EXTENSION_PRIORITIES = Object.fromEntries(
   AUDIO_EXTENSIONS.map((ext, idx) => [ext, idx])

@@ -144,10 +144,10 @@ pub fn calculate_experience(
     let n = i32::from(level);
     let n2 = n * n;
     let n3 = n2 * n;
-    Ok(
+    let experience =
         ((curve.numerator * n3) / curve.denominator) + (curve.quadratic * n2) + (curve.linear * n)
-            - curve.constant,
-    )
+            - curve.constant;
+    Ok(experience & 0x00ff_ffff)
 }
 
 fn is_exact_growth_rate_token(value: &str) -> bool {
@@ -245,6 +245,16 @@ mod tests {
         assert_eq!(
             calculate_experience(&catalog, "GROWTH_SLOW", 50),
             Ok(156250)
+        );
+    }
+
+    #[test]
+    fn medium_slow_level_one_experience_underflows_in_three_bytes() {
+        let catalog = crystal_growth_rate_catalog_for_tests();
+
+        assert_eq!(
+            calculate_experience(&catalog, "GROWTH_MEDIUM_SLOW", 1),
+            Ok(0x00ff_ffca)
         );
     }
 

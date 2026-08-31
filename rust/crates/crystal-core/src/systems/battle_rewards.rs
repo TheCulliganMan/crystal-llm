@@ -2031,13 +2031,9 @@ mod tests {
             ai_layers: Vec::new(),
         };
         state.script_runtime.active_battle_combat = Some(
-            crate::battle::turn::BattleCombatState::new(
-                player.clone(),
-                defeated.clone(),
-                state.rng_seed,
-            )
-            .with_parties(vec![player, previous_participant], vec![defeated])
-            .with_party_indices(0, 0),
+            crate::battle::turn::BattleCombatState::new(player.clone(), defeated.clone())
+                .with_parties(vec![player, previous_participant], vec![defeated])
+                .with_party_indices(0, 0),
         );
 
         let mut tower_state = state.clone();
@@ -2472,13 +2468,9 @@ mod tests {
             Dv::default(),
         );
         state.script_runtime.active_battle_combat = Some(
-            crate::battle::turn::BattleCombatState::new(
-                player.clone(),
-                enemy.clone(),
-                state.rng_seed,
-            )
-            .with_parties(vec![player], vec![enemy])
-            .with_party_indices(0, 0),
+            crate::battle::turn::BattleCombatState::new(player.clone(), enemy.clone())
+                .with_parties(vec![player], vec![enemy])
+                .with_party_indices(0, 0),
         );
 
         replace_pending_move_learn(&mut state, 1).expect("replace pending move");

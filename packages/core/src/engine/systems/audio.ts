@@ -46,38 +46,6 @@ type PendingSound = {
 type SoundChannelCategory = "sfx" | "cry" | "other";
 type ManifestKind = "music" | "sfx" | "cry";
 
-export interface MusicStemManifest {
-  channel: number;
-  path: string;
-  loop?: boolean;
-  pan?: [boolean, boolean];
-}
-
-export interface MusicTrackManifest {
-  kind: "music";
-  token: string;
-  mixedPath: string;
-  channelCount: number;
-  loop?: boolean;
-  loopStartFrame?: number | null;
-  loopStartSeconds?: number | null;
-  stems: MusicStemManifest[];
-}
-
-export interface SoundCueManifest {
-  kind: "sfx" | "cry";
-  token: string;
-  assetPath: string;
-  ownedChannels: number[];
-  durationFrames?: number | null;
-  priorityClass?: "none" | "priority" | "cry";
-}
-
-export interface AudioBundleManifest {
-  music: Record<string, string>;
-  sounds: Record<string, string>;
-}
-
 export interface ActiveChannelState {
   channel: number;
   ownerToken: string;
@@ -104,8 +72,6 @@ export interface AudioPlaybackSnapshot {
   recentEvents: AudioPlaybackEvent[];
 }
 
-type AnyAudioManifest = MusicTrackManifest | SoundCueManifest | PcmAudioManifest;
-
 type AudioPlaybackBackendKind = "auto" | "direct-pcm" | "html";
 
 type AudioHandle = {
@@ -126,7 +92,7 @@ type MusicPlaybackState = {
   source: string;
   stems: Map<number, AudioHandle>;
   mixed: AudioHandle | null;
-  manifest: MusicTrackManifest | PcmMusicTrackManifest | null;
+  manifest: PcmMusicTrackManifest | null;
   frameCursor: number;
   gain: number;
   role: string;
@@ -792,11 +758,23 @@ export class AudioEngine {
   }
 
   loadSound(name: string, filePath: string): void {
+    this._assertCanonicalPcmSource(filePath);
     this.sounds[name] = filePath;
   }
 
   loadMusic(name: string, filePath: string): void {
+    this._assertCanonicalPcmSource(filePath);
     this.music[name] = filePath;
+  }
+
+  private _assertCanonicalPcmSource(source: string): void {
+    const normalized = source.trim().split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
+    if (normalized.endsWith(".pcm") || /\/pcm\/(?:music|sfx|cries)\/[^/]+\.json$/.test(normalized)) {
+      return;
+    }
+    throw new Error(
+      `audio source '${source}' must be raw PCM or a canonical /pcm/{music,sfx,cries} manifest`,
+    );
   }
 
   private _shouldUseDirectPcm(): boolean {
@@ -1730,7 +1708,7 @@ export class AudioEngine {
     return source.toLowerCase().endsWith(".json");
   }
 
-  private async _loadManifest<T extends AnyAudioManifest>(source: string): Promise<T | null> {
+  private async _loadManifest<T extends PcmAudioManifest>(source: string): Promise<T | null> {
     try {
       if (typeof fetch === "function") {
         const response = await fetch(source, { cache: "force-cache" });
@@ -1749,17 +1727,16 @@ export class AudioEngine {
     return null;
   }
 
-  private _isPcmMusicManifest(manifest: AnyAudioManifest | null): manifest is PcmMusicTrackManifest {
+  private _isPcmMusicManifest(manifest: PcmAudioManifest | null): manifest is PcmMusicTrackManifest {
     return Boolean(
       manifest &&
       manifest.kind === "music" &&
       Array.isArray((manifest as PcmMusicTrackManifest).stems) &&
-      (manifest as Partial<MusicTrackManifest>).mixedPath === undefined &&
       (manifest as PcmMusicTrackManifest).stems.every((stem) => typeof stem.path === "string" && stem.bitsPerSample === 16),
     );
   }
 
-  private _isPcmClipManifest(manifest: AnyAudioManifest | null): manifest is PcmClipManifest {
+  private _isPcmClipManifest(manifest: PcmAudioManifest | null): manifest is PcmClipManifest {
     return Boolean(
       manifest &&
       (manifest.kind === "sfx" || manifest.kind === "cry") &&
@@ -1890,7 +1867,7 @@ export class AudioEngine {
   }
 
   private async _playMusicManifest(token: string, source: string, role: string, requestId: number): Promise<void> {
-    const manifest = await this._loadManifest<MusicTrackManifest | PcmMusicTrackManifest>(source);
+    const manifest = await this._loadManifest<PcmAudioManifest>(source);
     if (requestId !== this.pendingMusicRequestId || this.currentMusicName !== token) {
       return;
     }
@@ -1904,44 +1881,17 @@ export class AudioEngine {
       }
       return;
     }
-    if (this._isPcmMusicManifest(manifest)) {
-      await this._playPcmMusicManifest(token, source, role, manifest, requestId);
+    if (!this._isPcmMusicManifest(manifest)) {
+      if (this.currentMusicName === token) {
+        this.currentMusicName = null;
+        this.currentMusicRole = "general";
+      }
+      if (role === "map" && this.mapMusicName === token) {
+        this.mapMusicName = null;
+      }
       return;
     }
-    if (this.currentMusicState) {
-      const currentState = this.currentMusicState;
-      for (const audio of currentState.stems.values()) {
-        audio.pause();
-      }
-      currentState.mixed?.pause();
-    }
-    const stems = new Map<number, AudioHandle>();
-    for (const stem of manifest.stems) {
-      const audio = this._createAudio(stem.path, stem.loop ?? manifest.loop ?? true);
-      if (audio) {
-        stems.set(stem.channel, audio);
-      }
-    }
-    let mixed: AudioHandle | null = null;
-    if (stems.size === 0) {
-      mixed = this._createAudio(manifest.mixedPath, manifest.loop ?? true);
-    }
-    this.currentMusic = stems.values().next().value ?? mixed;
-    this.currentMusicState = {
-      source,
-      stems,
-      mixed,
-      manifest,
-      frameCursor: 0,
-      gain: 1,
-      role,
-      token,
-    };
-    this._applyMusicState();
-    const audios = stems.size > 0 ? [...stems.values()] : (mixed ? [mixed] : []);
-    for (const audio of audios) {
-      this._playAudioHandle(audio);
-    }
+    await this._playPcmMusicManifest(token, source, role, manifest, requestId);
   }
 
   private async _playSoundManifest(
@@ -1949,7 +1899,7 @@ export class AudioEngine {
     source: string,
     options: ResolvedBattleSoundOptions,
   ): Promise<void> {
-    const manifest = await this._loadManifest<SoundCueManifest | PcmClipManifest>(source);
+    const manifest = await this._loadManifest<PcmAudioManifest>(source);
     if (!manifest) {
       return;
     }
@@ -2003,21 +1953,6 @@ export class AudioEngine {
       this._playAudioHandle(audio);
       return;
     }
-    const assetPath = manifest.assetPath;
-    if (!assetPath) {
-      return;
-    }
-    this._playSoundSource(
-      token,
-      assetPath,
-      true,
-      {
-        ...options,
-        duration: options.duration ?? manifest?.durationFrames ?? null,
-      },
-      manifest?.ownedChannels ?? [],
-      manifest?.priorityClass,
-    );
   }
 
   private _applyMusicState(): void {

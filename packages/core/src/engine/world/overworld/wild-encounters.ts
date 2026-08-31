@@ -167,7 +167,7 @@ export class WildEncounterManager {
       return;
     }
 
-    const encounterData = this._lookup_map_data(overworld.current_map_name);
+    const encounterData = this._encounter_data_at(overworld);
     if (!encounterData) {
       return;
     }
@@ -211,7 +211,7 @@ export class WildEncounterManager {
     overworld: OverworldLike,
     rng: RandomSource
   ): [WildEncounter, string] | null {
-    const data = this._lookup_map_data(overworld.current_map_name);
+    const data = this._encounter_data_at(overworld);
     if (!data) {
       return null;
     }
@@ -259,6 +259,33 @@ export class WildEncounterManager {
     return this.encounterMap.get(map_name) ?? null;
   }
 
+  private _encounter_data_at(overworld: OverworldLike): WildEncounterData | null {
+    const data = this._lookup_map_data(overworld.current_map_name);
+    if (!data) {
+      return null;
+    }
+    const zone = this._zone_at(overworld, data);
+    if (!zone) {
+      return data;
+    }
+    return {
+      ...data,
+      grass_rates: zone.grassRates,
+      grass: zone.grass,
+      zones: [],
+    };
+  }
+
+  private _zone_at(
+    overworld: OverworldLike,
+    data = this._lookup_map_data(overworld.current_map_name)
+  ) {
+    return data?.zones?.find(({ minX, minY, maxX, maxY }) =>
+      overworld.player_x >= minX && overworld.player_x <= maxX &&
+      overworld.player_y >= minY && overworld.player_y <= maxY
+    );
+  }
+
   public _resolve_surface(overworld: OverworldLike): EncounterSurface | null {
     const mapWidth = overworld.map.width * METATILE_WIDTH;
     const mapHeight = overworld.map.height * METATILE_WIDTH;
@@ -284,6 +311,9 @@ export class WildEncounterManager {
     }
     if (ICE_COLLISION_VALUES.has(attrs.value)) {
       return null;
+    }
+    if (this._zone_at(overworld)) {
+      return EncounterSurface.GRASS;
     }
     if (
       this._map_allows_land_encounters(overworld)

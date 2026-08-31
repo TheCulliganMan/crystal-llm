@@ -17,6 +17,8 @@ type MatchRow = {
   player1_id: string;
   player2_id: string;
   mode: "battle" | "trade" | "time_capsule";
+  modpack_id: string;
+  ranked: boolean;
   status: "waiting" | "active" | "completed" | "cancelled";
   channel_name: string;
   result: Record<string, unknown> | null;
@@ -130,7 +132,38 @@ const buildServiceClient = () => {
     throw new Error(`Unexpected table ${table}`);
   });
 
-  return { client: { from }, state };
+  const rpc = jest.fn(async (_name: string, args: Record<string, any>) => {
+    let match = state.matches.find((entry) => entry.channel_name === args.report_channel_name);
+    if (!match) {
+      match = {
+        id: `match-${state.matches.length + 1}`,
+        player1_id: args.report_user_id,
+        player2_id: args.report_peer_user_id,
+        mode: args.report_mode,
+        modpack_id: args.report_modpack_id,
+        ranked: false,
+        status: "active",
+        channel_name: args.report_channel_name,
+        result: null,
+        created_at: new Date().toISOString(),
+        started_at: new Date().toISOString(),
+        completed_at: null,
+      };
+      state.matches.push(match);
+    }
+    if (match.ranked && match.mode === "battle") {
+      const local = state.profiles.get(args.report_user_id)!;
+      const peer = state.profiles.get(args.report_peer_user_id)!;
+      local.link_battle_wins += 1;
+      local.link_battle_rating += 16;
+      peer.link_battle_losses += 1;
+      peer.link_battle_rating -= 16;
+    }
+    match.result = { ranked: match.ranked };
+    return { data: { settled: false, awaitingPeer: true, ranked: match.ranked, match }, error: null };
+  });
+
+  return { client: { from, rpc }, state, rpc };
 };
 
 const loadRoute = async (serviceClient: unknown) => {
@@ -178,7 +211,7 @@ describe("multiplayer matches API", () => {
     expect(response.status).toBe(401);
   });
 
-  it("creates profiles, persists a completed battle, and updates ratings", async () => {
+  it("submits a direct battle report as unranked without allowing client-created rating changes", async () => {
     const supabase = buildServiceClient();
     const { POST } = await loadRoute(supabase.client);
 
@@ -196,13 +229,49 @@ describe("multiplayer matches API", () => {
 
     expect(response.status).toBe(200);
     expect(supabase.state.matches).toHaveLength(1);
-    expect(supabase.state.matches[0].status).toBe("completed");
-    expect(supabase.state.profiles.get("local-1")?.link_battle_wins).toBe(1);
-    expect(supabase.state.profiles.get("peer-1")?.link_battle_losses).toBe(1);
-    expect(supabase.state.profiles.get("local-1")?.link_battle_rating).toBeGreaterThan(1000);
+    expect(supabase.state.matches[0].status).toBe("active");
+    expect(supabase.state.matches[0].modpack_id).toBe("core-modular");
+    expect(supabase.state.profiles.get("local-1")?.link_battle_wins).toBe(0);
+    expect(supabase.state.profiles.get("peer-1")?.link_battle_losses).toBe(0);
+    expect(supabase.state.matches[0].result).toMatchObject({ ranked: false });
   });
 
-  it("increments trade counters for completed trades", async () => {
+  it("updates ratings for a server-created match after validating participants", async () => {
+    const supabase = buildServiceClient();
+    supabase.state.matches.push({
+      id: "ranked-1",
+      player1_id: "local-1",
+      player2_id: "peer-1",
+      mode: "battle",
+      modpack_id: "core-modular",
+      ranked: true,
+      status: "waiting",
+      channel_name: "ranked-channel",
+      result: null,
+      created_at: new Date().toISOString(),
+      started_at: null,
+      completed_at: null,
+    });
+    const { POST } = await loadRoute(supabase.client);
+
+    const response = await POST(new Request("http://localhost/api/multiplayer/matches", {
+      method: "POST",
+      body: JSON.stringify({
+        channelName: "ranked-channel",
+        peerUserId: "peer-1",
+        mode: "battle",
+        modpackId: "core-modular",
+        outcome: "local",
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(supabase.state.profiles.get("local-1")?.link_battle_wins).toBe(1);
+    expect(supabase.state.profiles.get("peer-1")?.link_battle_losses).toBe(1);
+    expect(supabase.state.matches[0].result).toMatchObject({ ranked: true });
+  });
+
+  it("does not increment trade counters for client-created direct sessions", async () => {
     const supabase = buildServiceClient();
     const { POST } = await loadRoute(supabase.client);
 
@@ -219,8 +288,8 @@ describe("multiplayer matches API", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(supabase.state.profiles.get("local-1")?.total_trades).toBe(1);
-    expect(supabase.state.profiles.get("peer-1")?.total_trades).toBe(1);
+    expect(supabase.state.profiles.get("local-1")?.total_trades).toBe(0);
+    expect(supabase.state.profiles.get("peer-1")?.total_trades).toBe(0);
   });
 
   it("reads the multiplayer leaderboard", async () => {

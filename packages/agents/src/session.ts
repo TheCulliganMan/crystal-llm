@@ -498,7 +498,7 @@ export class KrabbyClawSession {
       route_render: textTool("route_render", "Get a full current-map navigation schematic when viewport evidence is insufficient.", emptySchema),
       flow_state: textTool("flow_state", "Get spoiler-safe story-flow progress and next goal.", emptySchema),
       move: textTool("move", "Send a d-pad input; in menus, name entry, and time entry this moves the cursor or adjusts the selected value.", directionSchema.merge(reasonSchema)),
-      press: textTool("press", "Press a Game Boy button once; A selects/confirms, B cancels/deletes, and Start accepts END on name entry.", buttonSchema.merge(reasonSchema)),
+      press: textTool("press", "Press a Game Boy button once; A selects/confirms, B cancels/deletes, and Start moves to END on name entry (press A afterward to submit).", buttonSchema.merge(reasonSchema)),
       type_text: textTool("type_text", "Send literal text input to text-entry surfaces such as name entry. For full names, prefer clear:true and submit:true.", typeTextSchema),
       hold_button: textTool(
         "hold_button",

@@ -335,7 +335,7 @@ impl CompiledModpack {
     }
 
     pub fn write_browser_game_pack(&self, path: impl AsRef<Path>) -> Result<()> {
-        write_compiled_game_pack_with_pcm_sidecars(
+        write_compiled_game_pack_with_midi_audio(
             path,
             &CompiledGamePack {
                 format_version: COMPILED_GAME_PACK_FORMAT_VERSION,

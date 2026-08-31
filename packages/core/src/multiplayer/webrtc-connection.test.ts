@@ -74,6 +74,17 @@ describe('WebRTCConnection', () => {
     expect(RealtimeManager).toHaveBeenCalledTimes(1);
   });
 
+  test('passes production TURN configuration to the peer', async () => {
+    const iceServers = [
+      { urls: 'stun:stun.example.test:3478' },
+      { urls: 'turn:turn.example.test:3478', username: 'user', credential: 'secret' },
+    ];
+    const rtc = new WebRTCConnection({ matchId: 'm-turn', isHost: true, iceServers });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect((rtc as any).peer.opts.config.iceServers).toEqual(iceServers);
+  });
+
   test('reports connection lifecycle through callbacks and isConnected()', async () => {
     const rtc = new WebRTCConnection({ matchId: 'm1', isHost: true });
     await new Promise((r) => setTimeout(r, 0));

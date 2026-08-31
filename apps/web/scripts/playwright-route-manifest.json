@@ -16,14 +16,6 @@
     "includeInVisual": false
   },
   {
-    "declaredPath": "/game-corner?tab=audio-generation",
-    "path": "/game-corner?tab=audio-generation",
-    "expectedPath": "/game-corner?tab=audio-generation",
-    "slug": "game-corner-audio-generation",
-    "readyTestId": "route-game-corner",
-    "includeInVisual": false
-  },
-  {
     "declaredPath": "/game-corner?tab=arena-mcp-skill",
     "path": "/game-corner?tab=arena-mcp-skill",
     "expectedPath": "/game-corner?tab=arena-mcp-skill",
@@ -42,9 +34,9 @@
   {
     "declaredPath": "/audio",
     "path": "/audio",
-    "expectedPath": "/game-corner?tab=audio-generation",
+    "expectedPath": "/audio-test",
     "slug": "audio-redirect",
-    "readyTestId": "route-game-corner",
+    "readyTestId": "audio-test-page",
     "includeInVisual": false
   },
   {

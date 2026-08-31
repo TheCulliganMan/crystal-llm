@@ -6,15 +6,15 @@ use crate::state::{
     GameState, HALL_OF_FAME_ENTRY_LIMIT, HALL_OF_FAME_MASTER_COUNT, HALL_OF_FAME_TEAM_SIZE,
     HallOfFameEntry, HallOfFamePokemon, ScriptLocation, ScriptReturnFrame, ScriptRuntimeDelay,
     ScriptRuntimeEarthquake, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry,
+    ScriptTextRuntimeEvent, ScriptTextRuntimeKind,
 };
 use crate::systems::economy::{EconomyError, MoneyAccount};
 use crate::systems::phone::insert_phone_number_in_first_open_slot;
 use crate::timing::{wrapping_byte_counter_frames, wrapping_byte_counter_ticks};
 
 pub const SCRIPT_RUNTIME_SPECIAL_PHONE_CALL_NONE: &str = "SPECIALCALL_NONE";
-const PHONE_CALLER_MEMCALL_OPERAND: [&str; 3] =
-    ["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"];
-const PHONE_SCRIPT_BANK_MEMCALL_OPERAND: &str = "wPhoneScriptBank";
+pub const SAVE_CHECK_VALUE_1: u8 = 99;
+pub const SAVE_CHECK_VALUE_2: u8 = 127;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,9 +64,18 @@ impl ScriptRuntimeCpuCondition {
 #[serde(deny_unknown_fields)]
 pub struct ScriptRuntimeInputs {
     pub selected_party_index: Option<usize>,
-    pub game_version: Option<String>,
+    /// Exact SRAM sentinel bytes read by `CheckSave`. The script opcode owns
+    /// only their comparison; file/storage access remains at the host edge.
+    pub save_check_values: Option<[u8; 2]>,
     pub current_landmark_name: Option<String>,
     pub resolved_named_buffer_value: Option<String>,
+    /// Pack-resolved `CheckItemPocket` result for `specialsound`.
+    pub resolved_special_sound_effect: Option<String>,
+    /// Pack-resolved map name for the `warpmod` group/number pair.
+    pub resolved_warpmod_map_name: Option<String>,
+    /// `GetPocketName`/`CurItemName` results consumed by `pocketisfull`.
+    pub resolved_current_pocket_name: Option<String>,
+    pub resolved_current_item_name: Option<String>,
     pub resolved_stone_table_entries: Option<Vec<ScriptRuntimeStoneTableEntry>>,
     pub resolved_decoration: Option<ScriptRuntimeDecorationResolution>,
     pub gift_original_trainer_name: Option<String>,
@@ -287,6 +296,11 @@ pub enum ScriptRuntimeOutcome {
         source_script: String,
         command_index: usize,
     },
+    PhoneCallPresentation {
+        target_script: String,
+        source_script: String,
+        command_index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +351,20 @@ pub enum ScriptRuntimeCommandError {
     MissingCurrentLandmarkName,
     #[error("script runtime command '{command}' requires a resolved named-buffer value")]
     MissingResolvedNamedBufferValue { command: String },
+    #[error("script runtime command 'specialsound' requires the current item's resolved sound")]
+    MissingResolvedSpecialSoundEffect,
+    #[error("script runtime command 'warpmod' requires its resolved target map")]
+    MissingResolvedWarpmodMap,
+    #[error("script runtime command 'repeattext' has no retained text pointer")]
+    MissingRepeatedTextLabel,
+    #[error("script runtime command 'pocketisfull' requires the current pocket name")]
+    MissingCurrentPocketName,
+    #[error("script runtime command 'pocketisfull' requires the current item name")]
+    MissingCurrentItemName,
+    #[error("script runtime command '{command}' requires memory pointer {pointer}")]
+    MissingMemoryPointer { command: String, pointer: String },
+    #[error("script runtime command 'checksave' requires the two SRAM save-check bytes")]
+    MissingSaveCheckValues,
     #[error("script runtime command 'writecmdqueue' requires a resolved stone-table queue")]
     MissingResolvedStoneTableQueue,
     #[error("script runtime command 'describedecoration' requires a resolved decoration script")]
@@ -349,8 +377,6 @@ pub enum ScriptRuntimeCommandError {
     RandomBoundOutOfByteRange { bound: u32 },
     #[error("script runtime command 'random' divider read failed: {message}")]
     RandomDivider { message: String },
-    #[error("script runtime command 'checkver' requires explicit game version input")]
-    MissingGameVersion,
     #[error("script runtime command '{command}' requires source constant {constant}")]
     MissingSourceConstant { command: String, constant: String },
     #[error("script runtime command '{command}' source constant {constant}={value} is not a u16")]
@@ -363,10 +389,6 @@ pub enum ScriptRuntimeCommandError {
     InvalidNextScript { script: String },
     #[error("script dispatch has invalid last talked object '{object_identifier}'")]
     InvalidLastTalkedObject { object_identifier: String },
-    #[error("script runtime memcall has unsupported pointer operand '{operand}'")]
-    UnsupportedMemcallOperand { operand: String },
-    #[error("script runtime memcall requires wPhoneCallerScript")]
-    MissingPhoneCallerScript,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -848,7 +870,8 @@ pub fn script_runtime_command_issues(
                 });
             }
         }
-        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail" => {
+        "writecmdqueue" | "elevator" | "callasm" | "checkpokemail" | "givepokemail"
+        | "phonecall" | "changemapblocks" => {
             let target_label = &command.args[0];
             push_unknown_runtime_target_issue(command, target_label, catalog, &mut issues);
         }
@@ -940,13 +963,286 @@ pub fn apply_script_runtime_command_in_map(
         }
         "checkpokemail" => {
             apply_runtime_effect(state, origin_map_name, &command, constants)?;
-            set_script_value(state, &command, "2".to_string())
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
         }
-        "checkver" => {
-            let value = inputs
-                .game_version
-                .ok_or(ScriptRuntimeCommandError::MissingGameVersion)?;
-            set_script_value(state, &command, value)
+        // Crystal's source constant is GS_VERSION = 0. This is a ROM build
+        // identity byte, not runtime or host-provided state.
+        "checkver" => set_script_value(state, &command, "0".to_string()),
+        "checksave" => {
+            let [check_1, check_2] = inputs
+                .save_check_values
+                .ok_or(ScriptRuntimeCommandError::MissingSaveCheckValues)?;
+            set_script_value(
+                state,
+                &command,
+                u8::from(check_1 == SAVE_CHECK_VALUE_1 && check_2 == SAVE_CHECK_VALUE_2)
+                    .to_string(),
+            )
+        }
+        "checkjustbattled" => {
+            let value = state
+                .script_runtime
+                .memory
+                .get("wRunningTrainerBattleScript")
+                .map(|value| parse_i32_token(&command.command, value))
+                .transpose()?
+                .unwrap_or(0);
+            set_script_value(
+                state,
+                &command,
+                u8::from(value.rem_euclid(256) != 0).to_string(),
+            )
+        }
+        "specialsound" => {
+            let audio_id = inputs
+                .resolved_special_sound_effect
+                .ok_or(ScriptRuntimeCommandError::MissingResolvedSpecialSoundEffect)?;
+            if !is_exact_nonempty_runtime_token(&audio_id) {
+                return Err(ScriptRuntimeCommandError::PaddedArg {
+                    command: command.command.clone(),
+                    arg: audio_id,
+                });
+            }
+            state
+                .script_runtime
+                .audio_events
+                .push(crate::state::ScriptAudioRuntimeEvent {
+                    command: command.command.clone(),
+                    kind: crate::state::ScriptAudioRuntimeKind::SoundEffect,
+                    audio_id: Some(audio_id),
+                    fade_frames: None,
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+            state.script_runtime.waiting_for_sound_effect = true;
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "warpmod" => {
+            let warp_index = parse_u8_token(&command.command, &command.args[0])?;
+            let map_name = inputs
+                .resolved_warpmod_map_name
+                .ok_or(ScriptRuntimeCommandError::MissingResolvedWarpmodMap)?;
+            if !is_exact_nonempty_runtime_token(&map_name) {
+                return Err(ScriptRuntimeCommandError::PaddedArg {
+                    command: command.command.clone(),
+                    arg: map_name,
+                });
+            }
+            state.backup_warp_map_name = Some(map_name);
+            state.backup_warp_index = (warp_index != 0).then_some(u16::from(warp_index));
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "repeattext" => {
+            if command.args.as_slice() == ["-1", "-1"] {
+                let text_label = state
+                    .script_runtime
+                    .active_text_label
+                    .clone()
+                    .or_else(|| state.script_runtime.pending_text_label.clone())
+                    .ok_or(ScriptRuntimeCommandError::MissingRepeatedTextLabel)?;
+                state.script_runtime.text_window_open = true;
+                state.script_runtime.active_text_label = Some(text_label.clone());
+                state.script_runtime.pending_text_label = Some(text_label.clone());
+                state
+                    .script_runtime
+                    .text_events
+                    .push(ScriptTextRuntimeEvent {
+                        command: command.command.clone(),
+                        kind: ScriptTextRuntimeKind::Write,
+                        text_label: Some(text_label),
+                        face_player: false,
+                        closes_text: false,
+                        source_script: command.source_script.clone(),
+                        command_index: command.command_index,
+                    });
+            }
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "phonecall" => {
+            let target_script = command.args[0].clone();
+            state.script_runtime.memory.insert(
+                "wPhoneCallBank".to_string(),
+                format!("BANK({target_script})"),
+            );
+            state
+                .script_runtime
+                .memory
+                .insert("wPhoneCallScript".to_string(), target_script.clone());
+            ScriptRuntimeOutcome::PhoneCallPresentation {
+                target_script,
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "hangup" => ScriptRuntimeOutcome::PhoneCallasmPresentation {
+            effect: ScriptPhoneCallasmPresentation::HangUp,
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        },
+        "pocketisfull" => {
+            let pocket_name = inputs
+                .resolved_current_pocket_name
+                .ok_or(ScriptRuntimeCommandError::MissingCurrentPocketName)?;
+            let item_name = inputs
+                .resolved_current_item_name
+                .ok_or(ScriptRuntimeCommandError::MissingCurrentItemName)?;
+            if pocket_name.is_empty() || item_name.is_empty() {
+                return Err(ScriptRuntimeCommandError::EmptyArg {
+                    command: command.command.clone(),
+                });
+            }
+            state
+                .script_runtime
+                .named_buffers
+                .insert("STRING_BUFFER_3".to_string(), pocket_name);
+            state
+                .script_runtime
+                .named_buffers
+                .insert("STRING_BUFFER_1".to_string(), item_name);
+            let text_label = "PocketIsFullText".to_string();
+            state.script_runtime.text_window_open = true;
+            state.script_runtime.active_text_label = Some(text_label.clone());
+            state.script_runtime.pending_text_label = Some(text_label.clone());
+            state
+                .script_runtime
+                .text_events
+                .push(ScriptTextRuntimeEvent {
+                    command: command.command.clone(),
+                    kind: ScriptTextRuntimeKind::Write,
+                    text_label: Some(text_label),
+                    face_player: false,
+                    closes_text: false,
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "trainertext" => {
+            let text_kind = parse_u8_token(&command.command, &command.args[0])?;
+            let pointer = match text_kind {
+                0 => "wSeenTextPointer",
+                1 => "wWinTextPointer",
+                2 => "wLossTextPointer",
+                _ => {
+                    return Err(ScriptRuntimeCommandError::UnknownNumericToken {
+                        command: command.command.clone(),
+                        token: command.args[0].clone(),
+                    });
+                }
+            };
+            let text_label = state
+                .script_runtime
+                .memory
+                .get(pointer)
+                .filter(|value| value.as_str() != "0")
+                .cloned()
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingMemoryPointer {
+                    command: command.command.clone(),
+                    pointer: pointer.to_string(),
+                })?;
+            state.script_runtime.text_window_open = true;
+            state.script_runtime.active_text_label = Some(text_label.clone());
+            state.script_runtime.pending_text_label = Some(text_label.clone());
+            state
+                .script_runtime
+                .text_events
+                .push(ScriptTextRuntimeEvent {
+                    command: command.command.clone(),
+                    kind: ScriptTextRuntimeKind::Write,
+                    text_label: Some(text_label),
+                    face_player: false,
+                    closes_text: false,
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "scripttalkafter" => {
+            let target_script = state
+                .script_runtime
+                .memory
+                .get("wScriptAfterPointer")
+                .cloned()
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingMemoryPointer {
+                    command: command.command.clone(),
+                    pointer: "wScriptAfterPointer".to_string(),
+                })?;
+            if !is_exact_nonempty_runtime_label(&target_script) {
+                return Err(ScriptRuntimeCommandError::InvalidNextScript {
+                    script: target_script,
+                });
+            }
+            state.script_runtime.next_script = Some(ScriptLocation {
+                origin_map_name: origin_map_name.to_string(),
+                script: target_script,
+            });
+            state.script_runtime.script_ended = None;
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "memjump" => {
+            let pointer = &command.args[0];
+            let target_script = state
+                .script_runtime
+                .memory
+                .get(pointer)
+                .cloned()
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingMemoryPointer {
+                    command: command.command.clone(),
+                    pointer: pointer.clone(),
+                })?;
+            state.script_runtime.next_script = Some(ScriptLocation {
+                origin_map_name: origin_map_name.to_string(),
+                script: target_script,
+            });
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "changemapblocks" => {
+            let target = command.args[0].clone();
+            state
+                .script_runtime
+                .memory
+                .insert("wMapBlocksBank".to_string(), format!("BANK({target})"));
+            state
+                .script_runtime
+                .memory
+                .insert("wMapBlocksPointer".to_string(), target);
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
         }
         "getcurlandmarkname" => {
             let landmark_name = inputs
@@ -964,6 +1260,7 @@ pub fn apply_script_runtime_command_in_map(
         }
         "gettrainername"
         | "gettrainerclassname"
+        | "getname"
         | "getitemname"
         | "getmonname"
         | "getstring"
@@ -973,6 +1270,16 @@ pub fn apply_script_runtime_command_in_map(
                     command: command.command.clone(),
                 }
             })?;
+            if command.command == "getname" {
+                state
+                    .script_runtime
+                    .memory
+                    .insert("wNamedObjectType".to_string(), command.args[1].clone());
+                state
+                    .script_runtime
+                    .memory
+                    .insert("wCurSpecies".to_string(), command.args[2].clone());
+            }
             state
                 .script_runtime
                 .named_buffers
@@ -984,10 +1291,56 @@ pub fn apply_script_runtime_command_in_map(
             }
         }
         "writecmdqueue" => {
-            let entries = inputs
+            let mut entries = inputs
                 .resolved_stone_table_entries
                 .ok_or(ScriptRuntimeCommandError::MissingResolvedStoneTableQueue)?;
-            state.script_runtime.stone_table_entries.extend(entries);
+            if let Some(queue_slot) = (0_u8..4).find(|slot| {
+                state
+                    .script_runtime
+                    .memory
+                    .get(&format!("wCmdQueueType{slot}"))
+                    .is_none_or(|queue_type| queue_type == "0")
+            }) {
+                for entry in &mut entries {
+                    entry.queue_slot = queue_slot;
+                }
+                state
+                    .script_runtime
+                    .memory
+                    .insert(format!("wCmdQueueType{queue_slot}"), "2".to_string());
+                state.script_runtime.stone_table_entries.extend(entries);
+            }
+            ScriptRuntimeOutcome::EffectRecorded {
+                command: command.command.clone(),
+                source_script: command.source_script.clone(),
+                command_index: command.command_index,
+            }
+        }
+        "delcmdqueue" => {
+            let queue_type = parse_u8_token("delcmdqueue", &command.args[0])?;
+            let matched_slot = (0_u8..4).find(|slot| {
+                state
+                    .script_runtime
+                    .memory
+                    .get(&format!("wCmdQueueType{slot}"))
+                    .and_then(|value| value.parse::<u8>().ok())
+                    == Some(queue_type)
+            });
+            if let Some(queue_slot) = matched_slot {
+                state
+                    .script_runtime
+                    .memory
+                    .insert(format!("wCmdQueueType{queue_slot}"), "0".to_string());
+                state
+                    .script_runtime
+                    .stone_table_entries
+                    .retain(|entry| entry.queue_slot != queue_slot);
+            }
+            set_script_value(
+                state,
+                &command,
+                u8::from(matched_slot.is_some()).to_string(),
+            );
             ScriptRuntimeOutcome::EffectRecorded {
                 command: command.command.clone(),
                 source_script: command.source_script.clone(),
@@ -1126,12 +1479,14 @@ pub fn validate_script_runtime_command(
         command.command.as_str(),
         "gettrainername"
             | "gettrainerclassname"
+            | "getname"
             | "getitemname"
             | "getmonname"
             | "getstring"
             | "getcurlandmarkname"
             | "getlandmarkname"
             | "getmoney"
+            | "getcoins"
             | "getnum"
     ) {
         require_script_string_buffer(&command.command, &command.args[0])?;
@@ -1142,15 +1497,8 @@ pub fn validate_script_runtime_command(
     if command.command == "loadwildmon" {
         parse_u8_token(&command.command, &command.args[1])?;
     }
-    if command.command == "memcall" {
-        let args = command.args.iter().map(String::as_str).collect::<Vec<_>>();
-        if args.as_slice() != PHONE_CALLER_MEMCALL_OPERAND
-            && args.as_slice() != [PHONE_SCRIPT_BANK_MEMCALL_OPERAND]
-        {
-            return Err(ScriptRuntimeCommandError::UnsupportedMemcallOperand {
-                operand: command.args.join(" "),
-            });
-        }
+    if command.command == "writeunusedbyte" {
+        parse_u8_token(&command.command, &command.args[0])?;
     }
     if command.command == "special" && !is_exact_nonempty_runtime_pack_id(&command.args[0]) {
         return Err(ScriptRuntimeCommandError::PaddedArg {
@@ -1227,7 +1575,7 @@ fn apply_runtime_effect(
                 .pending_earthquakes
                 .push(ScriptRuntimeEarthquake {
                     parameter,
-                    shake_frames: parameter,
+                    shake_frames: wrapping_byte_counter_ticks((parameter & 0x3f) as u8),
                     sleep_frames: wrapping_byte_counter_ticks((parameter & 0x3f) as u8),
                     source_script: command.source_script.clone(),
                     command_index: command.command_index,
@@ -1236,7 +1584,10 @@ fn apply_runtime_effect(
         // The exact emote id remains in the replayable runtime effect. The
         // corresponding show/hide operations are movement opcodes.
         "loademote" => {}
-        "setlasttalked" => state.script_runtime.last_talked_object = Some(command.args[0].clone()),
+        "setlasttalked" => {
+            state.script_runtime.last_talked_object =
+                (command.args[0] != "-1").then(|| command.args[0].clone());
+        }
         "variablesprite" => {
             state
                 .script_runtime
@@ -1253,6 +1604,18 @@ fn apply_runtime_effect(
                 .script_runtime
                 .named_buffers
                 .insert(command.args[0].clone(), value.to_string());
+        }
+        "getcoins" => {
+            state
+                .script_runtime
+                .named_buffers
+                .insert(command.args[0].clone(), state.coins.to_string());
+        }
+        "xycompare" => {
+            state
+                .script_runtime
+                .memory
+                .insert("wXYComparePointer".to_string(), command.args[0].clone());
         }
         "loadmenu" => {
             state.script_runtime.active_menu = Some(command.args[0].clone());
@@ -1281,10 +1644,6 @@ fn apply_runtime_effect(
                 .engine_flags
                 .insert("STATUSFLAGS_NO_WILD_ENCOUNTERS_F".to_string(), false);
         }
-        "lock" => state.script_runtime.player_input_locked = true,
-        "release" => state.script_runtime.player_input_locked = false,
-        "lockall" => state.script_runtime.all_input_locked = true,
-        "releaseall" => state.script_runtime.all_input_locked = false,
         "itemnotify" => state.script_runtime.item_notify_queued = true,
         // The pack-backed item boundary resolves the variable quantity,
         // performs ReceiveItem, fills STRING_BUFFER_4 with CurItemName, and
@@ -1360,13 +1719,63 @@ fn apply_runtime_effect(
                 .memory
                 .insert("wCurPartyLevel".to_string(), level.to_string());
         }
+        // These opcodes remain in Crystal's script command table even though
+        // the shipped scripts do not call them. Preserve their exact WRAM
+        // effects at the common interpreter boundary.
+        "loadpikachudata" => {
+            state
+                .script_runtime
+                .memory
+                .insert("wTempWildMonSpecies".to_string(), "PIKACHU".to_string());
+            state
+                .script_runtime
+                .memory
+                .insert("wCurPartyLevel".to_string(), "5".to_string());
+        }
+        "writeunusedbyte" => {
+            let value = parse_u8_token(&command.command, &command.args[0])?;
+            state
+                .script_runtime
+                .memory
+                .insert("wUnusedScriptByte".to_string(), value.to_string());
+        }
+        "autoinput" => {
+            let target = &command.args[0];
+            state
+                .script_runtime
+                .memory
+                .insert("wAutoInputBank".to_string(), format!("BANK({target})"));
+            state
+                .script_runtime
+                .memory
+                .insert("wAutoInputAddress".to_string(), target.clone());
+            for key in [
+                "wAutoInputLength",
+                "hJoyPressed",
+                "hJoyReleased",
+                "hJoyDown",
+            ] {
+                state
+                    .script_runtime
+                    .memory
+                    .insert(key.to_string(), "0".to_string());
+            }
+            state
+                .script_runtime
+                .memory
+                .insert("wInputType".to_string(), "AUTO_INPUT".to_string());
+        }
         "memcall" => {
+            let pointer = command.args.join(" ");
             let target_script = state
                 .script_runtime
                 .memory
-                .get("wPhoneCallerScript")
+                .get(&pointer)
                 .cloned()
-                .ok_or(ScriptRuntimeCommandError::MissingPhoneCallerScript)?;
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingMemoryPointer {
+                    command: command.command.clone(),
+                    pointer,
+                })?;
             if !is_exact_nonempty_runtime_label(&target_script) {
                 return Err(ScriptRuntimeCommandError::InvalidNextScript {
                     script: target_script,
@@ -1482,6 +1891,29 @@ fn apply_runtime_effect(
                     command_index: command.command_index,
                 });
         }
+        "memcallasm" => {
+            let pointer = &command.args[0];
+            let target = state
+                .script_runtime
+                .memory
+                .get(pointer)
+                .cloned()
+                .ok_or_else(|| ScriptRuntimeCommandError::MissingMemoryPointer {
+                    command: command.command.clone(),
+                    pointer: pointer.clone(),
+                })?;
+            state
+                .script_runtime
+                .command_queue
+                .push(ScriptRuntimeQueuedCommand {
+                    origin_map_name: origin_map_name.to_string(),
+                    command: command.command.clone(),
+                    bank: None,
+                    target,
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+        }
         "_2dmenu" => state.script_runtime.menu_2d_requested = true,
         other => {
             return Err(ScriptRuntimeCommandError::UnknownCommand {
@@ -1530,11 +1962,7 @@ fn record_hall_of_fame(state: &mut GameState, spawn_after_champion: u16) {
         std::array::from_fn(|_| None);
     let mut slot = 0usize;
     for pokemon in state.storage.party.pokemon.iter().flatten() {
-        if slot >= HALL_OF_FAME_TEAM_SIZE
-            || pokemon.is_egg
-            || pokemon.status.as_deref() == Some("EGG")
-            || pokemon.species.id == "EGG"
-        {
+        if slot >= HALL_OF_FAME_TEAM_SIZE || pokemon.is_egg {
             continue;
         }
         let dvs = (u16::from(pokemon.dvs.attack & 0x0f) << 12)
@@ -1729,6 +2157,14 @@ fn parse_i32_token(command: &str, token: &str) -> Result<i32, ScriptRuntimeComma
 fn script_numeric_symbol(token: &str) -> Option<i32> {
     match token {
         "BATTLETOWER_REWARD_QUANTITY" => Some(5),
+        "TRAINERTEXT_SEEN" => Some(0),
+        "TRAINERTEXT_WIN" => Some(1),
+        "TRAINERTEXT_LOSS" => Some(2),
+        "CMDQUEUE_NULL" => Some(0),
+        "CMDQUEUE_TYPE1" => Some(1),
+        "CMDQUEUE_STONETABLE" => Some(2),
+        "CMDQUEUE_TYPE3" => Some(3),
+        "CMDQUEUE_TYPE4" => Some(4),
         _ => None,
     }
 }
@@ -1781,6 +2217,7 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("variablesprite", 2),
         ("gettrainername", 3),
         ("gettrainerclassname", 2),
+        ("getname", 3),
         ("getitemname", 2),
         ("getmonname", 2),
         ("loadmenu", 1),
@@ -1790,10 +2227,6 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("playmapmusic", 0),
         ("wildoff", 0),
         ("wildon", 0),
-        ("lock", 0),
-        ("release", 0),
-        ("lockall", 0),
-        ("releaseall", 0),
         ("itemnotify", 0),
         ("addval", 1),
         ("verbosegiveitemvar", 2),
@@ -1801,6 +2234,18 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("getcurlandmarkname", 1),
         ("getlandmarkname", 2),
         ("getmoney", 2),
+        ("getcoins", 1),
+        ("xycompare", 1),
+        ("checkjustbattled", 0),
+        ("specialsound", 0),
+        ("warpmod", 2),
+        ("repeattext", 2),
+        ("phonecall", 1),
+        ("hangup", 0),
+        ("pocketisfull", 0),
+        ("trainertext", 1),
+        ("scripttalkafter", 0),
+        ("changemapblocks", 1),
         ("checkphonecall", 0),
         ("addcellnum", 1),
         ("specialphonecall", 1),
@@ -1811,7 +2256,12 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("winlosstext", 2),
         ("loadtrainer", 2),
         ("loadwildmon", 2),
+        ("loadpikachudata", 0),
+        ("writeunusedbyte", 1),
+        ("autoinput", 1),
         ("memcall", 1),
+        ("memjump", 1),
+        ("memcallasm", 1),
         ("randomwildmon", 0),
         ("catchtutorial", 1),
         ("warpsound", 0),
@@ -1823,7 +2273,9 @@ pub fn script_runtime_command_arg_counts() -> BTreeMap<&'static str, usize> {
         ("credits", 0),
         ("describedecoration", 1),
         ("checkver", 0),
+        ("checksave", 0),
         ("writecmdqueue", 1),
+        ("delcmdqueue", 1),
         ("elevator", 1),
         ("_2dmenu", 0),
         ("writevar", 1),
@@ -1882,6 +2334,185 @@ mod tests {
                 .engine_flags
                 .get("STATUSFLAGS_NO_WILD_ENCOUNTERS_F"),
             Some(&false)
+        );
+    }
+
+    #[test]
+    fn legacy_script_table_wram_commands_preserve_their_exact_byte_effects() {
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .memory
+            .insert("wBattleScriptFlags".to_string(), "7".to_string());
+
+        apply_script_runtime_command(
+            &mut state,
+            command("loadpikachudata", &[]),
+            default_inputs(),
+        )
+        .expect("loadpikachudata applies");
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wTempWildMonSpecies")
+                .map(String::as_str),
+            Some("PIKACHU")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCurPartyLevel")
+                .map(String::as_str),
+            Some("5")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wBattleScriptFlags")
+                .map(String::as_str),
+            Some("7"),
+            "Script_loadpikachudata does not change battle script flags"
+        );
+
+        apply_script_runtime_command(
+            &mut state,
+            command("writeunusedbyte", &["$ff"]),
+            default_inputs(),
+        )
+        .expect("writeunusedbyte applies");
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wUnusedScriptByte")
+                .map(String::as_str),
+            Some("255")
+        );
+    }
+
+    #[test]
+    fn checksave_compares_both_exact_sram_check_bytes() {
+        let mut state = GameState::default();
+
+        for (check_values, expected) in [([99, 127], "1"), ([98, 127], "0"), ([99, 126], "0")] {
+            let outcome = apply_script_runtime_command(
+                &mut state,
+                command("checksave", &[]),
+                ScriptRuntimeInputs {
+                    save_check_values: Some(check_values),
+                    ..default_inputs()
+                },
+            )
+            .expect("checksave applies");
+            assert_eq!(state.script_runtime.script_value.as_deref(), Some(expected));
+            assert_eq!(
+                outcome,
+                ScriptRuntimeOutcome::ScriptValueSet {
+                    command: "checksave".to_string(),
+                    value: expected.to_string(),
+                    source_script: "RuntimeScript".to_string(),
+                    command_index: 4,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn getname_writes_the_resolved_table_entry_and_selector_registers() {
+        let mut state = GameState::default();
+
+        apply_script_runtime_command(
+            &mut state,
+            command("getname", &["STRING_BUFFER_3", "ITEM_NAME", "POTION"]),
+            ScriptRuntimeInputs {
+                resolved_named_buffer_value: Some("POTION".to_string()),
+                ..default_inputs()
+            },
+        )
+        .expect("getname applies");
+
+        assert_eq!(
+            state.script_runtime.named_buffers.get("STRING_BUFFER_3"),
+            Some(&"POTION".to_string())
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wNamedObjectType")
+                .map(String::as_str),
+            Some("ITEM_NAME")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCurSpecies")
+                .map(String::as_str),
+            Some("POTION")
+        );
+    }
+
+    #[test]
+    fn autoinput_starts_the_symbolic_stream_and_clears_joypad_mirrors() {
+        let mut state = GameState::default();
+        for (key, value) in [
+            ("hJoyPressed", "PAD_A"),
+            ("hJoyReleased", "PAD_B"),
+            ("hJoyDown", "PAD_UP"),
+            ("wAutoInputLength", "42"),
+        ] {
+            state
+                .script_runtime
+                .memory
+                .insert(key.to_string(), value.to_string());
+        }
+
+        apply_script_runtime_command(
+            &mut state,
+            command("autoinput", &[".InputStream"]),
+            default_inputs(),
+        )
+        .expect("autoinput applies");
+
+        for key in [
+            "hJoyPressed",
+            "hJoyReleased",
+            "hJoyDown",
+            "wAutoInputLength",
+        ] {
+            assert_eq!(
+                state.script_runtime.memory.get(key).map(String::as_str),
+                Some("0"),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wAutoInputAddress")
+                .map(String::as_str),
+            Some(".InputStream")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wAutoInputBank")
+                .map(String::as_str),
+            Some("BANK(.InputStream)")
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wInputType")
+                .map(String::as_str),
+            Some("AUTO_INPUT")
         );
     }
 
@@ -1951,10 +2582,15 @@ mod tests {
         assert_eq!(counts.get("special"), Some(&1));
         assert_eq!(counts.get("checkver"), Some(&0));
         assert_eq!(counts.get("givepokemail"), Some(&1));
-        assert_eq!(counts.get("lock"), Some(&0));
-        assert_eq!(counts.get("release"), Some(&0));
-        assert_eq!(counts.get("lockall"), Some(&0));
-        assert_eq!(counts.get("releaseall"), Some(&0));
+        assert_eq!(counts.get("loadpikachudata"), Some(&0));
+        assert_eq!(counts.get("writeunusedbyte"), Some(&1));
+        assert_eq!(counts.get("getname"), Some(&3));
+        assert_eq!(counts.get("checksave"), Some(&0));
+        assert_eq!(counts.get("autoinput"), Some(&1));
+        assert!(!counts.contains_key("lock"));
+        assert!(!counts.contains_key("release"));
+        assert!(!counts.contains_key("lockall"));
+        assert!(!counts.contains_key("releaseall"));
         assert_eq!(counts.get("deactivatefacing"), Some(&1));
         assert_eq!(counts.get("loademote"), Some(&1));
         assert!(!counts.contains_key("stop"));
@@ -2209,22 +2845,23 @@ mod tests {
             validate_script_runtime_command(&command("memcall", &["wPhoneScriptBank"])),
             Ok(())
         );
-        assert!(matches!(
+        assert_eq!(
             validate_script_runtime_command(&command("memcall", &["wUnknownPointer"])),
-            Err(ScriptRuntimeCommandError::UnsupportedMemcallOperand { operand })
-                if operand == "wUnknownPointer"
-        ));
+            Ok(())
+        );
         let mut missing = GameState::default();
         let before_missing = missing.clone();
-        assert_eq!(
+        assert!(matches!(
             apply_script_runtime_command(&mut missing, runtime_command.clone(), default_inputs(),),
-            Err(ScriptRuntimeCommandError::MissingPhoneCallerScript)
-        );
+            Err(ScriptRuntimeCommandError::MissingMemoryPointer { command, pointer })
+                if command == "memcall"
+                    && pointer == "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK"
+        ));
         assert_eq!(missing, before_missing);
 
         let mut state = GameState::default();
         state.script_runtime.memory.insert(
-            "wPhoneCallerScript".to_string(),
+            "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK".to_string(),
             "BillPhoneScript1".to_string(),
         );
 
@@ -2247,6 +2884,45 @@ mod tests {
             })
         );
         assert_eq!(state.script_runtime.script_ended, None);
+    }
+
+    #[test]
+    fn memjump_and_memcallasm_read_the_far_target_from_runtime_memory() {
+        let mut state = GameState::default();
+        state
+            .script_runtime
+            .memory
+            .insert("wQueuedScriptBank".to_string(), "QueuedScript".to_string());
+        apply_script_runtime_command(
+            &mut state,
+            command("memjump", &["wQueuedScriptBank"]),
+            default_inputs(),
+        )
+        .expect("memjump");
+        assert_eq!(
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: "QueuedScript".to_string(),
+            })
+        );
+
+        state.script_runtime.memory.insert(
+            "wQueuedRoutineBank".to_string(),
+            "QueuedRoutine".to_string(),
+        );
+        apply_script_runtime_command(
+            &mut state,
+            command("memcallasm", &["wQueuedRoutineBank"]),
+            default_inputs(),
+        )
+        .expect("memcallasm");
+        assert_eq!(state.script_runtime.command_queue.len(), 1);
+        assert_eq!(state.script_runtime.command_queue[0].command, "memcallasm");
+        assert_eq!(
+            state.script_runtime.command_queue[0].target,
+            "QueuedRoutine"
+        );
     }
 
     #[test]
@@ -2312,6 +2988,187 @@ mod tests {
                 .map(String::as_str),
             Some("654321")
         );
+    }
+
+    #[test]
+    fn retained_stateful_commands_match_their_exact_wram_effects() {
+        let mut state = GameState {
+            coins: 9_999,
+            ..GameState::default()
+        };
+        state
+            .script_runtime
+            .memory
+            .insert("wRunningTrainerBattleScript".to_string(), "-1".to_string());
+
+        apply_script_runtime_command(
+            &mut state,
+            command("getcoins", &["STRING_BUFFER_4"]),
+            default_inputs(),
+        )
+        .expect("getcoins prints the coin case value");
+        apply_script_runtime_command(
+            &mut state,
+            command("xycompare", &["Route29XYCompareTable"]),
+            default_inputs(),
+        )
+        .expect("xycompare writes the comparison pointer");
+        apply_script_runtime_command(
+            &mut state,
+            command("specialsound", &[]),
+            ScriptRuntimeInputs {
+                resolved_special_sound_effect: Some("SFX_GET_TM".to_string()),
+                ..default_inputs()
+            },
+        )
+        .expect("specialsound plays and waits for the pack-resolved pocket cue");
+        apply_script_runtime_command(
+            &mut state,
+            command("warpmod", &["3", "ROUTE_29"]),
+            ScriptRuntimeInputs {
+                resolved_warpmod_map_name: Some("Route29".to_string()),
+                ..default_inputs()
+            },
+        )
+        .expect("warpmod writes the backup warp tuple");
+        state.script_runtime.active_text_label = Some("RetainedText".to_string());
+        apply_script_runtime_command(
+            &mut state,
+            command("repeattext", &["-1", "-1"]),
+            default_inputs(),
+        )
+        .expect("repeattext reuses the retained script text pointer");
+        let phone = apply_script_runtime_command(
+            &mut state,
+            command("phonecall", &["MomPhoneGreetingText"]),
+            default_inputs(),
+        )
+        .expect("phonecall retains its source-bank text pointer");
+        assert!(matches!(
+            phone,
+            ScriptRuntimeOutcome::PhoneCallPresentation { target_script, .. }
+                if target_script == "MomPhoneGreetingText"
+        ));
+        assert!(matches!(
+            apply_script_runtime_command(&mut state, command("hangup", &[]), default_inputs(),),
+            Ok(ScriptRuntimeOutcome::PhoneCallasmPresentation {
+                effect: ScriptPhoneCallasmPresentation::HangUp,
+                ..
+            })
+        ));
+        apply_script_runtime_command(
+            &mut state,
+            command("pocketisfull", &[]),
+            ScriptRuntimeInputs {
+                resolved_current_pocket_name: Some("ITEM POCKET".to_string()),
+                resolved_current_item_name: Some("POTION".to_string()),
+                ..default_inputs()
+            },
+        )
+        .expect("pocketisfull fills both name buffers and prints its fixed text");
+        state.script_runtime.memory.insert(
+            "wSeenTextPointer".to_string(),
+            "YoungsterSeenText".to_string(),
+        );
+        state.script_runtime.memory.insert(
+            "wScriptAfterPointer".to_string(),
+            "YoungsterAfterScript".to_string(),
+        );
+        apply_script_runtime_command(
+            &mut state,
+            command("trainertext", &["TRAINERTEXT_SEEN"]),
+            default_inputs(),
+        )
+        .expect("trainertext indexes the retained trainer text table");
+        apply_script_runtime_command(
+            &mut state,
+            command("scripttalkafter", &[]),
+            default_inputs(),
+        )
+        .expect("scripttalkafter jumps through the retained callback pointer");
+        apply_script_runtime_command(
+            &mut state,
+            command("changemapblocks", &["Route29Alternate_Blocks"]),
+            default_inputs(),
+        )
+        .expect("changemapblocks retains its far block-data pointer");
+        let outcome = apply_script_runtime_command(
+            &mut state,
+            command("checkjustbattled", &[]),
+            default_inputs(),
+        )
+        .expect("checkjustbattled reads the trainer-script byte");
+
+        assert_eq!(
+            state.script_runtime.named_buffers["STRING_BUFFER_4"],
+            "9999"
+        );
+        assert_eq!(
+            state.script_runtime.memory["wXYComparePointer"],
+            "Route29XYCompareTable"
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .audio_events
+                .last()
+                .and_then(|event| event.audio_id.as_deref()),
+            Some("SFX_GET_TM")
+        );
+        assert!(state.script_runtime.waiting_for_sound_effect);
+        assert_eq!(state.backup_warp_map_name.as_deref(), Some("Route29"));
+        assert_eq!(state.backup_warp_index, Some(3));
+        assert_eq!(
+            state
+                .script_runtime
+                .text_events
+                .last()
+                .and_then(|event| event.text_label.as_deref()),
+            Some("RetainedText")
+        );
+        assert_eq!(
+            state.script_runtime.memory["wPhoneCallScript"],
+            "MomPhoneGreetingText"
+        );
+        assert_eq!(
+            state.script_runtime.named_buffers["STRING_BUFFER_3"],
+            "ITEM POCKET"
+        );
+        assert_eq!(
+            state.script_runtime.named_buffers["STRING_BUFFER_1"],
+            "POTION"
+        );
+        assert_eq!(
+            state.script_runtime.active_text_label.as_deref(),
+            Some("YoungsterSeenText")
+        );
+        assert_eq!(
+            state.script_runtime.next_script,
+            Some(ScriptLocation {
+                origin_map_name: "TestMap".to_string(),
+                script: "YoungsterAfterScript".to_string(),
+            })
+        );
+        assert_eq!(
+            state.script_runtime.memory["wMapBlocksPointer"],
+            "Route29Alternate_Blocks"
+        );
+        assert!(matches!(
+            outcome,
+            ScriptRuntimeOutcome::ScriptValueSet { value, .. } if value == "1"
+        ));
+
+        state
+            .script_runtime
+            .memory
+            .insert("wRunningTrainerBattleScript".to_string(), "0".to_string());
+        apply_script_runtime_command(
+            &mut state,
+            command("checkjustbattled", &[]),
+            default_inputs(),
+        )
+        .expect("zero trainer-script byte is false");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
     }
 
     #[test]
@@ -2871,7 +3728,7 @@ mod tests {
     }
 
     #[test]
-    fn check_pokemail_sets_script_result_from_authoritative_party_mail() {
+    fn check_pokemail_defers_the_mail_result_to_the_pack_owned_mail_routine() {
         let mut state = GameState::default();
         let species = crate::models::PokemonSpecies::new_for_tests(
             "SPEAROW",
@@ -2889,6 +3746,7 @@ mod tests {
         });
         pokemon.item = Some("FLOWER_MAIL".to_string());
         state.storage.party.pokemon[0] = Some(pokemon);
+        state.script_runtime.script_value = Some("7".to_string());
 
         apply_script_runtime_command(
             &mut state,
@@ -2897,7 +3755,10 @@ mod tests {
         )
         .expect("check mail");
 
-        assert_eq!(state.script_runtime.script_value.as_deref(), Some("2"));
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("7"));
+        assert!(state.script_runtime.command_queue.iter().any(|queued| {
+            queued.command == "checkpokemail" && queued.target == "ReceivedSpearowMailText"
+        }));
     }
 
     #[test]
@@ -2953,23 +3814,25 @@ mod tests {
     }
 
     #[test]
-    fn lock_and_release_commands_mutate_exact_runtime_state() {
-        let mut state = GameState::default();
+    fn non_asm_lock_commands_are_rejected_without_mutation() {
+        for command_name in ["lock", "release", "lockall", "releaseall"] {
+            let mut state = GameState::default();
+            state.script_runtime.player_input_locked = true;
+            state.script_runtime.all_input_locked = true;
+            let before = state.clone();
 
-        apply_script_runtime_command(&mut state, command("lock", &[]), default_inputs())
-            .expect("lock");
-        apply_script_runtime_command(&mut state, command("lockall", &[]), default_inputs())
-            .expect("lockall");
-        assert!(state.script_runtime.player_input_locked);
-        assert!(state.script_runtime.all_input_locked);
-
-        apply_script_runtime_command(&mut state, command("release", &[]), default_inputs())
-            .expect("release");
-        apply_script_runtime_command(&mut state, command("releaseall", &[]), default_inputs())
-            .expect("releaseall");
-
-        assert!(!state.script_runtime.player_input_locked);
-        assert!(!state.script_runtime.all_input_locked);
+            assert_eq!(
+                apply_script_runtime_command(
+                    &mut state,
+                    command(command_name, &[]),
+                    default_inputs(),
+                ),
+                Err(ScriptRuntimeCommandError::UnknownCommand {
+                    command: command_name.to_string(),
+                })
+            );
+            assert_eq!(state, before);
+        }
     }
 
     #[test]
@@ -3052,17 +3915,10 @@ mod tests {
         apply_script_runtime_command(
             &mut state,
             command("checkver", &[]),
-            ScriptRuntimeInputs {
-                game_version: Some("CRYSTAL".to_string()),
-                ..ScriptRuntimeInputs::default()
-            },
+            ScriptRuntimeInputs::default(),
         )
         .expect("checkver");
-        assert_eq!(
-            state.script_runtime.script_value.as_deref(),
-            Some("CRYSTAL")
-        );
-        assert!(!state.script_runtime.version_check_requested);
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
     }
 
     #[test]
@@ -3076,7 +3932,7 @@ mod tests {
         assert_eq!(state.script_runtime.pending_earthquakes.len(), 1);
         let earthquake = &state.script_runtime.pending_earthquakes[0];
         assert_eq!(earthquake.parameter, 84);
-        assert_eq!(earthquake.shake_frames, 84);
+        assert_eq!(earthquake.shake_frames, 84 & 0x3f);
         assert_eq!(earthquake.sleep_frames, 84 & 0x3f);
         assert_eq!(earthquake.source_script, "RuntimeScript");
         assert_eq!(earthquake.command_index, 4);
@@ -3097,6 +3953,21 @@ mod tests {
             outcome,
             ScriptRuntimeOutcome::EffectRecorded { ref command, .. } if command == "loademote"
         ));
+    }
+
+    #[test]
+    fn setlasttalked_minus_one_clears_the_exact_no_object_sentinel() {
+        let mut state = GameState::default();
+        state.script_runtime.last_talked_object = Some("TEAMROCKETBASEB1F_ROCKET1".to_string());
+
+        apply_script_runtime_command(
+            &mut state,
+            command("setlasttalked", &["-1"]),
+            default_inputs(),
+        )
+        .expect("setlasttalked -1");
+
+        assert_eq!(state.script_runtime.last_talked_object, None);
     }
 
     #[test]
@@ -3158,7 +4029,7 @@ mod tests {
 
         let earthquake = &state.script_runtime.pending_earthquakes[0];
         assert_eq!(earthquake.parameter, 0);
-        assert_eq!(earthquake.shake_frames, 0);
+        assert_eq!(earthquake.shake_frames, 256);
         assert_eq!(earthquake.sleep_frames, 256);
     }
 
@@ -3321,6 +4192,7 @@ mod tests {
         assert!(state.script_runtime.stone_table_entries.is_empty());
 
         let entries = vec![ScriptRuntimeStoneTableEntry {
+            queue_slot: 0,
             warp: 5,
             object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
             script: ".Boulder1@BlackthornGym2FSetUpStoneTableCallback".to_string(),
@@ -3338,6 +4210,91 @@ mod tests {
         .expect("writecmdqueue");
 
         assert_eq!(state.script_runtime.stone_table_entries, entries);
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCmdQueueType0")
+                .map(String::as_str),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn command_queue_uses_four_slots_and_delcmdqueue_removes_only_the_first_match() {
+        let mut state = GameState::default();
+        let entry = ScriptRuntimeStoneTableEntry {
+            queue_slot: 0,
+            warp: 5,
+            object_event: "BLACKTHORNGYM2F_BOULDER1".to_string(),
+            script: ".Boulder1@BlackthornGym2FSetUpStoneTableCallback".to_string(),
+            source_script: ".StoneTable@BlackthornGym2FSetUpStoneTableCallback".to_string(),
+            command_index: 0,
+        };
+
+        for _ in 0..5 {
+            apply_script_runtime_command(
+                &mut state,
+                command("writecmdqueue", &[".CommandQueue"]),
+                ScriptRuntimeInputs {
+                    resolved_stone_table_entries: Some(vec![entry.clone()]),
+                    ..default_inputs()
+                },
+            )
+            .expect("writecmdqueue");
+        }
+        assert_eq!(state.script_runtime.stone_table_entries.len(), 4);
+        assert_eq!(
+            state
+                .script_runtime
+                .stone_table_entries
+                .iter()
+                .map(|entry| entry.queue_slot)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+
+        apply_script_runtime_command(
+            &mut state,
+            command("delcmdqueue", &["CMDQUEUE_STONETABLE"]),
+            default_inputs(),
+        )
+        .expect("first delcmdqueue");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("1"));
+        assert_eq!(
+            state
+                .script_runtime
+                .stone_table_entries
+                .iter()
+                .map(|entry| entry.queue_slot)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            state
+                .script_runtime
+                .memory
+                .get("wCmdQueueType0")
+                .map(String::as_str),
+            Some("0")
+        );
+
+        for _ in 0..3 {
+            apply_script_runtime_command(
+                &mut state,
+                command("delcmdqueue", &["2"]),
+                default_inputs(),
+            )
+            .expect("remaining delcmdqueue");
+        }
+        apply_script_runtime_command(
+            &mut state,
+            command("delcmdqueue", &["CMDQUEUE_STONETABLE"]),
+            default_inputs(),
+        )
+        .expect("absent delcmdqueue");
+        assert_eq!(state.script_runtime.script_value.as_deref(), Some("0"));
+        assert!(state.script_runtime.stone_table_entries.is_empty());
     }
 
     #[test]

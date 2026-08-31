@@ -11,6 +11,7 @@ let consoleWarnSpy: jest.SpyInstance;
 let consoleErrorSpy: jest.SpyInstance;
 const mockSettingsPanelSpy = jest.fn();
 const mockMultiplayerMenuSpy = jest.fn();
+const mockMultiplayerChatSpy = jest.fn();
 const mockGameCanvasSpy = jest.fn();
 const mockGuestSavePanelSpy = jest.fn();
 const mockCreateSupabaseBrowserClient = createSupabaseBrowserClient as jest.MockedFunction<
@@ -76,6 +77,13 @@ jest.mock("@/components/multiplayer-menu", () => ({
   },
 }));
 
+jest.mock("@/components/multiplayer-chat", () => ({
+  MultiplayerChat: (props: Record<string, unknown>) => {
+    mockMultiplayerChatSpy(props);
+    return <div data-testid="multiplayer-chat" />;
+  },
+}));
+
 jest.mock("@/lib/supabase/browser", () => ({
   createSupabaseBrowserClient: jest.fn(),
 }));
@@ -85,11 +93,23 @@ jest.mock("@pokecrystal/core/multiplayer/overworld-presence", () => ({
     this.remotePlayersCallbacks = [];
     this.interactionRequestCallbacks = [];
     this.interactionResponseCallbacks = [];
+    this.chatMessageCallbacks = [];
     this.connect = jest.fn(async () => {});
     this.updateLocalState = jest.fn(async () => {});
     this.disconnect = jest.fn(async () => {});
     this.sendInteractionRequest = jest.fn(async (_toUserId: string, _kind: string) => "req-1");
     this.sendInteractionResponse = jest.fn(async () => {});
+    this.sendChatMessage = jest.fn(async (channel: string, text: string, toUserId: string | null) => ({
+      messageId: "chat-1",
+      fromUserId: "local-1",
+      fromPlayerName: "Ryan",
+      toUserId,
+      channel,
+      mapName: "NewBarkTown",
+      text,
+      timestampMs: 1,
+    }));
+    this.setBlockedUserIds = jest.fn();
     this.onRemotePlayersChange = (callback: (players: unknown[]) => void) => {
       this.remotePlayersCallbacks.push(callback);
     };
@@ -108,11 +128,20 @@ jest.mock("@pokecrystal/core/multiplayer/overworld-presence", () => ({
     this.offInteractionResponse = (callback: (response: unknown) => void) => {
       this.interactionResponseCallbacks = this.interactionResponseCallbacks.filter((entry: unknown) => entry !== callback);
     };
+    this.onChatMessage = (callback: (message: unknown) => void) => {
+      this.chatMessageCallbacks.push(callback);
+    };
+    this.offChatMessage = (callback: (message: unknown) => void) => {
+      this.chatMessageCallbacks = this.chatMessageCallbacks.filter((entry: unknown) => entry !== callback);
+    };
     this.emitInteractionRequest = (request: unknown) => {
       this.interactionRequestCallbacks.forEach((callback: (request: unknown) => void) => callback(request));
     };
     this.emitInteractionResponse = (response: unknown) => {
       this.interactionResponseCallbacks.forEach((callback: (response: unknown) => void) => callback(response));
+    };
+    this.emitChatMessage = (message: unknown) => {
+      this.chatMessageCallbacks.forEach((callback: (message: unknown) => void) => callback(message));
     };
     mockPresenceManagers.push(this);
   },
@@ -270,6 +299,7 @@ describe("PlayPanel controls dialog", () => {
   beforeEach(() => {
     mockSettingsPanelSpy.mockClear();
     mockMultiplayerMenuSpy.mockClear();
+    mockMultiplayerChatSpy.mockClear();
     mockGameCanvasSpy.mockClear();
     mockGuestSavePanelSpy.mockClear();
     act(() => {
@@ -1230,6 +1260,7 @@ describe("PlayPanel fullscreen mode", () => {
   beforeEach(() => {
     mockSettingsPanelSpy.mockClear();
     mockMultiplayerMenuSpy.mockClear();
+    mockMultiplayerChatSpy.mockClear();
     mockGameCanvasSpy.mockClear();
     useMultiplayerStore.getState().reset();
   });
@@ -1411,6 +1442,7 @@ describe("PlayPanel multiplayer controls", () => {
   beforeEach(() => {
     mockSettingsPanelSpy.mockClear();
     mockMultiplayerMenuSpy.mockClear();
+    mockMultiplayerChatSpy.mockClear();
     mockGameCanvasSpy.mockClear();
     mockCreateSupabaseBrowserClient.mockReturnValue({
       auth: {
@@ -1538,6 +1570,16 @@ describe("PlayPanel multiplayer controls", () => {
       );
       await flushPromises();
     });
+
+    const connectedChatProps = mockMultiplayerChatSpy.mock.calls.at(-1)?.[0];
+    await act(async () => {
+      connectedChatProps?.onSend?.("whisper", "Hello Leaf!");
+      await flushPromises();
+    });
+    expect(manager.sendChatMessage).toHaveBeenCalledWith("whisper", "Hello Leaf!", "peer-1");
+    expect(mockMultiplayerChatSpy.mock.calls.at(-1)?.[0]?.messages).toEqual([
+      expect.objectContaining({ text: "Hello Leaf!", outgoing: true, channel: "whisper" }),
+    ]);
 
     await act(async () => {
       menuProps?.onRequestBattle?.();

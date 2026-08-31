@@ -867,6 +867,252 @@ fn validate_runtime_title_screen(title_screen: &RuntimeTitleScreen) -> Result<()
         anyhow::bail!("runtime_title_screen requires title_music");
     };
     validate_modpack_payload_token(title_music, "runtime_title_screen title_music")?;
+    let program = &title_screen.program;
+    anyhow::ensure!(
+        program.schema_version == 1,
+        "runtime_title_screen program requires schema_version 1"
+    );
+    let required_entrypoints = [
+        "boot",
+        "intro",
+        "title",
+        "main_menu",
+        "continue",
+        "new_game",
+        "delete_save",
+        "reset_clock",
+    ];
+    anyhow::ensure!(
+        program.entrypoints.len() == required_entrypoints.len()
+            && required_entrypoints
+                .iter()
+                .all(|entrypoint| program.entrypoints.contains_key(*entrypoint)),
+        "runtime_title_screen program entrypoint set is incomplete"
+    );
+    for (entrypoint, target) in &program.entrypoints {
+        anyhow::ensure!(
+            program.blocks.contains_key(target),
+            "runtime_title_screen entrypoint {entrypoint} targets missing block {target}"
+        );
+    }
+    anyhow::ensure!(
+        !program.blocks.is_empty(),
+        "runtime_title_screen program blocks are empty"
+    );
+    for (block_id, block) in &program.blocks {
+        anyhow::ensure!(
+            !block.operations.is_empty(),
+            "runtime_title_screen block {block_id} has no operations"
+        );
+        anyhow::ensure!(
+            !block.source_span.file.is_empty()
+                && block.source_span.start_line > 0
+                && block.source_span.end_line >= block.source_span.start_line,
+            "runtime_title_screen block {block_id} has an invalid source span"
+        );
+        for operation in &block.operations {
+            anyhow::ensure!(
+                !operation.op.is_empty(),
+                "runtime_title_screen block {block_id} has an unnamed operation"
+            );
+            anyhow::ensure!(
+                !operation.source_span.file.is_empty()
+                    && operation.source_span.start_line > 0
+                    && operation.source_span.end_line >= operation.source_span.start_line,
+                "runtime_title_screen block {block_id} operation {} has an invalid source span",
+                operation.op
+            );
+        }
+    }
+    let mut subprogram_ids = std::collections::BTreeSet::new();
+    for subprogram in &program.subprograms {
+        anyhow::ensure!(
+            !subprogram.id.is_empty() && subprogram_ids.insert(subprogram.id.as_str()),
+            "runtime_title_screen program has a missing or duplicate subprogram id"
+        );
+        anyhow::ensure!(
+            !subprogram.source_entry.is_empty()
+                && !subprogram.accepted_call_forms.is_empty()
+                && !subprogram.phases.is_empty(),
+            "runtime_title_screen subprogram {} is incomplete",
+            subprogram.id
+        );
+        anyhow::ensure!(
+            !subprogram.source_span.file.is_empty()
+                && subprogram.source_span.start_line > 0
+                && subprogram.source_span.end_line >= subprogram.source_span.start_line,
+            "runtime_title_screen subprogram {} has an invalid source span",
+            subprogram.id
+        );
+        let mut phase_ids = std::collections::BTreeSet::new();
+        for phase in &subprogram.phases {
+            anyhow::ensure!(
+                !phase.id.is_empty() && phase_ids.insert(phase.id.as_str()),
+                "runtime_title_screen subprogram {} has a missing or duplicate phase id",
+                subprogram.id
+            );
+            anyhow::ensure!(
+                !phase.operations.is_empty(),
+                "runtime_title_screen subprogram {} phase {} has no operations",
+                subprogram.id,
+                phase.id
+            );
+            anyhow::ensure!(
+                !phase.source_span.file.is_empty()
+                    && phase.source_span.start_line > 0
+                    && phase.source_span.end_line >= phase.source_span.start_line,
+                "runtime_title_screen subprogram {} phase {} has an invalid source span",
+                subprogram.id,
+                phase.id
+            );
+            for (label, operation_index) in &phase.labels {
+                anyhow::ensure!(
+                    !label.is_empty() && *operation_index < phase.operations.len(),
+                    "runtime_title_screen subprogram {} phase {} label {} has invalid operation index {}",
+                    subprogram.id,
+                    phase.id,
+                    label,
+                    operation_index
+                );
+            }
+            if subprogram.id == "start_title_screen" && phase.id == "title_screen" {
+                anyhow::ensure!(
+                    !phase.labels.is_empty(),
+                    "runtime_title_screen StartTitleScreen phase has no executable source labels"
+                );
+            }
+            for operation in &phase.operations {
+                anyhow::ensure!(
+                    !operation.op.is_empty()
+                        && !operation.source_span.file.is_empty()
+                        && operation.source_span.start_line > 0
+                        && operation.source_span.end_line >= operation.source_span.start_line,
+                    "runtime_title_screen subprogram {} phase {} has an invalid operation",
+                    subprogram.id,
+                    phase.id
+                );
+                let target_fields: &[&str] = if phase.labels.is_empty() {
+                    &[]
+                } else {
+                    match operation.op.as_str() {
+                        "branch_memory_compare"
+                        | "branch_result"
+                        | "input_chord_branch"
+                        | "input_bit_branch"
+                        | "jump" => &["target"],
+                        "decrement_memory_word_unless_zero" => &["zero_target"],
+                        _ => &[],
+                    }
+                };
+                for field in target_fields {
+                    let target = operation
+                        .fields
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .with_context(|| {
+                            format!(
+                                "runtime_title_screen subprogram {} phase {} operation {} has no {}",
+                                subprogram.id, phase.id, operation.op, field
+                            )
+                        })?;
+                    anyhow::ensure!(
+                        phase.labels.contains_key(target),
+                        "runtime_title_screen subprogram {} phase {} operation {} targets missing label {}",
+                        subprogram.id,
+                        phase.id,
+                        operation.op,
+                        target
+                    );
+                }
+                if !phase.labels.is_empty() && operation.op == "branch_result" {
+                    if let Some(target) = operation.fields.get("else_target") {
+                        let target = target.as_str().context(
+                            "runtime presentation branch_result has an invalid else_target",
+                        )?;
+                        anyhow::ensure!(
+                            phase.labels.contains_key(target),
+                            "runtime_title_screen subprogram {} phase {} operation {} targets missing label {}",
+                            subprogram.id,
+                            phase.id,
+                            operation.op,
+                            target
+                        );
+                    }
+                }
+                if !phase.labels.is_empty() && operation.op == "select_title_option" {
+                    let target = operation
+                        .fields
+                        .get("target")
+                        .and_then(Value::as_str)
+                        .filter(|target| !target.is_empty())
+                        .context("runtime presentation select_title_option has no target")?;
+                    let options = operation
+                        .fields
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .filter(|options| !options.is_empty())
+                        .context("runtime presentation select_title_option has no options")?;
+                    for option in options {
+                        let source = option
+                            .as_object()
+                            .and_then(|option| option.get("source"))
+                            .and_then(Value::as_str)
+                            .context(
+                                "runtime presentation select_title_option has an invalid source",
+                            )?;
+                        let _value = option
+                            .as_object()
+                            .and_then(|option| option.get("value"))
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u16::try_from(value).ok())
+                            .with_context(|| {
+                                format!(
+                                    "runtime presentation select_title_option target {target} has an invalid value"
+                                )
+                            })?;
+                        anyhow::ensure!(
+                            phase.labels.contains_key(source),
+                            "runtime_title_screen subprogram {} phase {} select_title_option selects from missing label {}",
+                            subprogram.id,
+                            phase.id,
+                            source
+                        );
+                    }
+                }
+                if !phase.labels.is_empty() && operation.op == "dispatch_table" {
+                    let entries = operation
+                        .fields
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .context("runtime presentation dispatch_table has no entries")?;
+                    let internal = entries.iter().any(|entry| {
+                        entry
+                            .as_str()
+                            .is_some_and(|label| phase.labels.contains_key(label))
+                    });
+                    for entry in entries.iter().filter(|_| internal) {
+                        let label = entry
+                            .as_str()
+                            .context("runtime presentation dispatch_table entry is not a label")?;
+                        anyhow::ensure!(
+                            phase.labels.contains_key(label),
+                            "runtime_title_screen subprogram {} phase {} dispatch_table targets missing label {}",
+                            subprogram.id,
+                            phase.id,
+                            label
+                        );
+                    }
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        program
+            .audio
+            .iter()
+            .any(|reference| reference.id == *title_music && reference.kind == "music"),
+        "runtime_title_screen program audio catalog is missing title music {title_music}"
+    );
     Ok(())
 }
 
@@ -2762,30 +3008,14 @@ fn parse_trainer_scripts(
             };
             let mut request = TrainerBattleRequest::new(arg(0)?, arg(1)?, "");
             request.event_flag = trainer_command_optional_arg(arg(2)?);
-            request.seen_text = resolve_trainer_command_reference(
-                scripts,
-                script_name,
-                arg(3)?,
-                "seen text",
-            )?;
-            request.win_text = resolve_trainer_command_reference(
-                scripts,
-                script_name,
-                arg(4)?,
-                "win text",
-            )?;
-            request.loss_text = resolve_trainer_command_reference(
-                scripts,
-                script_name,
-                arg(5)?,
-                "loss text",
-            )?;
-            request.callback = resolve_trainer_command_reference(
-                scripts,
-                script_name,
-                arg(6)?,
-                "callback",
-            )?;
+            request.seen_text =
+                resolve_trainer_command_reference(scripts, script_name, arg(3)?, "seen text")?;
+            request.win_text =
+                resolve_trainer_command_reference(scripts, script_name, arg(4)?, "win text")?;
+            request.loss_text =
+                resolve_trainer_command_reference(scripts, script_name, arg(5)?, "loss text")?;
+            request.callback =
+                resolve_trainer_command_reference(scripts, script_name, arg(6)?, "callback")?;
             request.source_script = script_name.clone();
             trainer_scripts.insert(script_name.clone(), request);
         }

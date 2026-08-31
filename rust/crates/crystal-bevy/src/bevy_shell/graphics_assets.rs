@@ -380,8 +380,7 @@ fn overworld_object_in_scroll_region(view_x: i16, view_y: i16) -> bool {
     // step can reveal it continuously. Keep character OAM in that same region;
     // culling against only the settled LCD made edge characters appear or
     // disappear as a complete sprite at the end of the scroll.
-    (-CLASSIC_SCROLL_HALO_TILES..VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES)
-        .contains(&view_x)
+    (-CLASSIC_SCROLL_HALO_TILES..VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES).contains(&view_x)
         && (-CLASSIC_SCROLL_HALO_TILES..VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES)
             .contains(&view_y)
 }
@@ -493,6 +492,11 @@ fn render_tile_bounds_i16(map_name: &str, width: u16, height: u16) -> Result<(i1
 
 fn bevy_audio_action(kind: &RuntimeResolvedAudioPlaybackKind) -> Option<BevyAudioAction> {
     match kind {
+        RuntimeResolvedAudioPlaybackKind::StopMusic { audio_id } => {
+            Some(BevyAudioAction::StopMusic {
+                audio_id: audio_id.clone(),
+            })
+        }
         RuntimeResolvedAudioPlaybackKind::Play { audio_id, playback } => {
             Some(BevyAudioAction::Play(BevyAudioCommand {
                 audio_id: audio_id.clone(),
@@ -534,6 +538,8 @@ fn play_pending_audio(
     #[cfg(all(not(test), target_arch = "wasm32"))] mouse: Res<ButtonInput<MouseButton>>,
     #[cfg(all(not(test), target_arch = "wasm32"))] touches: Res<Touches>,
 ) {
+    #[cfg_attr(test, allow(unused_variables))]
+    let sound = runtime_shell.shell.session().state().options.sound;
     #[cfg(all(not(test), target_arch = "wasm32"))]
     if !*browser_audio_unlocked {
         let unlock_requested = browser_audio_unlock_requested(
@@ -552,11 +558,19 @@ fn play_pending_audio(
     }
     #[cfg(all(not(test), not(target_arch = "wasm32")))]
     {
+        native_audio.set_music_volume(runtime_shell.music_volume);
         runtime_shell.transient_audio_playing = !native_audio.transient_finished();
+        if !runtime_shell.transient_audio_playing {
+            runtime_shell.active_transient_kind = None;
+        }
     }
     #[cfg(all(not(test), target_arch = "wasm32"))]
     {
+        browser_audio.set_music_volume(runtime_shell.music_volume);
         runtime_shell.transient_audio_playing = !browser_audio.transient_finished();
+        if !runtime_shell.transient_audio_playing {
+            runtime_shell.active_transient_kind = None;
+        }
     }
     // Bevy queries are snapshots for the duration of a system invocation, so
     // a newly spawned music entity is not visible to `music_audio.iter()`
@@ -565,33 +579,54 @@ fn play_pending_audio(
     let mut active_music_entities = music_audio.iter().collect::<Vec<_>>();
     let mut active_transient_entities = transient_audio.iter().collect::<Vec<_>>();
     if runtime_shell.pending_music_stop {
+        let reset_all_audio = std::mem::take(&mut runtime_shell.pending_full_audio_reset);
         for entity in active_music_entities.drain(..) {
-            commands.entity(entity).despawn();
-        }
-        // A map/title/battle transition is an audio boundary.  Do not let a
-        // queued cry or sound effect from the previous surface continue over
-        // the replacement track; that was the source of audible multi-song
-        // and stale-cue overlap on macOS.
-        for entity in active_transient_entities.drain(..) {
             commands.entity(entity).despawn();
         }
         #[cfg(all(not(test), not(target_arch = "wasm32")))]
         {
             native_audio.stop_music();
-            native_audio.stop_transient();
+            if reset_all_audio {
+                native_audio.stop_transient();
+            }
         }
         #[cfg(all(not(test), target_arch = "wasm32"))]
         {
             browser_audio.stop_music();
-            browser_audio.stop_transient();
+            if reset_all_audio {
+                browser_audio.stop_transient();
+            }
         }
-        runtime_shell.transient_audio_playing = false;
+        if reset_all_audio {
+            for entity in active_transient_entities.drain(..) {
+                commands.entity(entity).despawn();
+            }
+            runtime_shell.transient_audio_playing = false;
+            runtime_shell.active_transient_kind = None;
+            runtime_shell.current_sfx_priority = 0;
+        }
         runtime_shell.pending_music_stop = false;
     }
 
-    let pending =
-        coalesce_pending_transient_audio(std::mem::take(&mut runtime_shell.pending_audio));
-    for command in pending {
+    let queued = std::mem::take(&mut runtime_shell.pending_audio);
+    let pending = match source_ordered_pending_audio(
+        queued,
+        runtime_shell.active_transient_kind,
+        runtime_shell.current_sfx_priority,
+        runtime_shell
+            .shell
+            .runtime()
+            .audio()
+            .sound_effect_priorities(),
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            record_visible_runtime_system_error(&mut runtime_shell, error);
+            return;
+        }
+    };
+    let mut pending = VecDeque::from(pending);
+    while let Some(command) = pending.pop_front() {
         if matches!(command.kind, ModpackAudioKind::Music) {
             // Stop before decoding/starting the replacement.  The previous
             // implementation stopped the native sink in `play`, but only
@@ -612,6 +647,7 @@ fn play_pending_audio(
             #[cfg(all(not(test), target_arch = "wasm32"))]
             browser_audio.stop_transient();
             runtime_shell.transient_audio_playing = false;
+            runtime_shell.active_transient_kind = None;
         }
         let cache_key = BevyAudioCacheKey::from_command(&command);
         #[cfg_attr(test, allow(unused_variables))]
@@ -660,7 +696,8 @@ fn play_pending_audio(
                             runtime_shell.transient_audio_playing = true;
                         }
                         runtime_shell.pending_audio.push(command);
-                        continue;
+                        runtime_shell.pending_audio.extend(pending.drain(..));
+                        break;
                     }
                     Err(error) => Err(error),
                 };
@@ -688,8 +725,8 @@ fn play_pending_audio(
                     loop_start_sample,
                     loop_end_sample,
                 ),
-                AudioProgramSource::PcmGzipSidecar {
-                    path,
+                AudioProgramSource::Midi {
+                    midi_base64,
                     format,
                     byte_len,
                     payload_hash,
@@ -698,29 +735,20 @@ fn play_pending_audio(
                 } => {
                     #[cfg(all(not(test), target_arch = "wasm32"))]
                     {
-                        match browser_audio.poll_pcm_sidecar(&path) {
-                            Ok(Some(bytes)) => decoded_gzip_pcm_audio(
-                                &command,
-                                &bytes,
-                                format,
-                                byte_len,
-                                &payload_hash,
-                                loop_start_sample,
-                                loop_end_sample,
-                            ),
-                            Ok(None) => {
-                                if !matches!(command.kind, ModpackAudioKind::Music) {
-                                    runtime_shell.transient_audio_playing = true;
-                                }
-                                runtime_shell.pending_audio.push(command);
-                                continue;
-                            }
-                            Err(error) => Err(error),
-                        }
+                        decoded_browser_midi_audio(
+                            &command,
+                            &midi_base64,
+                            format,
+                            byte_len,
+                            &payload_hash,
+                            loop_start_sample,
+                            loop_end_sample,
+                        )
                     }
                     #[cfg(any(test, not(target_arch = "wasm32")))]
                     {
                         let _ = (
+                            midi_base64,
                             format,
                             byte_len,
                             payload_hash,
@@ -728,14 +756,11 @@ fn play_pending_audio(
                             loop_end_sample,
                         );
                         Err(anyhow::anyhow!(
-                            "PCM sidecar {path} requires browser on-demand loading"
+                            "MIDI audio {} requires the browser synthesizer",
+                            command.audio_id
                         ))
                     }
                 }
-                AudioProgramSource::Midi(_) => Err(anyhow::anyhow!(
-                    "audio program {} is not canonical PCM",
-                    command.audio_id
-                )),
             };
             let decoded_pcm = match decoded_pcm {
                 Ok(audio) => audio,
@@ -755,7 +780,7 @@ fn play_pending_audio(
         };
         #[cfg(all(not(test), not(target_arch = "wasm32")))]
         {
-            if let Err(error) = native_audio.play(&command, &audio) {
+            if let Err(error) = native_audio.play(&command, &audio, sound) {
                 clear_failed_music_playback_state(&mut runtime_shell, &command);
                 eprintln!(
                     "crystal-bevy audio failed {:?} {}: {error:#}",
@@ -775,7 +800,7 @@ fn play_pending_audio(
         }
         #[cfg(all(not(test), target_arch = "wasm32"))]
         {
-            if let Err(error) = browser_audio.play(&command, &audio) {
+            if let Err(error) = browser_audio.play(&command, &audio, sound) {
                 clear_failed_music_playback_state(&mut runtime_shell, &command);
                 record_visible_runtime_system_error(
                     &mut runtime_shell,
@@ -796,14 +821,6 @@ fn play_pending_audio(
             Vec::new()
         };
         let mut entity_commands = if matches!(command.kind, ModpackAudioKind::Music) {
-            for entity in active_transient_entities.drain(..) {
-                commands.entity(entity).despawn();
-            }
-            #[cfg(all(not(test), not(target_arch = "wasm32")))]
-            native_audio.stop_transient();
-            #[cfg(all(not(test), target_arch = "wasm32"))]
-            browser_audio.stop_transient();
-            runtime_shell.transient_audio_playing = false;
             commands.spawn(MusicAudioMarker)
         } else {
             commands.spawn(TransientAudioMarker)
@@ -824,6 +841,15 @@ fn play_pending_audio(
             active_music_entities.push(new_audio_entity);
         } else {
             active_transient_entities.push(new_audio_entity);
+            runtime_shell.active_transient_kind = Some(command.kind);
+            if matches!(command.kind, ModpackAudioKind::SoundEffect) {
+                runtime_shell.current_sfx_priority = runtime_shell
+                    .shell
+                    .runtime()
+                    .audio()
+                    .require_sound_effect_priority(&command.audio_id)
+                    .expect("verified queued SFX has an ASM priority byte");
+            }
         }
         runtime_shell.last_audio_events.push(format!(
             "played {:?} {} mode={:?} looped={}",
@@ -850,6 +876,8 @@ fn clear_failed_music_playback_state(
     {
         runtime_shell.active_music = None;
         runtime_shell.faded_music = None;
+        runtime_shell.music_fade = None;
+        runtime_shell.music_volume = 7;
     }
 }
 
@@ -867,14 +895,11 @@ fn decoded_pcm_audio(
             command.mode
         );
     }
-    if format.sample_rate_hz == 0 {
-        anyhow::bail!("PCM sample_rate_hz must be positive");
-    }
-    if format.channels == 0 {
-        anyhow::bail!("PCM channels must be positive");
-    }
-    if format.bits_per_sample != 16 {
-        anyhow::bail!("canonical PCM bits_per_sample must be 16");
+    if format.sample_rate_hz != 22_050
+        || format.channels != 2
+        || format.bits_per_sample != 16
+    {
+        anyhow::bail!("canonical PCM must be 22.05 kHz stereo signed 16-bit data");
     }
     let block_align = usize::from(format.channels) * 2;
     if bytes.is_empty() || bytes.len() % block_align != 0 {
@@ -932,11 +957,83 @@ fn decoded_gzip_pcm_audio(
     decoded_pcm_audio(command, decoded, format, loop_start_sample, loop_end_sample)
 }
 
+#[cfg(all(not(test), target_arch = "wasm32"))]
+fn decoded_browser_midi_audio(
+    command: &BevyAudioCommand,
+    midi_base64: &str,
+    format: AudioPcmFormat,
+    byte_len: usize,
+    payload_hash: &str,
+    loop_start_sample: Option<usize>,
+    loop_end_sample: Option<usize>,
+) -> Result<CachedPcmAudio> {
+    use wasm_bindgen::{JsCast as _, JsValue};
+
+    let global = js_sys::global();
+    let synth = js_sys::Reflect::get(
+        &global,
+        &JsValue::from_str("__crystalSynthesizeMidi"),
+    )
+    .map_err(|error| anyhow::anyhow!("find browser audio synthesizer: {error:?}"))?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| anyhow::anyhow!("browser audio synthesizer is not initialized"))?;
+    let result = synth
+        .call1(&JsValue::UNDEFINED, &JsValue::from_str(midi_base64))
+        .map_err(|error| {
+            anyhow::anyhow!("synthesize browser audio {}: {error:?}", command.audio_id)
+        })?;
+    let sample_rate = js_sys::Reflect::get(&result, &JsValue::from_str("sampleRate"))
+        .map_err(|error| anyhow::anyhow!("read synthesized sample rate: {error:?}"))?
+        .as_f64()
+        .context("synthesized sample rate is not numeric")? as u32;
+    if sample_rate != format.sample_rate_hz {
+        anyhow::bail!(
+            "synthesized audio {} has sample rate {sample_rate}, expected {}",
+            command.audio_id,
+            format.sample_rate_hz
+        );
+    }
+    let samples = js_sys::Reflect::get(&result, &JsValue::from_str("samples"))
+        .map_err(|error| anyhow::anyhow!("read synthesized samples: {error:?}"))?;
+    if !samples.is_instance_of::<js_sys::Int16Array>() {
+        anyhow::bail!("synthesized audio {} did not return Int16Array samples", command.audio_id);
+    }
+    let samples = js_sys::Int16Array::new(&samples);
+    let mut pcm = vec![0_i16; samples.length() as usize];
+    samples.copy_to(&mut pcm);
+    let bytes = pcm
+        .into_iter()
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    if bytes.len() != byte_len || format!("{:08x}", bevy_audio_fnv1a32(&bytes)) != payload_hash {
+        anyhow::bail!(
+            "synthesized audio {} failed canonical PCM validation",
+            command.audio_id
+        );
+    }
+    decoded_pcm_audio(command, bytes, format, loop_start_sample, loop_end_sample)
+}
+
 fn pcm_i16_samples(audio: &CachedPcmAudio) -> Result<Arc<[i16]>> {
     if audio.format.bits_per_sample != 16 || audio.bytes.len() % 2 != 0 {
         anyhow::bail!("canonical PCM payload is not aligned signed 16-bit data");
     }
     Ok(Arc::clone(&audio.samples))
+}
+
+fn pcm_samples_for_sound_option(samples: &Arc<[i16]>, sound: Sound) -> Arc<[i16]> {
+    if sound == Sound::Stereo {
+        return Arc::clone(samples);
+    }
+    Arc::from(
+        samples
+            .chunks_exact(2)
+            .flat_map(|frame| {
+                let mono = ((i32::from(frame[0]) + i32::from(frame[1])) / 2) as i16;
+                [mono, mono]
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
@@ -967,12 +1064,8 @@ fn decoded_audio_program_source(
             loop_start_sample,
             loop_end_sample,
         ),
-        AudioProgramSource::PcmGzipSidecar { path, .. } => Err(anyhow::anyhow!(
-            "PCM sidecar {path} requires browser on-demand loading"
-        )),
-        AudioProgramSource::Midi(_) => Err(anyhow::anyhow!(
-            "audio program {} is not canonical PCM",
-            command.audio_id
+        AudioProgramSource::Midi { .. } => Err(anyhow::anyhow!(
+            "MIDI audio requires the browser synthesizer"
         )),
     }
 }
@@ -1291,12 +1384,7 @@ fn format_title_dialog(runtime_shell: &BevyRuntimeShell) -> String {
         .into_iter()
         .enumerate()
         .map(|(index, option)| {
-            let label = match option {
-                TitleMenuOption::Continue => "CONTINUE",
-                TitleMenuOption::NewGame => "NEW GAME",
-                TitleMenuOption::Options => "OPTION",
-                TitleMenuOption::MysteryGift => "MYSTERY GIFT",
-            };
+            let label = option.label.as_str();
             if index == selected_title_option {
                 format!("> {label}")
             } else {
@@ -2852,12 +2940,7 @@ fn append_title_menu_context(runtime_shell: &BevyRuntimeShell, lines: &mut Vec<S
         .into_iter()
         .enumerate()
         .map(|(index, option)| {
-            let label = match option {
-                TitleMenuOption::Continue => "Continue",
-                TitleMenuOption::NewGame => "New Game",
-                TitleMenuOption::Options => "Option",
-                TitleMenuOption::MysteryGift => "Mystery Gift",
-            };
+            let label = option.label.as_str();
             if index == selected_title_option {
                 format!(">{label}")
             } else {

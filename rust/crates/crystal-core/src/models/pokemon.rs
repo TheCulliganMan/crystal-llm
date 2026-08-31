@@ -520,9 +520,8 @@ pub struct Pokemon {
     pub moves: Vec<LearnedMove>,
     #[serde(deserialize_with = "required_nullable_pokemon_token")]
     pub status: Option<String>,
-    /// Persistent egg identity; the status field is reserved for battle
-    /// conditions and is retained only as a legacy read discriminator.
-    #[serde(default)]
+    /// Persistent representation of Crystal's `EGG` party-species sentinel.
+    /// Battle status remains separate and cannot encode egg identity.
     pub is_egg: bool,
     /// Pokérus status byte from the party structure. The low nibble stores
     /// remaining days; the high nibble is the strain and is preserved after
@@ -575,7 +574,6 @@ impl<'de> Deserialize<'de> for Pokemon {
             moves: Vec<LearnedMove>,
             #[serde(deserialize_with = "required_nullable_pokemon_token")]
             status: Option<String>,
-            #[serde(default)]
             is_egg: bool,
             pokerus: u8,
             #[serde(default)]
@@ -727,6 +725,11 @@ impl Pokemon {
         }
         if let Some(status) = &self.status {
             validate_exact_token("pokemon.status", status)?;
+            if status == "EGG" {
+                return Err(
+                    "pokemon.status cannot encode egg identity; use pokemon.is_egg".to_string(),
+                );
+            }
         }
         if let Some(caught) = &self.caught_data {
             if caught.level > 0x3f {
@@ -1468,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn pokemon_json_requires_explicit_nullable_item_and_status() {
+    fn pokemon_json_requires_explicit_item_status_and_typed_egg_identity() {
         let pokemon = Pokemon::new_for_tests(chikorita(), 5, Dv::from_non_hp(10, 10, 10, 10));
 
         let mut missing_item = serde_json::to_value(&pokemon).expect("pokemon json");
@@ -1493,6 +1496,16 @@ mod tests {
             status_error.contains("missing field `status`"),
             "{status_error}"
         );
+
+        let mut missing_is_egg = serde_json::to_value(&pokemon).expect("pokemon json");
+        missing_is_egg
+            .as_object_mut()
+            .expect("pokemon object")
+            .remove("is_egg");
+        let egg_error = serde_json::from_value::<Pokemon>(missing_is_egg)
+            .expect_err("missing egg identity must not deserialize as a non-Egg")
+            .to_string();
+        assert!(egg_error.contains("missing field `is_egg`"), "{egg_error}");
 
         let explicit_nulls = serde_json::from_value::<Pokemon>(
             serde_json::to_value(&pokemon).expect("pokemon json"),

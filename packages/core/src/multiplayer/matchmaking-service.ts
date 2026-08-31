@@ -19,6 +19,8 @@ export type MatchmakingMode = 'battle' | 'trade' | 'time_capsule';
 
 export interface MatchmakingRequest {
   mode: MatchmakingMode;
+  /** Stable server/operator supplied identity for the complete enabled modpack set. */
+  modpackId?: string;
   rating?: number;
   partyPreview?: {
     species: string;
@@ -36,6 +38,7 @@ export interface Match {
   player1_id: string;
   player2_id: string;
   mode: MatchmakingMode;
+  modpack_id: string;
   channel_name: string;
   created_at: string;
 }
@@ -44,6 +47,7 @@ export class MatchmakingService {
   private supabase = createMultiplayerClient();
   private channel: MultiplayerRealtimeChannel | null = null;
   private userId: string | null = null;
+  private modpackId = 'core-modular';
 
   /**
    * Join the matchmaking queue
@@ -62,11 +66,18 @@ export class MatchmakingService {
       throw new Error('User not authenticated');
     }
     this.userId = user.id;
+    this.modpackId = request.modpackId?.trim() || 'core-modular';
+
+    // Subscribe before inserting so a fast matcher cannot create the match in
+    // the gap between the queue write and Realtime registration.
+    await this.subscribeToMatches(user.id);
+    useMultiplayerStore.getState().setInQueue(true, request.mode);
 
     // Insert into matchmaking queue
     const { error } = await this.supabase.from('matchmaking_queue').upsert({
       user_id: user.id,
       mode: request.mode,
+      modpack_id: this.modpackId,
       rating: request.rating ?? 1000,
       party_preview: request.partyPreview ?? null,
       preferences: request.preferences ?? {},
@@ -76,15 +87,11 @@ export class MatchmakingService {
     });
 
     if (error) {
+      useMultiplayerStore.getState().setInQueue(false);
+      this.unsubscribe();
       console.error('[Matchmaking] Failed to join queue:', error);
       throw new Error(`Failed to join queue: ${error.message}`);
     }
-
-    // Update store
-    useMultiplayerStore.getState().setInQueue(true, request.mode);
-
-    // Subscribe to match notifications
-    this.subscribeToMatches(user.id);
 
     console.log(`[Matchmaking] Joined ${request.mode} queue`);
   }
@@ -130,11 +137,11 @@ export class MatchmakingService {
    *
    * @param userId - Current user's ID
    */
-  private subscribeToMatches(userId: string): void {
+  private async subscribeToMatches(userId: string): Promise<void> {
     if (!this.supabase) return;
 
     this.channel = this.supabase
-      .channel('matchmaking-notifications')
+      .channel(`matchmaking:${userId}`)
       .on(
         'postgres_changes',
         {
@@ -154,8 +161,17 @@ export class MatchmakingService {
           filter: `player2_id=eq.${userId}`,
         },
         (payload) => this.handleMatchFound(payload.new as Match, false)
-      )
-      .subscribe();
+      );
+
+    await new Promise<void>((resolve, reject) => {
+      this.channel?.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          resolve();
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          reject(new Error(`Matchmaking subscription failed: ${status}`));
+        }
+      });
+    });
 
     console.log('[Matchmaking] Subscribed to match notifications');
   }
@@ -195,7 +211,9 @@ export class MatchmakingService {
       opponentId,
       opponentName,
       match.mode,
-      isHost
+      isHost,
+      match.modpack_id,
+      match.channel_name,
     );
 
     console.log(
@@ -222,7 +240,7 @@ export class MatchmakingService {
    * @param mode - Matchmaking mode
    * @returns Number of players ahead in queue
    */
-  async getQueuePosition(mode: MatchmakingMode): Promise<number> {
+  async getQueuePosition(mode: MatchmakingMode, modpackId = this.modpackId): Promise<number> {
     if (!this.supabase) {
       throw new Error('Supabase not initialized');
     }
@@ -240,6 +258,7 @@ export class MatchmakingService {
       .select('created_at, rating')
       .eq('user_id', user.id)
       .eq('mode', mode)
+      .eq('modpack_id', modpackId)
       .single();
 
     if (userError || !userEntry) {
@@ -251,6 +270,7 @@ export class MatchmakingService {
       .from('matchmaking_queue')
       .select('*', { count: 'exact', head: true })
       .eq('mode', mode)
+      .eq('modpack_id', modpackId)
       .lt('created_at', userEntry.created_at)
       .gte('rating', (userEntry.rating ?? 1000) - 100)
       .lte('rating', (userEntry.rating ?? 1000) + 100);
@@ -268,9 +288,9 @@ export class MatchmakingService {
    * @param mode - Matchmaking mode
    * @returns Estimated wait time in seconds
    */
-  async getEstimatedWaitTime(mode: MatchmakingMode): Promise<number> {
+  async getEstimatedWaitTime(mode: MatchmakingMode, modpackId = this.modpackId): Promise<number> {
     // Simple estimation: assume 1 match per 10 seconds
-    const position = await this.getQueuePosition(mode);
+    const position = await this.getQueuePosition(mode, modpackId);
     return Math.max(position * 5, 10); // Minimum 10 seconds
   }
 

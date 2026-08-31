@@ -105,7 +105,7 @@ const copyWithoutHeavyWebAssets = (source, destination) => {
     recursive: true,
     filter: (entry) => {
       const relative = path.relative(source, entry);
-      return !relative.split(path.sep).some((part) => part === "downloads" || part === "ffmpeg" || part === "__tests__");
+      return !relative.split(path.sep).some((part) => part === "downloads" || part === "__tests__");
     },
   });
 };

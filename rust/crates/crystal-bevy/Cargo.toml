@@ -27,8 +27,10 @@ crystal-render-api = { path = "../crystal-render-api", optional = true }
 crystal-voxel-view = { path = "../crystal-voxel-view", optional = true }
 flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid = { version = "1", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { version = "0.14", optional = true, default-features = false, features = ["multi_threaded", "x11"] }
@@ -45,10 +47,14 @@ web-sys = { version = "0.3", features = [
     "AudioContext",
     "AudioDestinationNode",
     "AudioNode",
+    "AudioParam",
+    "GainNode",
+    "Location",
     "Response",
+    "Storage",
+    "UrlSearchParams",
     "Window",
 ] }
-uuid = { version = "1", features = ["js"] }
 
 [features]
 default = ["bevy-shell"]

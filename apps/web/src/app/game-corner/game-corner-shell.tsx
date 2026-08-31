@@ -1,6 +1,5 @@
 "use client";
 
-import { AudioConvertClient } from "@/app/audio/audio-convert-client";
 import { GameCornerClient } from "@/app/game-corner/game-corner-client";
 import { KrabbyClawArenaPanel } from "@/app/game-corner/krabbyclaw-arena-panel";
 import { ProgressTrackerPanel } from "@/app/game-corner/progress-tracker-panel";
@@ -16,7 +15,6 @@ type GameCornerShellProps = {
 
 const TAB_HINTS: Record<GameCornerTab, string> = {
   "slot-machine": "Classic Goldenrod slots and coin controls.",
-  "audio-generation": "Generate and export audio assets from the Game Corner.",
   "arena-mcp-skill": "Arena controls plus MCP/skill entry points for automation.",
   "progress-tracker": "Track end-to-end story completion with a live Mermaid flowchart.",
 };
@@ -56,14 +54,6 @@ export const GameCornerShell = ({
           <section className="kc-surface-card card card-bordered border-base-300 bg-base-200/90" data-testid="game-corner-slot-machine">
             <div className="card-body gap-3">
               <GameCornerClient initialTab="slot-machine" />
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "audio-generation" ? (
-          <section className="kc-surface-card card card-bordered border-base-300 bg-base-200/90" data-testid="game-corner-audio-generation">
-            <div className="card-body gap-3">
-              <AudioConvertClient />
             </div>
           </section>
         ) : null}

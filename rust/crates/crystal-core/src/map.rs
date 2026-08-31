@@ -565,6 +565,7 @@ fn has_reserved_pack_prefix(value: &str) -> bool {
 pub struct ObjectEvent {
     #[serde(deserialize_with = "required_map_token")]
     pub sprite: String,
+    pub sprite_has_facings: bool,
     pub x: u16,
     pub y: u16,
     #[serde(deserialize_with = "required_map_token")]
@@ -897,6 +898,7 @@ mod tests {
         let error = serde_json::from_str::<ObjectEvent>(
             r#"{
               "sprite":"SPRITE_YOUNGSTER",
+              "sprite_has_facings":true,
               "x":4,
               "y":5,
               "spritemovedata":"SPRITEMOVEDATA_STANDING_DOWN",
@@ -1233,6 +1235,7 @@ mod tests {
     fn valid_object_event_json() -> serde_json::Value {
         serde_json::json!({
             "sprite": "SPRITE_YOUNGSTER",
+            "sprite_has_facings": true,
             "x": 4,
             "y": 5,
             "spritemovedata": "SPRITEMOVEDATA_STANDING_DOWN",

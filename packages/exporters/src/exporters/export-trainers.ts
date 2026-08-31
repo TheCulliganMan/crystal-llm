@@ -86,6 +86,18 @@ function cleanTrainerName(rawName: string): string {
   return normalized;
 }
 
+function parseTrainerClassOrder(): string[] {
+  const constantsPath = path.join(getDisassemblyRoot(), "constants", "trainer_constants.asm");
+  const classOrder: string[] = [];
+  for (const raw of fs.readFileSync(constantsPath, "utf8").split(/\r?\n/)) {
+    const line = stripInlineComment(raw).trim();
+    if (!line.startsWith("trainerclass ")) continue;
+    const className = line.split(/\s+/)[1];
+    if (className && className !== "TRAINER_NONE") classOrder.push(className);
+  }
+  return classOrder;
+}
+
 function parseTrainerMetadata(): Array<[string, string]> {
   const root = getDisassemblyRoot();
   const constantsPath = path.join(root, "constants", "trainer_constants.asm");
@@ -123,6 +135,47 @@ function parseTrainerMetadata(): Array<[string, string]> {
     }
   }
   return orderedMetadata;
+}
+
+type TrainerDvs = {
+  attack: number;
+  defense: number;
+  speed: number;
+  special: number;
+  hp: number;
+};
+
+function parseTrainerClassDvs(classOrder: string[]): Record<string, TrainerDvs> {
+  const dvsPath = path.join(getDisassemblyRoot(), "data", "trainers", "dvs.asm");
+  const rows: Array<{ label: string | null; values: number[] }> = [];
+  for (const rawLine of fs.readFileSync(dvsPath, "utf8").split(/\r?\n/)) {
+    const match = rawLine.match(/^\s*dn\s+([^;]+?)(?:\s*;\s*([A-Z0-9_]+))?\s*$/);
+    if (!match) continue;
+    const values = match[1].split(",").map((value) => parseAsmNumber(value.trim()));
+    if (values.length !== 4 || values.some((value) => value < 0 || value > 0xf)) {
+      throw new Error(`Invalid trainer DV row: ${rawLine.trim()}`);
+    }
+    rows.push({ label: match[2] ?? null, values });
+  }
+  if (rows.length !== classOrder.length) {
+    throw new Error(
+      `Trainer DV row count does not match trainer class count: ${rows.length} != ${classOrder.length}`,
+    );
+  }
+  return Object.fromEntries(classOrder.map((trainerClass, index) => {
+    const row = rows[index];
+    if (row.label !== null && row.label !== trainerClass) {
+      throw new Error(
+        `Trainer DV row ${index} is labeled ${row.label}, expected ${trainerClass}`,
+      );
+    }
+    const [attack, defense, speed, special] = row.values;
+    const hp = ((attack & 1) << 3)
+      | ((defense & 1) << 2)
+      | ((speed & 1) << 1)
+      | (special & 1);
+    return [trainerClass, { attack, defense, speed, special, hp }];
+  }));
 }
 
 type TrainerClassAttributes = {
@@ -395,6 +448,7 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
 
   const metadata = parseTrainerMetadata();
   const classAttributes = parseTrainerClassAttributes();
+  const classDvs = parseTrainerClassDvs(parseTrainerClassOrder());
   if (metadata.length !== trainers.length) {
     throw new Error(`Parsed trainer count does not match ASM trainer metadata count: ${trainers.length} != ${metadata.length}`);
   }
@@ -414,6 +468,9 @@ export function parseTrainers(filePath: string, pokemonSpeciesMap: Record<string
     trainers[index].base_reward = attributes.baseReward;
     trainers[index].ai_move_flags = attributes.aiMoveFlags;
     trainers[index].ai_item_switch_flags = attributes.aiItemSwitchFlags;
+    for (const pokemon of trainers[index].party) {
+      pokemon.dvs = { ...classDvs[trainers[index].trainer_class] };
+    }
   }
   return trainers;
 }

@@ -27,7 +27,7 @@ describe("audio route cache helpers", () => {
 
 describe("audio route asset resolution", () => {
   const fixtureDir = path.resolve(process.cwd(), "public", "assets", "audio", "__tests__");
-  const fixturePath = path.join(fixtureDir, "fixture.wav");
+  const fixturePath = path.join(fixtureDir, "fixture.pcm");
   const manifestPath = path.join(fixtureDir, "fixture.json");
   const musicDir = path.resolve(process.cwd(), "public", "assets", "audio", "music");
   const missingMusicAsmPath = path.join(musicDir, "missingbundledtrack.asm");
@@ -43,17 +43,7 @@ describe("audio route asset resolution", () => {
     await fs.mkdir(tempAudioRoot, { recursive: true });
     await fs.mkdir(path.join(tempAudioRoot, "music"), { recursive: true });
     process.env.POKECRYSTAL_DISASSEMBLY_ROOT = tempDisassemblyRoot;
-    await fs.writeFile(
-      fixturePath,
-      Buffer.from([
-        0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
-        0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
-        0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
-        0x22, 0x56, 0x00, 0x00, 0x88, 0x58, 0x01, 0x00,
-        0x04, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
-        0x00, 0x00, 0x00, 0x00,
-      ]),
-    );
+    await fs.writeFile(fixturePath, Buffer.from([0, 0, 1, 0]));
     await fs.writeFile(
       manifestPath,
       JSON.stringify({ ok: true }),
@@ -137,14 +127,14 @@ describe("audio route asset resolution", () => {
 
   it("streams deployable bundled audio files from public assets", async () => {
     const response = await GET(
-      new Request("https://example.com/api/audio/__tests__/fixture.wav"),
-      { params: Promise.resolve({ path: ["__tests__", "fixture.wav"] }) },
+      new Request("https://example.com/api/audio/__tests__/fixture.pcm"),
+      { params: Promise.resolve({ path: ["__tests__", "fixture.pcm"] }) },
     );
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("Content-Type")).toBe("audio/wav");
+    expect(response.headers.get("Content-Type")).toBe("application/octet-stream");
     expect(response.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
-    expect((await response.arrayBuffer()).byteLength).toBe(44);
+    expect((await response.arrayBuffer()).byteLength).toBe(4);
   });
 
   it("streams bundled audio manifests as json", async () => {
@@ -265,8 +255,8 @@ describe("audio route asset resolution", () => {
 
   it("rejects traversal attempts outside the bundled audio roots", async () => {
     const response = await GET(
-      new Request("https://example.com/api/audio/../../secrets.wav"),
-      { params: Promise.resolve({ path: ["..", "..", "secrets.wav"] }) },
+      new Request("https://example.com/api/audio/../../secrets.pcm"),
+      { params: Promise.resolve({ path: ["..", "..", "secrets.pcm"] }) },
     );
 
     expect(response.status).toBe(404);

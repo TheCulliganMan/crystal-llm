@@ -125,12 +125,23 @@ export type BuildRuntimeTitlePresentationProgramOptions = {
   audioAssetIds: ReadonlySet<string>;
   runtimeSpawnIdentifiers: ReadonlySet<number>;
   readSource?: (relativePath: string) => string;
+  readBinary?: (relativePath: string) => Buffer;
 };
 
 type LoadedSource = {
   file: string;
   lines: string[];
 };
+
+const loadedSourceLineSpan = (
+  source: LoadedSource,
+  startLine: number,
+  endLine: number = startLine,
+): RuntimePresentationSourceSpan => ({
+  file: source.file,
+  start_line: startLine,
+  end_line: endLine,
+});
 
 export type RuntimePresentationAsmInstruction = {
   opcode: string;
@@ -236,6 +247,12 @@ export type RuntimePresentationSpriteProgram = {
   object: RuntimePresentationNamedByte & {
     table_source_span: RuntimePresentationSourceSpan;
   };
+  graphic_binding: {
+    resource: string;
+    target_vram_bank: number;
+    tile_base: number;
+    transfer_source_span: RuntimePresentationSourceSpan;
+  } | null;
   initial_memory: {
     index: number;
     frameset_id: number;
@@ -286,6 +303,7 @@ export type RuntimePresentationSpriteProgram = {
           table_source_span: RuntimePresentationSourceSpan;
           target: string;
           target_source_span: RuntimePresentationSourceSpan;
+          labels: Record<string, number>;
           instructions: RuntimePresentationAsmInstruction[];
           per_tick_struct_deltas: Partial<
             Record<
@@ -397,7 +415,7 @@ export type RuntimePresentationCallableSubprogram = {
   accepted_call_forms: RuntimePresentationHostEffectCallForm[];
   result: {
     name: string;
-    storage: "carry";
+    storage: "carry" | "none";
     domain: Array<{
       id: string;
       value: number | null;
@@ -408,6 +426,7 @@ export type RuntimePresentationCallableSubprogram = {
   phases: Array<{
     id: string;
     source_span: RuntimePresentationSourceSpan;
+    labels?: Record<string, number>;
     operations: RuntimePresentationOperation[];
   }>;
   loop: {
@@ -415,8 +434,8 @@ export type RuntimePresentationCallableSubprogram = {
     order: string[];
     input: Record<string, unknown>;
     scene_dispatch: Record<string, unknown>;
-    natural_scheduler_ticks: number;
-    scheduler: RuntimePresentationSpriteOperation;
+    natural_scheduler_ticks: number | null;
+    scheduler: RuntimePresentationSpriteOperation | null;
     frame_wait: RuntimePresentationOperation;
   };
   resource_transfers: Array<Record<string, unknown>>;
@@ -999,6 +1018,20 @@ const parseCountedByteRecords = (
   }
   return records;
 };
+
+const parseTerminatedMenuStrings = (block: ParsedAsmBlock): string[] =>
+  releaseInstructions(block.instructions)
+    .filter((instruction) => instruction.opcode === "db")
+    .flatMap((instruction) => instruction.args)
+    .map((argument) => {
+      const match = argument.match(/^"([^"]*)@"$/);
+      if (!match) {
+        throw new Error(
+          `Runtime presentation data ${block.id} has invalid menu string ${argument}`,
+        );
+      }
+      return match[1];
+    });
 
 const callSubtreeContainsExternalCall = (
   target: string,
@@ -3148,6 +3181,14 @@ const compileDirectSpriteCallback = (
         candidate.globalLabel === targetBlock.globalLabel,
     )
     .sort((left, right) => left.startLine - right.startLine);
+  const labels: Record<string, number> = {};
+  let instructionOffset = 0;
+  for (const block of family) {
+    const label = block.id.includes("@") ? block.id.split("@", 1)[0] : block.id;
+    labels[block.id] = instructionOffset;
+    if (!Object.hasOwn(labels, label)) labels[label] = instructionOffset;
+    instructionOffset += block.instructions.length;
+  }
   const instructions = family.flatMap((candidate) => candidate.instructions);
   let property:
     keyof RuntimePresentationSpriteProgram["initial_memory"] | null = null;
@@ -3436,6 +3477,7 @@ const compileDirectSpriteCallback = (
       table_source_span: dispatchRow.source_span,
       target,
       target_source_span: parsedBlockSourceSpan(targetBlock),
+      labels,
       instructions,
       per_tick_struct_deltas: deltas,
       host_operations: hostOperations,
@@ -3751,6 +3793,7 @@ const compileInitializedSpriteProgram = (
     initializer_source_span: initialized.sourceSpan,
     allocation_source_span: initialized.allocationSourceSpan,
     object: object.object,
+    graphic_binding: null,
     initial_memory: initialMemory,
     frameset,
     frameset_variants: framesetVariants,
@@ -8925,6 +8968,226 @@ function certifyJoyTextDelayOperations(
   ];
 }
 
+function certifyLoadCrystalDataOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  invocation: RuntimePresentationAsmInstruction,
+): RuntimePresentationOperation[] {
+  if (
+    invocation.opcode !== "farcall" ||
+    runtimePresentationInstructionTarget(invocation) !== "_LoadData"
+  ) {
+    throw new Error(
+      `_LoadData operation certification requires an exact farcall _LoadData invocation, reached ${instructionSignature(invocation)}`,
+    );
+  }
+  const save = loadSource("engine/menus/save.asm", options);
+  const wram = loadSource("ram/wram.asm", options);
+  const sram = loadSource("ram/sram.asm", options);
+  const blocks = parseAsmBlocks([save]);
+  const implementationSpan = requireExactRoutineBlock(
+    blocks,
+    "_LoadData",
+    [
+      "ld a, BANK(sCrystalData)",
+      "call OpenSRAM",
+      "ld hl, sCrystalData",
+      "ld de, wCrystalData",
+      "ld bc, wCrystalDataEnd - wCrystalData",
+      "call CopyBytes",
+      "ld hl, wCrystalFlags",
+      "ld a, [sCrystalFlags + 0]",
+      "ld [hli], a",
+      "ld a, [sCrystalFlags + 1]",
+      "ld [hli], a",
+      "jp CloseSRAM",
+    ],
+    "Continue exact Crystal-specific data load",
+  );
+  const wramDataSpan = requireExactNormalizedRegion(
+    wram,
+    "wCrystalData::",
+    "wCrystalDataEnd::",
+    [
+      "wCrystalData::",
+      "wPlayerGender::",
+      "db",
+      "wPlayerAge:: ds 1",
+      "wPlayerPrefecture:: ds 1",
+      "wPlayerPostalCode:: ds 4",
+      "wCrystalDataEnd::",
+    ],
+    "Continue exact Crystal WRAM load region",
+  );
+  const wramFlagsSpan = findLabelSpan(wram, "wCrystalFlags");
+  const sramDataSpan = findTokenSpan(
+    sram,
+    "sCrystalData:: ds wCrystalDataEnd - wCrystalData",
+  );
+  const sramFlagsSpan = findTokenSpan(sram, "sCrystalFlags:: ds 2");
+  return [
+    {
+      op: "copy_memory",
+      source: "sCrystalData",
+      target: "wCrystalData",
+      byte_count: "wCrystalDataEnd - wCrystalData",
+      source_bank: "BANK(sCrystalData)",
+      restore_sram: true,
+      source_declaration_span: sramDataSpan,
+      target_declaration_span: wramDataSpan,
+      implementation_source_span: implementationSpan,
+      invocation_source_span: invocation.source_span,
+      source_span: implementationSpan,
+    },
+    {
+      op: "copy_memory",
+      source: "sCrystalFlags",
+      target: "wCrystalFlags",
+      byte_count: 2,
+      source_bank: "BANK(sCrystalData)",
+      restore_sram: true,
+      source_declaration_span: sramFlagsSpan,
+      target_declaration_span: wramFlagsSpan,
+      implementation_source_span: implementationSpan,
+      invocation_source_span: invocation.source_span,
+      source_span: implementationSpan,
+    },
+  ];
+}
+
+function certifyLoadStandardMenuHeaderOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  invocation: RuntimePresentationAsmInstruction,
+): RuntimePresentationOperation[] {
+  if (
+    invocation.opcode !== "call" ||
+    runtimePresentationInstructionTarget(invocation) !== "LoadStandardMenuHeader"
+  ) {
+    throw new Error(
+      `LoadStandardMenuHeader certification requires an exact call invocation, reached ${instructionSignature(invocation)}`,
+    );
+  }
+  const homeMenu = loadSource("home/menu.asm", options);
+  const menuEngine = loadSource("engine/menus/menu.asm", options);
+  const blocks = parseAsmBlocks([homeMenu, menuEngine]);
+  const wrapperSpan = requireExactRoutineBlock(
+    blocks,
+    "LoadStandardMenuHeader",
+    ["ld hl, .MenuHeader", "call LoadMenuHeader", "ret"],
+    "Continue exact standard menu-header wrapper",
+  );
+  const headerSpan = requireExactRoutineBlock(
+    blocks,
+    ".MenuHeader@LoadStandardMenuHeader",
+    [
+      "db MENU_BACKUP_TILES",
+      "menu_coords 0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1",
+      "dw 0",
+      "db 1",
+    ],
+    "Continue exact full-screen standard menu header",
+  );
+  const loadSpan = requireExactRoutineBlock(
+    blocks,
+    "LoadMenuHeader",
+    ["call CopyMenuHeader", "call PushWindow", "ret"],
+    "Continue exact menu-header load order",
+  );
+  const copySpan = requireExactRoutineBlock(
+    blocks,
+    "CopyMenuHeader",
+    [
+      "ld de, wMenuHeader",
+      "ld bc, wMenuHeaderEnd - wMenuHeader",
+      "call CopyBytes",
+      "ldh a, [hROMBank]",
+      "ld [wMenuDataBank], a",
+      "ret",
+    ],
+    "Continue exact menu-header copy and bank capture",
+  );
+  const pushWrapperSpan = requireExactRoutineBlock(
+    blocks,
+    "PushWindow",
+    ["callfar _PushWindow", "ret"],
+    "Continue exact window-stack wrapper",
+  );
+  const pushImplementationSpan = findLabelSpan(menuEngine, "_PushWindow");
+  return [
+    {
+      op: "load_menu_header",
+      header: ".MenuHeader@LoadStandardMenuHeader",
+      flags: ["MENU_BACKUP_TILES"],
+      coordinates: { left: 0, top: 0, right: 19, bottom: 17 },
+      menu_data: 0,
+      default_option: 1,
+      destination: "wMenuHeader",
+      byte_count: "wMenuHeaderEnd - wMenuHeader",
+      captures_data_bank: { source: "hROMBank", target: "wMenuDataBank" },
+      pushes_window: true,
+      header_source_span: headerSpan,
+      implementation_source_spans: [
+        wrapperSpan,
+        loadSpan,
+        copySpan,
+        pushWrapperSpan,
+        pushImplementationSpan,
+      ],
+      invocation_source_span: invocation.source_span,
+      source_span: sourceSpanThrough(wrapperSpan, headerSpan),
+    },
+  ];
+}
+
+function certifyCloseWindowOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  invocation: RuntimePresentationAsmInstruction,
+): RuntimePresentationOperation[] {
+  if (
+    invocation.opcode !== "call" ||
+    runtimePresentationInstructionTarget(invocation) !== "CloseWindow"
+  ) {
+    throw new Error(
+      `CloseWindow certification requires an exact call invocation, reached ${instructionSignature(invocation)}`,
+    );
+  }
+  const homeMenu = loadSource("home/menu.asm", options);
+  const menuEngine = loadSource("engine/menus/menu.asm", options);
+  const blocks = parseAsmBlocks([homeMenu]);
+  const closeSpan = requireExactRoutineBlock(
+    blocks,
+    "CloseWindow",
+    [
+      "push af",
+      "call ExitMenu",
+      "call ApplyTilemap",
+      "call UpdateSprites",
+      "pop af",
+      "ret",
+    ],
+    "Continue exact close-window render and carry preservation",
+  );
+  const exitSpan = requireExactRoutineBlock(
+    blocks,
+    "ExitMenu",
+    ["push af", "callfar _ExitMenu", "pop af", "ret"],
+    "Continue exact exit-menu carry preservation",
+  );
+  const exitImplementationSpan = findLabelSpan(menuEngine, "_ExitMenu");
+  return [
+    {
+      op: "close_window",
+      restore_tile_backup: true,
+      pop_window_stack: true,
+      apply_tilemap: true,
+      update_sprites: true,
+      preserve: ["a", "flags"],
+      implementation_source_spans: [closeSpan, exitSpan, exitImplementationSpan],
+      invocation_source_span: invocation.source_span,
+      source_span: closeSpan,
+    },
+  ];
+}
+
 const RUNTIME_PRESENTATION_SOURCE_OPERATION_BOUNDARIES: Record<
   string,
   RuntimePresentationSourceOperationBoundary
@@ -8948,6 +9211,18 @@ const RUNTIME_PRESENTATION_SOURCE_OPERATION_BOUNDARIES: Record<
   JoyTextDelay: {
     accepted_call_forms: ["call"],
     certify: certifyJoyTextDelayOperations,
+  },
+  _LoadData: {
+    accepted_call_forms: ["farcall"],
+    certify: certifyLoadCrystalDataOperations,
+  },
+  LoadStandardMenuHeader: {
+    accepted_call_forms: ["call"],
+    certify: certifyLoadStandardMenuHeaderOperations,
+  },
+  CloseWindow: {
+    accepted_call_forms: ["call"],
+    certify: certifyCloseWindowOperations,
   },
 };
 
@@ -12040,7 +12315,9 @@ const decodePresentationLz3Resource = (
       `Runtime presentation compressed resource ${relativePath} escapes the disassembly root`,
     );
   }
-  const input = fs.readFileSync(absolute);
+  const input = options.readBinary
+    ? options.readBinary(relativePath)
+    : fs.readFileSync(absolute);
   const output: number[] = [];
   let cursor = 0;
   let terminated = false;
@@ -12895,6 +13172,714 @@ const compileIntroSceneDecompressionPrefix = (
     operations,
     consumed: index - startIndex,
     vram_bank: vramBank,
+  };
+};
+
+const compileIntroLoadTilemapCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_LoadTilemap") {
+    throw new Error(
+      `Intro_LoadTilemap requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const implementationSourceSpan = requireExactNormalizedRegion(
+    intro,
+    "Intro_LoadTilemap:",
+    "ret",
+    [
+      "Intro_LoadTilemap:",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wDecompressScratch)",
+      "ldh [rWBK], a",
+      "ld hl, wDecompressScratch",
+      "decoord 0, 0",
+      "ld b, SCREEN_HEIGHT",
+      ".row",
+      "ld c, SCREEN_WIDTH",
+      ".col",
+      "ld a, [hli]",
+      "ld [de], a",
+      "inc de",
+      "dec c",
+      "jr nz, .col",
+      "ld a, TILEMAP_WIDTH - SCREEN_WIDTH",
+      "add l",
+      "ld l, a",
+      "ld a, 0",
+      "adc h",
+      "ld h, a",
+      "dec b",
+      "jr nz, .row",
+      "pop af",
+      "ldh [rWBK], a",
+      "ret",
+    ],
+    "Intro_LoadTilemap exact visible tilemap copy",
+  );
+  const constants = parseAsmConstants(
+    CONSTANT_SOURCE_FILES.map((file) => loadSource(file, options)),
+  );
+  const width = constants.get("SCREEN_WIDTH");
+  const height = constants.get("SCREEN_HEIGHT");
+  const sourceStride = constants.get("TILEMAP_WIDTH");
+  if (width !== 20 || height !== 18 || sourceStride !== 32) {
+    throw new Error(
+      `Intro_LoadTilemap dimensions are not exact: ${String(width)}x${String(height)} stride ${String(sourceStride)}`,
+    );
+  }
+  const tilemap = requireFixedWramWriteTarget("[wTilemap]", options);
+  return {
+    op: "copy_strided_memory",
+    source: "wDecompressScratch",
+    source_address_space: "wram",
+    source_stride: sourceStride,
+    target: tilemap.target,
+    target_address_space: tilemap.address_space,
+    target_stride: width,
+    row_count: height,
+    bytes_per_row: width,
+    source_wram_bank: {
+      register: "rWBK",
+      select: "BANK(wDecompressScratch)",
+      restore: true,
+    },
+    target_declaration_source_span: tilemap.declaration_source_span,
+    target_section_source_span: tilemap.section_source_span,
+    implementation_source_span: implementationSourceSpan,
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroDirect2bppRequest = (
+  instructions: readonly RuntimePresentationAsmInstruction[],
+  startIndex: number,
+  vramBank: number,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): { operation: RuntimePresentationOperation; consumed: number } => {
+  const request = instructions.slice(startIndex, startIndex + 4);
+  const [sourceLoad, destinationLoad, countLoad, call] = request;
+  const sourceSymbol = sourceLoad?.args[1];
+  const destinationOperand = destinationLoad?.args[1];
+  if (
+    sourceLoad?.opcode !== "ld" ||
+    sourceLoad.args[0] !== "de" ||
+    !sourceSymbol ||
+    destinationLoad?.opcode !== "ld" ||
+    destinationLoad.args[0] !== "hl" ||
+    !destinationOperand ||
+    countLoad?.opcode !== "lb" ||
+    countLoad.args[0] !== "bc" ||
+    countLoad.args[1] !== `BANK(${sourceSymbol})` ||
+    !countLoad.args[2] ||
+    instructionSignature(call) !== "call Request2bpp"
+  ) {
+    throw new Error(
+      `Intro direct 2bpp request is not exact; reached ${request.map(instructionSignature).join(" -> ")}`,
+    );
+  }
+  const destinationMatch = destinationOperand.match(
+    /^(vTiles[012])\s+tile\s+(.+)$/,
+  );
+  if (!destinationMatch) {
+    throw new Error(
+      `Intro direct 2bpp destination ${destinationOperand} is not an exact VRAM tile operand`,
+    );
+  }
+  const vram = loadSource("ram/vram.asm", options);
+  if (!findAsmSymbolDeclarationSpan(destinationMatch[1], [vram])) {
+    throw new Error(
+      `Intro direct 2bpp destination ${destinationMatch[1]} has no VRAM declaration`,
+    );
+  }
+  const tileOffset = evaluateAsmInteger(destinationMatch[2], new Map());
+  const tileCount = evaluateAsmInteger(countLoad.args[2], new Map());
+  if (tileOffset < 0 || tileOffset >= 128 || tileCount <= 0 || tileCount > 128) {
+    throw new Error(
+      `Intro direct 2bpp request has invalid tile offset/count ${tileOffset}/${tileCount}`,
+    );
+  }
+  const resource = requirePresentationResourceAtLabel(intro, sourceSymbol);
+  if (resource.kind !== "tiles") {
+    throw new Error(
+      `Intro direct 2bpp resource ${sourceSymbol} is not exact tile data`,
+    );
+  }
+  const implementation = certifyIntroDecompressionImplementation(options);
+  const byteCount = tileCount * implementation.bytes_per_tile;
+  const absoluteResourcePath = path.join(options.disassemblyRoot, resource.path);
+  const resourceByteCount = fs.statSync(absoluteResourcePath).size;
+  if (resourceByteCount < byteCount) {
+    throw new Error(
+      `Intro direct 2bpp resource ${resource.path} has ${resourceByteCount} bytes, below requested ${byteCount}`,
+    );
+  }
+  return {
+    consumed: 4,
+    operation: {
+      op: "request_2bpp_transfer",
+      source: resource.path,
+      source_symbol: sourceSymbol,
+      source_rom_bank: `BANK(${sourceSymbol})`,
+      source_bank_argument: `BANK(${sourceSymbol})`,
+      source_segments: [
+        {
+          resource: resource.path,
+          resource_offset: 0,
+          byte_count: byteCount,
+        },
+      ],
+      target: destinationOperand,
+      target_byte_offset: tileOffset * implementation.bytes_per_tile,
+      target_vram_bank: vramBank,
+      tile_count: tileCount,
+      bytes_per_tile: implementation.bytes_per_tile,
+      byte_count: byteCount,
+      completion: {
+        blocking: true,
+        wait: "DelayFrame",
+        until: "wRequested2bppSize == 0",
+      },
+      resource_label_source_span: resource.label_source_span,
+      resource_source_span: resource.directive_source_span,
+      request_source_spans: implementation.request_source_spans,
+      service_source_spans: implementation.service_source_spans,
+      vblank_source_span: implementation.vblank_source_span,
+      source_span: sourceSpanThrough(sourceLoad.source_span, call.source_span),
+    },
+  };
+};
+
+const compileIntroScene16AnimateSuicuneCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_Scene16_AnimateSuicune") {
+    throw new Error(
+      `Intro Scene 16 animation requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const parsed = parseAsmBlocks([intro]);
+  const cadenceSpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_Scene16_AnimateSuicune",
+    [
+      "ld a, [wIntroSceneFrameCounter]",
+      "and $3",
+      "jr z, Intro_ColoredSuicuneFrameSwap",
+      "cp $3",
+      "jr z, .PrepareForSuicuneSwap",
+      "ret",
+    ],
+    "Intro Scene 16 exact four-frame animation cadence",
+  );
+  const prepareSpan = requireExactRoutineBlock(
+    parsed,
+    ".PrepareForSuicuneSwap@Intro_Scene16_AnimateSuicune",
+    ["xor a", "ldh [hBGMapMode], a", "ret"],
+    "Intro Scene 16 exact pre-swap BG-map disable",
+  );
+  const swapEntrySpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_ColoredSuicuneFrameSwap",
+    ["hlcoord 0, 0", "ld bc, SCREEN_AREA"],
+    "Intro Scene 16 exact colored-frame swap entry",
+  );
+  const swapLoopSpan = requireExactRoutineBlock(
+    parsed,
+    ".loop@Intro_ColoredSuicuneFrameSwap",
+    [
+      "ld a, [hl]",
+      "and a",
+      "jr z, .skip",
+      "cp $80",
+      "jr nc, .skip",
+      "xor $8",
+      "ld [hl], a",
+    ],
+    "Intro Scene 16 exact colored-frame tile predicate",
+  );
+  const swapTailSpan = requireExactRoutineBlock(
+    parsed,
+    ".skip@Intro_ColoredSuicuneFrameSwap",
+    [
+      "inc hl",
+      "dec bc",
+      "ld a, c",
+      "or b",
+      "jr nz, .loop",
+      "ld a, $1",
+      "ldh [hBGMapMode], a",
+      "ret",
+    ],
+    "Intro Scene 16 exact colored-frame swap completion",
+  );
+  const constants = parseAsmConstants(
+    CONSTANT_SOURCE_FILES.map((file) => loadSource(file, options)),
+  );
+  const screenArea = constants.get("SCREEN_AREA");
+  if (screenArea !== 360) {
+    throw new Error(`Intro Scene 16 screen area is not exact: ${String(screenArea)}`);
+  }
+  return {
+    op: "conditional_tilemap_xor",
+    clock: "wIntroSceneFrameCounter",
+    clock_mask: 0x03,
+    prepare_phase: {
+      equals: 3,
+      write: { target: "hBGMapMode", value: 0 },
+    },
+    swap_phase: {
+      equals: 0,
+      target: "wTilemap",
+      byte_count: screenArea,
+      predicate: { nonzero: true, unsigned_less_than: 0x80 },
+      xor: 0x08,
+      completion_write: { target: "hBGMapMode", value: 1 },
+    },
+    implementation_source_spans: [
+      cadenceSpan,
+      prepareSpan,
+      swapEntrySpan,
+      swapLoopSpan,
+      swapTailSpan,
+    ],
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroScene20AppearUnownCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_Scene20_AppearUnown") {
+    throw new Error(
+      `Intro Scene 20 Unown palette requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const parsed = parseAsmBlocks([intro]);
+  const entrySpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_Scene20_AppearUnown",
+    [
+      "and a",
+      "jr nz, .load_pal_2",
+      "ld hl, .pal1",
+      "jr .got_pointer",
+    ],
+    "Intro Scene 20 exact Unown palette selection",
+  );
+  const secondPaletteSpan = requireExactRoutineBlock(
+    parsed,
+    ".load_pal_2@Intro_Scene20_AppearUnown",
+    ["ld hl, .pal2"],
+    "Intro Scene 20 exact alternate Unown palette selection",
+  );
+  const copySpan = requireExactRoutineBlock(
+    parsed,
+    ".got_pointer@Intro_Scene20_AppearUnown",
+    [
+      "ld a, [wIntroSceneTimer]",
+      "and $7",
+      "add a",
+      "add a",
+      "add a",
+      "ld c, a",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wBGPals2)",
+      "ldh [rWBK], a",
+      "push bc",
+      "ld de, wBGPals2",
+      "ld a, c",
+      "add e",
+      "ld e, a",
+      "ld a, $0",
+      "adc d",
+      "ld d, a",
+      "ld bc, 1 palettes",
+      "call CopyBytes",
+      "pop bc",
+      "ld de, wBGPals1",
+      "ld a, c",
+      "add e",
+      "ld e, a",
+      "ld a, $0",
+      "adc d",
+      "ld d, a",
+      "ld bc, 1 palettes",
+      "call CopyBytes",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, TRUE",
+      "ldh [hCGBPalUpdate], a",
+      "ret",
+    ],
+    "Intro Scene 20 exact indexed palette copies",
+  );
+  const firstPaletteSpan = requireExactNormalizedLine(
+    intro,
+    'INCLUDE "gfx/intro/unown_1.pal"',
+    "Intro Scene 20 first Unown palette resource",
+  );
+  const alternatePaletteSpan = requireExactNormalizedLine(
+    intro,
+    'INCLUDE "gfx/intro/unown_2.pal"',
+    "Intro Scene 20 alternate Unown palette resource",
+  );
+  const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+  return {
+    op: "copy_indexed_palette",
+    selector: {
+      source: timer.target,
+      mask: 0x07,
+      byte_scale: 8,
+    },
+    palette_argument: {
+      source: "accumulator",
+      variants: [
+        {
+          value: 0,
+          resource: "gfx/intro/unown_1.pal",
+          source_span: firstPaletteSpan,
+        },
+        {
+          predicate: "nonzero",
+          resource: "gfx/intro/unown_2.pal",
+          source_span: alternatePaletteSpan,
+        },
+      ],
+    },
+    destinations: ["wBGPals2", "wBGPals1"],
+    bytes_per_palette: 8,
+    wram_bank: {
+      register: "rWBK",
+      select: "BANK(wBGPals2)",
+      restore: true,
+    },
+    completion_write: { target: "hCGBPalUpdate", value: 1 },
+    timer_declaration_source_span: timer.declaration_source_span,
+    implementation_source_spans: [entrySpan, secondPaletteSpan, copySpan],
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroColoredSuicuneFrameSwapCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_ColoredSuicuneFrameSwap") {
+    throw new Error(
+      `Colored Suicune frame swap requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const parsed = parseAsmBlocks([intro]);
+  const entrySpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_ColoredSuicuneFrameSwap",
+    ["hlcoord 0, 0", "ld bc, SCREEN_AREA"],
+    "exact colored-Suicune frame-swap entry",
+  );
+  const loopSpan = requireExactRoutineBlock(
+    parsed,
+    ".loop@Intro_ColoredSuicuneFrameSwap",
+    [
+      "ld a, [hl]",
+      "and a",
+      "jr z, .skip",
+      "cp $80",
+      "jr nc, .skip",
+      "xor $8",
+      "ld [hl], a",
+    ],
+    "exact colored-Suicune tile predicate",
+  );
+  const tailSpan = requireExactRoutineBlock(
+    parsed,
+    ".skip@Intro_ColoredSuicuneFrameSwap",
+    [
+      "inc hl",
+      "dec bc",
+      "ld a, c",
+      "or b",
+      "jr nz, .loop",
+      "ld a, $1",
+      "ldh [hBGMapMode], a",
+      "ret",
+    ],
+    "exact colored-Suicune frame-swap completion",
+  );
+  const constants = parseAsmConstants(
+    CONSTANT_SOURCE_FILES.map((file) => loadSource(file, options)),
+  );
+  if (constants.get("SCREEN_AREA") !== 360) {
+    throw new Error("Colored Suicune frame swap requires a 360-byte screen");
+  }
+  return {
+    op: "tilemap_xor",
+    target: "wTilemap",
+    byte_count: 360,
+    predicate: { nonzero: true, unsigned_less_than: 0x80 },
+    xor: 0x08,
+    completion_write: { target: "hBGMapMode", value: 1 },
+    implementation_source_spans: [entrySpan, loopSpan, tailSpan],
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroScene24PaletteFadeCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_Scene24_ApplyPaletteFade") {
+    throw new Error(
+      `Intro Scene 24 palette fade requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const parsed = parseAsmBlocks([intro]);
+  const entrySpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_Scene24_ApplyPaletteFade",
+    [
+      "ld hl, .FadePals",
+      "add l",
+      "ld l, a",
+      "ld a, $0",
+      "adc h",
+      "ld h, a",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wBGPals2)",
+      "ldh [rWBK], a",
+      "ld de, wBGPals2",
+      "ld b, 8",
+    ],
+    "Intro Scene 24 exact palette-source and bank setup",
+  );
+  const outerLoopSpan = requireExactRoutineBlock(
+    parsed,
+    ".loop1@Intro_Scene24_ApplyPaletteFade",
+    ["push hl", "ld c, 1 palettes"],
+    "Intro Scene 24 exact eight-palette broadcast outer loop",
+  );
+  const innerLoopSpan = requireExactRoutineBlock(
+    parsed,
+    ".loop2@Intro_Scene24_ApplyPaletteFade",
+    [
+      "ld a, [hli]",
+      "ld [de], a",
+      "inc de",
+      "dec c",
+      "jr nz, .loop2",
+      "pop hl",
+      "dec b",
+      "jr nz, .loop1",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, TRUE",
+      "ldh [hCGBPalUpdate], a",
+      "ret",
+    ],
+    "Intro Scene 24 exact palette broadcast and update",
+  );
+  const includeSpan = requireExactNormalizedLine(
+    intro,
+    'INCLUDE "gfx/intro/fade.pal"',
+    "Intro Scene 24 fade palette include",
+  );
+  const paletteSource = loadSource("gfx/intro/fade.pal", options);
+  const colors = paletteSource.lines
+    .map(normalizeAsmLine)
+    .filter((line) => line.startsWith("RGB "))
+    .map((line) =>
+      line
+        .slice(4)
+        .split(",")
+        .map((value) => {
+          const component = value.trim();
+          if (!/^\d+$/.test(component)) {
+            throw new Error(
+              `Intro Scene 24 fade resource has non-decimal RGB component ${component}`,
+            );
+          }
+          return Number(component);
+        }),
+    );
+  if (
+    colors.length !== 32 ||
+    colors.some(
+      (color) =>
+        color.length !== 3 || color.some((component) => component < 0 || component > 31),
+    )
+  ) {
+    throw new Error("Intro Scene 24 fade resource must contain eight exact four-color palettes");
+  }
+  return {
+    op: "broadcast_indexed_palette",
+    source: "gfx/intro/fade.pal",
+    source_offset: {
+      source: "accumulator",
+      valid_values: [0, 8, 16, 24, 32, 40, 48, 56],
+    },
+    palettes: Array.from({ length: 8 }, (_, index) =>
+      colors.slice(index * 4, index * 4 + 4),
+    ),
+    bytes_per_palette: 8,
+    destination: "wBGPals2",
+    destination_palette_count: 8,
+    behavior: "repeat_selected_palette",
+    wram_bank: {
+      register: "rWBK",
+      select: "BANK(wBGPals2)",
+      restore: true,
+    },
+    completion_write: { target: "hCGBPalUpdate", value: 1 },
+    resource_include_source_span: includeSpan,
+    resource_source_span: {
+      file: paletteSource.file,
+      start_line: 1,
+      end_line: paletteSource.lines.length,
+    },
+    implementation_source_spans: [entrySpan, outerLoopSpan, innerLoopSpan],
+    source_span: call.source_span,
+  };
+};
+
+const compileIntroFadeUnownWordPalettesCall = (
+  call: RuntimePresentationAsmInstruction,
+  intro: LoadedSource,
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation => {
+  if (instructionSignature(call) !== "call Intro_FadeUnownWordPals") {
+    throw new Error(
+      `Intro Unown-word fade requires the exact call form; reached ${instructionSignature(call)}`,
+    );
+  }
+  const parsed = parseAsmBlocks([intro]);
+  const implementationSpan = requireExactRoutineBlock(
+    parsed,
+    "Intro_FadeUnownWordPals",
+    [
+      "add a",
+      "add a",
+      "add a",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, wBGPals2",
+      "add hl, de",
+      "rept 4",
+      "inc hl",
+      "endr",
+      "ld a, [wIntroSceneTimer]",
+      "add a",
+      "ld c, a",
+      "ld b, 0",
+      "ldh a, [rWBK]",
+      "push af",
+      "ld a, BANK(wBGPals2)",
+      "ldh [rWBK], a",
+      "push hl",
+      "ld hl, .FastFadePalettes",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "pop hl",
+      "ld a, e",
+      "ld [hli], a",
+      "ld a, d",
+      "ld [hli], a",
+      "push hl",
+      "ld hl, .SlowFadePalettes",
+      "add hl, bc",
+      "ld a, [hli]",
+      "ld d, [hl]",
+      "ld e, a",
+      "pop hl",
+      "ld a, e",
+      "ld [hli], a",
+      "ld a, d",
+      "ld [hli], a",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld a, TRUE",
+      "ldh [hCGBPalUpdate], a",
+      "ret",
+    ],
+    "Intro exact Unown-word dual-speed fade",
+  );
+  const fastSpan = requireExactNormalizedRegion(
+    intro,
+    ".FastFadePalettes:",
+    "endr",
+    [
+      ".FastFadePalettes:",
+      "DEF hue = 31",
+      "rept 8",
+      "RGB hue, hue, hue",
+      "DEF hue -= 1",
+      "RGB hue, hue, hue",
+      "DEF hue -= 2",
+      "endr",
+    ],
+    "Intro exact fast Unown fade palette generator",
+  );
+  const slowSpan = requireExactNormalizedRegion(
+    intro,
+    ".SlowFadePalettes:",
+    "endr",
+    [
+      ".SlowFadePalettes:",
+      "DEF hue = 31",
+      "rept 16",
+      "RGB hue, hue, hue",
+      "DEF hue -= 1",
+      "endr",
+    ],
+    "Intro exact slow Unown fade palette generator",
+  );
+  const fastHues: number[] = [];
+  let hue = 31;
+  for (let index = 0; index < 8; index += 1) {
+    fastHues.push(hue);
+    hue -= 1;
+    fastHues.push(hue);
+    hue -= 2;
+  }
+  const slowHues = Array.from({ length: 16 }, (_, index) => 31 - index);
+  return {
+    op: "fade_unown_word_palettes",
+    palette_index: {
+      source: "accumulator",
+      multiply: 8,
+      valid_values: [0, 1, 2, 3, 4, 5, 6, 7],
+    },
+    fade_index: {
+      source: "wIntroSceneTimer",
+      multiply: 2,
+      valid_values: Array.from({ length: 16 }, (_, index) => index),
+    },
+    target: "wBGPals2",
+    target_color_offsets: [4, 6],
+    fast_hues: fastHues,
+    slow_hues: slowHues,
+    color_encoding: "rgb555_grayscale",
+    wram_bank: {
+      register: "rWBK",
+      select: "BANK(wBGPals2)",
+      restore: true,
+    },
+    completion_write: { target: "hCGBPalUpdate", value: 1 },
+    implementation_source_spans: [implementationSpan, fastSpan, slowSpan],
+    source_span: call.source_span,
   };
 };
 
@@ -13964,10 +14949,348 @@ const compileIntroPlayUnownSoundCall = (
   };
 };
 
-function certifyCrystalIntroSubprogramFrontier(
+type IntroVramByteOwner = {
+  resource: string;
+  resource_offset: number;
+  transfer_source_span: RuntimePresentationSourceSpan;
+};
+
+const bindCrystalIntroSpriteGraphics = (
+  operations: RuntimePresentationOperation[],
+  programs: RuntimePresentationSpriteProgram[],
+  constants: ReadonlyMap<string, number>,
+): void => {
+  const vram = [
+    Array<IntroVramByteOwner | null>(0x1800).fill(null),
+    Array<IntroVramByteOwner | null>(0x1800).fill(null),
+  ];
+  const programsByInstance = new Map(
+    programs.map((program) => [program.instance, program]),
+  );
+  const targetBase = (target: unknown): number | null => {
+    if (typeof target !== "string") return null;
+    const match = target.match(/^(vTiles[012])(?:\s+tile\s+.+)?$/);
+    if (!match) return null;
+    return { vTiles0: 0x0000, vTiles1: 0x0800, vTiles2: 0x1000 }[
+      match[1] as "vTiles0" | "vTiles1" | "vTiles2"
+    ];
+  };
+
+  const bind = (instance: string): void => {
+    const program = programsByInstance.get(instance);
+    if (!program) {
+      throw new Error(`CrystalIntro activates unknown sprite instance ${instance}`);
+    }
+    const reached = new Map<
+      string,
+      RuntimePresentationSpriteProgram["graphic_binding"]
+    >();
+    for (const oam of program.oam_resources) {
+      for (const sprite of oam.sprites) {
+        if (sprite.opcode !== "dbsprite" || sprite.args.length !== 6) {
+          throw new Error(
+            `CrystalIntro sprite ${instance} has unsupported OAM instruction ${instructionSignature(sprite)}`,
+          );
+        }
+        const pieceTile = evaluateAsmInteger(sprite.args[4], constants);
+        const attributes = evaluateAsmInteger(sprite.args[5], constants);
+        const bank = (attributes >> 3) & 1;
+        const tile =
+          (program.initial_memory.tile_id + oam.tile_offset + pieceTile) & 0xff;
+        const byteOffset = tile * 16;
+        const owner = vram[bank][byteOffset];
+        if (!owner) {
+          throw new Error(
+            `CrystalIntro sprite ${instance} tile $${tile.toString(16).padStart(2, "0")} in VRAM bank ${bank} has no source-derived resource owner`,
+          );
+        }
+        for (let byte = 0; byte < 16; byte += 1) {
+          const candidate = vram[bank][byteOffset + byte];
+          if (
+            !candidate ||
+            candidate.resource !== owner.resource ||
+            candidate.resource_offset !== owner.resource_offset + byte
+          ) {
+            throw new Error(
+              `CrystalIntro sprite ${instance} tile $${tile.toString(16).padStart(2, "0")} crosses source resource ownership`,
+            );
+          }
+        }
+        if (owner.resource_offset % 16 !== 0) {
+          throw new Error(
+            `CrystalIntro sprite ${instance} tile owner ${owner.resource} is not tile-aligned`,
+          );
+        }
+        const tileBase = (tile - owner.resource_offset / 16) & 0xff;
+        const key = `${owner.resource}\0${bank}\0${tileBase}`;
+        reached.set(key, {
+          resource: owner.resource,
+          target_vram_bank: bank,
+          tile_base: tileBase,
+          transfer_source_span: owner.transfer_source_span,
+        });
+      }
+    }
+    if (reached.size !== 1) {
+      throw new Error(
+        `CrystalIntro sprite ${instance} resolves to ${reached.size} graphic bindings`,
+      );
+    }
+    program.graphic_binding = [...reached.values()][0];
+  };
+
+  for (const operation of operations) {
+    if (operation.op === "request_2bpp_transfer") {
+      const base = targetBase(operation.target);
+      const bank = operation.target_vram_bank;
+      const targetOffset = operation.target_byte_offset;
+      const segments = operation.source_segments;
+      if (
+        base !== null &&
+        (bank === 0 || bank === 1) &&
+        typeof targetOffset === "number" &&
+        Array.isArray(segments)
+      ) {
+        let written = 0;
+        for (const rawSegment of segments) {
+          const segment = rawSegment as Record<string, unknown>;
+          const byteCount = segment.byte_count;
+          if (typeof byteCount !== "number") {
+            throw new Error("CrystalIntro VRAM source segment has no exact byte count");
+          }
+          const resource = segment.resource;
+          const resourceOffset = segment.resource_offset;
+          for (let byte = 0; byte < byteCount; byte += 1) {
+            const destination = base + targetOffset + written + byte;
+            if (destination < 0 || destination >= vram[bank].length) {
+              throw new Error("CrystalIntro VRAM transfer exceeds tile memory");
+            }
+            vram[bank][destination] =
+              typeof resource === "string" &&
+              typeof resourceOffset === "number" &&
+              segment.origin !== "preexisting_memory"
+                ? {
+                    resource,
+                    resource_offset: resourceOffset + byte,
+                    transfer_source_span: operation.source_span,
+                  }
+                : null;
+          }
+          written += byteCount;
+        }
+      }
+    }
+    if (operation.op === "sprite_activate" && typeof operation.instance === "string") {
+      bind(operation.instance);
+    }
+    if (operation.op === "sprite_init_group" && Array.isArray(operation.instances)) {
+      for (const instance of operation.instances) {
+        if (typeof instance !== "string") {
+          throw new Error("CrystalIntro sprite group contains a non-string instance");
+        }
+        bind(instance);
+      }
+    }
+  }
+  const unbound = programs.filter((program) => !program.graphic_binding);
+  if (unbound.length > 0) {
+    throw new Error(
+      `CrystalIntro has sprites without source-derived graphic bindings: ${unbound.map((program) => program.instance).join(", ")}`,
+    );
+  }
+};
+
+const compileCrystalIntroBackgroundBindings = (
+  operations: RuntimePresentationOperation[],
+  blocks: ReadonlyMap<string, ParsedAsmBlock>,
+): RuntimePresentationOperation[] => {
+  const sceneStarts = Array.from({ length: 28 }, (_, index) => {
+    const scene = blocks.get(`IntroScene${index + 1}`);
+    if (!scene || scene.file !== "engine/movie/intro.asm") {
+      throw new Error(`CrystalIntro background binding is missing IntroScene${index + 1}`);
+    }
+    return scene.startLine;
+  });
+  const sceneForOperation = (operation: RuntimePresentationOperation): number | null => {
+    const spans = [operation.source_span, operation.invocation_source_span].filter(
+      (span): span is RuntimePresentationSourceSpan =>
+        !!span &&
+        typeof span === "object" &&
+        (span as RuntimePresentationSourceSpan).file === "engine/movie/intro.asm",
+    );
+    for (const span of spans) {
+      for (let entry = sceneStarts.length - 1; entry >= 0; entry -= 1) {
+        if (span.start_line >= sceneStarts[entry]) return entry;
+      }
+    }
+    return null;
+  };
+  const vram = [
+    Array<IntroVramByteOwner | null>(0x1800).fill(null),
+    Array<IntroVramByteOwner | null>(0x1800).fill(null),
+  ];
+  const tileTargetBase = (target: unknown): number | null => {
+    if (typeof target !== "string") return null;
+    const match = target.match(/^(vTiles[012])(?:\s+tile\s+.+)?$/);
+    if (!match) return null;
+    return { vTiles0: 0x0000, vTiles1: 0x0800, vTiles2: 0x1000 }[
+      match[1] as "vTiles0" | "vTiles1" | "vTiles2"
+    ];
+  };
+  let tilemapResource: string | null = null;
+  let attrmapResource: string | null = null;
+  let paletteResource: string | null = null;
+  let bindingSourceSpan: RuntimePresentationSourceSpan | null = null;
+  const output: RuntimePresentationOperation[] = [];
+
+  const tileBindings = (): Array<Record<string, unknown>> => {
+    const bindings: Array<Record<string, unknown>> = [];
+    for (let bank = 0; bank <= 1; bank += 1) {
+      for (let tile = 0; tile <= 0xff; tile += 1) {
+        const physicalByte =
+          tile < 0x80 ? 0x1000 + tile * 16 : 0x0800 + (tile - 0x80) * 16;
+        const owner = vram[bank][physicalByte];
+        if (
+          !owner ||
+          owner.resource_offset % 16 !== 0 ||
+          !(owner.resource.endsWith(".2bpp") || owner.resource.endsWith(".2bpp.lz"))
+        ) {
+          continue;
+        }
+        let exact = true;
+        for (let byte = 0; byte < 16; byte += 1) {
+          const candidate = vram[bank][physicalByte + byte];
+          if (
+            !candidate ||
+            candidate.resource !== owner.resource ||
+            candidate.resource_offset !== owner.resource_offset + byte
+          ) {
+            exact = false;
+            break;
+          }
+        }
+        if (!exact) continue;
+        const resourceTile = owner.resource_offset / 16;
+        const previous = bindings.at(-1) as
+          | {
+              tile_id_end: number;
+              target_vram_bank: number;
+              resource: string;
+              resource_tile_start: number;
+              tile_id_start: number;
+            }
+          | undefined;
+        if (
+          previous &&
+          previous.target_vram_bank === bank &&
+          previous.resource === owner.resource &&
+          previous.tile_id_end + 1 === tile &&
+          previous.resource_tile_start + (tile - previous.tile_id_start) === resourceTile
+        ) {
+          previous.tile_id_end = tile;
+        } else {
+          bindings.push({
+            tile_id_start: tile,
+            tile_id_end: tile,
+            target_vram_bank: bank,
+            resource: owner.resource,
+            resource_tile_start: resourceTile,
+          });
+        }
+      }
+    }
+    return bindings;
+  };
+
+  for (let entry = 0; entry < sceneStarts.length; entry += 1) {
+    for (const operation of operations) {
+      if (sceneForOperation(operation) !== entry) continue;
+      if (operation.op === "request_2bpp_transfer") {
+        const bank = operation.target_vram_bank;
+        const segments = operation.source_segments;
+        const targetOffset = operation.target_byte_offset;
+        const base = tileTargetBase(operation.target);
+        if (
+          base !== null &&
+          (bank === 0 || bank === 1) &&
+          typeof targetOffset === "number" &&
+          Array.isArray(segments)
+        ) {
+          let written = 0;
+          for (const rawSegment of segments) {
+            const segment = rawSegment as Record<string, unknown>;
+            const byteCount = segment.byte_count;
+            if (typeof byteCount !== "number") {
+              throw new Error("CrystalIntro background VRAM segment has no byte count");
+            }
+            const resource = segment.resource;
+            const resourceOffset = segment.resource_offset;
+            for (let byte = 0; byte < byteCount; byte += 1) {
+              vram[bank][base + targetOffset + written + byte] =
+                typeof resource === "string" &&
+                typeof resourceOffset === "number" &&
+                segment.origin !== "preexisting_memory"
+                  ? {
+                      resource,
+                      resource_offset: resourceOffset + byte,
+                      transfer_source_span: operation.source_span,
+                    }
+                  : null;
+            }
+            written += byteCount;
+          }
+        }
+        if (
+          typeof operation.target === "string" &&
+          operation.target.startsWith("vBGMap0") &&
+          Array.isArray(segments)
+        ) {
+          const resources = segments
+            .map((segment) => (segment as Record<string, unknown>).resource)
+            .filter((resource): resource is string => typeof resource === "string");
+          if (resources.length !== 1) {
+            throw new Error("CrystalIntro BG-map transfer must have one exact resource");
+          }
+          if (bank === 0) {
+            tilemapResource = resources[0];
+            bindingSourceSpan = operation.source_span;
+          } else if (bank === 1) {
+            attrmapResource = resources[0];
+          }
+        }
+      }
+      if (
+        operation.op === "copy_memory" &&
+        operation.resource_kind === "palette" &&
+        operation.target === "wBGPals2" &&
+        typeof operation.resource === "string"
+      ) {
+        paletteResource = operation.resource;
+      }
+    }
+    if (!tilemapResource || !attrmapResource || !paletteResource || !bindingSourceSpan) {
+      throw new Error(
+        `CrystalIntro dispatcher entry ${entry} has no complete source-derived background binding`,
+      );
+    }
+    output.push({
+      op: "intro_background_binding",
+      dispatcher_entry: entry,
+      tilemap_resource: tilemapResource,
+      attrmap_resource: attrmapResource,
+      palette_resource: paletteResource,
+      tile_addressing: "signed_8800",
+      tile_bindings: tileBindings(),
+      source_span: bindingSourceSpan,
+    });
+  }
+  return output;
+};
+
+function certifyCrystalIntroSubprogram(
   options: BuildRuntimeTitlePresentationProgramOptions,
   controlFlow: RuntimePresentationControlFlow,
-): RuntimePresentationEmissionFrontier {
+): RuntimePresentationCallableSubprogram {
   const intro = loadSource("engine/movie/intro.asm", options);
   const joypad = loadSource("home/joypad.asm", options);
   const clearSprites = loadSource("home/clear_sprites.asm", options);
@@ -13975,7 +15298,7 @@ function certifyCrystalIntroSubprogramFrontier(
   const blocks = parseAsmBlocks([intro, joypad, clearSprites, delay]);
   const delayFramesImplementationSpan = certifyDelayFrames(blocks);
 
-  requireExactRoutineBlock(
+  const entrySpan = requireExactRoutineBlock(
     blocks,
     "CrystalIntro",
     [
@@ -13991,7 +15314,7 @@ function certifyCrystalIntroSubprogramFrontier(
     ],
     "CrystalIntro exact saved-state entry",
   );
-  requireExactRoutineBlock(
+  const loopSpan = requireExactRoutineBlock(
     blocks,
     ".loop@CrystalIntro",
     [
@@ -14009,13 +15332,13 @@ function certifyCrystalIntroSubprogramFrontier(
     ],
     "CrystalIntro input, scene, sprite, VBlank, and repeat order",
   );
-  requireExactRoutineBlock(
+  const shutOffMusicSpan = requireExactRoutineBlock(
     blocks,
     ".ShutOffMusic@CrystalIntro",
     ["ld de, MUSIC_NONE", "call PlayMusic"],
     "CrystalIntro button-cancel music stop",
   );
-  requireExactRoutineBlock(
+  const cleanupSpan = requireExactRoutineBlock(
     blocks,
     ".done@CrystalIntro",
     [
@@ -14039,7 +15362,7 @@ function certifyCrystalIntroSubprogramFrontier(
     ],
     "CrystalIntro exact display reset and saved-state restoration",
   );
-  requireExactRoutineBlock(
+  const initSpan = requireExactRoutineBlock(
     blocks,
     ".InitRAMAddrs@CrystalIntro",
     [
@@ -14233,19 +15556,9 @@ function certifyCrystalIntroSubprogramFrontier(
   );
   if (decompressionPrefix.operations.length === 0) {
     const instruction = firstScene[expectedPrefix.length];
-    return {
-      reason: "missing_runtime_operation",
-      block: "IntroScene1",
-      target: runtimePresentationInstructionTarget(instruction),
-      opcode: instruction.opcode,
-      args: instruction.args,
-      source_span: instruction.source_span,
-      compiled_prefix: {
-        source_entry: "CrystalIntro",
-        block: "IntroScene1",
-        operations: compiledPrefix,
-      },
-    };
+    throw new Error(
+      `CrystalIntro first scene has no exact decompression prefix at ${instruction.source_span.file}:${instruction.source_span.start_line}`,
+    );
   }
   compiledPrefix.push(...decompressionPrefix.operations);
 
@@ -14311,19 +15624,9 @@ function certifyCrystalIntroSubprogramFrontier(
   );
   if (copyPrefix.operations.length === 0) {
     const instruction = firstScene[cursor];
-    return {
-      reason: "missing_runtime_operation",
-      block: "IntroScene1",
-      target: runtimePresentationInstructionTarget(instruction),
-      opcode: instruction.opcode,
-      args: instruction.args,
-      source_span: instruction.source_span,
-      compiled_prefix: {
-        source_entry: "CrystalIntro",
-        block: "IntroScene1",
-        operations: compiledPrefix,
-      },
-    };
+    throw new Error(
+      `CrystalIntro first scene has no exact palette-copy prefix at ${instruction.source_span.file}:${instruction.source_span.start_line}`,
+    );
   }
   compiledPrefix.push(...copyPrefix.operations);
   cursor += copyPrefix.consumed;
@@ -17008,26 +18311,8669 @@ function certifyCrystalIntroSubprogramFrontier(
     frontierBlock = fourteenthScene.id;
     nextCall = fourteenthSceneEntry;
   }
-  const nextTarget = runtimePresentationInstructionTarget(nextCall);
-  const reason = ["call", "callfar", "farcall"].includes(nextCall.opcode)
-    ? "missing_subprogram_contract"
-    : "missing_runtime_operation";
-  return {
-    reason,
-    block: frontierBlock,
-    target: nextTarget,
-    opcode: nextCall.opcode,
-    args: nextCall.args,
-    source_span: nextCall.source_span,
-    compiled_prefix: {
-      source_entry: "CrystalIntro",
-      block: "IntroScene1",
-      operations: compiledPrefix,
-      ...(compiledSpritePrograms.length > 0
-        ? { sprite_programs: compiledSpritePrograms }
-        : {}),
+  if (
+    frontierBlock === "IntroScene14" &&
+    instructionSignature(nextCall) === "ldh a, [hSCX]"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ldh a, [hSCX]",
+      "sub 10",
+      "ldh [hSCX], a",
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $80",
+      "jr z, .done",
+      "cp $60",
+      "jr z, .jump",
+      "jr nc, .run_after_jump",
+      "cp $40",
+      "jr nc, .run",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene14 run/jump dispatcher is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const scroll = requireHighMemoryWriteTarget("[hSCX]", options);
+    const counter = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    const endThreshold = evaluateAsmInteger(scene.instructions[6].args[0], new Map());
+    const jumpThreshold = evaluateAsmInteger(scene.instructions[8].args[0], new Map());
+    const runThreshold = evaluateAsmInteger(scene.instructions[11].args[0], new Map());
+    if (endThreshold !== 0x80 || jumpThreshold !== 0x60 || runThreshold !== 0x40) {
+      throw new Error(
+        `IntroScene14 thresholds are not exact: end=${endThreshold}, jump=${jumpThreshold}, run=${runThreshold}`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "subtract_memory_byte",
+        target: scroll.target,
+        address_space: scroll.address_space,
+        delta: 10,
+        wrap: "u8",
+        source_span: sourceSpanThrough(
+          scene.instructions[0].source_span,
+          scene.instructions[2].source_span,
+        ),
+      },
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(
+          scene.instructions[3].source_span,
+          scene.instructions[5].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "equal",
+        operand: endThreshold,
+        target: instructionTarget(scene, scene.instructions[7], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[6].source_span,
+          scene.instructions[7].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "equal",
+        operand: jumpThreshold,
+        target: instructionTarget(scene, scene.instructions[9], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[8].source_span,
+          scene.instructions[9].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: jumpThreshold,
+        target: instructionTarget(scene, scene.instructions[10], blocks),
+        source_span: scene.instructions[10].source_span,
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: runThreshold,
+        target: instructionTarget(scene, scene.instructions[12], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[11].source_span,
+          scene.instructions[12].source_span,
+        ),
+      },
+      { op: "return", source_span: scene.instructions[13].source_span },
+    );
+
+    const jump = blocks.get(".jump@IntroScene14")?.instructions ?? [];
+    if (
+      jump.length !== 2 ||
+      instructionSignature(jump[0]) !== "ld de, SFX_INTRO_SUICUNE_4" ||
+      instructionSignature(jump[1]) !== "call PlaySFX"
+    ) {
+      throw new Error("IntroScene14 jump SFX branch is not exact");
+    }
+    compiledPrefix.push({
+      op: "play_audio",
+      audio: "SFX_INTRO_SUICUNE_4",
+      source_span: sourceSpanThrough(jump[0].source_span, jump[1].source_span),
+    });
+
+    const afterJump = blocks.get(".run_after_jump@IntroScene14")?.instructions ?? [];
+    const expectedAfterJump = [
+      "ld a, $1",
+      "ld [wIntroSceneTimer], a",
+      "ld a, [wGlobalAnimXOffset]",
+      "cp $88",
+      "jr c, .disappear",
+      "sub $8",
+      "ld [wGlobalAnimXOffset], a",
+      "ret",
+    ];
+    if (afterJump.map(instructionSignature).join("\0") !== expectedAfterJump.join("\0")) {
+      throw new Error("IntroScene14 post-jump movement branch is not exact");
+    }
+    const timerWrite = compileAccumulatorWramWriteRun(afterJump, 0, options);
+    if (!timerWrite || timerWrite.operations.length !== 1 || timerWrite.consumed !== 2) {
+      throw new Error("IntroScene14 must set its scene timer to one");
+    }
+    const offset = requireFixedWramWriteTarget("[wGlobalAnimXOffset]", options);
+    const disappearThreshold = evaluateAsmInteger(afterJump[3].args[0], new Map());
+    if (disappearThreshold !== 0x88) {
+      throw new Error(`IntroScene14 disappearance threshold is not exact: ${disappearThreshold}`);
+    }
+    compiledPrefix.push(
+      ...timerWrite.operations,
+      {
+        op: "branch_memory_compare",
+        source: offset.target,
+        address_space: offset.address_space,
+        predicate: "unsigned_less_than",
+        operand: disappearThreshold,
+        target: instructionTarget(
+          blocks.get(".run_after_jump@IntroScene14")!,
+          afterJump[4],
+          blocks,
+        ),
+        source_span: sourceSpanThrough(afterJump[2].source_span, afterJump[4].source_span),
+      },
+      {
+        op: "subtract_memory_byte",
+        target: offset.target,
+        address_space: offset.address_space,
+        delta: 8,
+        wrap: "u8",
+        target_declaration_source_span: offset.declaration_source_span,
+        target_section_source_span: offset.section_source_span,
+        source_span: sourceSpanThrough(afterJump[5].source_span, afterJump[6].source_span),
+      },
+      { op: "return", source_span: afterJump[7].source_span },
+    );
+
+    const disappear = blocks.get(".disappear@IntroScene14")?.instructions ?? [];
+    if (
+      disappear.length !== 2 ||
+      instructionSignature(disappear[0]) !== "farcall DeinitializeAllSprites" ||
+      instructionSignature(disappear[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene14 disappearance branch is not exact");
+    }
+    compiledPrefix.push(
+      {
+        op: "deinitialize_all_sprites",
+        source_span: disappear[0].source_span,
+      },
+      { op: "return", source_span: disappear[1].source_span },
+    );
+
+    const run = blocks.get(".run@IntroScene14")?.instructions ?? [];
+    const expectedRun = [
+      "ld a, [wGlobalAnimXOffset]",
+      "sub $2",
+      "ld [wGlobalAnimXOffset], a",
+      "ret",
+    ];
+    if (run.map(instructionSignature).join("\0") !== expectedRun.join("\0")) {
+      throw new Error("IntroScene14 running branch is not exact");
+    }
+    compiledPrefix.push(
+      {
+        op: "subtract_memory_byte",
+        target: offset.target,
+        address_space: offset.address_space,
+        delta: 2,
+        wrap: "u8",
+        target_declaration_source_span: offset.declaration_source_span,
+        target_section_source_span: offset.section_source_span,
+        source_span: sourceSpanThrough(run[0].source_span, run[2].source_span),
+      },
+      { op: "return", source_span: run[3].source_span },
+    );
+
+    const done = blocks.get(".done@IntroScene14")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene14 completion branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        done[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const fifteenthScene = blocks.get("IntroScene15");
+    const fifteenthSceneEntry = fifteenthScene?.instructions[0];
+    if (!fifteenthScene || !fifteenthSceneEntry) {
+      throw new Error("IntroScene14 has no exact IntroScene15 continuation");
+    }
+    frontierBlock = fifteenthScene.id;
+    nextCall = fifteenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene15" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene15 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      5,
+      options,
+    );
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error(
+        "IntroScene15 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const firstCompressed = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      firstCompressed.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 3
+    ) {
+      throw new Error(
+        "IntroScene15 must source-prove its first three compressed transfers",
+      );
+    }
+    compiledPrefix.push(...firstCompressed.operations);
+    cursor += firstCompressed.consumed;
+    const grass = compileIntroDirect2bppRequest(
+      scene.instructions,
+      cursor,
+      firstCompressed.vram_bank,
+      intro,
+      options,
+    );
+    if (
+      grass.operation.source_symbol !== "IntroGrass4GFX" ||
+      grass.operation.tile_count !== 1
+    ) {
+      throw new Error("IntroScene15 direct grass transfer is not exact");
+    }
+    compiledPrefix.push(grass.operation);
+    cursor += grass.consumed;
+    const tilemap = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      firstCompressed.vram_bank,
+      intro,
+      options,
+    );
+    if (
+      tilemap.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 1
+    ) {
+      throw new Error("IntroScene15 final tilemap transfer is not exact");
+    }
+    compiledPrefix.push(...tilemap.operations);
+    cursor += tilemap.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_LoadTilemap"
+    ) {
+      throw new Error("IntroScene15 must copy the visible tilemap window");
+    }
+    compiledPrefix.push(
+      compileIntroLoadTilemapCall(scene.instructions[cursor], intro, options),
+    );
+    cursor += 1;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene15 must clear sprite animations before allocation");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene15 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    for (const [depixelSignature, objectSignature, origin] of [
+      [
+        "depixel 8, 5",
+        "ld a, SPRITE_ANIM_OBJ_INTRO_UNOWN_F",
+        { macro: "depixel", first: 8, second: 5, x: 40, y: 64 },
+      ],
+      [
+        "depixel 12, 0",
+        "ld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY",
+        { macro: "depixel", first: 12, second: 0, x: 0, y: 96 },
+      ],
+    ] as const) {
+      const depixel = scene.instructions[cursor];
+      const objectLoad = scene.instructions[cursor + 1];
+      const initCall = scene.instructions[cursor + 2];
+      if (
+        instructionSignature(depixel) !== depixelSignature ||
+        instructionSignature(objectLoad) !== objectSignature ||
+        instructionSignature(initCall) !== "call InitSpriteAnimStruct"
+      ) {
+        throw new Error(`IntroScene15 sprite allocation ${depixelSignature} is not exact`);
+      }
+      const programs = compiledSpritePrograms.filter(
+        (program) =>
+          program.allocation_source_span.file === "engine/movie/intro.asm" &&
+          program.allocation_source_span.start_line ===
+            initCall.source_span.start_line,
+      );
+      if (programs.length !== 1) {
+        throw new Error(
+          `IntroScene15 allocation at ${initCall.source_span.start_line} must source-prove one sprite program`,
+        );
+      }
+      compiledPrefix.push({
+        op: "sprite_activate",
+        instance: programs[0].instance,
+        object: programs[0].object,
+        origin,
+        lifetime: programs[0].lifetime,
+        source_span: sourceSpanThrough(depixel.source_span, initCall.source_span),
+      });
+      cursor += 3;
+    }
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene15 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene15 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene15 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const sixteenthScene = blocks.get("IntroScene16");
+    const sixteenthSceneEntry = sixteenthScene?.instructions[0];
+    if (!sixteenthScene || !sixteenthSceneEntry) {
+      throw new Error("IntroScene15 has no exact IntroScene16 continuation");
+    }
+    frontierBlock = sixteenthScene.id;
+    nextCall = sixteenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene16" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $80",
+      "jr nc, .done",
+      "call Intro_Scene16_AnimateSuicune",
+      "ldh a, [hSCY]",
+      "and a",
+      "ret z",
+      "add 8",
+      "ldh [hSCY], a",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene16 frame program is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const counter = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    const endThreshold = evaluateAsmInteger(scene.instructions[3].args[0], new Map());
+    if (endThreshold !== 0x80) {
+      throw new Error(`IntroScene16 end threshold is not exact: ${endThreshold}`);
+    }
+    const scroll = requireHighMemoryWriteTarget("[hSCY]", options);
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(
+          scene.instructions[0].source_span,
+          scene.instructions[2].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: endThreshold,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[3].source_span,
+          scene.instructions[4].source_span,
+        ),
+      },
+      compileIntroScene16AnimateSuicuneCall(
+        scene.instructions[5],
+        intro,
+        options,
+      ),
+      {
+        op: "return_if_memory_zero",
+        source: scroll.target,
+        address_space: scroll.address_space,
+        source_span: sourceSpanThrough(
+          scene.instructions[6].source_span,
+          scene.instructions[8].source_span,
+        ),
+      },
+      {
+        op: "add_memory_byte",
+        target: scroll.target,
+        address_space: scroll.address_space,
+        delta: 8,
+        wrap: "u8",
+        source_span: sourceSpanThrough(
+          scene.instructions[9].source_span,
+          scene.instructions[10].source_span,
+        ),
+      },
+      { op: "return", source_span: scene.instructions[11].source_span },
+    );
+    const done = blocks.get(".done@IntroScene16")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene16 completion branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        done[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const seventeenthScene = blocks.get("IntroScene17");
+    const seventeenthSceneEntry = seventeenthScene?.instructions[0];
+    if (!seventeenthScene || !seventeenthSceneEntry) {
+      throw new Error("IntroScene16 has no exact IntroScene17 continuation");
+    }
+    frontierBlock = seventeenthScene.id;
+    nextCall = seventeenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene17" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene17 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      3,
+      options,
+    );
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      5,
+      options,
+    );
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error(
+        "IntroScene17 register writes have no exact accumulator data flow",
+      );
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 3 ||
+      decompression.operations.filter(
+        (operation) => operation.op === "request_2bpp_transfer",
+      ).length !== 3
+    ) {
+      throw new Error(
+        "IntroScene17 must source-prove three decompression/request pairs",
+      );
+    }
+    compiledPrefix.push(...decompression.operations);
+    cursor += decompression.consumed;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene17 must clear sprite animations after setup");
+    }
+    compiledPrefix.push(
+      compileClearSpriteAnimsCall(scene.instructions[cursor], options),
+    );
+    cursor += 1;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call Intro_SetCGBPalUpdate"
+    ) {
+      throw new Error("IntroScene17 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene17 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+      "call NextIntroScene"
+    ) {
+      throw new Error("IntroScene17 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene17 must return after advancing");
+    }
+    compiledPrefix.push({
+      op: "return",
+      source_span: scene.instructions[cursor].source_span,
+    });
+    const eighteenthScene = blocks.get("IntroScene18");
+    const eighteenthSceneEntry = eighteenthScene?.instructions[0];
+    if (!eighteenthScene || !eighteenthSceneEntry) {
+      throw new Error("IntroScene17 has no exact IntroScene18 continuation");
+    }
+    frontierBlock = eighteenthScene.id;
+    nextCall = eighteenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene18" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $60",
+      "jr nc, .done",
+      "ldh a, [hSCX]",
+      "cp $60",
+      "ret z",
+      "add 8",
+      "ldh [hSCX], a",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene18 close-up program is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const counter = requireFixedWramWriteTarget(
+      "[wIntroSceneFrameCounter]",
+      options,
+    );
+    const scroll = requireHighMemoryWriteTarget("[hSCX]", options);
+    const endThreshold = evaluateAsmInteger(scene.instructions[3].args[0], new Map());
+    const stopOffset = evaluateAsmInteger(scene.instructions[6].args[0], new Map());
+    if (endThreshold !== 0x60 || stopOffset !== 0x60) {
+      throw new Error(
+        `IntroScene18 thresholds are not exact: end=${endThreshold}, offset=${stopOffset}`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(
+          scene.instructions[0].source_span,
+          scene.instructions[2].source_span,
+        ),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: endThreshold,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(
+          scene.instructions[3].source_span,
+          scene.instructions[4].source_span,
+        ),
+      },
+      {
+        op: "return_if_memory_equal",
+        source: scroll.target,
+        address_space: scroll.address_space,
+        operand: stopOffset,
+        source_span: sourceSpanThrough(
+          scene.instructions[5].source_span,
+          scene.instructions[7].source_span,
+        ),
+      },
+      {
+        op: "add_memory_byte",
+        target: scroll.target,
+        address_space: scroll.address_space,
+        delta: 8,
+        wrap: "u8",
+        source_span: sourceSpanThrough(
+          scene.instructions[8].source_span,
+          scene.instructions[9].source_span,
+        ),
+      },
+      { op: "return", source_span: scene.instructions[10].source_span },
+    );
+    const done = blocks.get(".done@IntroScene18")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene18 completion branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        done[0],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const nineteenthScene = blocks.get("IntroScene19");
+    const nineteenthSceneEntry = nineteenthScene?.instructions[0];
+    if (!nineteenthScene || !nineteenthSceneEntry) {
+      throw new Error("IntroScene18 has no exact IntroScene19 continuation");
+    }
+    frontierBlock = nineteenthScene.id;
+    nextCall = nineteenthSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene19" &&
+    instructionSignature(nextCall) === "call Intro_ClearBGPals"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call Intro_ClearBGPals",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions
+      .slice(0, expectedPrefix.length)
+      .map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(
+        `IntroScene19 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`,
+      );
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(scene.instructions, 3, options);
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(scene.instructions, 5, options);
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error("IntroScene19 register writes have no exact accumulator data flow");
+    }
+    compiledPrefix.push(
+      ...certifyIntroClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = expectedPrefix.length;
+    const firstCompressed = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      firstCompressed.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 3
+    ) {
+      throw new Error("IntroScene19 must source-prove its first three compressed transfers");
+    }
+    compiledPrefix.push(...firstCompressed.operations);
+    cursor += firstCompressed.consumed;
+    const grass = compileIntroDirect2bppRequest(
+      scene.instructions,
+      cursor,
+      firstCompressed.vram_bank,
+      intro,
+      options,
+    );
+    if (
+      grass.operation.source_symbol !== "IntroGrass4GFX" ||
+      grass.operation.target !== "vTiles1 tile $7f" ||
+      grass.operation.tile_count !== 1
+    ) {
+      throw new Error("IntroScene19 direct grass transfer is not exact");
+    }
+    compiledPrefix.push(grass.operation);
+    cursor += grass.consumed;
+    const tilemap = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      firstCompressed.vram_bank,
+      intro,
+      options,
+    );
+    if (
+      tilemap.operations.filter(
+        (operation) => operation.op === "decompress_lz3_resource",
+      ).length !== 1
+    ) {
+      throw new Error("IntroScene19 final tilemap transfer is not exact");
+    }
+    compiledPrefix.push(...tilemap.operations);
+    cursor += tilemap.consumed;
+    if (instructionSignature(scene.instructions[cursor]) !== "call Intro_LoadTilemap") {
+      throw new Error("IntroScene19 must copy the visible tilemap window");
+    }
+    compiledPrefix.push(
+      compileIntroLoadTilemapCall(scene.instructions[cursor], intro, options),
+    );
+    cursor += 1;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    const horizontalReset = compileAccumulatorHighMemoryWriteRun(
+      scene.instructions,
+      cursor,
+      options,
+    );
+    if (
+      !horizontalReset ||
+      horizontalReset.consumed !== 2 ||
+      horizontalReset.operations[0]?.target !== "hSCX" ||
+      horizontalReset.operations[0]?.value !== 0
+    ) {
+      throw new Error("IntroScene19 must reset hSCX before its vertical offset");
+    }
+    compiledPrefix.push(...horizontalReset.operations);
+    cursor += horizontalReset.consumed;
+    if (
+      instructionSignature(scene.instructions[cursor]) !==
+        "ld a, -5 * TILE_WIDTH" ||
+      instructionSignature(scene.instructions[cursor + 1]) !== "ldh [hSCY], a"
+    ) {
+      throw new Error("IntroScene19 vertical offset is not exact");
+    }
+    const tileWidthSpan = requireExactNormalizedLine(
+      loadSource("constants/hardware.inc", options),
+      "def TILE_WIDTH equ 8",
+      "IntroScene19 exact tile width",
+    );
+    const verticalTarget = requireHighMemoryWriteTarget("[hSCY]", options);
+    compiledPrefix.push({
+      op: "write_memory_byte",
+      ...verticalTarget,
+      value: 216,
+      condition: { source: null, predicate: "always", source_span: null },
+      value_source_span: tileWidthSpan,
+      source_span: sourceSpanThrough(
+        scene.instructions[cursor].source_span,
+        scene.instructions[cursor + 1].source_span,
+      ),
+    });
+    cursor += 2;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(
+        scene.instructions,
+        cursor,
+        options,
+      );
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (
+      runtimePresentationInstructionTarget(scene.instructions[cursor]) !==
+      "ClearSpriteAnims"
+    ) {
+      throw new Error("IntroScene19 must clear sprite animations before dictionary setup");
+    }
+    compiledPrefix.push(compileClearSpriteAnimsCall(scene.instructions[cursor], options));
+    cursor += 1;
+    const dictionary = scene.instructions.slice(cursor, cursor + 5);
+    if (
+      dictionary.map(instructionSignature).join("\0") !==
+      [
+        "ld hl, wSpriteAnimDict",
+        "xor a",
+        "ld [hli], a",
+        "ld [hl], $7f",
+        "call Intro_SetCGBPalUpdate",
+      ].join("\0")
+    ) {
+      throw new Error("IntroScene19 sprite dictionary setup is not exact");
+    }
+    const dictionaryDeclaration = findAsmSymbolDeclarationSpan(
+      "wSpriteAnimDict",
+      [loadSource("ram/wram.asm", options)],
+    );
+    if (!dictionaryDeclaration) {
+      throw new Error("IntroScene19 sprite dictionary has no WRAM declaration");
+    }
+    compiledPrefix.push(
+      {
+        op: "write_memory_bytes",
+        target: "wSpriteAnimDict",
+        address_space: "wram",
+        bytes: [0, 0x7f],
+        target_declaration_source_span: dictionaryDeclaration,
+        source_span: sourceSpanThrough(dictionary[0].source_span, dictionary[3].source_span),
+      },
+      compileAccumulatorWriteSubprogramCall(
+        dictionary[4],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 5;
+    const depixel = scene.instructions[cursor];
+    const objectLoad = scene.instructions[cursor + 1];
+    const initCall = scene.instructions[cursor + 2];
+    if (
+      instructionSignature(depixel) !== "depixel 12, 0" ||
+      instructionSignature(objectLoad) !==
+        "ld a, SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY" ||
+      instructionSignature(initCall) !== "call InitSpriteAnimStruct"
+    ) {
+      throw new Error("IntroScene19 Suicune-away allocation is not exact");
+    }
+    const programs = compiledSpritePrograms.filter(
+      (program) =>
+        program.allocation_source_span.file === "engine/movie/intro.asm" &&
+        program.allocation_source_span.start_line === initCall.source_span.start_line,
+    );
+    if (programs.length !== 1) {
+      throw new Error("IntroScene19 must source-prove one Suicune-away sprite program");
+    }
+    compiledPrefix.push({
+      op: "sprite_activate",
+      instance: programs[0].instance,
+      object: programs[0].object,
+      origin: { macro: "depixel", first: 12, second: 0, x: 0, y: 96 },
+      lifetime: programs[0].lifetime,
+      source_span: sourceSpanThrough(depixel.source_span, initCall.source_span),
+    });
+    cursor += 3;
+    const stateWrites = compileAccumulatorWramWriteRun(scene.instructions, cursor, options);
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene19 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (instructionSignature(scene.instructions[cursor]) !== "call NextIntroScene") {
+      throw new Error("IntroScene19 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(
+        scene.instructions[cursor],
+        "NextIntroScene",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene19 must return after advancing");
+    }
+    compiledPrefix.push({ op: "return", source_span: scene.instructions[cursor].source_span });
+    const twentiethScene = blocks.get("IntroScene20");
+    const twentiethSceneEntry = twentiethScene?.instructions[0];
+    if (!twentiethScene || !twentiethSceneEntry) {
+      throw new Error("IntroScene19 has no exact IntroScene20 continuation");
+    }
+    frontierBlock = twentiethScene.id;
+    nextCall = twentiethSceneEntry;
+  }
+  if (
+    frontierBlock === "IntroScene20" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $98",
+      "jr nc, .finished",
+      "cp $58",
+      "ret nc",
+      "cp $40",
+      "jr nc, .AppearUnown",
+      "cp $28",
+      "ret nc",
+      "ldh a, [hSCY]",
+      "inc a",
+      "ldh [hSCY], a",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene20 frame dispatch is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const counter = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const scroll = requireHighMemoryWriteTarget("[hSCY]", options);
+    const finish = evaluateAsmInteger(scene.instructions[3].args[0], new Map());
+    const lateHold = evaluateAsmInteger(scene.instructions[5].args[0], new Map());
+    const unownStart = evaluateAsmInteger(scene.instructions[7].args[0], new Map());
+    const earlyHold = evaluateAsmInteger(scene.instructions[9].args[0], new Map());
+    if (finish !== 0x98 || lateHold !== 0x58 || unownStart !== 0x40 || earlyHold !== 0x28) {
+      throw new Error(
+        `IntroScene20 thresholds are not exact: ${finish}/${lateHold}/${unownStart}/${earlyHold}`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[2].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: finish,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(scene.instructions[3].source_span, scene.instructions[4].source_span),
+      },
+      {
+        op: "return_if_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: lateHold,
+        source_span: sourceSpanThrough(scene.instructions[5].source_span, scene.instructions[6].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: unownStart,
+        target: instructionTarget(scene, scene.instructions[8], blocks),
+        source_span: sourceSpanThrough(scene.instructions[7].source_span, scene.instructions[8].source_span),
+      },
+      {
+        op: "return_if_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: earlyHold,
+        source_span: sourceSpanThrough(scene.instructions[9].source_span, scene.instructions[10].source_span),
+      },
+      {
+        op: "increment_memory_byte",
+        target: scroll.target,
+        address_space: scroll.address_space,
+        delta: 1,
+        wrap: "u8",
+        source_span: sourceSpanThrough(scene.instructions[11].source_span, scene.instructions[13].source_span),
+      },
+      { op: "return", source_span: scene.instructions[14].source_span },
+    );
+
+    const appearBlock = blocks.get(".AppearUnown@IntroScene20");
+    const appear = appearBlock?.instructions ?? [];
+    const expectedAppear = [
+      "sub $18",
+      "ld c, a",
+      "and $3",
+      "cp $3",
+      "ret nz",
+      "ld a, c",
+      "and $1c",
+      "srl a",
+      "srl a",
+      "ld [wIntroSceneTimer], a",
+      "xor a",
+      "call Intro_Scene20_AppearUnown",
+      "ret",
+    ];
+    if (!appearBlock || appear.map(instructionSignature).join("\0") !== expectedAppear.join("\0")) {
+      throw new Error("IntroScene20 Unown appearance branch is not exact");
+    }
+    const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+    compiledPrefix.push(
+      {
+        op: "set_local_from_result",
+        name: "scene20_unown_phase",
+        source: "intro_scene_frame",
+        subtract: 0x18,
+        wrap: "u8",
+        source_span: sourceSpanThrough(appear[0].source_span, appear[1].source_span),
+      },
+      {
+        op: "return_unless_mask_equal",
+        source: "scene20_unown_phase",
+        mask: 0x03,
+        operand: 0x03,
+        source_span: sourceSpanThrough(appear[2].source_span, appear[4].source_span),
+      },
+      {
+        op: "write_memory_byte_from_masked_result",
+        target: timer.target,
+        address_space: timer.address_space,
+        result: "scene20_unown_phase",
+        mask: 0x1c,
+        shift_right: 2,
+        target_declaration_source_span: timer.declaration_source_span,
+        target_section_source_span: timer.section_source_span,
+        source_span: sourceSpanThrough(appear[5].source_span, appear[9].source_span),
+      },
+      { op: "set_local", name: "accumulator", value: 0, source_span: appear[10].source_span },
+      compileIntroScene20AppearUnownCall(appear[11], intro, options),
+      { op: "return", source_span: appear[12].source_span },
+    );
+    const finished = blocks.get(".finished@IntroScene20")?.instructions ?? [];
+    if (
+      finished.length !== 2 ||
+      instructionSignature(finished[0]) !== "call NextIntroScene" ||
+      instructionSignature(finished[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene20 completion branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(finished[0], "NextIntroScene", blocks, options),
+      { op: "return", source_span: finished[1].source_span },
+    );
+    const twentyFirstScene = blocks.get("IntroScene21");
+    const twentyFirstEntry = twentyFirstScene?.instructions[0];
+    if (!twentyFirstScene || !twentyFirstEntry) {
+      throw new Error("IntroScene20 has no exact IntroScene21 continuation");
+    }
+    frontierBlock = twentyFirstScene.id;
+    nextCall = twentyFirstEntry;
+  }
+  if (
+    frontierBlock === "IntroScene21" &&
+    instructionSignature(nextCall) === "call Intro_ColoredSuicuneFrameSwap"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "call Intro_ColoredSuicuneFrameSwap",
+      "ld c, 3",
+      "call DelayFrames",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld [wIntroSceneFrameCounter], a",
+      "ld [wIntroSceneTimer], a",
+      "call NextIntroScene",
+      "ret",
+    ];
+    const reached = scene.instructions.map(instructionSignature);
+    if (reached.join("\0") !== expected.join("\0")) {
+      throw new Error(
+        `IntroScene21 program is not exact; reached ${reached.join(" -> ")}`,
+      );
+    }
+    const counter = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+    const bgMode = requireHighMemoryWriteTarget("[hBGMapMode]", options);
+    compiledPrefix.push(
+      compileIntroColoredSuicuneFrameSwapCall(scene.instructions[0], intro, options),
+      {
+        op: "wait_frames",
+        frames: 3,
+        condition: { source: null, predicate: "always", source_span: null },
+        implementation_source_span: delayFramesImplementationSpan,
+        source_span: sourceSpanThrough(scene.instructions[1].source_span, scene.instructions[2].source_span),
+      },
+      {
+        op: "write_memory_byte",
+        ...bgMode,
+        value: 0,
+        condition: { source: null, predicate: "always", source_span: null },
+        value_source_span: scene.instructions[3].source_span,
+        source_span: sourceSpanThrough(scene.instructions[3].source_span, scene.instructions[4].source_span),
+      },
+      ...[counter, timer].map((memory, index) => ({
+        op: "write_memory_byte",
+        target: memory.target,
+        address_space: memory.address_space,
+        value: 0,
+        condition: { source: null, predicate: "always", source_span: null },
+        value_source_span: scene.instructions[3].source_span,
+        target_declaration_source_span: memory.declaration_source_span,
+        target_section_source_span: memory.section_source_span,
+        source_span: scene.instructions[5 + index].source_span,
+      })),
+      compileIncrementMemoryByteSubprogramCall(scene.instructions[7], "NextIntroScene", blocks, options),
+      { op: "return", source_span: scene.instructions[8].source_span },
+    );
+    const scene22 = blocks.get("IntroScene22");
+    const scene22Entry = scene22?.instructions[0];
+    if (!scene22 || !scene22Entry) {
+      throw new Error("IntroScene21 has no exact IntroScene22 continuation");
+    }
+    frontierBlock = scene22.id;
+    nextCall = scene22Entry;
+  }
+  if (
+    frontierBlock === "IntroScene22" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $8",
+      "jr nc, .done",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene22 counter program is not exact");
+    }
+    const counter = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const threshold = evaluateAsmInteger(scene.instructions[3].args[0], new Map());
+    if (threshold !== 8) {
+      throw new Error(`IntroScene22 teardown threshold is not exact: ${threshold}`);
+    }
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[2].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: threshold,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(scene.instructions[3].source_span, scene.instructions[4].source_span),
+      },
+      { op: "return", source_span: scene.instructions[5].source_span },
+    );
+    const done = blocks.get(".done@IntroScene22")?.instructions ?? [];
+    if (
+      done.length !== 3 ||
+      instructionSignature(done[0]) !== "farcall DeinitializeAllSprites" ||
+      instructionSignature(done[1]) !== "call NextIntroScene" ||
+      instructionSignature(done[2]) !== "ret"
+    ) {
+      throw new Error("IntroScene22 teardown branch is not exact");
+    }
+    compiledPrefix.push(
+      { op: "deinitialize_all_sprites", source_span: done[0].source_span },
+      compileIncrementMemoryByteSubprogramCall(done[1], "NextIntroScene", blocks, options),
+      { op: "return", source_span: done[2].source_span },
+    );
+    const scene23 = blocks.get("IntroScene23");
+    const scene23Entry = scene23?.instructions[0];
+    if (!scene23 || !scene23Entry) {
+      throw new Error("IntroScene22 has no exact IntroScene23 continuation");
+    }
+    frontierBlock = scene23.id;
+    nextCall = scene23Entry;
+  }
+  if (
+    frontierBlock === "IntroScene23" &&
+    instructionSignature(nextCall) === "xor a"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "xor a",
+      "ld [wIntroSceneFrameCounter], a",
+      "call NextIntroScene",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene23 reset program is not exact");
+    }
+    const reset = compileAccumulatorWramWriteRun(scene.instructions, 0, options);
+    if (!reset || reset.operations.length !== 1 || reset.operations[0]?.target !== "wIntroSceneFrameCounter") {
+      throw new Error("IntroScene23 must reset only the frame counter");
+    }
+    compiledPrefix.push(
+      ...reset.operations,
+      compileIncrementMemoryByteSubprogramCall(scene.instructions[2], "NextIntroScene", blocks, options),
+      { op: "return", source_span: scene.instructions[3].source_span },
+    );
+    const scene24 = blocks.get("IntroScene24");
+    const scene24Entry = scene24?.instructions[0];
+    if (!scene24 || !scene24Entry) {
+      throw new Error("IntroScene23 has no exact IntroScene24 continuation");
+    }
+    frontierBlock = scene24.id;
+    nextCall = scene24Entry;
+  }
+  if (
+    frontierBlock === "IntroScene24" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $20",
+      "jr nc, .done",
+      "ld c, a",
+      "and $3",
+      "ret nz",
+      "ld a, c",
+      "and $1c",
+      "sla a",
+      "call Intro_Scene24_ApplyPaletteFade",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene24 fade cadence is not exact");
+    }
+    const counter = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const threshold = evaluateAsmInteger(scene.instructions[3].args[0], new Map());
+    if (threshold !== 0x20) {
+      throw new Error(`IntroScene24 fade threshold is not exact: ${threshold}`);
+    }
+    compiledPrefix.push(
+      {
+        op: "postincrement_memory_byte",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[2].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: threshold,
+        target: instructionTarget(scene, scene.instructions[4], blocks),
+        source_span: sourceSpanThrough(scene.instructions[3].source_span, scene.instructions[4].source_span),
+      },
+      {
+        op: "return_unless_mask_equal",
+        source: "intro_scene_frame",
+        mask: 0x03,
+        operand: 0,
+        source_span: sourceSpanThrough(scene.instructions[5].source_span, scene.instructions[7].source_span),
+      },
+      {
+        op: "set_local_from_masked_result",
+        name: "accumulator",
+        source: "intro_scene_frame",
+        mask: 0x1c,
+        shift_left: 1,
+        wrap: "u8",
+        valid_values: [0, 8, 16, 24, 32, 40, 48, 56],
+        source_span: sourceSpanThrough(scene.instructions[8].source_span, scene.instructions[10].source_span),
+      },
+      compileIntroScene24PaletteFadeCall(scene.instructions[11], intro, options),
+      { op: "return", source_span: scene.instructions[12].source_span },
+    );
+    const done = blocks.get(".done@IntroScene24")?.instructions ?? [];
+    if (
+      done.length !== 4 ||
+      instructionSignature(done[0]) !== "ld a, $40" ||
+      instructionSignature(done[1]) !== "ld [wIntroSceneFrameCounter], a" ||
+      instructionSignature(done[2]) !== "call NextIntroScene" ||
+      instructionSignature(done[3]) !== "ret"
+    ) {
+      throw new Error("IntroScene24 completion branch is not exact");
+    }
+    const seed = compileAccumulatorWramWriteRun(done, 0, options);
+    if (!seed || seed.operations.length !== 1 || seed.operations[0]?.value !== 0x40) {
+      throw new Error("IntroScene24 must seed the wait counter with $40");
+    }
+    compiledPrefix.push(
+      ...seed.operations,
+      compileIncrementMemoryByteSubprogramCall(done[2], "NextIntroScene", blocks, options),
+      { op: "return", source_span: done[3].source_span },
+    );
+    const scene25 = blocks.get("IntroScene25");
+    const scene25Entry = scene25?.instructions[0];
+    if (!scene25 || !scene25Entry) {
+      throw new Error("IntroScene24 has no exact IntroScene25 continuation");
+    }
+    frontierBlock = scene25.id;
+    nextCall = scene25Entry;
+  }
+  if (
+    frontierBlock === "IntroScene25" &&
+    instructionSignature(nextCall) === "ld a, [wIntroSceneFrameCounter]"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld a, [wIntroSceneFrameCounter]",
+      "dec a",
+      "jr z, .done",
+      "ld [wIntroSceneFrameCounter], a",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene25 countdown is not exact");
+    }
+    const counter = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    compiledPrefix.push(
+      {
+        op: "set_local_from_memory",
+        name: "intro_scene_countdown",
+        source: counter.target,
+        address_space: counter.address_space,
+        subtract: 1,
+        wrap: "u8",
+        source_declaration_source_span: counter.declaration_source_span,
+        source_section_source_span: counter.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[1].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_countdown",
+        predicate: "equal",
+        operand: 0,
+        target: instructionTarget(scene, scene.instructions[2], blocks),
+        source_span: scene.instructions[2].source_span,
+      },
+      {
+        op: "write_memory_byte_from_result",
+        target: counter.target,
+        address_space: counter.address_space,
+        result: "intro_scene_countdown",
+        target_declaration_source_span: counter.declaration_source_span,
+        target_section_source_span: counter.section_source_span,
+        source_span: scene.instructions[3].source_span,
+      },
+      { op: "return", source_span: scene.instructions[4].source_span },
+    );
+    const done = blocks.get(".done@IntroScene25")?.instructions ?? [];
+    if (
+      done.length !== 2 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene25 completion branch is not exact");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(done[0], "NextIntroScene", blocks, options),
+      { op: "return", source_span: done[1].source_span },
+    );
+    const scene26 = blocks.get("IntroScene26");
+    const scene26Entry = scene26?.instructions[0];
+    if (!scene26 || !scene26Entry) {
+      throw new Error("IntroScene25 has no exact IntroScene26 continuation");
+    }
+    frontierBlock = scene26.id;
+    nextCall = scene26Entry;
+  }
+  if (
+    frontierBlock === "IntroScene26" &&
+    instructionSignature(nextCall) === "call ClearBGPalettes"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expectedPrefix = [
+      "call ClearBGPalettes",
+      "call ClearSprites",
+      "call ClearTilemap",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld a, $1",
+      "ldh [rVBK], a",
+    ];
+    const reachedPrefix = scene.instructions.slice(0, 7).map(instructionSignature);
+    if (reachedPrefix.join("\0") !== expectedPrefix.join("\0")) {
+      throw new Error(`IntroScene26 setup prefix is not exact; reached ${reachedPrefix.join(" -> ")}`);
+    }
+    const bgModeRun = compileAccumulatorHighMemoryWriteRun(scene.instructions, 3, options);
+    const vramBankRun = compileAccumulatorHighMemoryWriteRun(scene.instructions, 5, options);
+    if (bgModeRun?.consumed !== 2 || vramBankRun?.consumed !== 2) {
+      throw new Error("IntroScene26 register writes have no exact accumulator data flow");
+    }
+    compiledPrefix.push(
+      ...certifyClearBgPalettesOperations(options),
+      {
+        op: "fill_memory",
+        target: "wShadowOAM",
+        byte_count: 160,
+        value: 0,
+        direction: "ascending",
+        bank: { select: "current", restore: false },
+        condition: { source: null, predicate: "always", source_span: null },
+        source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+      },
+      ...clearTileOperations,
+      ...bgModeRun.operations,
+      ...vramBankRun.operations,
+    );
+    let cursor = 7;
+    const decompression = compileIntroSceneDecompressionPrefix(
+      scene.instructions,
+      cursor,
+      1,
+      intro,
+      options,
+    );
+    if (
+      decompression.operations.filter((operation) => operation.op === "decompress_lz3_resource").length !== 3 ||
+      decompression.operations.filter((operation) => operation.op === "request_2bpp_transfer").length !== 3
+    ) {
+      throw new Error("IntroScene26 must source-prove three decompression/request pairs");
+    }
+    compiledPrefix.push(...decompression.operations);
+    cursor += decompression.consumed;
+    const paletteScope = compileIntroScenePaletteCopyScope(
+      frontierBlock,
+      scene.instructions,
+      cursor,
+      intro,
+      options,
+    );
+    compiledPrefix.push(...paletteScope.operations);
+    cursor += paletteScope.consumed;
+    while (cursor < scene.instructions.length) {
+      const writeRun = compileAccumulatorHighMemoryWriteRun(scene.instructions, cursor, options);
+      if (!writeRun) break;
+      compiledPrefix.push(...writeRun.operations);
+      cursor += writeRun.consumed;
+    }
+    if (runtimePresentationInstructionTarget(scene.instructions[cursor]) !== "ClearSpriteAnims") {
+      throw new Error("IntroScene26 must clear sprite animations after setup");
+    }
+    compiledPrefix.push(compileClearSpriteAnimsCall(scene.instructions[cursor], options));
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "call Intro_SetCGBPalUpdate") {
+      throw new Error("IntroScene26 must request its CGB palette update");
+    }
+    compiledPrefix.push(
+      compileAccumulatorWriteSubprogramCall(
+        scene.instructions[cursor],
+        "Intro_SetCGBPalUpdate",
+        blocks,
+        options,
+      ),
+    );
+    cursor += 1;
+    const stateWrites = compileAccumulatorWramWriteRun(scene.instructions, cursor, options);
+    if (!stateWrites || stateWrites.operations.length !== 2) {
+      throw new Error("IntroScene26 must reset both intro state bytes");
+    }
+    compiledPrefix.push(...stateWrites.operations);
+    cursor += stateWrites.consumed;
+    if (instructionSignature(scene.instructions[cursor]) !== "call NextIntroScene") {
+      throw new Error("IntroScene26 must advance through NextIntroScene");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(scene.instructions[cursor], "NextIntroScene", blocks, options),
+    );
+    cursor += 1;
+    if (instructionSignature(scene.instructions[cursor]) !== "ret") {
+      throw new Error("IntroScene26 must return after advancing");
+    }
+    compiledPrefix.push({ op: "return", source_span: scene.instructions[cursor].source_span });
+    const scene27 = blocks.get("IntroScene27");
+    const scene27Entry = scene27?.instructions[0];
+    if (!scene27 || !scene27Entry) {
+      throw new Error("IntroScene26 has no exact IntroScene27 continuation");
+    }
+    frontierBlock = scene27.id;
+    nextCall = scene27Entry;
+  }
+  if (
+    frontierBlock === "IntroScene27" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneTimer"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneTimer",
+      "inc [hl]",
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "inc [hl]",
+      "cp $80",
+      "jr nc, .done",
+      "ld c, a",
+      "and $f",
+      "ld [wIntroSceneTimer], a",
+      "ld a, c",
+      "and $70",
+      "swap a",
+      "call Intro_FadeUnownWordPals",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene27 word-fade program is not exact");
+    }
+    const timer = requireFixedWramWriteTarget("[wIntroSceneTimer]", options);
+    const frame = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const threshold = evaluateAsmInteger(scene.instructions[5].args[0], new Map());
+    if (threshold !== 0x80) {
+      throw new Error(`IntroScene27 end threshold is not exact: ${threshold}`);
+    }
+    compiledPrefix.push(
+      {
+        op: "increment_memory_byte",
+        target: timer.target,
+        address_space: timer.address_space,
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: timer.declaration_source_span,
+        target_section_source_span: timer.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[1].source_span),
+      },
+      {
+        op: "postincrement_memory_byte",
+        target: frame.target,
+        address_space: frame.address_space,
+        result: "intro_scene_frame",
+        delta: 1,
+        wrap: "u8",
+        target_declaration_source_span: frame.declaration_source_span,
+        target_section_source_span: frame.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[2].source_span, scene.instructions[4].source_span),
+      },
+      {
+        op: "branch_compare",
+        value: "intro_scene_frame",
+        predicate: "unsigned_greater_or_equal",
+        operand: threshold,
+        target: instructionTarget(scene, scene.instructions[6], blocks),
+        source_span: sourceSpanThrough(scene.instructions[5].source_span, scene.instructions[6].source_span),
+      },
+      {
+        op: "write_memory_byte_from_masked_result",
+        target: timer.target,
+        address_space: timer.address_space,
+        result: "intro_scene_frame",
+        mask: 0x0f,
+        target_declaration_source_span: timer.declaration_source_span,
+        target_section_source_span: timer.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[7].source_span, scene.instructions[9].source_span),
+      },
+      {
+        op: "set_local_from_masked_result",
+        name: "accumulator",
+        source: "intro_scene_frame",
+        mask: 0x70,
+        swap_nibbles: true,
+        valid_values: [0, 1, 2, 3, 4, 5, 6, 7],
+        source_span: sourceSpanThrough(scene.instructions[10].source_span, scene.instructions[12].source_span),
+      },
+      compileIntroFadeUnownWordPalettesCall(scene.instructions[13], intro, options),
+      { op: "return", source_span: scene.instructions[14].source_span },
+    );
+    const done = blocks.get(".done@IntroScene27")?.instructions ?? [];
+    if (
+      done.length !== 4 ||
+      instructionSignature(done[0]) !== "call NextIntroScene" ||
+      instructionSignature(done[1]) !== "ld a, $80" ||
+      instructionSignature(done[2]) !== "ld [wIntroSceneFrameCounter], a" ||
+      instructionSignature(done[3]) !== "ret"
+    ) {
+      throw new Error("IntroScene27 completion branch is not exact");
+    }
+    const seed = compileAccumulatorWramWriteRun(done, 1, options);
+    if (!seed || seed.operations.length !== 1 || seed.operations[0]?.value !== 0x80) {
+      throw new Error("IntroScene27 must seed Scene28 with $80 frames");
+    }
+    compiledPrefix.push(
+      compileIncrementMemoryByteSubprogramCall(done[0], "NextIntroScene", blocks, options),
+      ...seed.operations,
+      { op: "return", source_span: done[3].source_span },
+    );
+    const scene28 = blocks.get("IntroScene28");
+    const scene28Entry = scene28?.instructions[0];
+    if (!scene28 || !scene28Entry) {
+      throw new Error("IntroScene27 has no exact IntroScene28 continuation");
+    }
+    frontierBlock = scene28.id;
+    nextCall = scene28Entry;
+  }
+  if (
+    frontierBlock === "IntroScene28" &&
+    instructionSignature(nextCall) === "ld hl, wIntroSceneFrameCounter"
+  ) {
+    const scene = blocks.get(frontierBlock)!;
+    const expected = [
+      "ld hl, wIntroSceneFrameCounter",
+      "ld a, [hl]",
+      "and a",
+      "jr z, .done",
+      "dec [hl]",
+      "cp $18",
+      "jr z, .clear",
+      "cp $8",
+      "ret nz",
+      "ld de, SFX_INTRO_WHOOSH",
+      "call PlaySFX",
+      "ret",
+    ];
+    if (scene.instructions.map(instructionSignature).join("\0") !== expected.join("\0")) {
+      throw new Error("IntroScene28 final countdown program is not exact");
+    }
+    const frame = requireFixedWramWriteTarget("[wIntroSceneFrameCounter]", options);
+    const clearThreshold = evaluateAsmInteger(scene.instructions[5].args[0], new Map());
+    const soundThreshold = evaluateAsmInteger(scene.instructions[7].args[0], new Map());
+    if (clearThreshold !== 0x18 || soundThreshold !== 0x08) {
+      throw new Error(
+        `IntroScene28 thresholds are not exact: clear=${clearThreshold}, sound=${soundThreshold}`,
+      );
+    }
+    compiledPrefix.push(
+      {
+        op: "return_if_memory_zero",
+        source: frame.target,
+        address_space: frame.address_space,
+        target: ".done@IntroScene28",
+        source_declaration_source_span: frame.declaration_source_span,
+        source_section_source_span: frame.section_source_span,
+        source_span: sourceSpanThrough(scene.instructions[0].source_span, scene.instructions[3].source_span),
+      },
+      {
+        op: "decrement_memory_byte",
+        target: frame.target,
+        address_space: frame.address_space,
+        delta: 1,
+        wrap: "u8",
+        comparison_value: "predecrement_value",
+        target_declaration_source_span: frame.declaration_source_span,
+        target_section_source_span: frame.section_source_span,
+        source_span: scene.instructions[4].source_span,
+      },
+      {
+        op: "branch_compare",
+        value: "predecrement_value",
+        predicate: "equal",
+        operand: clearThreshold,
+        target: instructionTarget(scene, scene.instructions[6], blocks),
+        source_span: sourceSpanThrough(scene.instructions[5].source_span, scene.instructions[6].source_span),
+      },
+      {
+        op: "return_unless_compare",
+        value: "predecrement_value",
+        predicate: "equal",
+        operand: soundThreshold,
+        source_span: sourceSpanThrough(scene.instructions[7].source_span, scene.instructions[8].source_span),
+      },
+      {
+        op: "play_audio",
+        audio: "SFX_INTRO_WHOOSH",
+        source_span: sourceSpanThrough(scene.instructions[9].source_span, scene.instructions[10].source_span),
+      },
+      { op: "return", source_span: scene.instructions[11].source_span },
+    );
+    const clear = blocks.get(".clear@IntroScene28")?.instructions ?? [];
+    if (
+      clear.length !== 2 ||
+      instructionSignature(clear[0]) !== "call ClearBGPalettes" ||
+      instructionSignature(clear[1]) !== "ret"
+    ) {
+      throw new Error("IntroScene28 palette-clear branch is not exact");
+    }
+    compiledPrefix.push(
+      ...certifyClearBgPalettesOperations(options).map((operation) => ({
+        ...operation,
+        invocation_source_span: clear[0].source_span,
+      })),
+      { op: "return", source_span: clear[1].source_span },
+    );
+    const done = blocks.get(".done@IntroScene28")?.instructions ?? [];
+    if (
+      done.length !== 3 ||
+      instructionSignature(done[0]) !== "ld hl, wJumptableIndex" ||
+      instructionSignature(done[1]) !== "set JUMPTABLE_EXIT_F, [hl]" ||
+      instructionSignature(done[2]) !== "ret"
+    ) {
+      throw new Error("IntroScene28 exit-bit branch is not exact");
+    }
+    const constants = parseAsmConstants(
+      CONSTANT_SOURCE_FILES.map((file) => loadSource(file, options)),
+    );
+    const exitBit = constants.get("JUMPTABLE_EXIT_F");
+    if (exitBit !== 7) {
+      throw new Error(`IntroScene28 exit bit is not exact: ${String(exitBit)}`);
+    }
+    const jumptable = requireFixedWramWriteTarget("[wJumptableIndex]", options);
+    compiledPrefix.push(
+      {
+        op: "set_memory_bit",
+        target: jumptable.target,
+        address_space: jumptable.address_space,
+        bit: exitBit,
+        target_declaration_source_span: jumptable.declaration_source_span,
+        target_section_source_span: jumptable.section_source_span,
+        source_span: sourceSpanThrough(done[0].source_span, done[1].source_span),
+      },
+      { op: "return", source_span: done[2].source_span },
+    );
+    const outerDone = blocks.get(".done@CrystalIntro");
+    const outerDoneEntry = outerDone?.instructions[0];
+    if (!outerDone || !outerDoneEntry) {
+      throw new Error("IntroScene28 has no exact CrystalIntro cleanup continuation");
+    }
+    frontierBlock = outerDone.id;
+    nextCall = outerDoneEntry;
+  }
+  if (
+    frontierBlock !== ".done@CrystalIntro" ||
+    instructionSignature(nextCall) !== "call ClearBGPalettes"
+  ) {
+    throw new Error(
+      `CrystalIntro compilation did not reach its exact cleanup entry; reached ${frontierBlock} ${instructionSignature(nextCall)}`,
+    );
+  }
+
+  const entry = blocks.get("CrystalIntro")?.instructions ?? [];
+  const init = blocks.get(".InitRAMAddrs@CrystalIntro")?.instructions ?? [];
+  const cleanup = blocks.get(".done@CrystalIntro")?.instructions ?? [];
+  const shutOffMusic = blocks.get(".ShutOffMusic@CrystalIntro")?.instructions ?? [];
+  const entryBankSpan = findAsmSymbolDeclarationSpan("wGBCPalettes", [wram]);
+  if (
+    entry.length !== 9 ||
+    init.length !== 9 ||
+    cleanup.length !== 17 ||
+    shutOffMusic.length !== 2 ||
+    !entryBankSpan
+  ) {
+    throw new Error("CrystalIntro callable entry/exit blocks are not exact");
+  }
+  const entryOperations: RuntimePresentationOperation[] = [
+    {
+      op: "save_memory_byte",
+      source: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 0 },
+      restore_required: true,
+      source_span: sourceSpanThrough(entry[0].source_span, entry[1].source_span),
     },
+    {
+      op: "write_memory_byte",
+      target: "rWBK",
+      address_space: "hardware_register",
+      value: "BANK(wGBCPalettes)",
+      value_source_span: entryBankSpan,
+      source_span: sourceSpanThrough(entry[2].source_span, entry[3].source_span),
+    },
+    {
+      op: "save_memory_byte",
+      source: "hInMenu",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 1 },
+      restore_required: true,
+      source_span: sourceSpanThrough(entry[4].source_span, entry[5].source_span),
+    },
+    {
+      op: "save_memory_byte",
+      source: "hVBlank",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 2 },
+      restore_required: true,
+      source_span: sourceSpanThrough(entry[6].source_span, entry[7].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hVBlank",
+      address_space: "hram",
+      value: 0,
+      source_span: sourceSpanThrough(init[1].source_span, init[2].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hInMenu",
+      address_space: "hram",
+      value: 1,
+      source_span: sourceSpanThrough(init[3].source_span, init[4].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hMapAnims",
+      address_space: "hram",
+      value: 0,
+      source_span: sourceSpanThrough(init[5].source_span, init[6].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "wJumptableIndex",
+      address_space: "wram",
+      value: 0,
+      source_span: sourceSpanThrough(init[5].source_span, init[7].source_span),
+    },
+  ];
+
+  const cleanupWrites: RuntimePresentationOperation[] = [];
+  for (let cleanupCursor = 3; cleanupCursor < 10; ) {
+    const writeRun = compileAccumulatorHighMemoryWriteRun(cleanup, cleanupCursor, options);
+    if (!writeRun) {
+      throw new Error(
+        `CrystalIntro cleanup register writes stop at ${instructionSignature(cleanup[cleanupCursor])}`,
+      );
+    }
+    cleanupWrites.push(...writeRun.operations);
+    cleanupCursor += writeRun.consumed;
+  }
+  const cleanupOperations: RuntimePresentationOperation[] = [
+    ...certifyClearBgPalettesOperations(options).map((operation) => ({
+      ...operation,
+      invocation_source_span: cleanup[0].source_span,
+    })),
+    {
+      op: "fill_memory",
+      target: "wShadowOAM",
+      byte_count: 160,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      invocation_source_span: cleanup[1].source_span,
+      source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+    },
+    ...clearTileOperations.map((operation) => ({
+      ...operation,
+      invocation_source_span: cleanup[2].source_span,
+    })),
+    ...cleanupWrites,
+    {
+      op: "restore_memory_byte",
+      target: "hVBlank",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 2 },
+      matches_save_source_span: sourceSpanThrough(entry[6].source_span, entry[7].source_span),
+      source_span: sourceSpanThrough(cleanup[10].source_span, cleanup[11].source_span),
+    },
+    {
+      op: "restore_memory_byte",
+      target: "hInMenu",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 1 },
+      matches_save_source_span: sourceSpanThrough(entry[4].source_span, entry[5].source_span),
+      source_span: sourceSpanThrough(cleanup[12].source_span, cleanup[13].source_span),
+    },
+    {
+      op: "restore_memory_byte",
+      target: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af", stack_slot: 0 },
+      matches_save_source_span: sourceSpanThrough(entry[0].source_span, entry[1].source_span),
+      source_span: sourceSpanThrough(cleanup[14].source_span, cleanup[15].source_span),
+    },
+    { op: "return", source_span: cleanup[16].source_span },
+  ];
+
+  const scheduler = compiledPrefix.find(
+    (operation) => operation.op === "sprite_scheduler_step" && operation.source_span.start_line === 20,
+  ) as RuntimePresentationSpriteOperation | undefined;
+  const frameWait = compiledPrefix.find(
+    (operation) => operation.op === "wait_frames" && operation.source_span.start_line === 21,
+  );
+  if (!scheduler || !frameWait) {
+    throw new Error("CrystalIntro callable loop has no exact central scheduler/frame boundary");
+  }
+
+  bindCrystalIntroSpriteGraphics(
+    compiledPrefix,
+    compiledSpritePrograms,
+    parseAsmConstants([loadSource("constants/hardware.inc", options)]),
+  );
+  compiledPrefix.push(...compileCrystalIntroBackgroundBindings(compiledPrefix, blocks));
+
+  const resourceMap = new Map<string, RuntimePresentationCallableSubprogram["resources"][number]>();
+  const audioMap = new Map<string, RuntimePresentationCallableSubprogram["audio"][number]>();
+  for (const operation of compiledPrefix) {
+    if (
+      typeof operation.resource === "string" &&
+      ["tiles", "tilemap", "attrmap", "palette"].includes(String(operation.resource_kind)) &&
+      operation.resource_source_span
+    ) {
+      const includeSpan = operation.resource_source_span as RuntimePresentationSourceSpan;
+      resourceMap.set(operation.resource, {
+        path: operation.resource,
+        kind: operation.resource_kind as "tiles" | "tilemap" | "attrmap" | "palette",
+        include_source_span: includeSpan,
+        data_source_span:
+          (operation.resource_data_source_span as RuntimePresentationSourceSpan | undefined) ?? includeSpan,
+      });
+    }
+    if (operation.op === "play_audio" && typeof operation.audio === "string") {
+      audioMap.set(operation.audio, {
+        id: operation.audio,
+        kind: operation.audio.startsWith("MUSIC_") ? "music" : "sound_effect",
+        source_span: operation.source_span,
+      });
+    }
+  }
+  audioMap.set("MUSIC_NONE", {
+    id: "MUSIC_NONE",
+    kind: "silence",
+    source_span: shutOffMusicSpan,
+  });
+
+  return {
+    id: "crystal_intro",
+    source_entry: "CrystalIntro",
+    accepted_call_forms: ["farcall"],
+    result: {
+      name: "crystal_intro_preserved_carry",
+      storage: "carry",
+      domain: [
+        {
+          id: "caller_carry_clear",
+          value: 0,
+          condition: { kind: "preserved_caller_carry", value: 0 },
+          source_span: cleanupSpan,
+        },
+        {
+          id: "caller_carry_set",
+          value: 1,
+          condition: { kind: "preserved_caller_carry", value: 1 },
+          source_span: cleanupSpan,
+        },
+      ],
+    },
+    phases: [
+      { id: "entry_init", source_span: sourceSpanThrough(entrySpan, initSpan), operations: entryOperations },
+      { id: "scene_dispatch", source_span: loopSpan, operations: compiledPrefix },
+      {
+        id: "button_cancel",
+        source_span: shutOffMusicSpan,
+        operations: [{ op: "stop_audio", audio: "MUSIC_NONE", source_span: shutOffMusicSpan }],
+      },
+      { id: "cleanup", source_span: cleanupSpan, operations: cleanupOperations },
+    ],
+    loop: {
+      source_span: loopSpan,
+      order: [
+        "sample_input",
+        "cancel_if_buttons",
+        "test_exit",
+        "dispatch_scene",
+        "sprite_scheduler_step",
+        "wait_frame",
+        "repeat",
+      ],
+      input: {
+        routine: "JoyTextDelay",
+        result: "hJoyLast",
+        menu_guard: "hInMenu",
+        menu_zero_source: "hJoyPressed",
+        menu_nonzero_source: "hJoyDown",
+        repeat_delay: "wTextDelayFrames",
+        pressed_repeat_reset: 15,
+        idle_repeat_restart: 5,
+      },
+      scene_dispatch: {
+        table: "IntroScenes",
+        index: "wJumptableIndex",
+        domain: sceneDomain,
+        source_span: sceneTable.source_span,
+      },
+      natural_scheduler_ticks: null,
+      scheduler,
+      frame_wait: frameWait,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [...resourceMap.values()],
+    audio: [...audioMap.values()],
+    sprite_operations: controlFlow.sprite_operations.filter(
+      (operation) => operation.source_span.file === "engine/movie/intro.asm",
+    ),
+    sprite_programs: compiledSpritePrograms,
+    required_consumer: { id: "runtime_title_screen.crystal_intro", required: true },
+    source_span: sourceSpanThrough(entrySpan, cleanupSpan),
+    implementation_source_spans: [
+      entrySpan,
+      initSpan,
+      loopSpan,
+      shutOffMusicSpan,
+      cleanupSpan,
+      sceneDispatcherSpan,
+      clearOamSpan,
+      clearOamLoopSpan,
+      delayFramesImplementationSpan,
+    ],
   };
+}
+
+function certifyStartTitleScreenSetupFrontier(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  _controlFlow: RuntimePresentationControlFlow,
+): RuntimePresentationCallableSubprogram {
+  const introMenu = loadSource("engine/menus/intro_menu.asm", options);
+  const title = loadSource("engine/movie/title.asm", options);
+  const clearSprites = loadSource("home/clear_sprites.asm", options);
+  const lcd = loadSource("home/lcd.asm", options);
+  const delay = loadSource("home/delay.asm", options);
+  const joypad = loadSource("home/joypad.asm", options);
+  const textSource = loadSource("home/text.asm", options);
+  const tilemapSource = loadSource("home/tilemap.asm", options);
+  const cgbLayouts = loadSource("engine/gfx/cgb_layouts.asm", options);
+  const sgbLayouts = loadSource("engine/gfx/sgb_layouts.asm", options);
+  const colorSource = loadSource("engine/gfx/color.asm", options);
+  const timePalettes = loadSource("home/time_palettes.asm", options);
+  const timeOfDayPalettes = loadSource("engine/tilesets/timeofday_pals.asm", options);
+  const wram = loadSource("ram/wram.asm", options);
+  const hardware = loadSource("constants/hardware.inc", options);
+  const blocks = parseAsmBlocks([
+    introMenu,
+    title,
+    clearSprites,
+    lcd,
+    delay,
+    joypad,
+    textSource,
+    tilemapSource,
+  ]);
+  const wrapper = blocks.get(".TitleScreen@StartTitleScreen")?.instructions ?? [];
+  if (
+    wrapper.length !== 2 ||
+    instructionSignature(wrapper[0]) !== "farcall _TitleScreen" ||
+    instructionSignature(wrapper[1]) !== "ret"
+  ) {
+    throw new Error("StartTitleScreen local setup wrapper is not exact");
+  }
+  const setup = blocks.get("_TitleScreen");
+  const setupInstructions = setup?.instructions ?? [];
+  const expectedSetupPrefix = [
+    "call ClearBGPalettes",
+    "call ClearSprites",
+    "call ClearTilemap",
+    "xor a",
+    "ldh [hBGMapMode], a",
+    "ld hl, wJumptableIndex",
+    "ld [hli], a",
+    "ld [hli], a",
+    "ld [hli], a",
+    "ld [hl], a",
+    "call DisableLCD",
+  ];
+  if (
+    !setup ||
+    setupInstructions.slice(0, expectedSetupPrefix.length).map(instructionSignature).join("\0") !==
+      expectedSetupPrefix.join("\0")
+  ) {
+    throw new Error("StartTitleScreen wrapper has no exact _TitleScreen continuation");
+  }
+  const bgMode = compileAccumulatorHighMemoryWriteRun(setupInstructions, 3, options);
+  if (!bgMode || bgMode.consumed !== 2) {
+    throw new Error("_TitleScreen BG-map disable has no exact accumulator data flow");
+  }
+  const clearOamSpan = requireExactRoutineBlock(
+    blocks,
+    "ClearSprites",
+    ["ld hl, wShadowOAM", "ld b, wShadowOAMEnd - wShadowOAM", "xor a"],
+    "_TitleScreen exact OAM-clear setup",
+  );
+  const clearOamLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@ClearSprites",
+    ["ld [hli], a", "dec b", "jr nz, .loop", "ret"],
+    "_TitleScreen exact OAM-clear loop",
+  );
+  const stateLayoutSpan = requireExactNormalizedRegion(
+    wram,
+    "wJumptableIndex::",
+    "wCreditsLYOverride:: db",
+    [
+      "wJumptableIndex::",
+      "wBattleTowerBattleEnded::",
+      "db",
+      "UNION",
+      "wIntroSceneFrameCounter:: db",
+      "wIntroSceneTimer:: db",
+      "NEXTU",
+      "wTitleScreenSelectedOption:: db",
+      "wTitleScreenTimer:: dw",
+      "NEXTU",
+      "wCreditsBorderFrame:: db",
+      "wCreditsBorderMon:: db",
+      "wCreditsLYOverride:: db",
+    ],
+    "_TitleScreen exact four-byte timing-state union",
+  );
+  const setupOperations: RuntimePresentationOperation[] = [
+    ...certifyClearBgPalettesOperations(options).map((operation) => ({
+      ...operation,
+      invocation_source_span: setupInstructions[0].source_span,
+    })),
+    {
+      op: "fill_memory",
+      target: "wShadowOAM",
+      byte_count: 160,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      invocation_source_span: setupInstructions[1].source_span,
+      source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+    },
+    ...certifyClearTilemapOperations(options).map((operation) => ({
+      ...operation,
+      invocation_source_span: setupInstructions[2].source_span,
+    })),
+    ...bgMode.operations,
+    {
+      op: "fill_memory",
+      target: "wJumptableIndex",
+      byte_count: 4,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      destination_labels: [
+        "wJumptableIndex",
+        "wTitleScreenSelectedOption",
+        "wTitleScreenTimer",
+      ],
+      layout_source_spans: [stateLayoutSpan],
+      source_span: sourceSpanThrough(
+        setupInstructions[5].source_span,
+        setupInstructions[9].source_span,
+      ),
+    },
+  ];
+  const disableEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "DisableLCD",
+    [
+      "ldh a, [rLCDC]",
+      "bit B_LCDC_ENABLE, a",
+      "ret z",
+      "xor a",
+      "ldh [rIF], a",
+      "ldh a, [rIE]",
+      "ld b, a",
+      "res B_IE_VBLANK, a",
+      "ldh [rIE], a",
+    ],
+    "_TitleScreen exact LCD-disable entry",
+  );
+  const disableWaitSpan = requireExactRoutineBlock(
+    blocks,
+    ".wait@DisableLCD",
+    [
+      "ldh a, [rLY]",
+      "cp LY_VBLANK + 1",
+      "jr nz, .wait",
+      "ldh a, [rLCDC]",
+      "and ~LCDC_ON",
+      "ldh [rLCDC], a",
+      "xor a",
+      "ldh [rIF], a",
+      "ld a, b",
+      "ldh [rIE], a",
+      "ret",
+    ],
+    "_TitleScreen exact LCD-disable VBlank wait and restore",
+  );
+  const hardwareConstants = parseAsmConstants([hardware]);
+  if (
+    hardwareConstants.get("B_LCDC_ENABLE") !== 7 ||
+    hardwareConstants.get("B_IE_VBLANK") !== 0 ||
+    hardwareConstants.get("LY_VBLANK") !== 144 ||
+    hardwareConstants.get("LCDC_ON") !== 0x80
+  ) {
+    throw new Error("_TitleScreen LCD-disable constants are not exact");
+  }
+  setupOperations.push({
+    op: "disable_lcd",
+    skip_if: { source: "rLCDC", bit: 7, predicate: "clear" },
+    interrupt_flags: { target: "rIF", value: 0, before_and_after: true },
+    interrupt_enable: {
+      target: "rIE",
+      save: "register_b",
+      clear_bit: 0,
+      restore: true,
+    },
+    wait_until: { source: "rLY", equals: 145 },
+    lcd_control: { target: "rLCDC", clear_mask: 0x80 },
+    implementation_source_spans: [disableEntrySpan, disableWaitSpan],
+    source_span: setupInstructions[10].source_span,
+  });
+  const vramBank = compileAccumulatorHighMemoryWriteRun(setupInstructions, 11, options);
+  if (!vramBank || vramBank.consumed !== 2 || vramBank.operations[0]?.value !== 1) {
+    throw new Error("_TitleScreen Suicune transfer does not select VRAM bank 1 exactly");
+  }
+  setupOperations.push(...vramBank.operations);
+  if (
+    instructionSignature(setupInstructions[13]) !== "ld hl, TitleSuicuneGFX" ||
+    instructionSignature(setupInstructions[14]) !== "ld de, vTiles4" ||
+    instructionSignature(setupInstructions[15]) !== "call Decompress"
+  ) {
+    throw new Error("_TitleScreen running-Suicune decompression operands are not exact");
+  }
+  const suicuneResource = requirePresentationResourceAtLabel(title, "TitleSuicuneGFX");
+  const suicuneDecoded = decodePresentationLz3Resource(suicuneResource.path, options);
+  const decompression = certifyIntroDecompressionImplementation(options);
+  const vram = loadSource("ram/vram.asm", options);
+  const vTiles4Span = findAsmSymbolDeclarationSpan("vTiles4", [vram]);
+  if (!vTiles4Span) {
+    throw new Error("_TitleScreen vTiles4 destination has no source declaration");
+  }
+  setupOperations.push({
+    op: "decompress_lz3_resource",
+    resource: suicuneResource.path,
+    resource_symbol: "TitleSuicuneGFX",
+    resource_kind: suicuneResource.kind,
+    compressed_byte_count: suicuneDecoded.compressed_byte_count,
+    output_byte_count: suicuneDecoded.output_byte_count,
+    target: "vTiles4",
+    target_vram_bank: 1,
+    resource_label_source_span: suicuneResource.label_source_span,
+    resource_source_span: suicuneResource.directive_source_span,
+    target_declaration_source_span: vTiles4Span,
+    algorithm_source_span: decompression.algorithm_source_span,
+    source_span: sourceSpanThrough(
+      setupInstructions[13].source_span,
+      setupInstructions[15].source_span,
+    ),
+  });
+  const constants = parseAsmConstants(
+    CONSTANT_SOURCE_FILES.map((file) => loadSource(file, options)),
+  );
+  if (constants.get("TILEMAP_WIDTH") !== 32 || constants.get("OAM_BANK1") !== 8) {
+    throw new Error("_TitleScreen BG-map fill constants are not exact");
+  }
+  const fillSpecifications = [
+    { coord: ["0", "0"], count: "20 * TILEMAP_WIDTH", value: 0 },
+    { coord: ["0", "0", "vBGMap3"], count: "TILEMAP_WIDTH", value: 7 },
+    { coord: ["0", "3"], count: "2 * TILEMAP_WIDTH", value: 2 },
+    { coord: ["0", "5"], count: "TILEMAP_WIDTH", value: 3 },
+    { coord: ["0", "6"], count: "TILEMAP_WIDTH", value: 4 },
+    { coord: ["0", "7"], count: "TILEMAP_WIDTH", value: 5 },
+    { coord: ["0", "8"], count: "2 * TILEMAP_WIDTH", value: 6 },
+    { coord: ["5", "9"], count: "11", value: 1 },
+    { coord: ["0", "12"], count: "6 * TILEMAP_WIDTH", value: 8 },
+  ] as const;
+  let setupCursor = 16;
+  for (const specification of fillSpecifications) {
+    const coordinate = setupInstructions[setupCursor];
+    const count = setupInstructions[setupCursor + 1];
+    const value = setupInstructions[setupCursor + 2];
+    const fill = setupInstructions[setupCursor + 3];
+    const expectedValueSignature =
+      specification.value === 0 && setupCursor === 16
+        ? "xor a"
+        : specification.value === 8
+          ? "ld a, 0 | OAM_BANK1"
+          : `ld a, ${specification.value}`;
+    if (
+      coordinate?.opcode !== "hlbgcoord" ||
+      coordinate.args.join(",") !== specification.coord.join(",") ||
+      instructionSignature(count) !== `ld bc, ${specification.count}` ||
+      instructionSignature(value) !== expectedValueSignature ||
+      instructionSignature(fill) !== "call ByteFill"
+    ) {
+      throw new Error(
+        `_TitleScreen BG-map fill is not exact at ${coordinate?.source_span.start_line ?? "missing"}`,
+      );
+    }
+    const x = evaluateAsmInteger(specification.coord[0], constants);
+    const y = evaluateAsmInteger(specification.coord[1], constants);
+    const base = specification.coord[2] ?? "vBGMap0";
+    const offset = y * 32 + x;
+    setupOperations.push({
+      op: "fill_memory",
+      target: offset === 0 ? base : `${base} + ${offset}`,
+      target_byte_offset: offset,
+      target_vram_bank: 1,
+      byte_count: evaluateAsmInteger(specification.count, constants),
+      value: specification.value,
+      direction: "ascending",
+      bank: { select: "vram1", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: sourceSpanThrough(coordinate.source_span, fill.source_span),
+    });
+    setupCursor += 4;
+  }
+  const vramBankZero = compileAccumulatorHighMemoryWriteRun(
+    setupInstructions,
+    setupCursor,
+    options,
+  );
+  if (!vramBankZero || vramBankZero.consumed !== 2 || vramBankZero.operations[0]?.value !== 0) {
+    throw new Error("_TitleScreen does not restore VRAM bank 0 after its attrmap fills");
+  }
+  setupOperations.push(...vramBankZero.operations);
+  setupCursor += vramBankZero.consumed;
+  for (const [symbol, target] of [
+    ["TitleLogoGFX", "vTiles1"],
+    ["TitleCrystalGFX", "vTiles0"],
+  ] as const) {
+    const resourceLoad = setupInstructions[setupCursor];
+    const targetLoad = setupInstructions[setupCursor + 1];
+    const call = setupInstructions[setupCursor + 2];
+    if (
+      instructionSignature(resourceLoad) !== `ld hl, ${symbol}` ||
+      instructionSignature(targetLoad) !== `ld de, ${target}` ||
+      instructionSignature(call) !== "call Decompress"
+    ) {
+      throw new Error(`_TitleScreen ${symbol} decompression operands are not exact`);
+    }
+    const resource = requirePresentationResourceAtLabel(title, symbol);
+    const decoded = decodePresentationLz3Resource(resource.path, options);
+    const targetSpan = findAsmSymbolDeclarationSpan(target, [vram]);
+    if (!targetSpan) {
+      throw new Error(`_TitleScreen ${target} destination has no source declaration`);
+    }
+    setupOperations.push({
+      op: "decompress_lz3_resource",
+      resource: resource.path,
+      resource_symbol: symbol,
+      resource_kind: resource.kind,
+      compressed_byte_count: decoded.compressed_byte_count,
+      output_byte_count: decoded.output_byte_count,
+      target,
+      target_vram_bank: 0,
+      resource_label_source_span: resource.label_source_span,
+      resource_source_span: resource.directive_source_span,
+      target_declaration_source_span: targetSpan,
+      algorithm_source_span: decompression.algorithm_source_span,
+      source_span: sourceSpanThrough(resourceLoad.source_span, call.source_span),
+    });
+    setupCursor += 3;
+  }
+  const clearTiles = setupInstructions.slice(setupCursor, setupCursor + 4);
+  if (
+    clearTiles.map(instructionSignature).join("\0") !==
+    [
+      "hlbgcoord 0, 0",
+      "ld bc, 64 * TILEMAP_WIDTH",
+      "ld a, ' '",
+      "call ByteFill",
+    ].join("\0")
+  ) {
+    throw new Error("_TitleScreen full BG-map tile clear is not exact");
+  }
+  setupOperations.push({
+    op: "fill_memory",
+    target: "vBGMap0",
+    target_vram_bank: 0,
+    byte_count: 64 * 32,
+    value: 0x7f,
+    direction: "ascending",
+    bank: { select: "vram0", restore: false },
+    condition: { source: null, predicate: "always", source_span: null },
+    source_span: sourceSpanThrough(clearTiles[0].source_span, clearTiles[3].source_span),
+  });
+  setupCursor += 4;
+  const drawEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "DrawTitleGraphic",
+    [],
+    "_TitleScreen exact graphic-draw entry",
+  );
+  const drawRowsSpan = requireExactRoutineBlock(
+    blocks,
+    ".bgrows@DrawTitleGraphic",
+    ["push de", "push bc", "push hl"],
+    "_TitleScreen exact graphic row save",
+  );
+  const drawColumnsSpan = requireExactRoutineBlock(
+    blocks,
+    ".col@DrawTitleGraphic",
+    [
+      "ld a, d",
+      "ld [hli], a",
+      "inc d",
+      "dec c",
+      "jr nz, .col",
+      "pop hl",
+      "ld bc, SCREEN_WIDTH",
+      "add hl, bc",
+      "pop bc",
+      "pop de",
+      "ld a, e",
+      "add d",
+      "ld d, a",
+      "dec b",
+      "jr nz, .bgrows",
+      "ret",
+    ],
+    "_TitleScreen exact graphic row/column loops",
+  );
+  for (const specification of [
+    {
+      location: "hlcoord 0, 3",
+      height: 7,
+      width: 20,
+      firstTile: 0x80,
+      rowAdvance: 20,
+      target: "wTilemap coord 0,3",
+    },
+    {
+      location: "hlbgcoord 3, 0, vBGMap1",
+      height: 1,
+      width: 13,
+      firstTile: 0x0c,
+      rowAdvance: 16,
+      target: "vBGMap1 + 3",
+    },
+  ]) {
+    const draw = setupInstructions.slice(setupCursor, setupCursor + 5);
+    if (
+      instructionSignature(draw[0]) !== specification.location ||
+      instructionSignature(draw[1]) !== `lb bc, ${specification.height}, ${specification.width}` ||
+      evaluateAsmInteger(draw[2]?.args[1] ?? "-1", constants) !== specification.firstTile ||
+      evaluateAsmInteger(draw[3]?.args[1] ?? "-1", constants) !== specification.rowAdvance ||
+      instructionSignature(draw[4]) !== "call DrawTitleGraphic"
+    ) {
+      throw new Error(`_TitleScreen ${specification.target} graphic draw is not exact`);
+    }
+    setupOperations.push({
+      op: "draw_tiled_rectangle",
+      target: specification.target,
+      height: specification.height,
+      width: specification.width,
+      first_tile: specification.firstTile,
+      source_row_advance: specification.rowAdvance,
+      destination_row_stride: 20,
+      implementation_source_spans: [drawEntrySpan, drawRowsSpan, drawColumnsSpan],
+      source_span: sourceSpanThrough(draw[0].source_span, draw[4].source_span),
+    });
+    setupCursor += 5;
+  }
+  const loadSuicuneEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "LoadSuicuneFrame",
+    ["hlcoord 6, 12", "ld b, 6"],
+    "_TitleScreen exact Suicune-frame entry",
+  );
+  const loadSuicuneRowsSpan = requireExactRoutineBlock(
+    blocks,
+    ".bgrows@LoadSuicuneFrame",
+    ["ld c, 8"],
+    "_TitleScreen exact Suicune-frame row loop",
+  );
+  const loadSuicuneColumnsSpan = requireExactRoutineBlock(
+    blocks,
+    ".col@LoadSuicuneFrame",
+    [
+      "ld a, d",
+      "ld [hli], a",
+      "inc d",
+      "dec c",
+      "jr nz, .col",
+      "ld a, SCREEN_WIDTH - 8",
+      "add l",
+      "ld l, a",
+      "ld a, 0",
+      "adc h",
+      "ld h, a",
+      "ld a, 8",
+      "add d",
+      "ld d, a",
+      "dec b",
+      "jr nz, .bgrows",
+      "ret",
+    ],
+    "_TitleScreen exact Suicune-frame row advance",
+  );
+  if (
+    instructionSignature(setupInstructions[setupCursor]) !== "ld d, $0" ||
+    instructionSignature(setupInstructions[setupCursor + 1]) !== "call LoadSuicuneFrame"
+  ) {
+    throw new Error("_TitleScreen initial Suicune frame call is not exact");
+  }
+  setupOperations.push({
+    op: "draw_tiled_rectangle",
+    target: "wTilemap coord 6,12",
+    height: 6,
+    width: 8,
+    first_tile: 0,
+    source_row_advance: 16,
+    destination_row_stride: 20,
+    implementation_source_spans: [
+      loadSuicuneEntrySpan,
+      loadSuicuneRowsSpan,
+      loadSuicuneColumnsSpan,
+    ],
+    source_span: sourceSpanThrough(
+      setupInstructions[setupCursor].source_span,
+      setupInstructions[setupCursor + 1].source_span,
+    ),
+  });
+  setupCursor += 2;
+  const initializeEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "InitializeBackground",
+    [
+      "ld hl, wShadowOAMSprite00",
+      "ld d, -$22",
+      "ld e, $0",
+      "ld c, 5",
+    ],
+    "_TitleScreen exact crystal-OAM initializer",
+  );
+  const initializeColumnsSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@InitializeBackground",
+    [
+      "push bc",
+      "call .InitColumn",
+      "pop bc",
+      "ld a, $10",
+      "add d",
+      "ld d, a",
+      "dec c",
+      "jr nz, .loop",
+      "ret",
+    ],
+    "_TitleScreen exact crystal-OAM column loop",
+  );
+  const initializeColumnSpan = requireExactRoutineBlock(
+    blocks,
+    ".InitColumn@InitializeBackground",
+    ["ld c, $6", "ld b, $40"],
+    "_TitleScreen exact crystal-OAM column initializer",
+  );
+  const initializeObjectsSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop2@InitializeBackground",
+    [
+      "ld a, d",
+      "ld [hli], a",
+      "ld a, b",
+      "ld [hli], a",
+      "add $8",
+      "ld b, a",
+      "ld a, e",
+      "ld [hli], a",
+      "inc e",
+      "inc e",
+      "ld a, 0 | OAM_PRIO",
+      "ld [hli], a",
+      "dec c",
+      "jr nz, .loop2",
+      "ret",
+    ],
+    "_TitleScreen exact crystal-OAM object loop",
+  );
+  if (instructionSignature(setupInstructions[setupCursor]) !== "call InitializeBackground") {
+    throw new Error("_TitleScreen crystal-OAM initialization call is not exact");
+  }
+  setupOperations.push({
+    op: "initialize_title_crystal_oam",
+    target: "wShadowOAMSprite00",
+    columns: 5,
+    objects_per_column: 6,
+    initial_y: -0x22,
+    column_y_delta: 0x10,
+    initial_x: 0x40,
+    row_x_delta: 8,
+    initial_tile: 0,
+    tile_delta: 2,
+    attributes: 0x80,
+    implementation_source_spans: [
+      initializeEntrySpan,
+      initializeColumnsSpan,
+      initializeColumnSpan,
+      initializeObjectsSpan,
+    ],
+    source_span: setupInstructions[setupCursor].source_span,
+  });
+  setupCursor += 1;
+  const paletteScope = compileIntroScenePaletteCopyScope(
+    "_TitleScreen",
+    setupInstructions,
+    setupCursor,
+    title,
+    options,
+  );
+  setupOperations.push(...paletteScope.operations);
+  setupCursor += paletteScope.consumed;
+  const lyBankRead = setupInstructions[setupCursor];
+  const lyBankPush = setupInstructions[setupCursor + 1];
+  const lyBankValue = setupInstructions[setupCursor + 2];
+  const lyBankWrite = setupInstructions[setupCursor + 3];
+  if (
+    instructionSignature(lyBankRead) !== "ldh a, [rWBK]" ||
+    instructionSignature(lyBankPush) !== "push af" ||
+    instructionSignature(lyBankValue) !== "ld a, BANK(wLYOverrides)" ||
+    instructionSignature(lyBankWrite) !== "ldh [rWBK], a" ||
+    instructionSignature(setupInstructions[setupCursor + 4]) !== "ld b, 80 / 2" ||
+    instructionSignature(setupInstructions[setupCursor + 5]) !== "ld hl, wLYOverrides"
+  ) {
+    throw new Error("_TitleScreen LY-override bank/pattern setup is not exact");
+  }
+  const titlePhaseLabels: Record<string, number> = {};
+  setupOperations.push(
+    {
+      op: "save_memory_byte",
+      source: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af" },
+      restore_required: true,
+      source_span: sourceSpanThrough(lyBankRead.source_span, lyBankPush.source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "rWBK",
+      address_space: "hardware_register",
+      value: "BANK(wLYOverrides)",
+      value_source_span: findAsmSymbolDeclarationSpan("wLYOverrides", [wram]),
+      source_span: sourceSpanThrough(lyBankValue.source_span, lyBankWrite.source_span),
+    },
+  );
+  const lyLoop = blocks.get(".loop@_TitleScreen")?.instructions ?? [];
+  const expectedLyLoop = [
+    "ld [hl], +112",
+    "inc hl",
+    "ld [hl], -112",
+    "inc hl",
+    "dec b",
+    "jr nz, .loop",
+    "ld hl, wLYOverrides + 80",
+    "xor a",
+    "ld bc, wLYOverridesEnd - (wLYOverrides + 80)",
+    "call ByteFill",
+    "ld a, LOW(rSCX)",
+    "ldh [hLCDCPointer], a",
+    "pop af",
+    "ldh [rWBK], a",
+    "call ChannelsOff",
+    "call EnableLCD",
+    "ldh a, [rLCDC]",
+    "set B_LCDC_OBJ_SIZE, a",
+    "ldh [rLCDC], a",
+    "ld a, +112",
+    "ldh [hSCX], a",
+    "ld a, 8",
+    "ldh [hSCY], a",
+    "ld a, 7",
+    "ldh [hWX], a",
+    "ld a, -112",
+    "ldh [hWY], a",
+    "ld a, TRUE",
+    "ldh [hCGBPalUpdate], a",
+    "ldh [hBGMapMode], a",
+    "xor a",
+    "ld [wSuicuneFrame], a",
+    "call SFXChannelsOff",
+    "ld de, SFX_TITLE_SCREEN_ENTRANCE",
+    "call PlaySFX",
+    "ret",
+  ];
+  if (lyLoop.map(instructionSignature).join("\0") !== expectedLyLoop.join("\0")) {
+    throw new Error("_TitleScreen LY override, LCD, audio, and final state program is not exact");
+  }
+  const audio = loadSource("home/audio.asm", options);
+  const audioBlocks = parseAsmBlocks([audio]);
+  const channelsOffSpan = requireExactRoutineBlock(
+    audioBlocks,
+    "ChannelsOff",
+    [
+      "xor a",
+      "ld [wChannel1Flags1], a",
+      "ld [wChannel2Flags1], a",
+      "ld [wChannel3Flags1], a",
+      "ld [wChannel4Flags1], a",
+      "ld [wPitchSweep], a",
+      "ret",
+    ],
+    "_TitleScreen exact music-channel stop",
+  );
+  const sfxChannelsOffSpan = requireExactRoutineBlock(
+    audioBlocks,
+    "SFXChannelsOff",
+    [
+      "xor a",
+      "ld [wChannel5Flags1], a",
+      "ld [wChannel6Flags1], a",
+      "ld [wChannel7Flags1], a",
+      "ld [wChannel8Flags1], a",
+      "ld [wPitchSweep], a",
+      "ret",
+    ],
+    "_TitleScreen exact SFX-channel stop",
+  );
+  const enableLcdSpan = requireExactRoutineBlock(
+    blocks,
+    "EnableLCD",
+    [
+      "ldh a, [rLCDC]",
+      "set B_LCDC_ENABLE, a",
+      "ldh [rLCDC], a",
+      "ret",
+    ],
+    "_TitleScreen exact LCD enable",
+  );
+  setupOperations.push(
+    {
+      op: "write_memory_pattern",
+      target: "wLYOverrides",
+      byte_count: 80,
+      pattern: [112, 144],
+      repeat_count: 40,
+      source_span: sourceSpanThrough(lyLoop[0].source_span, lyLoop[5].source_span),
+    },
+    {
+      op: "fill_memory",
+      target: "wLYOverrides + 80",
+      byte_count: 64,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "BANK(wLYOverrides)", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: sourceSpanThrough(lyLoop[6].source_span, lyLoop[9].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hLCDCPointer",
+      address_space: "hram",
+      value: "LOW(rSCX)",
+      source_span: sourceSpanThrough(lyLoop[10].source_span, lyLoop[11].source_span),
+    },
+    {
+      op: "restore_memory_byte",
+      target: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af" },
+      matches_save_source_span: sourceSpanThrough(lyBankRead.source_span, lyBankPush.source_span),
+      source_span: sourceSpanThrough(lyLoop[12].source_span, lyLoop[13].source_span),
+    },
+    {
+      op: "stop_audio_channels",
+      channels: [1, 2, 3, 4],
+      clears_pitch_sweep: true,
+      implementation_source_span: channelsOffSpan,
+      source_span: lyLoop[14].source_span,
+    },
+    {
+      op: "set_memory_bit",
+      target: "rLCDC",
+      address_space: "hardware_register",
+      bit: 7,
+      implementation_source_span: enableLcdSpan,
+      source_span: lyLoop[15].source_span,
+    },
+    {
+      op: "set_memory_bit",
+      target: "rLCDC",
+      address_space: "hardware_register",
+      bit: 2,
+      source_span: sourceSpanThrough(lyLoop[16].source_span, lyLoop[18].source_span),
+    },
+    { op: "write_memory_byte", target: "hSCX", address_space: "hram", value: 112, source_span: sourceSpanThrough(lyLoop[19].source_span, lyLoop[20].source_span) },
+    { op: "write_memory_byte", target: "hSCY", address_space: "hram", value: 8, source_span: sourceSpanThrough(lyLoop[21].source_span, lyLoop[22].source_span) },
+    { op: "write_memory_byte", target: "hWX", address_space: "hram", value: 7, source_span: sourceSpanThrough(lyLoop[23].source_span, lyLoop[24].source_span) },
+    { op: "write_memory_byte", target: "hWY", address_space: "hram", value: 144, source_span: sourceSpanThrough(lyLoop[25].source_span, lyLoop[26].source_span) },
+    { op: "write_memory_byte", target: "hCGBPalUpdate", address_space: "hram", value: 1, source_span: sourceSpanThrough(lyLoop[27].source_span, lyLoop[28].source_span) },
+    { op: "write_memory_byte", target: "hBGMapMode", address_space: "hram", value: 1, source_span: lyLoop[29].source_span },
+    { op: "write_memory_byte", target: "wSuicuneFrame", address_space: "wram", value: 0, source_span: sourceSpanThrough(lyLoop[30].source_span, lyLoop[31].source_span) },
+    {
+      op: "stop_audio_channels",
+      channels: [5, 6, 7, 8],
+      clears_pitch_sweep: true,
+      implementation_source_span: sfxChannelsOffSpan,
+      source_span: lyLoop[32].source_span,
+    },
+    {
+      op: "play_audio",
+      audio: "SFX_TITLE_SCREEN_ENTRANCE",
+      source_span: sourceSpanThrough(lyLoop[33].source_span, lyLoop[34].source_span),
+    },
+    { op: "return", source_span: lyLoop[35].source_span },
+  );
+  const startTitle = blocks.get("StartTitleScreen")?.instructions ?? [];
+  const delayFrame = startTitle[5];
+  if (instructionSignature(delayFrame) !== "call DelayFrame") {
+    throw new Error("_TitleScreen return has no exact StartTitleScreen DelayFrame continuation");
+  }
+  const delayFramesImplementationSpan = certifyDelayFrames(blocks);
+  setupOperations.push({
+    op: "wait_frames",
+    frames: 1,
+    condition: { source: null, predicate: "always", source_span: null },
+    implementation_source_span: delayFramesImplementationSpan,
+    invocation: {
+      call_form: "call",
+      target: "DelayFrame",
+      stack_effect: "push_return_address_then_ret",
+      source_span: delayFrame.source_span,
+    },
+    source_span: delayFrame.source_span,
+  });
+  const titleLoop = blocks.get(".loop@StartTitleScreen")?.instructions ?? [];
+  if (
+    instructionSignature(titleLoop[0]) !== "call RunTitleScreen" ||
+    instructionSignature(titleLoop[1]) !== "jr nc, .loop"
+  ) {
+    throw new Error("StartTitleScreen frame has no exact RunTitleScreen loop continuation");
+  }
+  const runTitle = blocks.get("RunTitleScreen")?.instructions ?? [];
+  const runTitleDone = blocks.get(".done_title@RunTitleScreen")?.instructions ?? [];
+  if (
+    runTitle.map(instructionSignature).join("\0") !==
+      [
+        "ld a, [wJumptableIndex]",
+        "bit JUMPTABLE_EXIT_F, a",
+        "jr nz, .done_title",
+        "call TitleScreenScene",
+        "farcall SuicuneFrameIterator",
+        "call DelayFrame",
+        "and a",
+        "ret",
+      ].join("\0") ||
+    runTitleDone.map(instructionSignature).join("\0") !== ["scf", "ret"].join("\0")
+  ) {
+    throw new Error("RunTitleScreen carry-driven frame loop is not exact");
+  }
+  setupOperations.push(
+    {
+      op: "repeat_call_while_carry_clear",
+      target: "RunTitleScreen",
+      branch_target: ".loop@StartTitleScreen",
+      source_span: sourceSpanThrough(titleLoop[0].source_span, titleLoop[1].source_span),
+    },
+    {
+      op: "memory_branch",
+      source: "wJumptableIndex",
+      predicate: "bit_set",
+      bit: { symbol: "JUMPTABLE_EXIT_F", value: 7 },
+      target: ".done_title@RunTitleScreen",
+      source_span: sourceSpanThrough(runTitle[0].source_span, runTitle[2].source_span),
+    },
+    {
+      op: "return_with_carry",
+      value: 1,
+      source_span: sourceSpanThrough(runTitleDone[0].source_span, runTitleDone[1].source_span),
+    },
+  );
+  const sceneDispatcherSpan = requireExactRoutineBlock(
+    blocks,
+    "TitleScreenScene",
+    [
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, .scenes",
+      "add hl, de",
+      "add hl, de",
+      "ld a, [hli]",
+      "ld h, [hl]",
+      "ld l, a",
+      "jp hl",
+    ],
+    "TitleScreenScene exact word-table dispatcher",
+  );
+  const sceneTableSpan = requireExactNormalizedRegion(
+    introMenu,
+    ".scenes",
+    "TitleScreenNextScene:",
+    [
+      ".scenes",
+      "dw TitleScreenEntrance",
+      "dw TitleScreenTimer",
+      "dw TitleScreenMain",
+      "dw TitleScreenEnd",
+      "TitleScreenNextScene:",
+    ],
+    "TitleScreenScene exact four-entry table",
+  );
+  const sceneEntries = [
+    "TitleScreenEntrance",
+    "TitleScreenTimer",
+    "TitleScreenMain",
+    "TitleScreenEnd",
+  ];
+  setupOperations.push({
+    op: "dispatch_table",
+    dispatcher: "TitleScreenScene",
+    table: ".scenes@TitleScreenScene",
+    index: "wJumptableIndex",
+    entries: sceneEntries,
+    domain: { minimum: 0, maximum: 3, values: [0, 1, 2, 3] },
+    implementation_source_span: sceneDispatcherSpan,
+    table_source_span: sceneTableSpan,
+    invocation: {
+      call_form: "call",
+      target: "TitleScreenScene",
+      source_span: runTitle[3].source_span,
+    },
+    source_span: runTitle[3].source_span,
+  });
+  const iterator = blocks.get("SuicuneFrameIterator")?.instructions ?? [];
+  const expectedIterator = [
+    "ld hl, wSuicuneFrame",
+    "ld a, [hl]",
+    "ld c, a",
+    "inc [hl]",
+    "and %111",
+    "ret nz",
+    "ld a, c",
+    "and %11000",
+    "sla a",
+    "swap a",
+    "ld e, a",
+    "ld d, 0",
+    "ld hl, .Frames",
+    "add hl, de",
+    "ld d, [hl]",
+    "xor a",
+    "ldh [hBGMapMode], a",
+    "call LoadSuicuneFrame",
+    "ld a, $1",
+    "ldh [hBGMapMode], a",
+    "ld a, $3",
+    "ldh [hBGMapThird], a",
+    "ret",
+  ];
+  if (
+    instructionSignature(runTitle[4]) !== "farcall SuicuneFrameIterator" ||
+    iterator.map(instructionSignature).join("\0") !== expectedIterator.join("\0")
+  ) {
+    throw new Error("SuicuneFrameIterator exact eight-frame program is missing");
+  }
+  const frameTableSpan = requireExactNormalizedRegion(
+    title,
+    ".Frames:",
+    "LoadSuicuneFrame:",
+    [
+      ".Frames:",
+      "db $80",
+      "db $88",
+      "db $00",
+      "db $08",
+      "LoadSuicuneFrame:",
+    ],
+    "SuicuneFrameIterator exact four-frame table",
+  );
+  const frameTableBytes = [0x80, 0x88, 0x00, 0x08];
+  setupOperations.push(
+    {
+      op: "postincrement_memory_byte",
+      target: "wSuicuneFrame",
+      result: "title_suicune_frame",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(iterator[0].source_span, iterator[3].source_span),
+    },
+    {
+      op: "return_unless_masked_zero",
+      value: "title_suicune_frame",
+      mask: 0x07,
+      source_span: sourceSpanThrough(iterator[4].source_span, iterator[5].source_span),
+    },
+    {
+      op: "draw_indexed_title_suicune_frame",
+      clock: "title_suicune_frame",
+      selector: { mask: 0x18, shift_left: 1, swap_nibbles: true },
+      frames: frameTableBytes,
+      target: "wTilemap coord 6,12",
+      height: 6,
+      width: 8,
+      source_row_advance: 16,
+      destination_row_stride: 20,
+      bg_map_mode: { before: 0, after: 1, third: 3 },
+      frame_table_source_span: frameTableSpan,
+      implementation_source_spans: [
+        loadSuicuneEntrySpan,
+        loadSuicuneRowsSpan,
+        loadSuicuneColumnsSpan,
+      ],
+      invocation_source_span: runTitle[4].source_span,
+      source_span: sourceSpanThrough(iterator[6].source_span, iterator[22].source_span),
+    },
+  );
+  if (instructionSignature(runTitle[5]) !== "call DelayFrame") {
+    throw new Error("RunTitleScreen iterator has no exact DelayFrame continuation");
+  }
+  setupOperations.push(
+    {
+      op: "wait_frames",
+      frames: 1,
+      condition: { source: null, predicate: "always", source_span: null },
+      implementation_source_span: delayFramesImplementationSpan,
+      invocation: {
+        call_form: "call",
+        target: "DelayFrame",
+        source_span: runTitle[5].source_span,
+      },
+      source_span: runTitle[5].source_span,
+    },
+    {
+      op: "return_with_carry",
+      value: 0,
+      source_span: sourceSpanThrough(runTitle[6].source_span, runTitle[7].source_span),
+    },
+  );
+  const entrance = blocks.get("TitleScreenEntrance")?.instructions ?? [];
+  let frontierBlock = "TitleScreenEntrance";
+  let nextInstruction = entrance[0];
+  if (!nextInstruction) {
+    throw new Error("TitleScreenScene has no exact entrance-scene continuation");
+  }
+  const expectedEntrance = [
+    "ldh a, [hSCX]",
+    "and a",
+    "jr z, .done",
+    "sub 4",
+    "ldh [hSCX], a",
+    "ld e, a",
+    "ld hl, wLYOverrides",
+    "ld bc, 8 * 10",
+    "call ByteFill",
+    "ld a, e",
+    "xor $ff",
+    "inc a",
+    "ld b, 8 * 10 / 2",
+    "ld hl, wLYOverrides + 1",
+  ];
+  const entranceLoop = blocks.get(".loop@TitleScreenEntrance")?.instructions ?? [];
+  const entranceDone = blocks.get(".done@TitleScreenEntrance")?.instructions ?? [];
+  if (
+    entrance.map(instructionSignature).join("\0") !== expectedEntrance.join("\0") ||
+    entranceLoop.map(instructionSignature).join("\0") !==
+      [
+        "ld [hli], a",
+        "inc hl",
+        "dec b",
+        "jr nz, .loop",
+        "farcall AnimateTitleCrystal",
+        "ret",
+      ].join("\0") ||
+    entranceDone.map(instructionSignature).join("\0") !==
+      [
+        "ld hl, wJumptableIndex",
+        "inc [hl]",
+        "xor a",
+        "ldh [hLCDCPointer], a",
+        "ld de, MUSIC_TITLE",
+        "call PlayMusic",
+        "ld a, $88",
+        "ldh [hWY], a",
+        "ret",
+      ].join("\0")
+  ) {
+    throw new Error("TitleScreenEntrance exact interlaced-scroll program is missing");
+  }
+  const animateEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "AnimateTitleCrystal",
+    [
+      "ld hl, wShadowOAMSprite00YCoord",
+      "ld a, [hl]",
+      "cp 6 + 2 * TILE_WIDTH",
+      "ret z",
+      "ld c, 30",
+    ],
+    "TitleScreenEntrance exact crystal-animation gate",
+  );
+  const animateLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@AnimateTitleCrystal",
+    [
+      "ld a, [hl]",
+      "add 2",
+      "ld [hli], a",
+      "rept OBJ_SIZE - 1",
+      "inc hl",
+      "endr",
+      "dec c",
+      "jr nz, .loop",
+      "ret",
+    ],
+    "TitleScreenEntrance exact 30-object crystal-animation loop",
+  );
+  titlePhaseLabels.TitleScreenEntrance = 1 + setupOperations.length;
+  titlePhaseLabels[".loop@TitleScreenEntrance"] = titlePhaseLabels.TitleScreenEntrance + 2;
+  titlePhaseLabels[".done@TitleScreenEntrance"] = titlePhaseLabels.TitleScreenEntrance + 6;
+  setupOperations.push(
+    {
+      op: "branch_memory_compare",
+      source: "hSCX",
+      predicate: "equal",
+      operand: 0,
+      target: ".done@TitleScreenEntrance",
+      source_span: sourceSpanThrough(entrance[0].source_span, entrance[2].source_span),
+    },
+    {
+      op: "subtract_memory_byte",
+      target: "hSCX",
+      address_space: "hram",
+      delta: 4,
+      wrap: "u8",
+      result: "title_entrance_scroll",
+      source_span: sourceSpanThrough(entrance[3].source_span, entrance[4].source_span),
+    },
+    {
+      op: "fill_memory_from_result",
+      target: "wLYOverrides",
+      byte_count: 80,
+      result: "title_entrance_scroll",
+      direction: "ascending",
+      source_span: sourceSpanThrough(entrance[5].source_span, entrance[8].source_span),
+    },
+    {
+      op: "fill_strided_memory_from_transformed_result",
+      target: "wLYOverrides + 1",
+      byte_count: 40,
+      stride: 2,
+      result: "title_entrance_scroll",
+      transform: { xor: 0xff, add: 1, wrap: "u8" },
+      source_span: sourceSpanThrough(entrance[9].source_span, entranceLoop[3].source_span),
+    },
+    {
+      op: "animate_title_crystal",
+      target: "wShadowOAMSprite00YCoord",
+      stop_at: 22,
+      object_count: 30,
+      object_stride: 4,
+      y_delta: 2,
+      implementation_source_spans: [animateEntrySpan, animateLoopSpan],
+      source_span: entranceLoop[4].source_span,
+    },
+    { op: "return", source_span: entranceLoop[5].source_span },
+    {
+      op: "increment_memory_byte",
+      target: "wJumptableIndex",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(entranceDone[0].source_span, entranceDone[1].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hLCDCPointer",
+      address_space: "hram",
+      value: 0,
+      source_span: sourceSpanThrough(entranceDone[2].source_span, entranceDone[3].source_span),
+    },
+    {
+      op: "play_audio",
+      audio: "MUSIC_TITLE",
+      source_span: sourceSpanThrough(entranceDone[4].source_span, entranceDone[5].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hWY",
+      address_space: "hram",
+      value: 0x88,
+      source_span: sourceSpanThrough(entranceDone[6].source_span, entranceDone[7].source_span),
+    },
+    { op: "return", source_span: entranceDone[8].source_span },
+  );
+  const timerScene = blocks.get("TitleScreenTimer")?.instructions ?? [];
+  if (
+    timerScene.map(instructionSignature).join("\0") !==
+    [
+      "ld hl, wJumptableIndex",
+      "inc [hl]",
+      "ld hl, wTitleScreenTimer",
+      "ld de, 73 * 60 + 36",
+      "ld [hl], e",
+      "inc hl",
+      "ld [hl], d",
+      "ret",
+    ].join("\0")
+  ) {
+    throw new Error("TitleScreenTimer exact 4416-frame seed is missing");
+  }
+  titlePhaseLabels.TitleScreenTimer = 1 + setupOperations.length;
+  setupOperations.push(
+    {
+      op: "increment_memory_byte",
+      target: "wJumptableIndex",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(timerScene[0].source_span, timerScene[1].source_span),
+    },
+    {
+      op: "write_memory_word",
+      target: "wTitleScreenTimer",
+      value: 73 * 60 + 36,
+      byte_order: "little_endian",
+      source_span: sourceSpanThrough(timerScene[2].source_span, timerScene[6].source_span),
+    },
+    { op: "return", source_span: timerScene[7].source_span },
+  );
+  const mainScene = blocks.get("TitleScreenMain")?.instructions ?? [];
+  if (!mainScene[0]) {
+    throw new Error("TitleScreenTimer has no exact TitleScreenMain continuation");
+  }
+  const checkClock = blocks.get(".check_clock_reset@TitleScreenMain")?.instructions ?? [];
+  const checkStart = blocks.get(".check_start@TitleScreenMain")?.instructions ?? [];
+  const enterMainMenu = blocks.get(".incave@TitleScreenMain")?.instructions ?? [];
+  const deleteSave = blocks.get(".delete_save_data@TitleScreenMain")?.instructions ?? [];
+  const selectDone = blocks.get(".done@TitleScreenMain")?.instructions ?? [];
+  const timerEnd = blocks.get(".end@TitleScreenMain")?.instructions ?? [];
+  const resetClock = blocks.get(".reset_clock@TitleScreenMain")?.instructions ?? [];
+  if (
+    mainScene.map(instructionSignature).join("\0") !==
+      [
+        "ld hl, wTitleScreenTimer",
+        "ld e, [hl]",
+        "inc hl",
+        "ld d, [hl]",
+        "ld a, e",
+        "or d",
+        "jr z, .end",
+        "dec de",
+        "ld [hl], d",
+        "dec hl",
+        "ld [hl], e",
+        "call GetJoypad",
+        "ld hl, hJoyDown",
+        "ld a, [hl]",
+        "and PAD_UP + PAD_B + PAD_SELECT",
+        "cp PAD_UP + PAD_B + PAD_SELECT",
+        "jr z, .delete_save_data",
+        "ldh a, [hClockResetTrigger]",
+        "cp $34",
+        "jr z, .check_clock_reset",
+        "ld a, [hl]",
+        "and PAD_DOWN + PAD_B + PAD_SELECT",
+        "cp PAD_DOWN + PAD_B + PAD_SELECT",
+        "jr nz, .check_start",
+        "ld a, $34",
+        "ldh [hClockResetTrigger], a",
+        "jr .check_start",
+      ].join("\0") ||
+    checkClock.map(instructionSignature).join("\0") !==
+      [
+        "bit B_PAD_SELECT, [hl]",
+        "jr nz, .check_start",
+        "xor a",
+        "ldh [hClockResetTrigger], a",
+        "ld a, [hl]",
+        "and PAD_LEFT + PAD_UP",
+        "cp PAD_LEFT + PAD_UP",
+        "jr z, .reset_clock",
+      ].join("\0") ||
+    checkStart.map(instructionSignature).join("\0") !==
+      ["ld a, [hl]", "and PAD_START | PAD_A", "jr nz, .incave", "ret"].join("\0") ||
+    enterMainMenu.map(instructionSignature).join("\0") !==
+      ["ld a, TITLESCREENOPTION_MAIN_MENU", "jr .done"].join("\0") ||
+    deleteSave.map(instructionSignature).join("\0") !==
+      ["ld a, TITLESCREENOPTION_DELETE_SAVE_DATA"].join("\0") ||
+    selectDone.map(instructionSignature).join("\0") !==
+      [
+        "ld [wTitleScreenSelectedOption], a",
+        "ld hl, wJumptableIndex",
+        "set JUMPTABLE_EXIT_F, [hl]",
+        "ret",
+      ].join("\0") ||
+    timerEnd.map(instructionSignature).join("\0") !==
+      [
+        "ld hl, wJumptableIndex",
+        "inc [hl]",
+        "xor a",
+        "ld [wMusicFadeID], a",
+        "ld [wMusicFadeID + 1], a",
+        "ld hl, wMusicFade",
+        "ld [hl], 8",
+        "ld hl, wTitleScreenTimer",
+        "inc [hl]",
+        "ret",
+      ].join("\0") ||
+    resetClock.map(instructionSignature).join("\0") !==
+      [
+        "ld a, TITLESCREENOPTION_RESET_CLOCK",
+        "ld [wTitleScreenSelectedOption], a",
+        "ld hl, wJumptableIndex",
+        "set JUMPTABLE_EXIT_F, [hl]",
+        "ret",
+      ].join("\0")
+  ) {
+    throw new Error("TitleScreenMain exact timer, input-chord, and option program is missing");
+  }
+  const titleConstants = parseAsmConstants([introMenu, hardware]);
+  const expectedTitleConstants: Record<string, number> = {
+    PAD_UP: 0x40,
+    PAD_DOWN: 0x80,
+    PAD_LEFT: 0x20,
+    PAD_B: 0x02,
+    PAD_SELECT: 0x04,
+    PAD_START: 0x08,
+    PAD_A: 0x01,
+    B_PAD_SELECT: 2,
+    TITLESCREENOPTION_MAIN_MENU: 0,
+    TITLESCREENOPTION_DELETE_SAVE_DATA: 1,
+    TITLESCREENOPTION_RESTART: 2,
+    TITLESCREENOPTION_RESET_CLOCK: 4,
+  };
+  for (const [symbol, expected] of Object.entries(expectedTitleConstants)) {
+    if (titleConstants.get(symbol) !== expected) {
+      throw new Error(`TitleScreenMain constant ${symbol} is not exact`);
+    }
+  }
+  const getJoypadEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "GetJoypad",
+    [
+      "push af",
+      "push hl",
+      "push de",
+      "push bc",
+      "ld a, [wInputType]",
+      "cp AUTO_INPUT",
+      "jr z, .auto",
+      "ldh a, [hJoypadDown]",
+      "ld b, a",
+      "ldh a, [hJoyDown]",
+      "ld e, a",
+      "xor b",
+      "ld d, a",
+      "and e",
+      "ldh [hJoyReleased], a",
+      "ld a, d",
+      "and b",
+      "ldh [hJoyPressed], a",
+      "ld c, a",
+      "ld a, b",
+      "ldh [hJoyDown], a",
+    ],
+    "TitleScreenMain exact joypad mirror update",
+  );
+  const getJoypadQuitSpan = requireExactRoutineBlock(
+    blocks,
+    ".quit@GetJoypad",
+    ["pop bc", "pop de", "pop hl", "pop af", "ret"],
+    "TitleScreenMain exact joypad register restoration",
+  );
+  const deleteMask = 0x40 | 0x02 | 0x04;
+  const clockArmMask = 0x80 | 0x02 | 0x04;
+  const clockFinishMask = 0x20 | 0x40;
+  const startMask = 0x08 | 0x01;
+  titlePhaseLabels.TitleScreenMain = 1 + setupOperations.length;
+  titlePhaseLabels[".check_clock_reset@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 7;
+  titlePhaseLabels[".check_start@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 10;
+  titlePhaseLabels[".incave@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 12;
+  titlePhaseLabels[".delete_save_data@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 12;
+  titlePhaseLabels[".done@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 13;
+  titlePhaseLabels[".end@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 15;
+  titlePhaseLabels[".reset_clock@TitleScreenMain"] = titlePhaseLabels.TitleScreenMain + 19;
+  setupOperations.push(
+    {
+      op: "decrement_memory_word_unless_zero",
+      target: "wTitleScreenTimer",
+      byte_order: "little_endian",
+      wrap: "u16",
+      zero_target: ".end@TitleScreenMain",
+      source_span: sourceSpanThrough(mainScene[0].source_span, mainScene[10].source_span),
+    },
+    {
+      op: "sample_input",
+      routine: "GetJoypad",
+      sampler: "hJoypadDown",
+      result: "hJoyDown",
+      delta_pressed: "hJoyPressed",
+      delta_released: "hJoyReleased",
+      auto_input_branch: ".auto@GetJoypad",
+      implementation_source_spans: [getJoypadEntrySpan, getJoypadQuitSpan],
+      invocation: { call_form: "call", target: "GetJoypad", source_span: mainScene[11].source_span },
+      source_span: mainScene[11].source_span,
+    },
+    {
+      op: "input_chord_branch",
+      sample: "hJoyDown",
+      mask: deleteMask,
+      predicate: "masked_equals",
+      operand: deleteMask,
+      target: ".delete_save_data@TitleScreenMain",
+      source_span: sourceSpanThrough(mainScene[12].source_span, mainScene[16].source_span),
+    },
+    {
+      op: "branch_memory_compare",
+      source: "hClockResetTrigger",
+      predicate: "equal",
+      operand: 0x34,
+      target: ".check_clock_reset@TitleScreenMain",
+      source_span: sourceSpanThrough(mainScene[17].source_span, mainScene[19].source_span),
+    },
+    {
+      op: "input_chord_branch",
+      sample: "hJoyDown",
+      mask: clockArmMask,
+      predicate: "masked_not_equal",
+      operand: clockArmMask,
+      target: ".check_start@TitleScreenMain",
+      source_span: sourceSpanThrough(mainScene[20].source_span, mainScene[23].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hClockResetTrigger",
+      address_space: "hram",
+      value: 0x34,
+      source_span: sourceSpanThrough(mainScene[24].source_span, mainScene[25].source_span),
+    },
+    { op: "jump", target: ".check_start@TitleScreenMain", source_span: mainScene[26].source_span },
+    {
+      op: "input_bit_branch",
+      sample: "hJoyDown",
+      bit: 2,
+      predicate: "set",
+      target: ".check_start@TitleScreenMain",
+      source_span: sourceSpanThrough(checkClock[0].source_span, checkClock[1].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hClockResetTrigger",
+      address_space: "hram",
+      value: 0,
+      source_span: sourceSpanThrough(checkClock[2].source_span, checkClock[3].source_span),
+    },
+    {
+      op: "input_chord_branch",
+      sample: "hJoyDown",
+      mask: clockFinishMask,
+      predicate: "masked_equals",
+      operand: clockFinishMask,
+      target: ".reset_clock@TitleScreenMain",
+      source_span: sourceSpanThrough(checkClock[4].source_span, checkClock[7].source_span),
+    },
+    {
+      op: "input_chord_branch",
+      sample: "hJoyDown",
+      mask: startMask,
+      predicate: "masked_nonzero",
+      target: ".incave@TitleScreenMain",
+      source_span: sourceSpanThrough(checkStart[0].source_span, checkStart[2].source_span),
+    },
+    { op: "return", source_span: checkStart[3].source_span },
+    {
+      op: "select_title_option",
+      options: [
+        { source: ".incave@TitleScreenMain", value: 0 },
+        { source: ".delete_save_data@TitleScreenMain", value: 1 },
+      ],
+      target: "wTitleScreenSelectedOption",
+      source_span: sourceSpanThrough(enterMainMenu[0].source_span, selectDone[0].source_span),
+    },
+    {
+      op: "set_memory_bit",
+      target: "wJumptableIndex",
+      bit: 7,
+      source_span: sourceSpanThrough(selectDone[1].source_span, selectDone[2].source_span),
+    },
+    { op: "return", source_span: selectDone[3].source_span },
+    {
+      op: "increment_memory_byte",
+      target: "wJumptableIndex",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(timerEnd[0].source_span, timerEnd[1].source_span),
+    },
+    {
+      op: "fade_audio",
+      audio: "MUSIC_NONE",
+      frames: 8 * 8,
+      fade_register: { target: "wMusicFade", value: 8 },
+      fade_id_target: "wMusicFadeID",
+      source_span: sourceSpanThrough(timerEnd[2].source_span, timerEnd[6].source_span),
+    },
+    {
+      op: "increment_memory_byte",
+      target: "wTitleScreenTimer",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(timerEnd[7].source_span, timerEnd[8].source_span),
+    },
+    { op: "return", source_span: timerEnd[9].source_span },
+    {
+      op: "select_title_option",
+      options: [{ source: ".reset_clock@TitleScreenMain", value: 4 }],
+      target: "wTitleScreenSelectedOption",
+      source_span: sourceSpanThrough(resetClock[0].source_span, resetClock[1].source_span),
+    },
+    {
+      op: "set_memory_bit",
+      target: "wJumptableIndex",
+      bit: 7,
+      source_span: sourceSpanThrough(resetClock[2].source_span, resetClock[3].source_span),
+    },
+    { op: "return", source_span: resetClock[4].source_span },
+  );
+  const titleEnd = blocks.get("TitleScreenEnd")?.instructions ?? [];
+  if (
+    titleEnd.map(instructionSignature).join("\0") !==
+    [
+      "ld hl, wTitleScreenTimer",
+      "inc [hl]",
+      "ld a, [wMusicFade]",
+      "and a",
+      "ret nz",
+      "ld a, TITLESCREENOPTION_RESTART",
+      "ld [wTitleScreenSelectedOption], a",
+      "ld hl, wJumptableIndex",
+      "set JUMPTABLE_EXIT_F, [hl]",
+      "ret",
+    ].join("\0")
+  ) {
+    throw new Error("TitleScreenEnd exact fade-completion program is missing");
+  }
+  titlePhaseLabels.TitleScreenEnd = 1 + setupOperations.length;
+  setupOperations.push(
+    {
+      op: "increment_memory_byte",
+      target: "wTitleScreenTimer",
+      delta: 1,
+      wrap: "u8",
+      source_span: sourceSpanThrough(titleEnd[0].source_span, titleEnd[1].source_span),
+    },
+    {
+      op: "return_if_memory_nonzero",
+      source: "wMusicFade",
+      source_span: sourceSpanThrough(titleEnd[2].source_span, titleEnd[4].source_span),
+    },
+    {
+      op: "select_title_option",
+      options: [{ source: "TitleScreenEnd", value: 2 }],
+      target: "wTitleScreenSelectedOption",
+      source_span: sourceSpanThrough(titleEnd[5].source_span, titleEnd[6].source_span),
+    },
+    {
+      op: "set_memory_bit",
+      target: "wJumptableIndex",
+      bit: 7,
+      source_span: sourceSpanThrough(titleEnd[7].source_span, titleEnd[8].source_span),
+    },
+    { op: "return", source_span: titleEnd[9].source_span },
+  );
+  frontierBlock = ".loop@StartTitleScreen";
+  nextInstruction = titleLoop[2];
+  if (
+    titleLoop.slice(2, 9).map(instructionSignature).join("\0") !==
+    [
+      "call ClearSprites",
+      "call ClearBGPalettes",
+      "pop af",
+      "ldh [rWBK], a",
+      "ld hl, rLCDC",
+      "res B_LCDC_OBJ_SIZE, [hl]",
+      "call ClearScreen",
+    ].join("\0")
+  ) {
+    throw new Error("TitleScreenEnd has no exact StartTitleScreen teardown continuation");
+  }
+  setupOperations.push(
+    {
+      op: "fill_memory",
+      target: "wShadowOAM",
+      byte_count: 160,
+      value: 0,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      invocation_source_span: titleLoop[2].source_span,
+      source_span: sourceSpanThrough(clearOamSpan, clearOamLoopSpan),
+    },
+    ...certifyClearBgPalettesOperations(options).map((operation) => ({
+      ...operation,
+      invocation_source_span: titleLoop[3].source_span,
+    })),
+    {
+      op: "restore_memory_byte",
+      target: "rWBK",
+      storage: { kind: "cpu_stack", register_pair: "af" },
+      matches_save_source_span: sourceSpanThrough(startTitle[0].source_span, startTitle[1].source_span),
+      source_span: sourceSpanThrough(titleLoop[4].source_span, titleLoop[5].source_span),
+    },
+    {
+      op: "clear_memory_bit",
+      target: "rLCDC",
+      address_space: "hardware_register",
+      bit: 2,
+      source_span: sourceSpanThrough(titleLoop[6].source_span, titleLoop[7].source_span),
+    },
+  );
+  const clearScreenSpan = requireExactRoutineBlock(
+    blocks,
+    "ClearScreen",
+    [
+      "ld a, PAL_BG_TEXT",
+      "hlcoord 0, 0, wAttrmap",
+      "ld bc, SCREEN_AREA",
+      "call ByteFill",
+      "jr ClearTilemap",
+    ],
+    "StartTitleScreen exact screen/attribute clear",
+  );
+  const paletteConstants = parseAsmConstants([
+    loadSource("constants/tileset_constants.asm", options),
+  ]);
+  if (paletteConstants.get("PAL_BG_TEXT") !== 7 || constants.get("SCREEN_AREA") !== 360) {
+    throw new Error("StartTitleScreen ClearScreen constants are not exact");
+  }
+  setupOperations.push(
+    {
+      op: "fill_memory",
+      target: "wAttrmap",
+      byte_count: 360,
+      value: 7,
+      direction: "ascending",
+      bank: { select: "current", restore: false },
+      condition: { source: null, predicate: "always", source_span: null },
+      implementation_source_span: clearScreenSpan,
+      invocation_source_span: titleLoop[8].source_span,
+      source_span: clearScreenSpan,
+    },
+    ...certifyClearTilemapOperations(options).map((operation) => ({
+      ...operation,
+      invocation_source_span: titleLoop[8].source_span,
+    })),
+  );
+  const waitBgMap2 = blocks.get("WaitBGMap2")?.instructions ?? [];
+  const waitBgMap2Bg0 = blocks.get(".bg0@WaitBGMap2")?.instructions ?? [];
+  if (
+    instructionSignature(titleLoop[9]) !== "call WaitBGMap2" ||
+    waitBgMap2.map(instructionSignature).join("\0") !==
+      [
+        "ldh a, [hCGB]",
+        "and a",
+        "jr z, .bg0",
+        "ld a, 2",
+        "ldh [hBGMapMode], a",
+        "ld c, 4",
+        "call DelayFrames",
+      ].join("\0") ||
+    waitBgMap2Bg0.map(instructionSignature).join("\0") !==
+      ["ld a, 1", "ldh [hBGMapMode], a", "ld c, 4", "call DelayFrames", "ret"].join("\0")
+  ) {
+    throw new Error("StartTitleScreen exact dual-bank WaitBGMap2 program is missing");
+  }
+  setupOperations.push(
+    {
+      op: "write_memory_byte",
+      target: "hBGMapMode",
+      address_space: "hram",
+      value: 2,
+      condition: { source: "hCGB", predicate: "nonzero" },
+      source_span: sourceSpanThrough(waitBgMap2[0].source_span, waitBgMap2[4].source_span),
+    },
+    {
+      op: "wait_frames",
+      frames: 4,
+      condition: { source: "hCGB", predicate: "nonzero" },
+      implementation_source_span: delayFramesImplementationSpan,
+      source_span: sourceSpanThrough(waitBgMap2[5].source_span, waitBgMap2[6].source_span),
+    },
+    {
+      op: "write_memory_byte",
+      target: "hBGMapMode",
+      address_space: "hram",
+      value: 1,
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: sourceSpanThrough(waitBgMap2Bg0[0].source_span, waitBgMap2Bg0[1].source_span),
+    },
+    {
+      op: "wait_frames",
+      frames: 4,
+      condition: { source: null, predicate: "always", source_span: null },
+      implementation_source_span: delayFramesImplementationSpan,
+      source_span: sourceSpanThrough(waitBgMap2Bg0[2].source_span, waitBgMap2Bg0[3].source_span),
+    },
+  );
+  if (
+    titleLoop.slice(10, 20).map(instructionSignature).join("\0") !==
+    [
+      "xor a",
+      "ldh [hLCDCPointer], a",
+      "ldh [hSCX], a",
+      "ldh [hSCY], a",
+      "ld a, $7",
+      "ldh [hWX], a",
+      "ld a, $90",
+      "ldh [hWY], a",
+      "ld b, SCGB_DIPLOMA",
+      "call GetSGBLayout",
+    ].join("\0")
+  ) {
+    throw new Error("StartTitleScreen post-clear register/layout setup is not exact");
+  }
+  setupOperations.push(
+    { op: "write_memory_byte", target: "hLCDCPointer", address_space: "hram", value: 0, source_span: sourceSpanThrough(titleLoop[10].source_span, titleLoop[11].source_span) },
+    { op: "write_memory_byte", target: "hSCX", address_space: "hram", value: 0, source_span: sourceSpanThrough(titleLoop[10].source_span, titleLoop[12].source_span) },
+    { op: "write_memory_byte", target: "hSCY", address_space: "hram", value: 0, source_span: sourceSpanThrough(titleLoop[10].source_span, titleLoop[13].source_span) },
+    { op: "write_memory_byte", target: "hWX", address_space: "hram", value: 7, source_span: sourceSpanThrough(titleLoop[14].source_span, titleLoop[15].source_span) },
+    { op: "write_memory_byte", target: "hWY", address_space: "hram", value: 0x90, source_span: sourceSpanThrough(titleLoop[16].source_span, titleLoop[17].source_span) },
+  );
+  const layoutBlocks = parseAsmBlocks([tilemapSource]);
+  const getLayoutEntrySpan = requireExactRoutineBlock(
+    layoutBlocks,
+    "GetSGBLayout",
+    [
+      "ldh a, [hCGB]",
+      "and a",
+      "jr nz, .sgb",
+      "ldh a, [hSGB]",
+      "and a",
+      "ret z",
+    ],
+    "StartTitleScreen exact CGB/SGB layout gate",
+  );
+  const getLayoutDispatchSpan = requireExactRoutineBlock(
+    layoutBlocks,
+    ".sgb@GetSGBLayout",
+    ["predef_jump LoadSGBLayout"],
+    "StartTitleScreen exact layout predef dispatch",
+  );
+  const cgbTable = parseWordTable(
+    cgbLayouts,
+    "CGBLayoutJumptable:",
+    "assert_table_length NUM_SCGB_LAYOUTS",
+  );
+  const sgbTable = parseWordTable(
+    sgbLayouts,
+    "SGBLayoutJumptable:",
+    "assert_table_length NUM_SCGB_LAYOUTS",
+  );
+  if (
+    cgbTable.entries[8] !== "_CGB_Diploma" ||
+    sgbTable.entries[8] !== ".SGB_Diploma" ||
+    cgbTable.entries.length !== sgbTable.entries.length ||
+    cgbTable.entries.length !== 31
+  ) {
+    throw new Error("StartTitleScreen SCGB_DIPLOMA layout table routes are not exact");
+  }
+  const cgbBlocks = parseAsmBlocks([cgbLayouts]);
+  const sgbBlocks = parseAsmBlocks([sgbLayouts]);
+  const cgbDiplomaSpan = requireExactRoutineBlock(
+    cgbBlocks,
+    "_CGB_Diploma",
+    [
+      "ld hl, DiplomaPalettes",
+      "ld de, wBGPals1",
+      "assert DiplomaPalettes + 8 palettes == PartyMenuOBPals",
+      "ld bc, 16 palettes",
+      "ld a, BANK(wBGPals1)",
+      "call FarCopyWRAM",
+      "ld hl, PalPacket_Diploma + 1",
+      "call CopyFourPalettes",
+      "call WipeAttrmap",
+      "call ApplyAttrmap",
+      "ret",
+    ],
+    "StartTitleScreen exact CGB Diploma layout",
+  );
+  const sgbDiplomaSpan = requireExactNormalizedRegion(
+    sgbLayouts,
+    ".SGB_Diploma:",
+    "ret",
+    [
+      ".SGB_Diploma:",
+      ".SGB_MysteryGift:",
+      "ld hl, PalPacket_Diploma",
+      "ld de, BlkPacket_AllPal0",
+      "ret",
+    ],
+    "StartTitleScreen exact SGB Diploma packet selection",
+  );
+  const sgbReturnSpan = requireExactRoutineBlock(
+    sgbBlocks,
+    "_LoadSGBLayout_ReturnFromJumptable",
+    ["push de", "call PushSGBPals", "pop hl", "jp PushSGBPals"],
+    "StartTitleScreen exact SGB Diploma packet application",
+  );
+  setupOperations.push({
+    op: "apply_palette_layout",
+    layout: { symbol: "SCGB_DIPLOMA", value: 8 },
+    branches: [
+      {
+        id: "dmg",
+        condition: { hCGB: 0, hSGB: 0 },
+        operations: [],
+      },
+      {
+        id: "cgb",
+        condition: { hCGB: "nonzero" },
+        table: "CGBLayoutJumptable",
+        target: "_CGB_Diploma",
+        effects: {
+          copy_palette_bytes: {
+            source: "DiplomaPalettes",
+            target: "wBGPals1",
+            byte_count: 128,
+          },
+          copy_four_predefined_palettes: "PalPacket_Diploma + 1",
+          wipe_attrmap: true,
+          apply_attrmap: true,
+        },
+        source_span: cgbDiplomaSpan,
+      },
+      {
+        id: "sgb",
+        condition: { hCGB: 0, hSGB: "nonzero" },
+        table: "SGBLayoutJumptable",
+        target: ".SGB_Diploma",
+        packets: ["PalPacket_Diploma", "BlkPacket_AllPal0"],
+        source_spans: [sgbDiplomaSpan, sgbReturnSpan],
+      },
+    ],
+    table_source_spans: [cgbTable.source_span, sgbTable.source_span],
+    implementation_source_spans: [getLayoutEntrySpan, getLayoutDispatchSpan],
+    source_span: sourceSpanThrough(titleLoop[18].source_span, titleLoop[19].source_span),
+  });
+  if (instructionSignature(titleLoop[20]) !== "call UpdateTimePals") {
+    throw new Error("StartTitleScreen Diploma layout has no exact UpdateTimePals continuation");
+  }
+  const timeWrapperBlocks = parseAsmBlocks([timePalettes]);
+  const timeImplementationBlocks = parseAsmBlocks([timeOfDayPalettes]);
+  const updateTimeWrapperSpan = requireExactRoutineBlock(
+    timeWrapperBlocks,
+    "UpdateTimePals",
+    ["callfar _UpdateTimePals", "ret"],
+    "StartTitleScreen exact time-palette wrapper",
+  );
+  const updateTimeImplementationSpan = requireExactRoutineBlock(
+    timeImplementationBlocks,
+    "_UpdateTimePals",
+    ["ld c, $9", "call GetTimePalFade", "call DmgToCgbTimePals", "ret"],
+    "StartTitleScreen exact time-palette application",
+  );
+  setupOperations.push({
+    op: "update_time_palettes",
+    fade_index: 9,
+    source: "GetTimePalFade",
+    converter: "DmgToCgbTimePals",
+    implementation_source_spans: [updateTimeWrapperSpan, updateTimeImplementationSpan],
+    source_span: titleLoop[20].source_span,
+  });
+  const optionOk = blocks.get(".ok@StartTitleScreen")?.instructions ?? [];
+  if (
+    titleLoop.slice(21, 25).map(instructionSignature).join("\0") !==
+      [
+        "ld a, [wTitleScreenSelectedOption]",
+        "cp NUM_TITLESCREENOPTIONS",
+        "jr c, .ok",
+        "xor a",
+      ].join("\0") ||
+    optionOk.map(instructionSignature).join("\0") !==
+      [
+        "ld e, a",
+        "ld d, 0",
+        "ld hl, .dw",
+        "add hl, de",
+        "add hl, de",
+        "ld a, [hli]",
+        "ld h, [hl]",
+        "ld l, a",
+        "jp hl",
+      ].join("\0")
+  ) {
+    throw new Error("StartTitleScreen selected-option clamp/dispatch is not exact");
+  }
+  const optionTableSpan = requireExactNormalizedRegion(
+    introMenu,
+    ".dw",
+    ".TitleScreen:",
+    [
+      ".dw",
+      "dw Intro_MainMenu",
+      "dw DeleteSaveData",
+      "dw IntroSequence",
+      "dw IntroSequence",
+      "dw ResetClock",
+      ".TitleScreen:",
+    ],
+    "StartTitleScreen exact five-entry option table",
+  );
+  const optionEntries = [
+    "Intro_MainMenu",
+    "DeleteSaveData",
+    "IntroSequence",
+    "IntroSequence",
+    "ResetClock",
+  ];
+  setupOperations.push(
+    {
+      op: "clamp_memory_byte",
+      source: "wTitleScreenSelectedOption",
+      valid_max_exclusive: 5,
+      replacement: 0,
+      result: "title_screen_selected_option",
+      source_span: sourceSpanThrough(titleLoop[21].source_span, titleLoop[24].source_span),
+    },
+    {
+      op: "dispatch_table",
+      dispatcher: "StartTitleScreen option tail",
+      table: ".dw@StartTitleScreen",
+      index: "title_screen_selected_option",
+      entries: optionEntries,
+      domain: { minimum: 0, maximum: 4, values: [0, 1, 2, 3, 4] },
+      table_source_span: optionTableSpan,
+      tail_dispatch: true,
+      source_span: sourceSpanThrough(optionOk[0].source_span, optionOk[8].source_span),
+    },
+  );
+  const allOperations: RuntimePresentationOperation[] = [
+    {
+      op: "source_wrapper",
+      call_form: "farcall",
+      target: "_TitleScreen",
+      returns: true,
+      source_span: sourceSpanThrough(wrapper[0].source_span, wrapper[1].source_span),
+    },
+    ...setupOperations,
+  ];
+  const resourceMap = new Map<string, RuntimePresentationCallableSubprogram["resources"][number]>();
+  const audioMap = new Map<string, RuntimePresentationCallableSubprogram["audio"][number]>();
+  for (const operation of allOperations) {
+    if (
+      typeof operation.resource === "string" &&
+      ["tiles", "tilemap", "attrmap", "palette"].includes(String(operation.resource_kind)) &&
+      operation.resource_source_span
+    ) {
+      const includeSpan = operation.resource_source_span as RuntimePresentationSourceSpan;
+      resourceMap.set(operation.resource, {
+        path: operation.resource,
+        kind: operation.resource_kind as "tiles" | "tilemap" | "attrmap" | "palette",
+        include_source_span: includeSpan,
+        data_source_span:
+          (operation.resource_data_source_span as RuntimePresentationSourceSpan | undefined) ?? includeSpan,
+      });
+    }
+    if (
+      ["play_audio", "stop_audio", "fade_audio"].includes(operation.op) &&
+      typeof operation.audio === "string"
+    ) {
+      audioMap.set(operation.audio, {
+        id: operation.audio,
+        kind:
+          operation.audio === "MUSIC_NONE"
+            ? "silence"
+            : operation.audio.startsWith("MUSIC_")
+              ? "music"
+              : "sound_effect",
+        source_span: operation.source_span,
+      });
+    }
+  }
+  const centralFrameWait = setupOperations.find(
+    (operation) => operation.op === "wait_frames" && operation.source_span.start_line === 1036,
+  );
+  if (!centralFrameWait) {
+    throw new Error("StartTitleScreen callable has no exact central frame wait");
+  }
+  return {
+    id: "start_title_screen",
+    source_entry: ".TitleScreen",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "title_screen_tail_destination",
+      storage: "carry",
+      domain: optionEntries.map((destination, value) => ({
+        id: `option_${value}_${destination}`,
+        value: null,
+        condition: {
+          kind: "tail_dispatch_index",
+          source: "title_screen_selected_option",
+          value,
+          destination,
+        },
+        source_span: optionTableSpan,
+      })),
+    },
+    phases: [
+      {
+        id: "title_screen",
+        source_span: loadedSourceLineSpan(introMenu, 971, 1028),
+        labels: titlePhaseLabels,
+        operations: allOperations,
+      },
+    ],
+    loop: {
+      source_span: sourceSpanThrough(titleLoop[0].source_span, titleLoop[1].source_span),
+      order: [
+        "test_exit",
+        "dispatch_scene",
+        "suicune_frame_iterator",
+        "wait_frame",
+        "repeat_while_carry_clear",
+      ],
+      input: {
+        routine: "GetJoypad",
+        result: "hJoyDown",
+        delete_chord: 0x46,
+        clock_arm_chord: 0x86,
+        clock_finish_chord: 0x60,
+        start_mask: 0x09,
+      },
+      scene_dispatch: {
+        table: ".scenes@TitleScreenScene",
+        index: "wJumptableIndex",
+        domain: { minimum: 0, maximum: 3, values: [0, 1, 2, 3] },
+      },
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: centralFrameWait,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [...resourceMap.values()],
+    audio: [...audioMap.values()],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.start_title_screen", required: true },
+    source_span: loadedSourceLineSpan(introMenu, 971, 1028),
+    implementation_source_spans: [
+      loadedSourceLineSpan(title, 1, 351),
+      getLayoutEntrySpan,
+      getLayoutDispatchSpan,
+      cgbDiplomaSpan,
+      sgbDiplomaSpan,
+      sgbReturnSpan,
+      updateTimeWrapperSpan,
+      updateTimeImplementationSpan,
+    ],
+  };
+}
+
+function certifyMainMenuSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+  controlFlow: RuntimePresentationControlFlow,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/main_menu.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const loopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@MainMenu",
+    [
+      "xor a",
+      "ld [wDisableTextAcceleration], a",
+      "call ClearTilemapEtc",
+      "ld b, SCGB_DIPLOMA",
+      "call GetSGBLayout",
+      "call SetDefaultBGPAndOBP",
+      "ld hl, wGameTimerPaused",
+      "res GAME_TIMER_COUNTING_F, [hl]",
+      "call MainMenu_GetWhichMenu",
+      "ld [wWhichIndexSet], a",
+      "call MainMenu_PrintCurrentTimeAndDay",
+      "ld hl, .MenuHeader",
+      "call LoadMenuHeader",
+      "call MainMenuJoypadLoop",
+      "call CloseWindow",
+      "jr c, .quit",
+      "call ClearTilemap",
+      "ld a, [wMenuSelection]",
+      "ld hl, .Jumptable",
+      "rst JumpTable",
+      "jr .loop",
+    ],
+    "MainMenu exact display/input/dispatch loop",
+  );
+  const quitSpan = requireExactRoutineBlock(
+    blocks,
+    ".quit@MainMenu",
+    ["ret"],
+    "MainMenu exact cancel return",
+  );
+  const selectionEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "MainMenu_GetWhichMenu",
+    [
+      "nop",
+      "nop",
+      "nop",
+      "ld a, [wSaveFileExists]",
+      "and a",
+      "jr nz, .next",
+      "ld a, MAINMENU_NEW_GAME",
+      "ret",
+    ],
+    "MainMenu exact no-save selection",
+  );
+  const selectionCgbSpan = requireExactRoutineBlock(
+    blocks,
+    ".next@MainMenu_GetWhichMenu",
+    [
+      "ldh a, [hCGB]",
+      "cp TRUE",
+      "ld a, MAINMENU_CONTINUE",
+      "ret nz",
+      "ld a, BANK(sNumDailyMysteryGiftPartnerIDs)",
+      "call OpenSRAM",
+      "ld a, [sNumDailyMysteryGiftPartnerIDs]",
+      "cp -1",
+      "call CloseSRAM",
+      "jr nz, .mystery_gift",
+      "ld a, [wStatusFlags]",
+      "bit STATUSFLAGS_MAIN_MENU_MOBILE_CHOICES_F, a",
+      "ld a, MAINMENU_CONTINUE",
+      "jr z, .ok",
+      "jr .ok",
+    ],
+    "MainMenu exact CGB save-feature selection",
+  );
+  const selectionMysterySpan = requireExactRoutineBlock(
+    blocks,
+    ".mystery_gift@MainMenu_GetWhichMenu",
+    [
+      "ld a, [wStatusFlags]",
+      "bit STATUSFLAGS_MAIN_MENU_MOBILE_CHOICES_F, a",
+      "jr z, .ok3",
+      "jr .ok3",
+    ],
+    "MainMenu exact Mystery Gift selection",
+  );
+  const inputEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "MainMenuJoypadLoop",
+    ["call SetUpMenu"],
+    "MainMenu exact input setup",
+  );
+  const inputLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@MainMenuJoypadLoop",
+    [
+      "call MainMenu_PrintCurrentTimeAndDay",
+      "ld a, [w2DMenuFlags1]",
+      "set _2DMENU_WRAP_UP_DOWN_F, a",
+      "ld [w2DMenuFlags1], a",
+      "call GetScrollingMenuJoypad",
+      "ld a, [wMenuJoypad]",
+      "cp PAD_B",
+      "jr z, .b_button",
+      "cp PAD_A",
+      "jr z, .a_button",
+      "jr .loop",
+    ],
+    "MainMenu exact wrapped input loop",
+  );
+  const inputAcceptSpan = requireExactRoutineBlock(
+    blocks,
+    ".a_button@MainMenuJoypadLoop",
+    ["call PlayClickSFX", "and a", "ret"],
+    "MainMenu exact accept result",
+  );
+  const inputCancelSpan = requireExactRoutineBlock(
+    blocks,
+    ".b_button@MainMenuJoypadLoop",
+    ["scf", "ret"],
+    "MainMenu exact cancel result",
+  );
+  const clearSpan = requireExactRoutineBlock(
+    blocks,
+    "ClearTilemapEtc",
+    [
+      "xor a",
+      "ldh [hMapAnims], a",
+      "call ClearTilemap",
+      "call LoadFontsExtra",
+      "call LoadStandardFont",
+      "call ClearWindowData",
+      "ret",
+    ],
+    "MainMenu exact display preparation",
+  );
+  const dispatch = controlFlow.indirect_tables.find(
+    (candidate) => candidate.table === ".Jumptable@MainMenu",
+  );
+  if (
+    !dispatch ||
+    dispatch.entries.join("\0") !==
+      [
+        "MainMenu_Continue",
+        "MainMenu_NewGame",
+        "MainMenu_Option",
+        "MainMenu_MysteryGift",
+        "MainMenu_Mobile",
+        "MainMenu_MobileStudium",
+      ].join("\0") ||
+    dispatch.index_domain?.values.join(",") !== "0,1,2,3"
+  ) {
+    throw new Error("MainMenu release dispatch table/domain is not exact");
+  }
+  const menuHeaderSpan = findLabelSpan(source, ".MenuHeader");
+  const menuItemsSpan = findLabelSpan(source, "MainMenuItems");
+  const timeSpan = findLabelSpan(source, "MainMenu_PrintCurrentTimeAndDay");
+  const constants = parseAsmConstants([source]);
+  const menuHeader = blocks.get(".MenuHeader@MainMenu");
+  const menuItems = blocks.get("MainMenuItems");
+  const menuStrings = blocks.get(".Strings@MainMenu");
+  if (!menuHeader || !menuItems || !menuStrings) {
+    throw new Error("MainMenu source header, menu records, or strings are missing");
+  }
+  const releaseHeader = releaseInstructions(menuHeader.instructions);
+  const coordinateInstruction = releaseHeader.find(
+    (instruction) => instruction.opcode === "menu_coords",
+  );
+  const defaultInstruction = [...releaseHeader]
+    .reverse()
+    .find((instruction) => instruction.opcode === "db");
+  if (
+    !coordinateInstruction ||
+    coordinateInstruction.args.length !== 4 ||
+    !defaultInstruction ||
+    defaultInstruction.args.length !== 1
+  ) {
+    throw new Error("MainMenu release menu header is not exact");
+  }
+  const [left, top, right, bottom] = coordinateInstruction.args.map((argument) =>
+    evaluateAsmInteger(argument, constants),
+  );
+  const defaultOption = evaluateAsmInteger(defaultInstruction.args[0], constants);
+  const itemSets = parseCountedByteRecords(menuItems, constants);
+  const strings = parseTerminatedMenuStrings(menuStrings);
+  if (
+    itemSets.length !== 9 ||
+    strings.length !== dispatch.entries.length ||
+    itemSets.some((items) => items.some((item) => item >= strings.length))
+  ) {
+    throw new Error("MainMenu release item records and strings are not exact");
+  }
+  const inputOperation: RuntimePresentationOperation = {
+    op: "menu_input_loop",
+    sampler: "GetScrollingMenuJoypad",
+    result: "wMenuJoypad",
+    accept: "PAD_A",
+    cancel: "PAD_B",
+    wrap_vertical: true,
+    refresh_before_each_poll: "MainMenu_PrintCurrentTimeAndDay",
+    source_span: sourceSpanThrough(inputEntrySpan, inputCancelSpan),
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "write_memory_byte",
+      target: "wDisableTextAcceleration",
+      address_space: "wram",
+      value: 0,
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: loadedSourceLineSpan(source, 28, 29),
+    },
+    {
+      op: "prepare_main_menu_display",
+      map_animations: 0,
+      clear_tilemap: true,
+      fonts: ["LoadFontsExtra", "LoadStandardFont"],
+      clear_window_data: true,
+      source_span: clearSpan,
+    },
+    {
+      op: "apply_palette_layout",
+      layout: { symbol: "SCGB_DIPLOMA", value: 8 },
+      source_span: loadedSourceLineSpan(source, 31, 32),
+    },
+    {
+      op: "set_default_palettes",
+      routine: "SetDefaultBGPAndOBP",
+      source_span: loadedSourceLineSpan(source, 33),
+    },
+    {
+      op: "clear_memory_bit",
+      target: "wGameTimerPaused",
+      bit: "GAME_TIMER_COUNTING_F",
+      source_span: loadedSourceLineSpan(source, 34, 35),
+    },
+    {
+      op: "select_main_menu_variant",
+      result: "wWhichIndexSet",
+      variants: [
+        { value: 0, id: "new_game", condition: "no_save" },
+        { value: 1, id: "continue", condition: "save_without_unlocked_mystery_gift" },
+        { value: 6, id: "mystery", condition: "cgb_with_unlocked_mystery_gift" },
+      ],
+      source_span: sourceSpanThrough(selectionEntrySpan, selectionMysterySpan),
+    },
+    {
+      op: "render_main_menu_time_and_day",
+      only_when: { source: "wSaveFileExists", predicate: "nonzero" },
+      source_span: timeSpan,
+    },
+    {
+      op: "load_menu",
+      header: ".MenuHeader@MainMenu",
+      item_records: "MainMenuItems",
+      coordinates: { left, top, right, bottom },
+      default_option: defaultOption,
+      item_sets: itemSets,
+      strings,
+      header_source_span: menuHeaderSpan,
+      records_source_span: menuItemsSpan,
+      source_span: loadedSourceLineSpan(source, 39, 40),
+    },
+    inputOperation,
+    {
+      op: "close_window",
+      routine: "CloseWindow",
+      source_span: loadedSourceLineSpan(source, 42),
+    },
+    {
+      op: "branch_result",
+      result: "main_menu_input",
+      equals: "cancelled",
+      target: ".quit@MainMenu",
+      source_span: loadedSourceLineSpan(source, 43),
+    },
+    {
+      op: "clear_tilemap",
+      source_span: loadedSourceLineSpan(source, 44),
+    },
+    {
+      op: "dispatch_table",
+      dispatcher: "MainMenu selection",
+      table: dispatch.table,
+      index: "wMenuSelection",
+      entries: dispatch.entries,
+      domain: dispatch.index_domain,
+      table_source_span: dispatch.source_span,
+      source_span: loadedSourceLineSpan(source, 45, 48),
+    },
+    {
+      op: "jump",
+      target: ".loop@MainMenu",
+      source_span: loadedSourceLineSpan(source, 48),
+    },
+    { op: "return", source_span: quitSpan },
+  ];
+  return {
+    id: "main_menu",
+    source_entry: "MainMenu",
+    accepted_call_forms: ["farcall"],
+    result: {
+      name: "main_menu_outcome",
+      storage: "carry",
+      domain: [
+        {
+          id: "cancelled",
+          value: 1,
+          condition: { kind: "input", source: "wMenuJoypad", equals: "PAD_B" },
+          source_span: inputCancelSpan,
+        },
+        {
+          id: "new_game_non_returning",
+          value: null,
+          condition: { kind: "selection", source: "wMenuSelection", value: 1 },
+          source_span: dispatch.source_span,
+        },
+        {
+          id: "continue_success_non_returning",
+          value: null,
+          condition: { kind: "selection", source: "wMenuSelection", value: 0 },
+          source_span: dispatch.source_span,
+        },
+      ],
+    },
+    phases: [
+      {
+        id: "main_menu",
+        source_span: sourceSpanThrough(loopSpan, quitSpan),
+        labels: { ".loop@MainMenu": 0, ".quit@MainMenu": 14 },
+        operations,
+      },
+    ],
+    loop: {
+      source_span: loopSpan,
+      order: ["prepare", "select_variant", "render", "input", "dispatch", "repeat"],
+      input: { routine: "GetScrollingMenuJoypad", result: "wMenuJoypad" },
+      scene_dispatch: {
+        table: dispatch.table,
+        index: "wMenuSelection",
+        domain: dispatch.index_domain,
+      },
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: inputOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.main_menu", required: true },
+    source_span: sourceSpanThrough(loopSpan, quitSpan),
+    implementation_source_spans: [
+      clearSpan,
+      selectionEntrySpan,
+      selectionCgbSpan,
+      selectionMysterySpan,
+      inputEntrySpan,
+      inputLoopSpan,
+      inputAcceptSpan,
+      inputCancelSpan,
+      menuHeaderSpan,
+      menuItemsSpan,
+      timeSpan,
+    ],
+  };
+}
+
+function certifyTryLoadSaveFileSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/save.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const primarySpan = requireExactRoutineBlock(
+    blocks,
+    "TryLoadSaveFile",
+    [
+      "call VerifyChecksum",
+      "jr nz, .backup",
+      "call LoadPlayerData",
+      "call LoadPokemonData",
+      "call LoadBox",
+      "farcall RestorePartyMonMail",
+      "farcall RestoreGSBallFlag",
+      "farcall RestoreMysteryGift",
+      "call ValidateBackupSave",
+      "call SaveBackupOptions",
+      "call SaveBackupPlayerData",
+      "call SaveBackupPokemonData",
+      "call SaveBackupChecksum",
+      "and a",
+      "ret",
+    ],
+    "TryLoadSaveFile exact primary-load/backup-refresh path",
+  );
+  const backupSpan = requireExactRoutineBlock(
+    blocks,
+    ".backup@TryLoadSaveFile",
+    [
+      "call VerifyBackupChecksum",
+      "jr nz, .corrupt",
+      "call LoadBackupPlayerData",
+      "call LoadBackupPokemonData",
+      "call LoadBox",
+      "farcall RestorePartyMonMail",
+      "farcall RestoreGSBallFlag",
+      "farcall RestoreMysteryGift",
+      "call ValidateSave",
+      "call SaveOptions",
+      "call SavePlayerData",
+      "call SavePokemonData",
+      "call SaveChecksum",
+      "and a",
+      "ret",
+    ],
+    "TryLoadSaveFile exact backup-load/primary-refresh path",
+  );
+  const corruptSpan = requireExactRoutineBlock(
+    blocks,
+    ".corrupt@TryLoadSaveFile",
+    [
+      "ld a, [wOptions]",
+      "push af",
+      "set NO_TEXT_SCROLL, a",
+      "ld [wOptions], a",
+      "ld hl, SaveFileCorruptedText",
+      "call PrintText",
+      "pop af",
+      "ld [wOptions], a",
+      "scf",
+      "ret",
+    ],
+    "TryLoadSaveFile exact corrupt-save presentation",
+  );
+  const verifyPrimarySpan = requireExactRoutineBlock(
+    blocks,
+    "VerifyChecksum",
+    [
+      "ld hl, sGameData",
+      "ld bc, sGameDataEnd - sGameData",
+      "ld a, BANK(sGameData)",
+      "call OpenSRAM",
+      "call Checksum",
+      "ld a, [sChecksum + 0]",
+      "cp e",
+      "jr nz, .fail",
+      "ld a, [sChecksum + 1]",
+      "cp d",
+    ],
+    "TryLoadSaveFile exact primary checksum",
+  );
+  const verifyPrimaryReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".fail@VerifyChecksum",
+    ["push af", "call CloseSRAM", "pop af", "ret"],
+    "TryLoadSaveFile primary checksum result preservation",
+  );
+  const verifyBackupSpan = requireExactRoutineBlock(
+    blocks,
+    "VerifyBackupChecksum",
+    [
+      "ld hl, sBackupGameData",
+      "ld bc, sBackupGameDataEnd - sBackupGameData",
+      "ld a, BANK(sBackupGameData)",
+      "call OpenSRAM",
+      "call Checksum",
+      "ld a, [sBackupChecksum + 0]",
+      "cp e",
+      "jr nz, .fail",
+      "ld a, [sBackupChecksum + 1]",
+      "cp d",
+    ],
+    "TryLoadSaveFile exact backup checksum",
+  );
+  const verifyBackupReturnSpan = requireExactRoutineBlock(
+    blocks,
+    ".fail@VerifyBackupChecksum",
+    ["push af", "call CloseSRAM", "pop af", "ret"],
+    "TryLoadSaveFile backup checksum result preservation",
+  );
+  const primaryLoadSpan = findLabelSpan(source, "LoadPlayerData");
+  const primaryPokemonSpan = findLabelSpan(source, "LoadPokemonData");
+  const backupLoadSpan = findLabelSpan(source, "LoadBackupPlayerData");
+  const backupPokemonSpan = findLabelSpan(source, "LoadBackupPokemonData");
+  const loadBoxSpan = requireExactRoutineBlock(
+    blocks,
+    "LoadBox",
+    ["call GetBoxAddress", "call LoadBoxAddress", "ret"],
+    "TryLoadSaveFile exact current-box load",
+  );
+  const verifyOperation: RuntimePresentationOperation = {
+    op: "verify_save_checksum",
+    source: "sGameData",
+    checksum: "sChecksum",
+    algorithm: "Checksum",
+    byte_count: "sGameDataEnd - sGameData",
+    source_span: sourceSpanThrough(verifyPrimarySpan, verifyPrimaryReturnSpan),
+  };
+  const operations: RuntimePresentationOperation[] = [
+    verifyOperation,
+    {
+      op: "load_save_regions",
+      source: "primary",
+      copies: [
+        { source: "sPlayerData", target: "wPlayerData", size: "wPlayerDataEnd - wPlayerData" },
+        { source: "sCurMapData", target: "wCurMapData", size: "wCurMapDataEnd - wCurMapData" },
+        { source: "sPokemonData", target: "wPokemonData", size: "wPokemonDataEnd - wPokemonData" },
+        { source: "current_box", target: "current_box", routine: "LoadBox" },
+      ],
+      restores: ["party_mail", "gs_ball_flag", "mystery_gift"],
+      source_span: sourceSpanThrough(primaryLoadSpan, loadBoxSpan),
+    },
+    {
+      op: "refresh_redundant_save",
+      source: "primary",
+      target: "backup",
+      validates: ["sBackupCheckValue1", "sBackupCheckValue2"],
+      regions: ["options", "player", "map", "pokemon", "checksum"],
+      source_span: primarySpan,
+    },
+    {
+      op: "verify_save_checksum",
+      source: "sBackupGameData",
+      checksum: "sBackupChecksum",
+      algorithm: "Checksum",
+      byte_count: "sBackupGameDataEnd - sBackupGameData",
+      condition: { source: "primary_checksum", predicate: "invalid" },
+      source_span: sourceSpanThrough(verifyBackupSpan, verifyBackupReturnSpan),
+    },
+    {
+      op: "load_save_regions",
+      source: "backup",
+      copies: [
+        { source: "sBackupPlayerData", target: "wPlayerData", size: "wPlayerDataEnd - wPlayerData" },
+        { source: "sBackupCurMapData", target: "wCurMapData", size: "wCurMapDataEnd - wCurMapData" },
+        { source: "sBackupPokemonData", target: "wPokemonData", size: "wPokemonDataEnd - wPokemonData" },
+        { source: "current_box", target: "current_box", routine: "LoadBox" },
+      ],
+      restores: ["party_mail", "gs_ball_flag", "mystery_gift"],
+      condition: { source: "backup_checksum", predicate: "valid" },
+      source_span: sourceSpanThrough(backupLoadSpan, backupPokemonSpan),
+    },
+    {
+      op: "refresh_redundant_save",
+      source: "backup",
+      target: "primary",
+      validates: ["sCheckValue1", "sCheckValue2"],
+      regions: ["options", "player", "map", "pokemon", "checksum"],
+      source_span: backupSpan,
+    },
+    {
+      op: "present_text",
+      text: "SaveFileCorruptedText",
+      text_scroll_override: "NO_TEXT_SCROLL",
+      restore_options: true,
+      condition: { source: "primary_and_backup_checksums", predicate: "invalid" },
+      source_span: corruptSpan,
+    },
+  ];
+  return {
+    id: "try_load_save_file",
+    source_entry: "TryLoadSaveFile",
+    accepted_call_forms: ["farcall"],
+    result: {
+      name: "save_file_load_outcome",
+      storage: "carry",
+      domain: [
+        {
+          id: "primary_loaded",
+          value: 0,
+          condition: { kind: "checksum_valid", source: "primary" },
+          source_span: primarySpan,
+        },
+        {
+          id: "backup_loaded",
+          value: 0,
+          condition: {
+            kind: "checksum_valid",
+            source: "backup",
+            after: { kind: "checksum_invalid", source: "primary" },
+          },
+          source_span: backupSpan,
+        },
+        {
+          id: "corrupt",
+          value: 1,
+          condition: { kind: "both_checksums_invalid" },
+          source_span: corruptSpan,
+        },
+      ],
+    },
+    phases: [
+      {
+        id: "load_and_repair",
+        source_span: sourceSpanThrough(primarySpan, corruptSpan),
+        operations,
+      },
+    ],
+    loop: {
+      source_span: sourceSpanThrough(primarySpan, corruptSpan),
+      order: ["verify_primary", "load_or_verify_backup", "repair_peer_or_report"],
+      input: {},
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: verifyOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.try_load_save_file", required: true },
+    source_span: sourceSpanThrough(primarySpan, corruptSpan),
+    implementation_source_spans: [
+      verifyPrimarySpan,
+      verifyPrimaryReturnSpan,
+      verifyBackupSpan,
+      verifyBackupReturnSpan,
+      primaryLoadSpan,
+      primaryPokemonSpan,
+      backupLoadSpan,
+      backupPokemonSpan,
+      loadBoxSpan,
+    ],
+  };
+}
+
+function certifyDisplaySaveInfoOnContinueSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/intro_menu.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const entrySpan = requireExactRoutineBlock(
+    blocks,
+    "DisplaySaveInfoOnContinue",
+    [
+      "call CheckRTCStatus",
+      "and RTC_RESET",
+      "jr z, .clock_ok",
+      "lb de, 4, 8",
+      "call DisplayContinueDataWithRTCError",
+      "ret",
+    ],
+    "Continue exact RTC-error save-info branch",
+  );
+  const clockOkSpan = requireExactRoutineBlock(
+    blocks,
+    ".clock_ok@DisplaySaveInfoOnContinue",
+    ["lb de, 4, 8", "call DisplayNormalContinueData", "ret"],
+    "Continue exact normal-clock save-info branch",
+  );
+  const normalSpan = requireExactRoutineBlock(
+    blocks,
+    "DisplayNormalContinueData",
+    [
+      "call Continue_LoadMenuHeader",
+      "call Continue_DisplayBadgesDexPlayerName",
+      "call Continue_PrintGameTime",
+      "call LoadFontsExtra",
+      "call UpdateSprites",
+      "ret",
+    ],
+    "Continue exact normal save-info render order",
+  );
+  const rtcErrorSpan = requireExactRoutineBlock(
+    blocks,
+    "DisplayContinueDataWithRTCError",
+    [
+      "call Continue_LoadMenuHeader",
+      "call Continue_DisplayBadgesDexPlayerName",
+      "call Continue_UnknownGameTime",
+      "call LoadFontsExtra",
+      "call UpdateSprites",
+      "ret",
+    ],
+    "Continue exact RTC-error save-info render order",
+  );
+  const headerEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_LoadMenuHeader",
+    [
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "ld hl, .MenuHeader_Dex",
+      "ld a, [wStatusFlags]",
+      "bit STATUSFLAGS_POKEDEX_F, a",
+      "jr nz, .show_menu",
+      "ld hl, .MenuHeader_NoDex",
+    ],
+    "Continue exact Pokédex-dependent menu-header selection",
+  );
+  const headerRenderSpan = requireExactRoutineBlock(
+    blocks,
+    ".show_menu@Continue_LoadMenuHeader",
+    [
+      "call _OffsetMenuHeader",
+      "call MenuBox",
+      "call PlaceVerticalMenuItems",
+      "ret",
+    ],
+    "Continue exact offset menu render",
+  );
+  const identitySpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_DisplayBadgesDexPlayerName",
+    [
+      "call MenuBoxCoord2Tile",
+      "push hl",
+      "decoord 13, 4, 0",
+      "add hl, de",
+      "call Continue_DisplayBadgeCount",
+      "pop hl",
+      "push hl",
+      "decoord 12, 6, 0",
+      "add hl, de",
+      "call Continue_DisplayPokedexNumCaught",
+      "pop hl",
+      "push hl",
+      "decoord 8, 2, 0",
+      "add hl, de",
+      "ld de, .Player",
+      "call PlaceString",
+      "pop hl",
+      "ret",
+    ],
+    "Continue exact player/badge/Pokédex field placement",
+  );
+  const gameTimePlacementSpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_PrintGameTime",
+    ["decoord 9, 8, 0", "add hl, de", "call Continue_DisplayGameTime", "ret"],
+    "Continue exact game-time placement",
+  );
+  const unknownTimeSpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_UnknownGameTime",
+    [
+      "decoord 9, 8, 0",
+      "add hl, de",
+      "ld de, .three_question_marks",
+      "call PlaceString",
+      "ret",
+    ],
+    "Continue exact unknown-time placement",
+  );
+  const badgeSpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_DisplayBadgeCount",
+    [
+      "push hl",
+      "ld hl, wJohtoBadges",
+      "ld b, 2",
+      "call CountSetBits",
+      "pop hl",
+      "ld de, wNumSetBits",
+      "lb bc, 1, 2",
+      "jp PrintNum",
+    ],
+    "Continue exact Johto badge count",
+  );
+  const dexSpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_DisplayPokedexNumCaught",
+    [
+      "ld a, [wStatusFlags]",
+      "bit STATUSFLAGS_POKEDEX_F, a",
+      "ret z",
+      "push hl",
+      "ld hl, wPokedexCaught",
+      "ld b, (NUM_POKEMON + 7) / 8",
+      "call CountSetBits",
+      "pop hl",
+      "ld de, wNumSetBits",
+      "lb bc, 1, 3",
+      "jp PrintNum",
+    ],
+    "Continue exact caught-Pokédex count",
+  );
+  const timeSpan = requireExactRoutineBlock(
+    blocks,
+    "Continue_DisplayGameTime",
+    [
+      "ld de, wGameTimeHours",
+      "lb bc, 2, 3",
+      "call PrintNum",
+      "ld [hl], '<COLON>'",
+      "inc hl",
+      "ld de, wGameTimeMinutes",
+      "lb bc, PRINTNUM_LEADINGZEROS | 1, 2",
+      "jp PrintNum",
+    ],
+    "Continue exact hours/minutes formatting",
+  );
+  const dexHeaderSpan = findLabelSpan(source, ".MenuHeader_Dex");
+  const noDexHeaderSpan = findLabelSpan(source, ".MenuHeader_NoDex");
+  const playerTextSpan = findLabelSpan(source, ".Player");
+  const unknownTextSpan = requireExactNormalizedRegion(
+    source,
+    ".three_question_marks",
+    "Continue_DisplayBadgeCount:",
+    [".three_question_marks", 'db " ???@"', "Continue_DisplayBadgeCount:"],
+    "Continue exact unknown-time string",
+  );
+  const updateOperation: RuntimePresentationOperation = {
+    op: "update_sprites",
+    routine: "UpdateSprites",
+    source_span: loadedSourceLineSpan(source, 504, 504),
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "branch_memory_mask",
+      source: "CheckRTCStatus",
+      mask: "RTC_RESET",
+      zero: "normal_clock",
+      nonzero: "rtc_error",
+      source_span: entrySpan,
+    },
+    {
+      op: "select_menu_header",
+      source: "wStatusFlags",
+      bit: "STATUSFLAGS_POKEDEX_F",
+      set: ".MenuHeader_Dex@Continue_LoadMenuHeader",
+      clear: ".MenuHeader_NoDex@Continue_LoadMenuHeader",
+      offset: { x: 4, y: 8 },
+      bg_map_mode: 0,
+      source_spans: [headerEntrySpan, headerRenderSpan],
+      source_span: sourceSpanThrough(headerEntrySpan, headerRenderSpan),
+    },
+    {
+      op: "render_continue_identity",
+      player: { text: "<PLAYER>", coordinate: [8, 2] },
+      badges: {
+        source: "wJohtoBadges",
+        byte_count: 2,
+        coordinate: [13, 4],
+        digits: 2,
+      },
+      pokedex: {
+        source: "wPokedexCaught",
+        byte_count: "(NUM_POKEMON + 7) / 8",
+        coordinate: [12, 6],
+        digits: 3,
+        condition: "STATUSFLAGS_POKEDEX_F",
+      },
+      source_span: identitySpan,
+    },
+    {
+      op: "render_continue_game_time",
+      coordinate: [9, 8],
+      hours: { source: "wGameTimeHours", bytes: 2, digits: 3 },
+      separator: "<COLON>",
+      minutes: { source: "wGameTimeMinutes", bytes: 1, digits: 2, leading_zeros: true },
+      condition: { source: "rtc_status", predicate: "reset_clear" },
+      source_span: sourceSpanThrough(gameTimePlacementSpan, timeSpan),
+    },
+    {
+      op: "place_text",
+      text: " ???",
+      coordinate: [9, 8],
+      condition: { source: "rtc_status", predicate: "reset_set" },
+      source_span: unknownTimeSpan,
+    },
+    {
+      op: "load_fonts",
+      routine: "LoadFontsExtra",
+      source_span: sourceSpanThrough(normalSpan, rtcErrorSpan),
+    },
+    updateOperation,
+  ];
+  return {
+    id: "display_save_info_on_continue",
+    source_entry: "DisplaySaveInfoOnContinue",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "display_save_info_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "rendered",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: sourceSpanThrough(entrySpan, clockOkSpan),
+        },
+      ],
+    },
+    phases: [
+      {
+        id: "save_info",
+        source_span: sourceSpanThrough(entrySpan, clockOkSpan),
+        operations,
+      },
+    ],
+    loop: {
+      source_span: sourceSpanThrough(entrySpan, clockOkSpan),
+      order: ["check_rtc", "select_header", "render_fields", "update_sprites"],
+      input: {},
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: updateOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: {
+      id: "runtime_title_screen.display_save_info_on_continue",
+      required: true,
+    },
+    source_span: sourceSpanThrough(entrySpan, clockOkSpan),
+    implementation_source_spans: [
+      normalSpan,
+      rtcErrorSpan,
+      headerEntrySpan,
+      headerRenderSpan,
+      dexHeaderSpan,
+      noDexHeaderSpan,
+      identitySpan,
+      playerTextSpan,
+      gameTimePlacementSpan,
+      unknownTimeSpan,
+      unknownTextSpan,
+      badgeSpan,
+      dexSpan,
+      timeSpan,
+    ],
+  };
+}
+
+function certifyConfirmContinueSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/intro_menu.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const loopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@ConfirmContinue",
+    [
+      "call DelayFrame",
+      "call GetJoypad",
+      "ld hl, hJoyPressed",
+      "bit B_PAD_A, [hl]",
+      "jr nz, .PressA",
+      "bit B_PAD_B, [hl]",
+      "jr z, .loop",
+      "scf",
+      "ret",
+    ],
+    "ConfirmContinue exact A/B frame loop",
+  );
+  const acceptSpan = requireExactRoutineBlock(
+    blocks,
+    ".PressA@ConfirmContinue",
+    ["ret"],
+    "ConfirmContinue exact A acceptance",
+  );
+  const pollOperation: RuntimePresentationOperation = {
+    op: "sample_input",
+    routine: "GetJoypad",
+    result: "hJoyPressed",
+    after_wait_frames: 1,
+    source_span: loopSpan,
+  };
+  return {
+    id: "confirm_continue",
+    source_entry: "ConfirmContinue",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "confirm_continue_outcome",
+      storage: "carry",
+      domain: [
+        {
+          id: "accepted",
+          value: 0,
+          condition: { kind: "input_bit_set", source: "hJoyPressed", bit: "B_PAD_A" },
+          source_span: acceptSpan,
+        },
+        {
+          id: "cancelled",
+          value: 1,
+          condition: {
+            kind: "input_bit_set_after_a_clear",
+            source: "hJoyPressed",
+            bit: "B_PAD_B",
+          },
+          source_span: loopSpan,
+        },
+      ],
+    },
+    phases: [
+      {
+        id: "confirmation",
+        source_span: sourceSpanThrough(loopSpan, acceptSpan),
+        operations: [
+          pollOperation,
+          {
+            op: "input_priority",
+            source: "hJoyPressed",
+            order: ["PAD_A", "PAD_B", "repeat"],
+            source_span: loopSpan,
+          },
+        ],
+      },
+    ],
+    loop: {
+      source_span: loopSpan,
+      order: ["wait_frame", "sample_input", "test_a", "test_b", "repeat"],
+      input: { routine: "GetJoypad", result: "hJoyPressed" },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: pollOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.confirm_continue", required: true },
+    source_span: sourceSpanThrough(loopSpan, acceptSpan),
+    implementation_source_spans: [],
+  };
+}
+
+function certifyResetWramSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const misc = loadSource("constants/misc_constants.asm", options);
+  const pokemonConstants = loadSource("constants/pokemon_data_constants.asm", options);
+  const textConstants = loadSource("constants/text_constants.asm", options);
+  const gameTime = loadSource("home/game_time.asm", options);
+  const decorations = loadSource("engine/overworld/decorations.asm", options);
+  const mail = loadSource("engine/pokemon/mail.asm", options);
+  const mobile = loadSource("mobile/mobile_41.asm", options);
+  const blocks = parseAsmBlocks([intro]);
+  const wrapperSpan = requireExactRoutineBlock(
+    blocks,
+    "ResetWRAM",
+    ["xor a", "ldh [hBGMapMode], a", "call _ResetWRAM", "ret"],
+    "NewGame exact ResetWRAM wrapper",
+  );
+  const resetSpan = requireExactRoutineBlock(
+    blocks,
+    "_ResetWRAM",
+    [
+      "ld hl, wShadowOAM",
+      "ld bc, wOptions - wShadowOAM",
+      "xor a",
+      "call ByteFill",
+      "ld hl, STARTOF(WRAMX)",
+      "ld bc, wGameData - STARTOF(WRAMX)",
+      "xor a",
+      "call ByteFill",
+      "ld hl, wGameData",
+      "ld bc, wGameDataEnd - wGameData",
+      "xor a",
+      "call ByteFill",
+      "ldh a, [rLY]",
+      "ldh [hUnusedBackup], a",
+      "call DelayFrame",
+      "ldh a, [hRandomSub]",
+      "ld [wPlayerID], a",
+      "ldh a, [rLY]",
+      "ldh [hUnusedBackup], a",
+      "call DelayFrame",
+      "ldh a, [hRandomAdd]",
+      "ld [wPlayerID + 1], a",
+      "call Random",
+      "ld [wSecretID], a",
+      "call DelayFrame",
+      "call Random",
+      "ld [wSecretID + 1], a",
+      "ld hl, wPartyCount",
+      "call .InitList",
+      "xor a",
+      "ld [wCurBox], a",
+      "ld [wSavedAtLeastOnce], a",
+      "call SetDefaultBoxNames",
+      "ld a, BANK(sBoxCount)",
+      "call OpenSRAM",
+      "ld hl, sBoxCount",
+      "call .InitList",
+      "call CloseSRAM",
+      "ld hl, wNumItems",
+      "call .InitList",
+      "ld hl, wNumKeyItems",
+      "call .InitList",
+      "ld hl, wNumBalls",
+      "call .InitList",
+      "ld hl, wNumPCItems",
+      "call .InitList",
+      "xor a",
+      "ld [wRoamMon1Species], a",
+      "ld [wRoamMon2Species], a",
+      "ld [wRoamMon3Species], a",
+      "ld a, -1",
+      "ld [wRoamMon1MapGroup], a",
+      "ld [wRoamMon2MapGroup], a",
+      "ld [wRoamMon3MapGroup], a",
+      "ld [wRoamMon1MapNumber], a",
+      "ld [wRoamMon2MapNumber], a",
+      "ld [wRoamMon3MapNumber], a",
+      "ld a, BANK(sMysteryGiftItem)",
+      "call OpenSRAM",
+      "ld hl, sMysteryGiftItem",
+      "xor a",
+      "ld [hli], a",
+      "assert sMysteryGiftItem + 1 == sMysteryGiftUnlocked",
+      "dec a",
+      "ld [hl], a",
+      "call CloseSRAM",
+      "call LoadOrRegenerateLuckyIDNumber",
+      "call InitializeMagikarpHouse",
+      "xor a",
+      "ld [wMonType], a",
+      "ld [wJohtoBadges], a",
+      "ld [wKantoBadges], a",
+      "ld [wCoins], a",
+      "ld [wCoins + 1], a",
+      "if START_MONEY >= $10000",
+      "ld a, HIGH(START_MONEY >> 8)",
+      "endc",
+      "ld [wMoney], a",
+      "ld a, HIGH(START_MONEY)",
+      "ld [wMoney + 1], a",
+      "ld a, LOW(START_MONEY)",
+      "ld [wMoney + 2], a",
+      "xor a",
+      "ld [wWhichMomItem], a",
+      "ld hl, wMomItemTriggerBalance",
+      "ld [hl], HIGH(MOM_MONEY >> 8)",
+      "inc hl",
+      "ld [hl], HIGH(MOM_MONEY)",
+      "inc hl",
+      "ld [hl], LOW(MOM_MONEY)",
+      "call InitializeNPCNames",
+      "farcall InitDecorations",
+      "farcall DeletePartyMonMail",
+      "farcall ClearGSBallFlag",
+      "call ResetGameTime",
+      "ret",
+    ],
+    "NewGame exact complete WRAM/SRAM initializer",
+  );
+  const initListSpan = requireExactRoutineBlock(
+    blocks,
+    ".InitList@_ResetWRAM",
+    ["xor a", "ld [hli], a", "dec a", "ld [hl], a", "ret"],
+    "NewGame exact empty-list sentinel initializer",
+  );
+  const boxEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "SetDefaultBoxNames",
+    ["ld hl, wBoxNames", "ld c, 0"],
+    "NewGame exact box-name entry",
+  );
+  const boxLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@SetDefaultBoxNames",
+    [
+      "push hl",
+      "ld de, .Box",
+      "call CopyName2",
+      "dec hl",
+      "ld a, c",
+      "inc a",
+      "cp 10",
+      "jr c, .less",
+      "sub 10",
+      "ld [hl], '1'",
+      "inc hl",
+    ],
+    "NewGame exact two-digit box-name prefix",
+  );
+  const boxLessSpan = requireExactRoutineBlock(
+    blocks,
+    ".less@SetDefaultBoxNames",
+    [
+      "add '0'",
+      "ld [hli], a",
+      "ld [hl], '@'",
+      "pop hl",
+      "ld de, BOX_NAME_LENGTH",
+      "add hl, de",
+      "inc c",
+      "ld a, c",
+      "cp NUM_BOXES",
+      "jr c, .loop",
+      "ret",
+    ],
+    "NewGame exact box-name loop bound/stride",
+  );
+  const luckyEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "LoadOrRegenerateLuckyIDNumber",
+    [
+      "ld a, BANK(sLuckyIDNumber)",
+      "call OpenSRAM",
+      "ld a, [wCurDay]",
+      "inc a",
+      "ld b, a",
+      "ld a, [sLuckyNumberDay]",
+      "cp b",
+      "ld a, [sLuckyIDNumber + 1]",
+      "ld c, a",
+      "ld a, [sLuckyIDNumber]",
+      "jr z, .skip",
+      "ld a, b",
+      "ld [sLuckyNumberDay], a",
+      "call Random",
+      "ld c, a",
+      "call Random",
+    ],
+    "NewGame exact daily Lucky ID regeneration",
+  );
+  const luckyStoreSpan = requireExactRoutineBlock(
+    blocks,
+    ".skip@LoadOrRegenerateLuckyIDNumber",
+    [
+      "ld [wLuckyIDNumber], a",
+      "ld [sLuckyIDNumber], a",
+      "ld a, c",
+      "ld [wLuckyIDNumber + 1], a",
+      "ld [sLuckyIDNumber + 1], a",
+      "jp CloseSRAM",
+    ],
+    "NewGame exact Lucky ID WRAM/SRAM synchronization",
+  );
+  const magikarpSpan = requireExactRoutineBlock(
+    blocks,
+    "InitializeMagikarpHouse",
+    [
+      "ld hl, wBestMagikarpLengthFeet",
+      "ld a, $3",
+      "ld [hli], a",
+      "ld a, $6",
+      "ld [hli], a",
+      "ld de, .Ralph",
+      "call CopyName2",
+      "ret",
+    ],
+    "NewGame exact Magikarp-house defaults",
+  );
+  const namesEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "InitializeNPCNames",
+    [
+      "ld hl, .Rival",
+      "ld de, wRivalName",
+      "call .Copy",
+      "ld hl, .Mom",
+      "ld de, wMomsName",
+      "call .Copy",
+      "ld hl, .Red",
+      "ld de, wRedsName",
+      "call .Copy",
+      "ld hl, .Green",
+      "ld de, wGreensName",
+    ],
+    "NewGame exact NPC-name sources/destinations",
+  );
+  const namesCopySpan = requireExactRoutineBlock(
+    blocks,
+    ".Copy@InitializeNPCNames",
+    ["ld bc, NAME_LENGTH", "call CopyBytes", "ret"],
+    "NewGame exact NPC-name copy width",
+  );
+  findTokenSpan(misc, "DEF START_MONEY EQU 3000");
+  findTokenSpan(misc, "DEF MOM_MONEY   EQU 2300");
+  findTokenSpan(pokemonConstants, "DEF NUM_BOXES EQU 14");
+  findTokenSpan(textConstants, "DEF BOX_NAME_LENGTH           EQU 9");
+  const gameTimeBlocks = parseAsmBlocks([gameTime]);
+  const resetTimeSpan = requireExactRoutineBlock(
+    gameTimeBlocks,
+    "ResetGameTime",
+    [
+      "xor a",
+      "ld [wGameTimeCap], a",
+      "ld [wGameTimeHours], a",
+      "ld [wGameTimeHours + 1], a",
+      "ld [wGameTimeMinutes], a",
+      "ld [wGameTimeSeconds], a",
+      "ld [wGameTimeFrames], a",
+      "ret",
+    ],
+    "NewGame exact game-time reset",
+  );
+  const decorationSpan = requireExactRoutineBlock(
+    parseAsmBlocks([decorations]),
+    "InitDecorations",
+    [
+      "ld a, DECO_FEATHERY_BED",
+      "ld [wDecoBed], a",
+      "ld a, DECO_TOWN_MAP",
+      "ld [wDecoPoster], a",
+      "ret",
+    ],
+    "NewGame exact initial decorations",
+  );
+  const mailSpan = requireExactRoutineBlock(
+    parseAsmBlocks([mail]),
+    "DeletePartyMonMail",
+    [
+      "ld a, BANK(sPartyMail)",
+      "call OpenSRAM",
+      "xor a",
+      "ld hl, sPartyMail",
+      "ld bc, PARTY_LENGTH * MAIL_STRUCT_LENGTH",
+      "call ByteFill",
+      "xor a",
+      "ld hl, sMailboxCount",
+      "ld bc, 1 + MAILBOX_CAPACITY * MAIL_STRUCT_LENGTH",
+      "call ByteFill",
+      "jp CloseSRAM",
+    ],
+    "NewGame exact party/mailbox mail deletion",
+  );
+  const gsBallSpan = requireExactRoutineBlock(
+    parseAsmBlocks([mobile]),
+    "ClearGSBallFlag",
+    [
+      "ld a, BANK(sGSBallFlag)",
+      "call OpenSRAM",
+      "xor a",
+      "ld [sGSBallFlag], a",
+      "call CloseSRAM",
+      "ret",
+    ],
+    "NewGame exact GS Ball flag clear",
+  );
+  const completionOperation: RuntimePresentationOperation = {
+    op: "initialize_new_game_state",
+    source_span: resetSpan,
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "write_memory_byte",
+      target: "hBGMapMode",
+      value: 0,
+      address_space: "hram",
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: wrapperSpan,
+    },
+    {
+      op: "fill_memory_ranges",
+      value: 0,
+      ranges: [
+        { start: "wShadowOAM", byte_count: "wOptions - wShadowOAM" },
+        { start: "STARTOF(WRAMX)", byte_count: "wGameData - STARTOF(WRAMX)" },
+        { start: "wGameData", byte_count: "wGameDataEnd - wGameData" },
+      ],
+      source_span: loadedSourceLineSpan(intro, 103, 116),
+    },
+    {
+      op: "generate_new_game_ids",
+      player_id: {
+        bytes: ["hRandomSub", "hRandomAdd"],
+        entropy_seed: "rLY -> hUnusedBackup",
+        waits: 2,
+      },
+      secret_id: { routine: "Random", calls: 2, intermediate_waits: 1 },
+      source_span: loadedSourceLineSpan(intro, 118, 134),
+    },
+    {
+      op: "initialize_sentinel_lists",
+      count_value: 0,
+      first_entry_value: 0xff,
+      targets: [
+        "wPartyCount",
+        "sBoxCount",
+        "wNumItems",
+        "wNumKeyItems",
+        "wNumBalls",
+        "wNumPCItems",
+      ],
+      source_span: initListSpan,
+    },
+    {
+      op: "initialize_box_names",
+      target: "wBoxNames",
+      prefix: "BOX",
+      count: 14,
+      name_length: 9,
+      displayed_numbers: { minimum: 1, maximum: 14 },
+      source_span: sourceSpanThrough(boxEntrySpan, boxLessSpan),
+    },
+    {
+      op: "initialize_roamers",
+      species: [0, 0, 0],
+      map_groups: [0xff, 0xff, 0xff],
+      map_numbers: [0xff, 0xff, 0xff],
+      source_span: loadedSourceLineSpan(intro, 163, 173),
+    },
+    {
+      op: "initialize_mystery_gift",
+      item: 0,
+      unlocked: 0xff,
+      source_span: loadedSourceLineSpan(intro, 175, 183),
+    },
+    {
+      op: "initialize_lucky_id",
+      regenerate_when: "sLuckyNumberDay != wCurDay + 1",
+      synchronize: ["wLuckyIDNumber", "sLuckyIDNumber"],
+      source_span: sourceSpanThrough(luckyEntrySpan, luckyStoreSpan),
+    },
+    {
+      op: "initialize_magikarp_house",
+      best_length: { feet: 3, inches: 6 },
+      trainer_name: "RALPH",
+      source_span: magikarpSpan,
+    },
+    {
+      op: "initialize_economy",
+      mon_type: 0,
+      johto_badges: 0,
+      kanto_badges: 0,
+      coins: 0,
+      money: 3000,
+      mom_item_index: 0,
+      mom_trigger_balance: 2300,
+      money_byte_order: "big_endian_24",
+      source_span: loadedSourceLineSpan(intro, 188, 214),
+    },
+    {
+      op: "initialize_npc_names",
+      values: {
+        wRivalName: "???",
+        wMomsName: "MOM",
+        wRedsName: "RED",
+        wGreensName: "GREEN",
+      },
+      byte_count: "NAME_LENGTH",
+      source_span: sourceSpanThrough(namesEntrySpan, namesCopySpan),
+    },
+    {
+      op: "initialize_decorations",
+      bed: "DECO_FEATHERY_BED",
+      poster: "DECO_TOWN_MAP",
+      source_span: decorationSpan,
+    },
+    {
+      op: "clear_saved_mail",
+      party_bytes: "PARTY_LENGTH * MAIL_STRUCT_LENGTH",
+      mailbox_bytes: "1 + MAILBOX_CAPACITY * MAIL_STRUCT_LENGTH",
+      source_span: mailSpan,
+    },
+    {
+      op: "write_memory_byte",
+      target: "sGSBallFlag",
+      address_space: "sram",
+      value: 0,
+      source_span: gsBallSpan,
+    },
+    {
+      op: "reset_game_time",
+      targets: [
+        "wGameTimeCap",
+        "wGameTimeHours",
+        "wGameTimeHours + 1",
+        "wGameTimeMinutes",
+        "wGameTimeSeconds",
+        "wGameTimeFrames",
+      ],
+      value: 0,
+      source_span: resetTimeSpan,
+    },
+    completionOperation,
+  ];
+  return {
+    id: "reset_wram",
+    source_entry: "ResetWRAM",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "reset_wram_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "completed",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: wrapperSpan,
+        },
+      ],
+    },
+    phases: [{ id: "reset", source_span: resetSpan, operations }],
+    loop: {
+      source_span: resetSpan,
+      order: ["clear_memory", "generate_ids", "initialize_state", "return"],
+      input: {},
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.reset_wram", required: true },
+    source_span: sourceSpanThrough(wrapperSpan, resetSpan),
+    implementation_source_spans: [
+      initListSpan,
+      boxEntrySpan,
+      boxLoopSpan,
+      boxLessSpan,
+      luckyEntrySpan,
+      luckyStoreSpan,
+      magikarpSpan,
+      namesEntrySpan,
+      namesCopySpan,
+      decorationSpan,
+      mailSpan,
+      gsBallSpan,
+      resetTimeSpan,
+    ],
+  };
+}
+
+function certifyNewGameClearTilemapSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/intro_menu.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const routineSpan = requireExactRoutineBlock(
+    blocks,
+    "NewGame_ClearTilemapEtc",
+    [
+      "xor a",
+      "ldh [hMapAnims], a",
+      "call ClearTilemap",
+      "call LoadFontsExtra",
+      "call LoadStandardFont",
+      "call ClearWindowData",
+      "ret",
+    ],
+    "NewGame exact tilemap/font/window preparation",
+  );
+  const clearTilemap = certifyClearTilemapOperations(options);
+  const clearWindow = certifyClearWindowDataOperations(options);
+  const completionOperation: RuntimePresentationOperation = {
+    op: "prepare_new_game_display",
+    map_animations: 0,
+    fonts: ["LoadFontsExtra", "LoadStandardFont"],
+    source_span: routineSpan,
+  };
+  return {
+    id: "new_game_clear_tilemap",
+    source_entry: "NewGame_ClearTilemapEtc",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "new_game_display_preparation_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "completed",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: routineSpan,
+        },
+      ],
+    },
+    phases: [
+      {
+        id: "display_preparation",
+        source_span: routineSpan,
+        operations: [completionOperation, ...clearTilemap, ...clearWindow],
+      },
+    ],
+    loop: {
+      source_span: routineSpan,
+      order: ["disable_map_anims", "clear_tilemap", "load_fonts", "clear_window"],
+      input: {},
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: {
+      id: "runtime_title_screen.new_game_clear_tilemap",
+      required: true,
+    },
+    source_span: routineSpan,
+    implementation_source_spans: [],
+  };
+}
+
+function certifyPlayerProfileSetupSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const gender = loadSource("engine/menus/init_gender.asm", options);
+  const mobile = loadSource("mobile/mobile_41.asm", options);
+  const introBlocks = parseAsmBlocks([intro]);
+  const genderBlocks = parseAsmBlocks([gender]);
+  const mobileBlocks = parseAsmBlocks([mobile]);
+  const entrySpan = requireExactRoutineBlock(
+    introBlocks,
+    "PlayerProfileSetup",
+    [
+      "farcall CheckMobileAdapterStatus",
+      "jr c, .ok",
+      "farcall InitGender",
+      "ret",
+    ],
+    "NewGame exact profile-selection entry",
+  );
+  const mobileBranchSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".ok@PlayerProfileSetup",
+    ["ld c, 0", "farcall InitMobileProfile", "ret", "if DEF(_DEBUG)"],
+    "NewGame source-retained mobile-profile branch",
+  );
+  const mobileStatusBlock = mobileBlocks.get("CheckMobileAdapterStatus");
+  if (
+    !mobileStatusBlock ||
+    mobileStatusBlock.instructions.slice(0, 2).map(instructionSignature).join("\0") !==
+      ["or a", "ret"].join("\0")
+  ) {
+    throw new Error("NewGame mobile-adapter status stub does not clear carry and return");
+  }
+  const mobileStubSpan = sourceSpanThrough(
+    mobileStatusBlock.instructions[0].source_span,
+    mobileStatusBlock.instructions[1].source_span,
+  );
+  const initGenderSpan = requireExactRoutineBlock(
+    genderBlocks,
+    "InitGender",
+    [
+      "call InitGenderScreen",
+      "call LoadGenderScreenPal",
+      "call LoadGenderScreenLightBlueTile",
+      "call WaitBGMap2",
+      "call SetDefaultBGPAndOBP",
+      "ld hl, AreYouABoyOrAreYouAGirlText",
+      "call PrintText",
+      "ld hl, .MenuHeader",
+      "call LoadMenuHeader",
+      "call WaitBGMap2",
+      "call VerticalMenu",
+      "call CloseWindow",
+      "ld a, [wMenuCursorY]",
+      "dec a",
+      "ld [wPlayerGender], a",
+      "ld c, 10",
+      "call DelayFrames",
+      "ret",
+    ],
+    "NewGame exact gender selection flow",
+  );
+  const initCrystalSpan = requireExactRoutineBlock(
+    genderBlocks,
+    "InitCrystalData",
+    [
+      "ld a, $1",
+      "ld [wPlayerPrefecture], a",
+      "xor a",
+      "ld [wPlayerAge], a",
+      "ld [wPlayerGender], a",
+      "ld [wPlayerPostalCode], a",
+      "ld [wPlayerPostalCode+1], a",
+      "ld [wPlayerPostalCode+2], a",
+      "ld [wPlayerPostalCode+3], a",
+      "ld [wd002], a",
+      "ld [wd003], a",
+      "ld a, [wCrystalFlags]",
+      "res 0, a",
+      "ld [wCrystalFlags], a",
+      "ld a, [wCrystalFlags]",
+      "res 1, a",
+      "ld [wCrystalFlags], a",
+      "ret",
+      'INCLUDE "mobile/mobile_12.asm"',
+    ],
+    "NewGame exact Crystal profile defaults",
+  );
+  const screenSpan = requireExactRoutineBlock(
+    genderBlocks,
+    "InitGenderScreen",
+    [
+      "ld a, $10",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_NONE)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_NONE)",
+      "ld [wMusicFadeID + 1], a",
+      "ld c, 8",
+      "call DelayFrames",
+      "call ClearBGPalettes",
+      "call InitCrystalData",
+      "call LoadFontsExtra",
+      "hlcoord 0, 0",
+      "ld bc, SCREEN_AREA",
+      "ld a, $0",
+      "call ByteFill",
+      "hlcoord 0, 0, wAttrmap",
+      "ld bc, SCREEN_AREA",
+      "xor a",
+      "call ByteFill",
+      "ret",
+    ],
+    "NewGame exact gender-screen initialization",
+  );
+  const paletteSpan = requireExactRoutineBlock(
+    genderBlocks,
+    "LoadGenderScreenPal",
+    [
+      "ld hl, .Palette",
+      "ld de, wBGPals1",
+      "ld bc, 1 palettes",
+      "ld a, BANK(wBGPals1)",
+      "call FarCopyWRAM",
+      "farcall ApplyPals",
+      "ret",
+    ],
+    "NewGame exact gender-screen palette load",
+  );
+  const tileSpan = requireExactRoutineBlock(
+    genderBlocks,
+    "LoadGenderScreenLightBlueTile",
+    [
+      "ld de, .LightBlueTile",
+      "ld hl, vTiles2 tile $00",
+      "lb bc, BANK(.LightBlueTile), 1",
+      "call Get2bpp",
+      "ret",
+    ],
+    "NewGame exact gender-screen tile load",
+  );
+  const menuHeaderSpan = findLabelSpan(gender, ".MenuHeader");
+  const menuDataSpan = findLabelSpan(gender, ".MenuData");
+  const promptSpan = findLabelSpan(gender, "AreYouABoyOrAreYouAGirlText");
+  const paletteResourceSpan = findTokenSpan(
+    gender,
+    'INCLUDE "gfx/new_game/gender_screen.pal"',
+  );
+  const tileResourceSpan = findTokenSpan(
+    gender,
+    'INCBIN "gfx/new_game/gender_screen.2bpp"',
+  );
+  const completionOperation: RuntimePresentationOperation = {
+    op: "select_player_gender",
+    source: "wMenuCursorY - 1",
+    target: "wPlayerGender",
+    domain: [
+      { cursor: 1, value: 0, label: "Boy" },
+      { cursor: 2, value: 1, label: "Girl" },
+    ],
+    source_span: initGenderSpan,
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "branch_constant_result",
+      source: "CheckMobileAdapterStatus",
+      carry: 0,
+      selected_path: "InitGender",
+      unreachable_path: "InitMobileProfile",
+      implementation_source_span: mobileStubSpan,
+      source_span: sourceSpanThrough(entrySpan, mobileBranchSpan),
+    },
+    {
+      op: "fade_audio",
+      audio: "MUSIC_NONE",
+      frames: 128,
+      fade_register: { target: "wMusicFade", value: 16 },
+      source_span: screenSpan,
+    },
+    {
+      op: "initialize_crystal_profile",
+      prefecture: 1,
+      age: 0,
+      gender: 0,
+      postal_code: [0, 0, 0, 0],
+      mobile_state: { wd002: 0, wd003: 0 },
+      cleared_crystal_flag_bits: [0, 1],
+      source_span: initCrystalSpan,
+    },
+    {
+      op: "fill_memory",
+      target: "wTilemap",
+      byte_count: 360,
+      value: 0,
+      source_span: screenSpan,
+    },
+    {
+      op: "fill_memory",
+      target: "wAttrmap",
+      byte_count: 360,
+      value: 0,
+      source_span: screenSpan,
+    },
+    {
+      op: "copy_palette",
+      resource: "gfx/new_game/gender_screen.pal",
+      target: "wBGPals1",
+      palette_count: 1,
+      apply: "ApplyPals",
+      resource_source_span: paletteResourceSpan,
+      source_span: paletteSpan,
+    },
+    {
+      op: "copy_tiles",
+      resource: "gfx/new_game/gender_screen.2bpp",
+      target: "vTiles2 tile $00",
+      tile_count: 1,
+      resource_source_span: tileResourceSpan,
+      source_span: tileSpan,
+    },
+    {
+      op: "present_text",
+      text: "AreYouABoyOrAreYouAGirlText",
+      source_span: promptSpan,
+    },
+    {
+      op: "load_menu",
+      header: ".MenuHeader@InitGender",
+      items: ["Boy", "Girl"],
+      flags: ["STATICMENU_CURSOR", "STATICMENU_WRAP", "STATICMENU_DISABLE_B"],
+      coordinates: { left: 6, top: 4, right: 12, bottom: 9 },
+      default_option: 1,
+      header_source_span: menuHeaderSpan,
+      data_source_span: menuDataSpan,
+      source_span: initGenderSpan,
+    },
+    completionOperation,
+    {
+      op: "wait_frames",
+      frames: 10,
+      condition: { source: null, predicate: "always", source_span: null },
+      source_span: initGenderSpan,
+    },
+  ];
+  return {
+    id: "player_profile_setup",
+    source_entry: "PlayerProfileSetup",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "player_profile_setup_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "gender_selected",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: entrySpan,
+        },
+      ],
+    },
+    phases: [{ id: "gender_selection", source_span: initGenderSpan, operations }],
+    loop: {
+      source_span: initGenderSpan,
+      order: ["prepare", "prompt", "select_gender", "close", "wait"],
+      input: { routine: "VerticalMenu", result: "wMenuCursorY" },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [
+      {
+        path: "gfx/new_game/gender_screen.pal",
+        kind: "palette",
+        include_source_span: paletteResourceSpan,
+        data_source_span: paletteResourceSpan,
+      },
+      {
+        path: "gfx/new_game/gender_screen.2bpp",
+        kind: "tiles",
+        include_source_span: tileResourceSpan,
+        data_source_span: tileResourceSpan,
+      },
+    ],
+    audio: [
+      {
+        id: "MUSIC_NONE",
+        kind: "silence",
+        source_span: screenSpan,
+      },
+    ],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: {
+      id: "runtime_title_screen.player_profile_setup",
+      required: true,
+    },
+    source_span: sourceSpanThrough(entrySpan, mobileBranchSpan),
+    implementation_source_spans: [
+      mobileStubSpan,
+      initGenderSpan,
+      initCrystalSpan,
+      screenSpan,
+      paletteSpan,
+      tileSpan,
+      menuHeaderSpan,
+      menuDataSpan,
+      promptSpan,
+    ],
+  };
+}
+
+function certifyOakSpeechSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const timeSet = loadSource("engine/rtc/timeset.asm", options);
+  const playerGfx = loadSource("engine/gfx/player_gfx.asm", options);
+  const blocks = parseAsmBlocks([intro]);
+  const timeBlocks = parseAsmBlocks([timeSet]);
+  const playerBlocks = parseAsmBlocks([playerGfx]);
+  const speechSpan = requireExactRoutineBlock(
+    blocks,
+    "OakSpeech",
+    [
+      "farcall InitClock",
+      "call RotateFourPalettesLeft",
+      "call ClearTilemap",
+      "ld de, MUSIC_ROUTE_30",
+      "call PlayMusic",
+      "call RotateFourPalettesRight",
+      "call RotateThreePalettesRight",
+      "xor a",
+      "ld [wCurPartySpecies], a",
+      "ld a, POKEMON_PROF",
+      "ld [wTrainerClass], a",
+      "call Intro_PrepTrainerPic",
+      "ld b, SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      "call GetSGBLayout",
+      "call Intro_RotatePalettesLeftFrontpic",
+      "ld hl, OakText1",
+      "call PrintText",
+      "call RotateThreePalettesRight",
+      "call ClearTilemap",
+      "ld a, WOOPER",
+      "ld [wCurSpecies], a",
+      "ld [wCurPartySpecies], a",
+      "call GetBaseData",
+      "hlcoord 6, 4",
+      "call PrepMonFrontpic",
+      "xor a",
+      "ld [wTempMonDVs], a",
+      "ld [wTempMonDVs + 1], a",
+      "ld b, SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      "call GetSGBLayout",
+      "call Intro_WipeInFrontpic",
+      "ld hl, OakText2",
+      "call PrintText",
+      "ld hl, OakText4",
+      "call PrintText",
+      "call RotateThreePalettesRight",
+      "call ClearTilemap",
+      "xor a",
+      "ld [wCurPartySpecies], a",
+      "ld a, POKEMON_PROF",
+      "ld [wTrainerClass], a",
+      "call Intro_PrepTrainerPic",
+      "ld b, SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      "call GetSGBLayout",
+      "call Intro_RotatePalettesLeftFrontpic",
+      "ld hl, OakText5",
+      "call PrintText",
+      "call RotateThreePalettesRight",
+      "call ClearTilemap",
+      "xor a",
+      "ld [wCurPartySpecies], a",
+      "farcall DrawIntroPlayerPic",
+      "ld b, SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      "call GetSGBLayout",
+      "call Intro_RotatePalettesLeftFrontpic",
+      "ld hl, OakText6",
+      "call PrintText",
+      "call NamePlayer",
+      "ld hl, OakText7",
+      "call PrintText",
+      "ret",
+    ],
+    "NewGame exact Oak speech presentation order",
+  );
+  const wooperTextSpan = requireExactRoutineBlock(
+    blocks,
+    "OakText2",
+    [
+      "text_far _OakText2",
+      "text_asm",
+      "ld a, WOOPER",
+      "call PlayMonCry",
+      "call WaitSFX",
+      "ld hl, OakText3",
+      "ret",
+    ],
+    "NewGame exact embedded Wooper cry/text continuation",
+  );
+  const fadeEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_RotatePalettesLeftFrontpic",
+    ["ld hl, IntroFadePalettes", "ld b, IntroFadePalettes.End - IntroFadePalettes"],
+    "NewGame exact frontpic fade entry",
+  );
+  const fadeLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@Intro_RotatePalettesLeftFrontpic",
+    [
+      "ld a, [hli]",
+      "call DmgToCgbBGPals",
+      "ld c, 10",
+      "call DelayFrames",
+      "dec b",
+      "jr nz, .loop",
+      "ret",
+    ],
+    "NewGame exact six-step frontpic fade cadence",
+  );
+  const wipeEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_WipeInFrontpic",
+    [
+      "ld a, $77",
+      "ldh [hWX], a",
+      "call DelayFrame",
+      "ld a, %11100100",
+      "call DmgToCgbBGPals",
+    ],
+    "NewGame exact frontpic wipe entry",
+  );
+  const wipeLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@Intro_WipeInFrontpic",
+    [
+      "call DelayFrame",
+      "ldh a, [hWX]",
+      "sub $8",
+      "cp -1",
+      "ret z",
+      "ldh [hWX], a",
+      "jr .loop",
+    ],
+    "NewGame exact eight-pixel frontpic wipe",
+  );
+  const trainerPicSpan = requireExactRoutineBlock(
+    blocks,
+    "Intro_PrepTrainerPic",
+    [
+      "ld de, vTiles2",
+      "farcall GetTrainerPic",
+      "xor a",
+      "ldh [hGraphicStartTile], a",
+      "hlcoord 6, 4",
+      "lb bc, 7, 7",
+      "predef PlaceGraphic",
+      "ret",
+    ],
+    "NewGame exact Oak trainer-frontpic preparation",
+  );
+  const nameEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "NamePlayer",
+    [
+      "farcall MovePlayerPicRight",
+      "farcall ShowPlayerNamingChoices",
+      "ld a, [wMenuCursorY]",
+      "dec a",
+      "jr z, .NewName",
+      "call StorePlayerName",
+      "farcall ApplyMonOrTrainerPals",
+      "farcall MovePlayerPicLeft",
+      "ret",
+    ],
+    "NewGame exact preset-name path",
+  );
+  const newNameSpan = requireExactRoutineBlock(
+    blocks,
+    ".NewName@NamePlayer",
+    [
+      "ld b, NAME_PLAYER",
+      "ld de, wPlayerName",
+      "farcall NamingScreen",
+      "call RotateThreePalettesRight",
+      "call ClearTilemap",
+      "call LoadFontsExtra",
+      "call WaitBGMap",
+      "xor a",
+      "ld [wCurPartySpecies], a",
+      "farcall DrawIntroPlayerPic",
+      "ld b, SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      "call GetSGBLayout",
+      "call RotateThreePalettesLeft",
+      "ld hl, wPlayerName",
+      "ld de, .Chris",
+      "ld a, [wPlayerGender]",
+      "bit PLAYERGENDER_FEMALE_F, a",
+      "jr z, .Male",
+      "ld de, .Kris",
+    ],
+    "NewGame exact custom-name redraw/fallback selection",
+  );
+  const nameFinishSpan = requireExactRoutineBlock(
+    blocks,
+    ".Male@NamePlayer",
+    ["call InitName", "ret"],
+    "NewGame exact gendered default-name completion",
+  );
+  const storeNameSpan = requireExactRoutineBlock(
+    blocks,
+    "StorePlayerName",
+    [
+      "ld a, '@'",
+      "ld bc, NAME_LENGTH",
+      "ld hl, wPlayerName",
+      "call ByteFill",
+      "ld hl, wPlayerName",
+      "ld de, wStringBuffer2",
+      "call CopyName2",
+      "ret",
+    ],
+    "NewGame exact preset-name storage",
+  );
+  const initClockEntrySpan = requireExactRoutineBlock(
+    timeBlocks,
+    "InitClock",
+    [
+      "ldh a, [hInMenu]",
+      "push af",
+      "ld a, $1",
+      "ldh [hInMenu], a",
+      "ld a, FALSE",
+      "ld [wSpriteUpdatesEnabled], a",
+      "ld a, $10",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_NONE)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_NONE)",
+      "ld [wMusicFadeID + 1], a",
+      "ld c, 8",
+      "call DelayFrames",
+      "call RotateFourPalettesLeft",
+      "call ClearTilemap",
+      "call ClearSprites",
+      "ld b, SCGB_DIPLOMA",
+      "call GetSGBLayout",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "call LoadStandardFont",
+      "ld de, TimeSetBackgroundGFX",
+      "ld hl, vTiles2 tile $00",
+      "lb bc, BANK(TimeSetBackgroundGFX), 1",
+      "call Request1bpp",
+      "ld de, TimeSetUpArrowGFX",
+      "ld hl, vTiles2 tile $01",
+      "lb bc, BANK(TimeSetUpArrowGFX), 1",
+      "call Request1bpp",
+      "ld de, TimeSetDownArrowGFX",
+      "ld hl, vTiles2 tile $02",
+      "lb bc, BANK(TimeSetDownArrowGFX), 1",
+      "call Request1bpp",
+      "call .ClearScreen",
+      "call WaitBGMap",
+      "call RotateFourPalettesRight",
+      "ld hl, OakTimeWokeUpText",
+      "call PrintText",
+      "ld hl, wTimeSetBuffer",
+      "ld bc, wTimeSetBufferEnd - wTimeSetBuffer",
+      "xor a",
+      "call ByteFill",
+      "ld a, 10",
+      "ld [wInitHourBuffer], a",
+    ],
+    "NewGame exact clock setup entry/default hour",
+  );
+  const initClockFinishSpan = requireExactRoutineBlock(
+    timeBlocks,
+    ".MinutesAreSet@InitClock",
+    [
+      "call InitTimeOfDay",
+      "ld hl, OakText_ResponseToSetTime",
+      "call PrintText",
+      "call WaitPressAorB_BlinkCursor",
+      "pop af",
+      "ldh [hInMenu], a",
+      "ret",
+    ],
+    "NewGame exact clock acceptance/menu restoration",
+  );
+  const moveRightSpan = requireExactRoutineBlock(
+    playerBlocks,
+    "MovePlayerPicRight",
+    ["hlcoord 6, 4", "ld de, 1", "jr MovePlayerPic"],
+    "NewGame exact player-picture right movement entry",
+  );
+  const moveLeftSpan = requireExactRoutineBlock(
+    playerBlocks,
+    "MovePlayerPicLeft",
+    ["hlcoord 13, 4", "ld de, -1"],
+    "NewGame exact player-picture left movement entry",
+  );
+  const drawPlayerSpan = findLabelSpan(playerGfx, "DrawIntroPlayerPic");
+  const namingChoicesSpan = findLabelSpan(playerGfx, "ShowPlayerNamingChoices");
+  const fadeDataSpan = findLabelSpan(intro, "IntroFadePalettes");
+  const chrisNameSpan = findLabelSpan(intro, ".Chris");
+  const krisNameSpan = findLabelSpan(intro, ".Kris");
+  const timeSetSpan = findLabelSpan(timeSet, "InitClock");
+  const completionOperation: RuntimePresentationOperation = {
+    op: "complete_oak_speech",
+    source_span: speechSpan,
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "initialize_clock",
+      default_hour: 10,
+      hour_range: [0, 23],
+      minute_range: [0, 59],
+      requires_hour_confirmation: true,
+      requires_minute_confirmation: true,
+      restores_hInMenu: true,
+      source_span: timeSetSpan,
+    },
+    {
+      op: "play_audio",
+      audio: "MUSIC_ROUTE_30",
+      source_span: loadedSourceLineSpan(intro, 632, 633),
+    },
+    {
+      op: "present_intro_portrait",
+      kind: "trainer",
+      trainer_class: "POKEMON_PROF",
+      target: "vTiles2",
+      coordinate: [6, 4],
+      dimensions: [7, 7],
+      palette_layout: "SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      fade: { words: 6, frames_per_word: 10 },
+      source_span: trainerPicSpan,
+    },
+    {
+      op: "present_text_sequence",
+      entries: ["OakText1"],
+      source_span: loadedSourceLineSpan(intro, 647, 648),
+    },
+    {
+      op: "present_intro_portrait",
+      kind: "pokemon",
+      species: "WOOPER",
+      dvs: [0, 0],
+      coordinate: [6, 4],
+      wipe: { window_x_start: 0x77, delta: -8, stop_before: -1 },
+      palette_layout: "SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      source_span: sourceSpanThrough(wipeEntrySpan, wipeLoopSpan),
+    },
+    {
+      op: "present_text_sequence",
+      entries: ["OakText2", "OakText3", "OakText4"],
+      embedded_audio: [{ after: "OakText2", cry: "WOOPER", wait_for_sfx: true }],
+      source_span: wooperTextSpan,
+    },
+    {
+      op: "present_intro_portrait",
+      kind: "trainer",
+      trainer_class: "POKEMON_PROF",
+      target: "vTiles2",
+      coordinate: [6, 4],
+      dimensions: [7, 7],
+      palette_layout: "SCGB_TRAINER_OR_MON_FRONTPIC_PALS",
+      fade: { words: 6, frames_per_word: 10 },
+      source_span: loadedSourceLineSpan(intro, 675, 683),
+    },
+    {
+      op: "present_text_sequence",
+      entries: ["OakText5"],
+      source_span: loadedSourceLineSpan(intro, 685, 686),
+    },
+    {
+      op: "present_intro_portrait",
+      kind: "player",
+      gender_source: "wPlayerGender",
+      coordinate: [6, 4],
+      dimensions: [7, 7],
+      source_span: drawPlayerSpan,
+    },
+    {
+      op: "present_text_sequence",
+      entries: ["OakText6"],
+      source_span: loadedSourceLineSpan(intro, 698, 699),
+    },
+    {
+      op: "name_player",
+      preset_choices_source: "ShowPlayerNamingChoices",
+      preset_copy_source: "wStringBuffer2",
+      custom_naming_mode: "NAME_PLAYER",
+      custom_target: "wPlayerName",
+      empty_fallbacks: { male: "CHRIS", female: "KRIS" },
+      picture_motion: { right_tiles: 7, left_tiles: 7, steps: 8 },
+      source_span: sourceSpanThrough(nameEntrySpan, nameFinishSpan),
+    },
+    {
+      op: "present_text_sequence",
+      entries: ["OakText7"],
+      source_span: loadedSourceLineSpan(intro, 701, 702),
+    },
+    completionOperation,
+  ];
+  return {
+    id: "oak_speech",
+    source_entry: "OakSpeech",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "oak_speech_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "completed",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: speechSpan,
+        },
+      ],
+    },
+    phases: [{ id: "speech", source_span: speechSpan, operations }],
+    loop: {
+      source_span: speechSpan,
+      order: ["set_clock", "oak", "wooper", "oak", "player", "name", "return"],
+      input: { routines: ["InitClock", "ShowPlayerNamingChoices", "NamingScreen"] },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [
+      { id: "MUSIC_ROUTE_30", kind: "music", source_span: speechSpan },
+      { id: "CRY_WOOPER", kind: "cry", source_span: wooperTextSpan },
+    ],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.oak_speech", required: true },
+    source_span: speechSpan,
+    implementation_source_spans: [
+      initClockEntrySpan,
+      initClockFinishSpan,
+      fadeEntrySpan,
+      fadeLoopSpan,
+      fadeDataSpan,
+      wipeEntrySpan,
+      wipeLoopSpan,
+      trainerPicSpan,
+      nameEntrySpan,
+      newNameSpan,
+      nameFinishSpan,
+      storeNameSpan,
+      moveRightSpan,
+      moveLeftSpan,
+      namingChoicesSpan,
+      drawPlayerSpan,
+      chrisNameSpan,
+      krisNameSpan,
+    ],
+  };
+}
+
+function certifyInitializeWorldSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const playerObject = loadSource("engine/overworld/player_object.asm", options);
+  const overworldTime = loadSource("engine/overworld/time.asm", options);
+  const miscGfx = loadSource("gfx/misc.asm", options);
+  const introBlocks = parseAsmBlocks([intro]);
+  const playerBlocks = parseAsmBlocks([playerObject]);
+  const timeBlocks = parseAsmBlocks([overworldTime]);
+  const worldSpan = requireExactRoutineBlock(
+    introBlocks,
+    "InitializeWorld",
+    ["call ShrinkPlayer", "farcall SpawnPlayer", "farcall _InitializeStartDay", "ret"],
+    "NewGame exact world-initialization order",
+  );
+  const shrinkSpan = requireExactRoutineBlock(
+    introBlocks,
+    "ShrinkPlayer",
+    [
+      "ldh a, [hROMBank]",
+      "push af",
+      "ld a, 32",
+      "ld [wMusicFade], a",
+      "ld de, MUSIC_NONE",
+      "ld a, e",
+      "ld [wMusicFadeID], a",
+      "ld a, d",
+      "ld [wMusicFadeID + 1], a",
+      "ld de, SFX_ESCAPE_ROPE",
+      "call PlaySFX",
+      "pop af",
+      "rst Bankswitch",
+      "ld c, 8",
+      "call DelayFrames",
+      "ld hl, Shrink1Pic",
+      "ld b, BANK(Shrink1Pic)",
+      "call ShrinkFrame",
+      "ld c, 8",
+      "call DelayFrames",
+      "ld hl, Shrink2Pic",
+      "ld b, BANK(Shrink2Pic)",
+      "call ShrinkFrame",
+      "ld c, 8",
+      "call DelayFrames",
+      "hlcoord 6, 5",
+      "ld b, 7",
+      "ld c, 7",
+      "call ClearBox",
+      "ld c, 3",
+      "call DelayFrames",
+      "call Intro_PlacePlayerSprite",
+      "call LoadFontsExtra",
+      "ld c, 50",
+      "call DelayFrames",
+      "call RotateThreePalettesRight",
+      "call ClearTilemap",
+      "ret",
+    ],
+    "NewGame exact player-shrink presentation",
+  );
+  const shrinkFrameSpan = requireExactRoutineBlock(
+    introBlocks,
+    "ShrinkFrame",
+    [
+      "ld de, vTiles2",
+      "ld c, 7 * 7",
+      "predef DecompressGet2bpp",
+      "xor a",
+      "ldh [hGraphicStartTile], a",
+      "hlcoord 6, 4",
+      "lb bc, 7, 7",
+      "predef PlaceGraphic",
+      "ret",
+    ],
+    "NewGame exact shrink-frame decompression/draw",
+  );
+  const spriteEntrySpan = requireExactRoutineBlock(
+    introBlocks,
+    "Intro_PlacePlayerSprite",
+    [
+      "farcall GetPlayerIcon",
+      "ld c, 12",
+      "ld hl, vTiles0",
+      "call Request2bpp",
+      "ld hl, wShadowOAMSprite00",
+      "ld de, .sprites",
+      "ld a, [de]",
+      "inc de",
+      "ld c, a",
+    ],
+    "NewGame exact player-sprite setup",
+  );
+  const spriteLoopSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".loop@Intro_PlacePlayerSprite",
+    [
+      "ld a, [de]",
+      "inc de",
+      "ld [hli], a",
+      "ld a, [de]",
+      "inc de",
+      "ld [hli], a",
+      "ld a, [de]",
+      "inc de",
+      "ld [hli], a",
+      "ld b, PAL_OW_RED",
+      "ld a, [wPlayerGender]",
+      "bit PLAYERGENDER_FEMALE_F, a",
+      "jr z, .male",
+      "ld b, PAL_OW_BLUE",
+    ],
+    "NewGame exact player-sprite gender palette selection",
+  );
+  const spriteMaleSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".male@Intro_PlacePlayerSprite",
+    ["ld a, b", "ld [hli], a", "dec c", "jr nz, .loop", "ret"],
+    "NewGame exact four-object player-sprite loop",
+  );
+  const spawnEntrySpan = requireExactRoutineBlock(
+    playerBlocks,
+    "SpawnPlayer",
+    [
+      "ld a, -1",
+      "ld [wObjectFollow_Leader], a",
+      "ld [wObjectFollow_Follower], a",
+      "ld a, PLAYER",
+      "ld hl, PlayerObjectTemplate",
+      "call CopyPlayerObjectTemplate",
+      "ld b, PLAYER",
+      "call PlayerSpawn_ConvertCoords",
+      "ld a, PLAYER_OBJECT",
+      "call GetMapObject",
+      "ld hl, MAPOBJECT_PALETTE",
+      "add hl, bc",
+      "ln e, PAL_NPC_RED, OBJECTTYPE_SCRIPT",
+      "ld a, [wPlayerSpriteSetupFlags]",
+      "bit PLAYERSPRITESETUP_FEMALE_TO_MALE_F, a",
+      "jr nz, .ok",
+      "ld a, [wPlayerGender]",
+      "bit PLAYERGENDER_FEMALE_F, a",
+      "jr z, .ok",
+      "ln e, PAL_NPC_BLUE, OBJECTTYPE_SCRIPT",
+    ],
+    "NewGame exact spawned-player template/palette selection",
+  );
+  const spawnFinishSpan = requireExactRoutineBlock(
+    playerBlocks,
+    ".ok@SpawnPlayer",
+    [
+      "ld [hl], e",
+      "ld a, PLAYER_OBJECT",
+      "ldh [hMapObjectIndex], a",
+      "ld bc, wMapObjects",
+      "ld a, PLAYER_OBJECT",
+      "ldh [hObjectStructIndex], a",
+      "ld de, wObjectStructs",
+      "call CopyMapObjectToObjectStruct",
+      "ld a, PLAYER",
+      "ld [wCenteredObject], a",
+      "ret",
+    ],
+    "NewGame exact spawned-player object-struct completion",
+  );
+  const startDayWrapperSpan = requireExactRoutineBlock(
+    timeBlocks,
+    "_InitializeStartDay",
+    ["call InitializeStartDay", "ret"],
+    "NewGame exact start-day wrapper",
+  );
+  const startDaySpan = requireExactRoutineBlock(
+    timeBlocks,
+    "InitializeStartDay",
+    ["call UpdateTime", "ld hl, wTimerEventStartDay", "call CopyDayToHL", "ret"],
+    "NewGame exact initial day capture",
+  );
+  const shrink1Span = findTokenSpan(miscGfx, 'INCBIN "gfx/new_game/shrink1.2bpp.lz"');
+  const shrink2Span = findTokenSpan(miscGfx, 'INCBIN "gfx/new_game/shrink2.2bpp.lz"');
+  const spriteTableSpan = requireExactNormalizedRegion(
+    intro,
+    ".sprites",
+    "const_def",
+    [
+      ".sprites",
+      "db 4",
+      "db 9 * TILE_WIDTH + 4, 9 * TILE_WIDTH, 0",
+      "db 9 * TILE_WIDTH + 4, 10 * TILE_WIDTH, 1",
+      "db 10 * TILE_WIDTH + 4, 9 * TILE_WIDTH, 2",
+      "db 10 * TILE_WIDTH + 4, 10 * TILE_WIDTH, 3",
+      "const_def",
+    ],
+    "NewGame exact four-object intro player OAM table",
+  );
+  const playerTemplateSpan = findLabelSpan(playerObject, "PlayerObjectTemplate");
+  const completionOperation: RuntimePresentationOperation = {
+    op: "initialize_world_completion",
+    source_span: worldSpan,
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "fade_audio",
+      audio: "MUSIC_NONE",
+      frames: 512,
+      fade_register: { target: "wMusicFade", value: 32 },
+      source_span: shrinkSpan,
+    },
+    {
+      op: "play_audio",
+      audio: "SFX_ESCAPE_ROPE",
+      source_span: shrinkSpan,
+    },
+    {
+      op: "animate_player_shrink",
+      frames: [
+        { resource: "gfx/new_game/shrink1.2bpp.lz", wait_before: 8 },
+        { resource: "gfx/new_game/shrink2.2bpp.lz", wait_before: 8 },
+      ],
+      decompressed_tile_count: 49,
+      coordinate: [6, 4],
+      dimensions: [7, 7],
+      clear_coordinate: [6, 5],
+      wait_after_second: 8,
+      wait_after_clear: 3,
+      source_span: sourceSpanThrough(shrinkSpan, shrinkFrameSpan),
+    },
+    {
+      op: "place_player_intro_sprite",
+      object_count: 4,
+      oam: [
+        { y: 76, x: 72, tile: 0 },
+        { y: 76, x: 80, tile: 1 },
+        { y: 84, x: 72, tile: 2 },
+        { y: 84, x: 80, tile: 3 },
+      ],
+      palette: { male: "PAL_OW_RED", female: "PAL_OW_BLUE" },
+      wait_after: 50,
+      source_span: sourceSpanThrough(spriteEntrySpan, spriteMaleSpan),
+    },
+    {
+      op: "spawn_player",
+      template: "PlayerObjectTemplate",
+      follower_indices: 0xff,
+      palette: {
+        default: "PAL_NPC_RED",
+        female: "PAL_NPC_BLUE",
+        female_to_male_override: "PAL_NPC_RED",
+      },
+      centered_object: "PLAYER",
+      source_span: sourceSpanThrough(spawnEntrySpan, spawnFinishSpan),
+    },
+    {
+      op: "initialize_start_day",
+      update_time: true,
+      target: "wTimerEventStartDay",
+      source_span: sourceSpanThrough(startDayWrapperSpan, startDaySpan),
+    },
+    completionOperation,
+  ];
+  return {
+    id: "initialize_world",
+    source_entry: "InitializeWorld",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "initialize_world_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "completed",
+          value: null,
+          condition: { kind: "ordinary_return" },
+          source_span: worldSpan,
+        },
+      ],
+    },
+    phases: [{ id: "world_initialization", source_span: worldSpan, operations }],
+    loop: {
+      source_span: worldSpan,
+      order: ["shrink_player", "spawn_player", "initialize_start_day", "return"],
+      input: {},
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [
+      {
+        path: "gfx/new_game/shrink1.2bpp.lz",
+        kind: "tiles",
+        include_source_span: shrink1Span,
+        data_source_span: shrink1Span,
+      },
+      {
+        path: "gfx/new_game/shrink2.2bpp.lz",
+        kind: "tiles",
+        include_source_span: shrink2Span,
+        data_source_span: shrink2Span,
+      },
+    ],
+    audio: [
+      { id: "MUSIC_NONE", kind: "silence", source_span: shrinkSpan },
+      { id: "SFX_ESCAPE_ROPE", kind: "sound_effect", source_span: shrinkSpan },
+    ],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.initialize_world", required: true },
+    source_span: worldSpan,
+    implementation_source_spans: [
+      shrinkSpan,
+      shrinkFrameSpan,
+      spriteEntrySpan,
+      spriteLoopSpan,
+      spriteMaleSpan,
+      spriteTableSpan,
+      spawnEntrySpan,
+      spawnFinishSpan,
+      playerTemplateSpan,
+      startDayWrapperSpan,
+      startDaySpan,
+    ],
+  };
+}
+
+function certifyDeleteSaveDataSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/menus/delete_save.asm", options);
+  const playerObject = loadSource("engine/overworld/player_object.asm", options);
+  const emptySram = loadSource("engine/menus/empty_sram.asm", options);
+  const ramConstants = loadSource("constants/ram_constants.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const routineSpan = requireExactRoutineBlock(
+    blocks,
+    "_DeleteSaveData",
+    [
+      "farcall BlankScreen",
+      "ld b, SCGB_DIPLOMA",
+      "call GetSGBLayout",
+      "call LoadStandardFont",
+      "call LoadFontsExtra",
+      "ld de, MUSIC_MAIN_MENU",
+      "call PlayMusic",
+      "ld hl, .ClearAllSaveDataText",
+      "call PrintText",
+      "ld hl, .NoYesMenuHeader",
+      "call CopyMenuHeader",
+      "call VerticalMenu",
+      "ret c",
+      "ld a, [wMenuCursorY]",
+      "cp 1",
+      "ret z",
+      "farcall EmptyAllSRAMBanks",
+      "ret",
+    ],
+    "DeleteSaveData exact confirmation/erase flow",
+  );
+  const blankSpan = requireExactRoutineBlock(
+    parseAsmBlocks([playerObject]),
+    "BlankScreen",
+    [
+      "call DisableSpriteUpdates",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "call ClearBGPalettes",
+      "call ClearSprites",
+      "hlcoord 0, 0",
+      "ld bc, wTilemapEnd - wTilemap",
+      "ld a, ' '",
+      "call ByteFill",
+      "hlcoord 0, 0, wAttrmap",
+      "ld bc, wAttrmapEnd - wAttrmap",
+      "ld a, $7",
+      "call ByteFill",
+      "call WaitBGMap2",
+      "call SetDefaultBGPAndOBP",
+      "ret",
+    ],
+    "DeleteSaveData exact blank-screen setup",
+  );
+  const emptyBlocks = parseAsmBlocks([emptySram]);
+  const emptyEntrySpan = requireExactRoutineBlock(
+    emptyBlocks,
+    "EmptyAllSRAMBanks",
+    [
+      "for x, NUM_SRAM_BANKS",
+      "ld a, x",
+      "call .EmptyBank",
+      "endr",
+      "ret",
+    ],
+    "DeleteSaveData exact SRAM-bank loop",
+  );
+  const emptyBankSpan = requireExactRoutineBlock(
+    emptyBlocks,
+    ".EmptyBank@EmptyAllSRAMBanks",
+    [
+      "call OpenSRAM",
+      "ld hl, STARTOF(SRAM)",
+      "ld bc, SIZEOF(SRAM)",
+      "xor a",
+      "call ByteFill",
+      "call CloseSRAM",
+      "ret",
+    ],
+    "DeleteSaveData exact full-bank zero fill",
+  );
+  findTokenSpan(ramConstants, "DEF NUM_SRAM_BANKS EQU 4");
+  const textSpan = findLabelSpan(source, ".ClearAllSaveDataText");
+  const headerSpan = findLabelSpan(source, ".NoYesMenuHeader");
+  const menuDataSpan = findLabelSpan(source, ".MenuData");
+  const completionOperation: RuntimePresentationOperation = {
+    op: "delete_save_completion",
+    source_span: routineSpan,
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "blank_screen",
+      tile_value: "' '",
+      attr_value: 7,
+      disable_sprite_updates: true,
+      source_span: blankSpan,
+    },
+    {
+      op: "apply_palette_layout",
+      layout: { symbol: "SCGB_DIPLOMA", value: 8 },
+      source_span: routineSpan,
+    },
+    {
+      op: "play_audio",
+      audio: "MUSIC_MAIN_MENU",
+      source_span: routineSpan,
+    },
+    {
+      op: "present_text",
+      text: "ClearAllSaveDataText",
+      source_span: textSpan,
+    },
+    {
+      op: "load_menu",
+      header: ".NoYesMenuHeader@_DeleteSaveData",
+      flags: [],
+      coordinates: { left: 14, top: 7, right: 19, bottom: 11 },
+      items: ["NO", "YES"],
+      item_flags: ["STATICMENU_CURSOR", "STATICMENU_NO_TOP_SPACING"],
+      default_option: 1,
+      header_source_span: headerSpan,
+      data_source_span: menuDataSpan,
+      source_span: routineSpan,
+    },
+    {
+      op: "erase_sram_banks",
+      condition: { source: "wMenuCursorY", equals: 2 },
+      bank_count: 4,
+      start: "STARTOF(SRAM)",
+      byte_count: "SIZEOF(SRAM)",
+      value: 0,
+      source_span: sourceSpanThrough(emptyEntrySpan, emptyBankSpan),
+    },
+    completionOperation,
+  ];
+  return {
+    id: "delete_save_data",
+    source_entry: "_DeleteSaveData",
+    accepted_call_forms: ["farcall"],
+    result: {
+      name: "delete_save_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "returned",
+          value: null,
+          condition: { kind: "cancel_no_or_erased" },
+          source_span: routineSpan,
+        },
+      ],
+    },
+    phases: [{ id: "delete_save", source_span: routineSpan, operations }],
+    loop: {
+      source_span: routineSpan,
+      order: ["blank", "prompt", "menu", "erase_if_yes", "return"],
+      input: { routine: "VerticalMenu", result: "wMenuCursorY" },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [
+      { id: "MUSIC_MAIN_MENU", kind: "music", source_span: routineSpan },
+    ],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: {
+      id: "runtime_title_screen.delete_save_data",
+      required: true,
+    },
+    source_span: routineSpan,
+    implementation_source_spans: [blankSpan, emptyEntrySpan, emptyBankSpan],
+  };
+}
+
+function certifyResetClockPasswordSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const source = loadSource("engine/rtc/reset_password.asm", options);
+  const playerObject = loadSource("engine/overworld/player_object.asm", options);
+  const ramConstants = loadSource("constants/ram_constants.asm", options);
+  const textConstants = loadSource("constants/text_constants.asm", options);
+  const sram = loadSource("ram/sram.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const entrySpan = requireExactRoutineBlock(
+    blocks,
+    "_ResetClock",
+    [
+      "farcall BlankScreen",
+      "ld b, SCGB_DIPLOMA",
+      "call GetSGBLayout",
+      "call LoadStandardFont",
+      "call LoadFontsExtra",
+      "ld de, MUSIC_MAIN_MENU",
+      "call PlayMusic",
+      "ld hl, .PasswordAskResetClockText",
+      "call PrintText",
+      "ld hl, .NoYes_MenuHeader",
+      "call CopyMenuHeader",
+      "call VerticalMenu",
+      "ret c",
+      "ld a, [wMenuCursorY]",
+      "cp 1",
+      "ret z",
+      "call ClockResetPassword",
+      "jr c, .wrongpassword",
+      "ld a, BANK(sRTCStatusFlags)",
+      "call OpenSRAM",
+      "ld a, RTC_RESET",
+      "ld [sRTCStatusFlags], a",
+      "call CloseSRAM",
+      "ld hl, .PasswordAskResetText",
+      "call PrintText",
+      "ret",
+    ],
+    "ResetClock exact confirmation/password/status flow",
+  );
+  const wrongSpan = requireExactRoutineBlock(
+    blocks,
+    ".wrongpassword@_ResetClock",
+    ["ld hl, .PasswordWrongText", "call PrintText", "ret"],
+    "ResetClock exact wrong-password return",
+  );
+  const passwordEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "ClockResetPassword",
+    [
+      "call .CalculatePassword",
+      "push de",
+      "ld hl, wStringBuffer2",
+      "ld bc, 5",
+      "xor a",
+      "call ByteFill",
+      "ld a, 4",
+      "ld [wStringBuffer2 + 5], a",
+      "ld hl, .PasswordAskEnterText",
+      "call PrintText",
+    ],
+    "ResetClock exact password input initialization",
+  );
+  const passwordLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop@ClockResetPassword",
+    ["call .updateIDdisplay"],
+    "ResetClock exact password redraw loop",
+  );
+  const passwordInputSpan = requireExactRoutineBlock(
+    blocks,
+    ".loop2@ClockResetPassword",
+    [
+      "call JoyTextDelay",
+      "ldh a, [hJoyLast]",
+      "ld b, a",
+      "and PAD_A",
+      "jr nz, .confirm",
+      "ld a, b",
+      "and PAD_CTRL_PAD",
+      "jr z, .loop2",
+      "call .dpadinput",
+      "ld c, 3",
+      "call DelayFrames",
+      "jr .loop",
+    ],
+    "ResetClock exact password input loop",
+  );
+  const confirmSpan = requireExactRoutineBlock(
+    blocks,
+    ".confirm@ClockResetPassword",
+    [
+      "call .ConvertDecIDToBytes",
+      "pop de",
+      "ld a, e",
+      "cp l",
+      "jr nz, .nope",
+      "ld a, d",
+      "cp h",
+      "jr nz, .nope",
+      "and a",
+      "ret",
+    ],
+    "ResetClock exact password comparison success",
+  );
+  const rejectSpan = requireExactRoutineBlock(
+    blocks,
+    ".nope@ClockResetPassword",
+    ["scf", "ret"],
+    "ResetClock exact password comparison rejection",
+  );
+  const displaySpan = sourceSpanThrough(
+    requireExactRoutineBlock(
+      blocks,
+      ".updateIDdisplay@ClockResetPassword",
+      ["hlcoord 14, 15", "ld de, wStringBuffer2", "ld c, 5"],
+      "ResetClock exact password display setup",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".loop3@ClockResetPassword",
+      [
+        "ld a, [de]",
+        "add '0'",
+        "ld [hli], a",
+        "inc de",
+        "dec c",
+        "jr nz, .loop3",
+        "hlcoord 14, 16",
+        "ld bc, 5",
+        "ld a, ' '",
+        "call ByteFill",
+        "hlcoord 14, 16",
+        "ld a, [wStringBuffer2 + 5]",
+        "ld e, a",
+        "ld d, 0",
+        "add hl, de",
+        "ld [hl], '▲'",
+        "ret",
+      ],
+      "ResetClock exact password digits/cursor display",
+    ),
+  );
+  const dpadSpan = sourceSpanThrough(
+    requireExactRoutineBlock(
+      blocks,
+      ".dpadinput@ClockResetPassword",
+      [
+        "ld a, b",
+        "and PAD_LEFT",
+        "jr nz, .left",
+        "ld a, b",
+        "and PAD_RIGHT",
+        "jr nz, .right",
+        "ld a, b",
+        "and PAD_UP",
+        "jr nz, .up",
+        "ld a, b",
+        "and PAD_DOWN",
+        "jr nz, .down",
+        "ret",
+      ],
+      "ResetClock exact directional dispatch",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".getcurrentdigit@ClockResetPassword",
+      [
+        "ld a, [wStringBuffer2 + 5]",
+        "ld e, a",
+        "ld d, 0",
+        "ld hl, wStringBuffer2",
+        "add hl, de",
+        "ret",
+      ],
+      "ResetClock exact selected-digit lookup",
+    ),
+  );
+  requireNormalizedSourceSequence(
+    source,
+    [
+      ".left",
+      "ld a, [wStringBuffer2 + 5]",
+      "and a",
+      "ret z",
+      "dec a",
+      "ld [wStringBuffer2 + 5], a",
+      "ret",
+      ".right",
+      "ld a, [wStringBuffer2 + 5]",
+      "cp 4",
+      "ret z",
+      "inc a",
+      "ld [wStringBuffer2 + 5], a",
+      "ret",
+      ".up",
+      "call .getcurrentdigit",
+      "ld a, [hl]",
+      "cp 9",
+      "jr z, .wraparound_up",
+      "inc a",
+      "ld [hl], a",
+      "ret",
+      ".wraparound_up",
+      "ld [hl], 0",
+      "ret",
+      ".down",
+      "call .getcurrentdigit",
+      "ld a, [hl]",
+      "and a",
+      "jr z, .wraparound_down",
+      "dec a",
+      "ld [hl], a",
+      "ret",
+      ".wraparound_down",
+      "ld [hl], 9",
+      "ret",
+    ],
+    "ResetClock exact cursor clamps and decimal wraparound",
+  );
+  const conversionSpan = sourceSpanThrough(
+    requireExactRoutineBlock(
+      blocks,
+      ".ConvertDecIDToBytes@ClockResetPassword",
+      [
+        "ld hl, 0",
+        "ld de, wStringBuffer2 + 4",
+        "ld bc, 1",
+        "call .ConvertToBytes",
+        "ld bc, 10",
+        "call .ConvertToBytes",
+        "ld bc, 100",
+        "call .ConvertToBytes",
+        "ld bc, 1000",
+        "call .ConvertToBytes",
+        "ld bc, 10000",
+      ],
+      "ResetClock exact five-digit conversion weights",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".ConvertToBytes@ClockResetPassword",
+      [
+        "ld a, [de]",
+        "dec de",
+        "push hl",
+        "ld hl, 0",
+        "call AddNTimes",
+        "ld c, l",
+        "ld b, h",
+        "pop hl",
+        "add hl, bc",
+        "ret",
+      ],
+      "ResetClock exact decimal-to-u16 accumulation",
+    ),
+  );
+  const calculationSpan = sourceSpanThrough(
+    requireExactRoutineBlock(
+      blocks,
+      ".CalculatePassword@ClockResetPassword",
+      [
+        "ld a, BANK(sPlayerData)",
+        "call OpenSRAM",
+        "ld de, 0",
+        "ld hl, sPlayerData + (wPlayerID - wPlayerData)",
+        "ld c, 2",
+        "call .ComponentFromNumber",
+        "ld hl, sPlayerData + (wPlayerName - wPlayerData)",
+        "ld c, NAME_LENGTH_JAPANESE - 1",
+        "call .ComponentFromString",
+        "ld hl, sPlayerData + (wMoney - wPlayerData)",
+        "ld c, 3",
+        "call .ComponentFromNumber",
+        "call CloseSRAM",
+        "ret",
+      ],
+      "ResetClock exact saved-profile password inputs",
+    ),
+    requireExactRoutineBlock(
+      blocks,
+      ".ComponentFromString@ClockResetPassword",
+      [
+        "ld a, [hli]",
+        "cp '@'",
+        "ret z",
+        "add e",
+        "ld e, a",
+        "ld a, 0",
+        "adc d",
+        "ld d, a",
+        "dec c",
+        "jr nz, .ComponentFromString",
+        "ret",
+      ],
+      "ResetClock exact name-byte password component",
+    ),
+  );
+  requireExactRoutineBlock(
+    blocks,
+    ".ComponentFromNumber@ClockResetPassword",
+    [
+      "ld a, [hli]",
+      "add e",
+      "ld e, a",
+      "ld a, 0",
+      "adc d",
+      "ld d, a",
+      "dec c",
+      "jr nz, .ComponentFromNumber",
+      "ret",
+    ],
+    "ResetClock exact numeric-byte password component",
+  );
+  const blankSpan = requireExactRoutineBlock(
+    parseAsmBlocks([playerObject]),
+    "BlankScreen",
+    [
+      "call DisableSpriteUpdates",
+      "xor a",
+      "ldh [hBGMapMode], a",
+      "call ClearBGPalettes",
+      "call ClearSprites",
+      "hlcoord 0, 0",
+      "ld bc, wTilemapEnd - wTilemap",
+      "ld a, ' '",
+      "call ByteFill",
+      "hlcoord 0, 0, wAttrmap",
+      "ld bc, wAttrmapEnd - wAttrmap",
+      "ld a, $7",
+      "call ByteFill",
+      "call WaitBGMap2",
+      "call SetDefaultBGPAndOBP",
+      "ret",
+    ],
+    "ResetClock exact blank-screen setup",
+  );
+  const rtcResetSpan = findTokenSpan(ramConstants, "shift_const RTC_RESET");
+  findTokenSpan(textConstants, "DEF NAME_LENGTH_JAPANESE      EQU 6");
+  const rtcStatusSpan = findTokenSpan(sram, "sRTCStatusFlags:: db");
+  const playerDataSpan = findTokenSpan(sram, "sPlayerData::");
+  const promptSpan = findLabelSpan(source, ".PasswordAskResetClockText");
+  const successTextSpan = findLabelSpan(source, ".PasswordAskResetText");
+  const failureTextSpan = findLabelSpan(source, ".PasswordWrongText");
+  const enterTextSpan = findLabelSpan(source, ".PasswordAskEnterText");
+  const headerSpan = findLabelSpan(source, ".NoYes_MenuHeader");
+  const menuDataSpan = findLabelSpan(source, ".NoYes_MenuData");
+  const completionOperation: RuntimePresentationOperation = {
+    op: "reset_clock_completion",
+    source_span: sourceSpanThrough(entrySpan, wrongSpan),
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "blank_screen",
+      tile_value: "' '",
+      attr_value: 7,
+      disable_sprite_updates: true,
+      source_span: blankSpan,
+    },
+    {
+      op: "apply_palette_layout",
+      layout: { symbol: "SCGB_DIPLOMA", value: 8 },
+      source_span: entrySpan,
+    },
+    { op: "play_audio", audio: "MUSIC_MAIN_MENU", source_span: entrySpan },
+    { op: "present_text", text: "PasswordAskResetClockText", source_span: promptSpan },
+    {
+      op: "load_menu",
+      header: ".NoYes_MenuHeader@_ResetClock",
+      flags: [],
+      coordinates: { left: 14, top: 7, right: 19, bottom: 11 },
+      items: ["NO", "YES"],
+      item_flags: ["STATICMENU_CURSOR", "STATICMENU_NO_TOP_SPACING"],
+      default_option: 1,
+      header_source_span: headerSpan,
+      data_source_span: menuDataSpan,
+      source_span: entrySpan,
+    },
+    {
+      op: "derive_clock_reset_password",
+      condition: { source: "wMenuCursorY", equals: 2 },
+      arithmetic: "wrapping_u16_sum",
+      player_data: "sPlayerData",
+      player_id_bytes: 2,
+      player_name_bytes: 5,
+      player_name_terminator: "'@'",
+      money_bytes: 3,
+      player_data_source_span: playerDataSpan,
+      source_span: calculationSpan,
+    },
+    { op: "present_text", text: "PasswordAskEnterText", condition: { source: "wMenuCursorY", equals: 2 }, source_span: enterTextSpan },
+    {
+      op: "edit_decimal_password",
+      condition: { source: "wMenuCursorY", equals: 2 },
+      digits: 5,
+      initial_digits: [0, 0, 0, 0, 0],
+      initial_cursor: 4,
+      cursor_minimum: 0,
+      cursor_maximum: 4,
+      digit_minimum: 0,
+      digit_maximum: 9,
+      digit_wraps: true,
+      confirm_button: "PAD_A",
+      cancel_button: null,
+      redraw_source_span: displaySpan,
+      directional_source_span: dpadSpan,
+      source_span: sourceSpanThrough(passwordEntrySpan, passwordInputSpan),
+    },
+    {
+      op: "compare_clock_reset_password",
+      entered_encoding: "five_decimal_digits_to_u16",
+      success_carry: 0,
+      failure_carry: 1,
+      conversion_source_span: conversionSpan,
+      source_span: sourceSpanThrough(confirmSpan, rejectSpan),
+    },
+    {
+      op: "write_sram_byte",
+      target: "sRTCStatusFlags",
+      bank: "BANK(sRTCStatusFlags)",
+      value: { symbol: "RTC_RESET", value: 0x80 },
+      condition: { password_matches: true },
+      target_source_span: rtcStatusSpan,
+      value_source_span: rtcResetSpan,
+      source_span: entrySpan,
+    },
+    { op: "present_text", text: "PasswordAskResetText", condition: { password_matches: true }, source_span: successTextSpan },
+    { op: "present_text", text: "PasswordWrongText", condition: { password_matches: false }, source_span: failureTextSpan },
+    completionOperation,
+  ];
+  return {
+    id: "reset_clock_password",
+    source_entry: "_ResetClock",
+    accepted_call_forms: ["farcall"],
+    result: {
+      name: "reset_clock_completion",
+      storage: "none",
+      domain: [
+        {
+          id: "returned",
+          value: null,
+          condition: { kind: "cancel_no_wrong_or_flagged" },
+          source_span: sourceSpanThrough(entrySpan, wrongSpan),
+        },
+      ],
+    },
+    phases: [{ id: "reset_clock_password", source_span: sourceSpanThrough(entrySpan, wrongSpan), operations }],
+    loop: {
+      source_span: sourceSpanThrough(passwordEntrySpan, rejectSpan),
+      order: ["prompt", "confirm_reset", "derive_password", "edit_digits", "compare", "set_reset_flag_if_matching", "return"],
+      input: { routine: "VerticalMenu then JoyTextDelay", confirmation: "PAD_A", directional_repeat_delay_frames: 3 },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [{ id: "MUSIC_MAIN_MENU", kind: "music", source_span: entrySpan }],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.reset_clock_password", required: true },
+    source_span: sourceSpanThrough(entrySpan, wrongSpan),
+    implementation_source_spans: [blankSpan, passwordEntrySpan, passwordInputSpan, displaySpan, dpadSpan, conversionSpan, calculationSpan],
+  };
+}
+
+function certifyContinueRtcRestartClockSubprogram(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationCallableSubprogram {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const restart = loadSource("engine/rtc/restart_clock.asm", options);
+  const homeTime = loadSource("home/time.asm", options);
+  const rtc = loadSource("engine/rtc/rtc.asm", options);
+  const ramConstants = loadSource("constants/ram_constants.asm", options);
+  const sram = loadSource("ram/sram.asm", options);
+  const wrapperSpan = requireExactRoutineBlock(
+    parseAsmBlocks([intro]),
+    "Continue_CheckRTC_RestartClock",
+    [
+      "call CheckRTCStatus",
+      "and RTC_RESET",
+      "jr z, .pass",
+      "farcall RestartClock",
+      "ld a, c",
+      "and a",
+      "jr z, .pass",
+      "scf",
+      "ret",
+    ],
+    "Continue exact RTC-reset dispatch/cancel result",
+  );
+  const passSpan = requireExactRoutineBlock(
+    parseAsmBlocks([intro]),
+    ".pass@Continue_CheckRTC_RestartClock",
+    ["xor a", "ret"],
+    "Continue exact RTC-reset pass result",
+  );
+  const statusSpan = requireExactRoutineBlock(
+    parseAsmBlocks([homeTime]),
+    "CheckRTCStatus",
+    [
+      "ld a, BANK(sRTCStatusFlags)",
+      "call OpenSRAM",
+      "ld a, [sRTCStatusFlags]",
+      "call CloseSRAM",
+      "ret",
+    ],
+    "Continue exact RTC-status SRAM read",
+  );
+  const restartBlocks = parseAsmBlocks([restart]);
+  const restartSpan = requireExactRoutineBlock(
+    restartBlocks,
+    "RestartClock",
+    [
+      "ld hl, .ClockTimeMayBeWrongText",
+      "call PrintText",
+      "ld hl, wOptions",
+      "ld a, [hl]",
+      "push af",
+      "set NO_TEXT_SCROLL, [hl]",
+      "call LoadStandardMenuHeader",
+      "call ClearTilemap",
+      "ld hl, .ClockSetWithControlPadText",
+      "call PrintText",
+      "call .SetClock",
+      "call ExitMenu",
+      "pop bc",
+      "ld hl, wOptions",
+      "ld [hl], b",
+      "ld c, a",
+      "ret",
+    ],
+    "Continue exact restart-clock wrapper",
+  );
+  const setClockSpan = requireExactRoutineBlock(
+    restartBlocks,
+    ".SetClock@RestartClock",
+    [
+      "ld a, RESTART_CLOCK_DAY",
+      "ld [wRestartClockCurDivision], a",
+      "ld [wRestartClockPrevDivision], a",
+      "ld a, 8",
+      "ld [wRestartClockUpArrowYCoord], a",
+      "call UpdateTime",
+      "call GetWeekday",
+      "ld [wRestartClockDay], a",
+      "ldh a, [hHours]",
+      "ld [wRestartClockHour], a",
+      "ldh a, [hMinutes]",
+      "ld [wRestartClockMin], a",
+    ],
+    "Continue exact restart-clock initial values",
+  );
+  const loopSpan = requireExactRoutineBlock(
+    restartBlocks,
+    ".loop@RestartClock",
+    [
+      "call .joy_loop",
+      "jr nc, .loop",
+      "and a",
+      "ret nz",
+      "call .PrintTime",
+      "ld hl, .ClockIsThisOKText",
+      "call PrintText",
+      "call YesNoBox",
+      "jr c, .cancel",
+      "ld a, [wRestartClockDay]",
+      "ld [wStringBuffer2], a",
+      "ld a, [wRestartClockHour]",
+      "ld [wStringBuffer2 + 1], a",
+      "ld a, [wRestartClockMin]",
+      "ld [wStringBuffer2 + 2], a",
+      "xor a",
+      "ld [wStringBuffer2 + 3], a",
+      "call InitTime",
+      "call .PrintTime",
+      "ld hl, .ClockHasResetText",
+      "call PrintText",
+      "call WaitPressAorB_BlinkCursor",
+      "xor a",
+      "ret",
+    ],
+    "Continue exact restart-clock confirmation/writeback",
+  );
+  const cancelSpan = requireExactRoutineBlock(
+    restartBlocks,
+    ".cancel@RestartClock",
+    ["ld a, TRUE", "ret"],
+    "Continue exact restart-clock cancel",
+  );
+  const joySpan = requireExactRoutineBlock(
+    restartBlocks,
+    ".joy_loop@RestartClock",
+    [
+      "call JoyTextDelay_ForcehJoyDown",
+      "ld c, a",
+      "push af",
+      "call .PrintTime",
+      "pop af",
+      "bit B_PAD_A, a",
+      "jr nz, .press_A",
+      "bit B_PAD_B, a",
+      "jr nz, .press_B",
+      "bit B_PAD_UP, a",
+      "jr nz, .pressed_up",
+      "bit B_PAD_DOWN, a",
+      "jr nz, .pressed_down",
+      "bit B_PAD_LEFT, a",
+      "jr nz, .pressed_left",
+      "bit B_PAD_RIGHT, a",
+      "jr nz, .pressed_right",
+      "jr .joy_loop",
+    ],
+    "Continue exact restart-clock input priority",
+  );
+  const scrollSpan = requireNormalizedSourceSequence(
+    restart,
+    [
+      ".press_A",
+      "ld a, FALSE",
+      "scf",
+      "ret",
+      ".press_B",
+      "ld a, TRUE",
+      "scf",
+      "ret",
+      ".pressed_up",
+      "ld a, [wRestartClockCurDivision]",
+      "call RestartClock_GetWraparoundTime",
+      "ld a, [de]",
+      "inc a",
+      "ld [de], a",
+      "cp b",
+      "jr c, .done_scroll",
+      "ld a, 0",
+      "ld [de], a",
+      "jr .done_scroll",
+      ".pressed_down",
+      "ld a, [wRestartClockCurDivision]",
+      "call RestartClock_GetWraparoundTime",
+      "ld a, [de]",
+      "dec a",
+      "ld [de], a",
+      "cp -1",
+      "jr nz, .done_scroll",
+      "ld a, b",
+      "dec a",
+      "ld [de], a",
+      "jr .done_scroll",
+      ".pressed_left",
+      "ld hl, wRestartClockCurDivision",
+      "dec [hl]",
+      "jr nz, .done_scroll",
+      "ld [hl], RESTART_CLOCK_MIN",
+      "jr .done_scroll",
+      ".pressed_right",
+      "ld hl, wRestartClockCurDivision",
+      "inc [hl]",
+      "ld a, [hl]",
+      "cp NUM_RESTART_CLOCK_DIVISIONS + 1",
+      "jr c, .done_scroll",
+      "ld [hl], RESTART_CLOCK_DAY",
+      ".done_scroll",
+      "xor a",
+      "ret",
+    ],
+    "Continue exact restart-clock field/digit wraparound",
+  );
+  const wraparoundSpan = requireExactRoutineBlock(
+    restartBlocks,
+    "RestartClock_GetWraparoundTime",
+    [
+      "push hl",
+      "dec a",
+      "ld e, a",
+      "ld d, 0",
+      "ld hl, .WrapAroundTimes",
+      "rept 4",
+      "add hl, de",
+      "endr",
+      "ld e, [hl]",
+      "inc hl",
+      "ld d, [hl]",
+      "inc hl",
+      "ld b, [hl]",
+      "inc hl",
+      "ld c, [hl]",
+      "pop hl",
+      "ret",
+    ],
+    "Continue exact restart-clock field-table lookup",
+  );
+  const printSpan = requireExactRoutineBlock(
+    restartBlocks,
+    ".PrintTime@RestartClock",
+    [
+      "hlcoord 0, 5",
+      "ld b, 5",
+      "ld c, 18",
+      "call Textbox",
+      "decoord 1, 8",
+      "ld a, [wRestartClockDay]",
+      "ld b, a",
+      "farcall PrintDayOfWeek",
+      "ld a, [wRestartClockHour]",
+      "ld b, a",
+      "ld a, [wRestartClockMin]",
+      "ld c, a",
+      "decoord 11, 8",
+      "farcall PrintHoursMins",
+      "ld a, [wRestartClockPrevDivision]",
+      "lb de, ' ', ' '",
+      "call .PlaceChars",
+      "ld a, [wRestartClockCurDivision]",
+      "lb de, '▲', '▼'",
+      "call .PlaceChars",
+      "ld a, [wRestartClockCurDivision]",
+      "ld [wRestartClockPrevDivision], a",
+      "ret",
+    ],
+    "Continue exact restart-clock display",
+  );
+  requireNormalizedSourceSequence(
+    restart,
+    [
+      "wraparound_time wRestartClockDay, 7, 4",
+      "wraparound_time wRestartClockHour, 24, 12",
+      "wraparound_time wRestartClockMin, 60, 15",
+    ],
+    "Continue exact restart-clock field table",
+  );
+  const initTimeWrapperSpan = requireExactRoutineBlock(
+    parseAsmBlocks([homeTime]),
+    "InitTime",
+    ["farcall _InitTime", "ret"],
+    "Continue exact InitTime wrapper",
+  );
+  const initTimeSpan = findLabelSpan(rtc, "_InitTime");
+  requireNormalizedSourceSequence(
+    rtc,
+    [
+      "_InitTime::",
+      "call GetClock",
+      "call FixDays",
+      "ld hl, hRTCSeconds",
+      "ld de, wStartSecond",
+      "ld a, [wStringBuffer2 + 3]",
+      "sub [hl]",
+      "dec hl",
+      "jr nc, .okay_secs",
+      "add 60",
+      ".okay_secs",
+      "ld [de], a",
+      "dec de",
+      "ld a, [wStringBuffer2 + 2]",
+      "sbc [hl]",
+      "dec hl",
+      "jr nc, .okay_mins",
+      "add 60",
+      ".okay_mins",
+      "ld [de], a",
+      "dec de",
+      "ld a, [wStringBuffer2 + 1]",
+      "sbc [hl]",
+      "dec hl",
+      "jr nc, .okay_hrs",
+      "add 24",
+      ".okay_hrs",
+      "ld [de], a",
+      "dec de",
+      "ld a, [wStringBuffer2]",
+      "sbc [hl]",
+      "dec hl",
+      "jr nc, .okay_days",
+      "add 140",
+      "ld c, 7",
+      "call SimpleDivide",
+      ".okay_days",
+      "ld [de], a",
+      "ret",
+    ],
+    "Continue exact selected-time offset calculation",
+  );
+  const rtcResetSpan = findTokenSpan(ramConstants, "shift_const RTC_RESET");
+  const rtcStatusDeclarationSpan = findTokenSpan(sram, "sRTCStatusFlags:: db");
+  const wrongTextSpan = findLabelSpan(restart, ".ClockTimeMayBeWrongText");
+  const controlTextSpan = findLabelSpan(restart, ".ClockSetWithControlPadText");
+  const confirmTextSpan = findLabelSpan(restart, ".ClockIsThisOKText");
+  const resetTextSpan = findLabelSpan(restart, ".ClockHasResetText");
+  const completionOperation: RuntimePresentationOperation = {
+    op: "continue_rtc_completion",
+    source_span: sourceSpanThrough(wrapperSpan, passSpan),
+  };
+  const operations: RuntimePresentationOperation[] = [
+    {
+      op: "read_sram_byte",
+      source: "sRTCStatusFlags",
+      bank: "BANK(sRTCStatusFlags)",
+      mask: { symbol: "RTC_RESET", value: 0x80 },
+      source_declaration_span: rtcStatusDeclarationSpan,
+      mask_source_span: rtcResetSpan,
+      source_span: statusSpan,
+    },
+    { op: "present_text", text: "ClockTimeMayBeWrongText", condition: { rtc_reset_flag: true }, source_span: wrongTextSpan },
+    { op: "present_text", text: "ClockSetWithControlPadText", condition: { rtc_reset_flag: true }, source_span: controlTextSpan },
+    {
+      op: "edit_restart_clock",
+      condition: { rtc_reset_flag: true },
+      initial_values: { day: "GetWeekday(UpdateTime())", hour: "hHours", minute: "hMinutes" },
+      fields: [
+        { id: "day", modulus: 7 },
+        { id: "hour", modulus: 24 },
+        { id: "minute", modulus: 60 },
+      ],
+      initial_field: "day",
+      field_navigation_wraps: true,
+      value_navigation_wraps: true,
+      accept_button: "PAD_A",
+      cancel_button: "PAD_B",
+      source_span: sourceSpanThrough(setClockSpan, scrollSpan),
+      table_source_span: wraparoundSpan,
+      render_source_span: printSpan,
+    },
+    { op: "present_text", text: "ClockIsThisOKText", condition: { edit_accepted: true }, source_span: confirmTextSpan },
+    {
+      op: "initialize_time_offsets",
+      condition: { restart_confirmed: true },
+      selected_fields: ["wRestartClockDay", "wRestartClockHour", "wRestartClockMin", "constant_zero_seconds"],
+      target_fields: ["wStartDay", "wStartHour", "wStartMinute", "wStartSecond"],
+      day_borrow_modulus: 140,
+      weekday_remainder_divisor: 7,
+      source_span: initTimeSpan,
+      wrapper_source_span: initTimeWrapperSpan,
+    },
+    { op: "present_text", text: "ClockHasResetText", condition: { restart_confirmed: true }, source_span: resetTextSpan },
+    completionOperation,
+  ];
+  return {
+    id: "continue_rtc_restart_clock",
+    source_entry: "Continue_CheckRTC_RestartClock",
+    accepted_call_forms: ["call"],
+    result: {
+      name: "continue_rtc_result",
+      storage: "carry",
+      domain: [
+        { id: "passed", value: 0, condition: { kind: "no_reset_flag_or_restart_confirmed" }, source_span: passSpan },
+        { id: "cancelled", value: 1, condition: { kind: "restart_cancelled" }, source_span: wrapperSpan },
+      ],
+    },
+    phases: [{ id: "continue_rtc", source_span: sourceSpanThrough(wrapperSpan, passSpan), operations }],
+    loop: {
+      source_span: sourceSpanThrough(setClockSpan, cancelSpan),
+      order: ["read_status", "prompt_if_reset", "edit", "confirm", "initialize_offsets_if_yes", "return_result"],
+      input: { routine: "JoyTextDelay_ForcehJoyDown", priority: ["PAD_A", "PAD_B", "PAD_UP", "PAD_DOWN", "PAD_LEFT", "PAD_RIGHT"] },
+      scene_dispatch: {},
+      natural_scheduler_ticks: null,
+      scheduler: null,
+      frame_wait: completionOperation,
+    },
+    resource_transfers: [],
+    tilemap_writes: [],
+    resources: [],
+    audio: [],
+    sprite_operations: [],
+    sprite_programs: [],
+    required_consumer: { id: "runtime_title_screen.continue_rtc_restart_clock", required: true },
+    source_span: sourceSpanThrough(wrapperSpan, passSpan),
+    implementation_source_spans: [statusSpan, restartSpan, setClockSpan, loopSpan, joySpan, scrollSpan, wraparoundSpan, printSpan, initTimeWrapperSpan, initTimeSpan],
+  };
+}
+
+function certifyInitMachineOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation[] {
+  const source = loadSource("home/init.asm", options);
+  const blocks = parseAsmBlocks([source]);
+  const initPrefixSpan = requireExactRoutineBlock(
+    blocks,
+    "Init",
+    [
+      "di",
+      "xor a",
+      "ldh [rIF], a",
+      "ldh [rIE], a",
+      "ldh [rRP], a",
+      "ldh [rSCX], a",
+      "ldh [rSCY], a",
+      "ldh [rSB], a",
+      "ldh [rSC], a",
+      "ldh [rWX], a",
+      "ldh [rWY], a",
+      "ldh [rBGP], a",
+      "ldh [rOBP0], a",
+      "ldh [rOBP1], a",
+      "ldh [rTMA], a",
+      "ldh [rTAC], a",
+      "ld [wBetaTitleSequenceOpeningType], a",
+      "ld a, %100",
+      "ldh [rTAC], a",
+    ],
+    "Init exact interrupt/register/timer prefix",
+  );
+  const waitSpan = requireExactRoutineBlock(
+    blocks,
+    ".wait@Init",
+    [
+      "ldh a, [rLY]",
+      "cp LY_VBLANK + 1",
+      "jr nz, .wait",
+      "xor a",
+      "ldh [rLCDC], a",
+      "ld hl, STARTOF(WRAM0)",
+      "ld bc, SIZEOF(WRAM0)",
+    ],
+    "Init exact LCD-safe shutdown and WRAM0 range",
+  );
+  const bodySpan = requireExactRoutineBlock(
+    blocks,
+    ".ByteFill@Init",
+    [
+      "ld [hl], 0",
+      "inc hl",
+      "dec bc",
+      "ld a, b",
+      "or c",
+      "jr nz, .ByteFill",
+      "ld sp, wStackTop",
+      "ldh a, [hCGB]",
+      "push af",
+      "ldh a, [hSystemBooted]",
+      "push af",
+      "xor a",
+      "ld hl, STARTOF(HRAM)",
+      "ld bc, SIZEOF(HRAM)",
+      "call ByteFill",
+      "pop af",
+      "ldh [hSystemBooted], a",
+      "pop af",
+      "ldh [hCGB], a",
+      "call ClearWRAM",
+      "ld a, 1",
+      "ldh [rWBK], a",
+      "call ClearVRAM",
+      "call ClearSprites",
+      "call ClearsScratch",
+      "ld a, BANK(WriteOAMDMACodeToHRAM)",
+      "rst Bankswitch",
+      "call WriteOAMDMACodeToHRAM",
+      "xor a",
+      "ldh [hMapAnims], a",
+      "ldh [hSCX], a",
+      "ldh [hSCY], a",
+      "ldh [rJOYP], a",
+      "ld a, STAT_MODE_0",
+      "ldh [rSTAT], a",
+      "ld a, SCREEN_HEIGHT_PX",
+      "ldh [hWY], a",
+      "ldh [rWY], a",
+      "ld a, WX_OFS",
+      "ldh [hWX], a",
+      "ldh [rWX], a",
+      "ld a, LCDC_DEFAULT",
+      "ldh [rLCDC], a",
+      "ld a, CONNECTION_NOT_ESTABLISHED",
+      "ldh [hSerialConnectionStatus], a",
+      "farcall InitCGBPals",
+      "ld a, HIGH(vBGMap1)",
+      "ldh [hBGMapAddress + 1], a",
+      "xor a",
+      "ldh [hBGMapAddress], a",
+      "farcall StartClock",
+      "xor a",
+      "ld [rRTCLATCH], a",
+      "ld [rRAMG], a",
+      "ldh a, [hCGB]",
+      "and a",
+      "jr z, .no_double_speed",
+      "call NormalSpeed",
+    ],
+    "Init exact memory/display/clock body",
+  );
+  const finishSpan = requireExactRoutineBlock(
+    blocks,
+    ".no_double_speed@Init",
+    [
+      "xor a",
+      "ldh [rIF], a",
+      "ld a, IE_DEFAULT",
+      "ldh [rIE], a",
+      "ei",
+      "call DelayFrame",
+      "predef InitSGBBorder",
+      "call InitSound",
+      "xor a",
+      "ld [wMapMusic], a",
+      "jp GameInit",
+    ],
+    "Init exact interrupt/audio/GameInit finish",
+  );
+  const clearVramEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "ClearVRAM",
+    ["ld a, 1", "ldh [rVBK], a", "call .clear", "xor a", "ldh [rVBK], a"],
+    "Init exact two-bank VRAM order",
+  );
+  const clearVramSpan = requireExactRoutineBlock(
+    blocks,
+    ".clear@ClearVRAM",
+    [
+      "ld hl, STARTOF(VRAM)",
+      "ld bc, SIZEOF(VRAM)",
+      "xor a",
+      "call ByteFill",
+      "ret",
+    ],
+    "Init exact VRAM clear range",
+  );
+  const clearWramEntrySpan = requireExactRoutineBlock(
+    blocks,
+    "ClearWRAM",
+    ["ld a, 1"],
+    "Init exact WRAMX starting bank",
+  );
+  const clearWramLoopSpan = requireExactRoutineBlock(
+    blocks,
+    ".bank_loop@ClearWRAM",
+    [
+      "push af",
+      "ldh [rWBK], a",
+      "xor a",
+      "ld hl, STARTOF(WRAMX)",
+      "ld bc, SIZEOF(WRAMX)",
+      "call ByteFill",
+      "pop af",
+      "inc a",
+      "cp 8",
+      "jr nc, .bank_loop",
+      "ret",
+    ],
+    "Init exact source-bugged WRAMX clear loop",
+  );
+  const scratchSpan = requireExactRoutineBlock(
+    blocks,
+    "ClearsScratch",
+    [
+      "ld a, BANK(sScratch)",
+      "call OpenSRAM",
+      "ld hl, sScratch",
+      "ld bc, $20",
+      "xor a",
+      "call ByteFill",
+      "call CloseSRAM",
+      "ret",
+    ],
+    "Init exact SRAM scratch-prefix clear",
+  );
+  return [
+    {
+      op: "initialize_machine",
+      interrupts: { disable_during_init: true, final_enable_mask: "IE_DEFAULT" },
+      zeroed_hardware_registers: [
+        "rIF", "rIE", "rRP", "rSCX", "rSCY", "rSB", "rSC", "rWX", "rWY",
+        "rBGP", "rOBP0", "rOBP1", "rTMA", "rTAC",
+      ],
+      timer_frequency_hz: 4096,
+      lcd_disable_scanline: "LY_VBLANK + 1",
+      cleared_memory: [
+        { region: "WRAM0", banks: [0] },
+        { region: "HRAM", preserved: ["hCGB", "hSystemBooted"] },
+        { region: "WRAMX", banks: [1], source_bug: "jr nc, .bank_loop" },
+        { region: "VRAM", banks: [1, 0] },
+        { region: "sScratch", byte_count: 32 },
+      ],
+      stack_pointer: "wStackTop",
+      oam_dma_code_installed: true,
+      sprites_cleared: true,
+      bg_map_address: "vBGMap1",
+      rtc_started: true,
+      rtc_latch_disabled_after_start: true,
+      cgb_speed: "normal_if_cgb",
+      sgb_border_initialized: true,
+      sound_initialized: true,
+      map_music: 0,
+      final_lcd_control: "LCDC_DEFAULT",
+      final_window: { x: "WX_OFS", y: "SCREEN_HEIGHT_PX" },
+      source_span: sourceSpanThrough(initPrefixSpan, finishSpan),
+      implementation_source_spans: [
+        clearVramEntrySpan,
+        clearVramSpan,
+        clearWramEntrySpan,
+        clearWramLoopSpan,
+        scratchSpan,
+      ],
+    },
+    {
+      op: "jump",
+      target: "GameInit",
+      source_span: { file: source.file, start_line: 168, end_line: 168 },
+    },
+  ];
+}
+
+function certifyContinueResumeOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation[] {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const mobile = loadSource("mobile/mobile_41.asm", options);
+  const wildmons = loadSource("engine/overworld/wildmons.asm", options);
+  const mysteryGift = loadSource("engine/link/mystery_gift.asm", options);
+  const rtc = loadSource("engine/rtc/rtc.asm", options);
+  const introBlocks = parseAsmBlocks([intro]);
+  const resumeSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".Check2Pass@Continue",
+    [
+      "ld a, $8",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_NONE)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_NONE)",
+      "ld [wMusicFadeID + 1], a",
+      "call ClearBGPalettes",
+      "call Continue_MobileAdapterMenu",
+      "call CloseWindow",
+      "call ClearTilemap",
+      "ld c, 20",
+      "call DelayFrames",
+      "farcall JumpRoamMons",
+      "farcall CopyMysteryGiftReceivedDecorationsToPC",
+      "farcall ClockContinue",
+      "ld a, [wSpawnAfterChampion]",
+      "cp SPAWN_LANCE",
+      "jr z, .SpawnAfterE4",
+      "ld a, MAPSETUP_CONTINUE",
+      "ldh [hMapEntryMethod], a",
+      "jp FinishContinueFunction",
+    ],
+    "Continue exact saved-game resume sequence",
+  );
+  const championSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".SpawnAfterE4@Continue",
+    [
+      "ld a, SPAWN_NEW_BARK",
+      "ld [wDefaultSpawnpoint], a",
+      "call PostCreditsSpawn",
+      "jp FinishContinueFunction",
+    ],
+    "Continue exact post-Elite-Four spawn branch",
+  );
+  const postCreditsSpan = requireExactRoutineBlock(
+    introBlocks,
+    "PostCreditsSpawn",
+    [
+      "xor a",
+      "ld [wSpawnAfterChampion], a",
+      "ld a, MAPSETUP_WARP",
+      "ldh [hMapEntryMethod], a",
+      "ret",
+    ],
+    "Continue exact post-credits spawn state",
+  );
+  const mobileMenuSpan = requireExactRoutineBlock(
+    introBlocks,
+    "Continue_MobileAdapterMenu",
+    [
+      "farcall CheckMobileAdapterStatus",
+      "ret nc",
+      "ld hl, wCrystalFlags",
+      "bit 1, [hl]",
+      "ret nz",
+      "ld a, 5",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_MOBILE_ADAPTER_MENU)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_MOBILE_ADAPTER_MENU)",
+      "ld [wMusicFadeID + 1], a",
+      "ld c, 20",
+      "call DelayFrames",
+      "ld c, $1",
+      "farcall InitMobileProfile",
+      "farcall _SaveData",
+      "ld a, 8",
+      "ld [wMusicFade], a",
+      "ld a, LOW(MUSIC_NONE)",
+      "ld [wMusicFadeID], a",
+      "ld a, HIGH(MUSIC_NONE)",
+      "ld [wMusicFadeID + 1], a",
+      "ld c, 35",
+      "call DelayFrames",
+      "ret",
+    ],
+    "Continue exact mobile-adapter menu branch",
+  );
+  const mobileStubSpan = requireExactRoutineBlock(
+    parseAsmBlocks([mobile]),
+    "CheckMobileAdapterStatus",
+    ["or a", "ret"],
+    "Continue exact English mobile-adapter stub",
+    true,
+  );
+  const roamSpan = findLabelSpan(wildmons, "JumpRoamMons");
+  requireNormalizedSourceSequence(
+    wildmons,
+    [
+      "JumpRoamMons:",
+      "ld a, [wRoamMon1MapGroup]",
+      "cp GROUP_N_A",
+      "jr z, .SkipRaikou",
+      "call JumpRoamMon",
+      "ld a, b",
+      "ld [wRoamMon1MapGroup], a",
+      "ld a, c",
+      "ld [wRoamMon1MapNumber], a",
+      ".SkipRaikou:",
+      "ld a, [wRoamMon2MapGroup]",
+      "cp GROUP_N_A",
+      "jr z, .SkipEntei",
+      "call JumpRoamMon",
+      "ld a, b",
+      "ld [wRoamMon2MapGroup], a",
+      "ld a, c",
+      "ld [wRoamMon2MapNumber], a",
+      ".SkipEntei:",
+      "ld a, [wRoamMon3MapGroup]",
+      "cp GROUP_N_A",
+      "jr z, .Finished",
+      "call JumpRoamMon",
+      "ld a, b",
+      "ld [wRoamMon3MapGroup], a",
+      "ld a, c",
+      "ld [wRoamMon3MapNumber], a",
+      ".Finished:",
+      "jp _BackUpMapIndices",
+    ],
+    "Continue exact three-roamer jump dispatch",
+  );
+  const decorationSpan = requireNormalizedSourceSequence(
+    mysteryGift,
+    [
+      "CopyMysteryGiftReceivedDecorationsToPC:",
+      "call GetMysteryGiftBank",
+      "ld c, 0",
+    ],
+    "Continue exact Mystery Gift decoration loop setup",
+  );
+  const decorationLoopSpan = requireNormalizedSourceSequence(
+    mysteryGift,
+    [
+      ".loop",
+      "push bc",
+      "ld d, 0",
+      "ld b, CHECK_FLAG",
+      "ld hl, sMysteryGiftDecorationsReceived",
+      "predef SmallFarFlagAction",
+      "ld a, c",
+      "and a",
+      "pop bc",
+      "jr z, .skip",
+      "push bc",
+      "callfar SetSpecificDecorationFlag",
+      "pop bc",
+      ".skip",
+      "inc c",
+      "ld a, c",
+      "cp NUM_NON_TROPHY_DECOS",
+      "jr c, .loop",
+      "jp CloseSRAM",
+    ],
+    "Continue exact received-decoration copy loop",
+  );
+  const clockSpan = findLabelSpan(rtc, "ClockContinue");
+  requireNormalizedSourceSequence(
+    rtc,
+    [
+      "ClockContinue:",
+      "call CheckRTCStatus",
+      "ld c, a",
+      "and RTC_RESET | RTC_DAYS_EXCEED_255",
+      "jr nz, .time_overflow",
+      "ld a, c",
+      "and RTC_DAYS_EXCEED_139",
+      "jr z, .dont_update",
+      "call UpdateTime",
+      "ld a, [wRTC + 0]",
+      "ld b, a",
+      "ld a, [wCurDay]",
+      "cp b",
+      "jr c, .dont_update",
+      ".time_overflow",
+      "farcall ClearDailyTimers",
+      "farcall Function170923",
+      "ld a, BANK(s5_aa8c)",
+      "call OpenSRAM",
+      "ld a, [s5_aa8c]",
+      "inc a",
+      "ld [s5_aa8c], a",
+      "ld a, [s5_b2fa]",
+      "inc a",
+      "ld [s5_b2fa], a",
+      "call CloseSRAM",
+      "ret",
+      ".dont_update",
+      "xor a",
+      "ret",
+    ],
+    "Continue exact clock-overflow/daily reset handling",
+  );
+  return [
+    { op: "request_music_fade", frames: 8, audio: "MUSIC_NONE", source_span: loadedSourceLineSpan(intro, 360, 365) },
+    { op: "clear_bg_palettes", source_span: loadedSourceLineSpan(intro, 366) },
+    {
+      op: "skip_unreachable_mobile_adapter_menu",
+      reason: "English CheckMobileAdapterStatus clears carry",
+      source_span: mobileMenuSpan,
+      implementation_source_span: mobileStubSpan,
+    },
+    { op: "close_window", source_span: loadedSourceLineSpan(intro, 368) },
+    { op: "clear_tilemap", source_span: loadedSourceLineSpan(intro, 369) },
+    { op: "wait_frames", frames: 20, condition: { source: null, predicate: "always", source_span: null }, source_span: loadedSourceLineSpan(intro, 370, 371) },
+    { op: "jump_roaming_mons", excludes_group: "GROUP_N_A", roamer_count: 3, source_span: roamSpan },
+    { op: "copy_received_mystery_gift_decorations", count: "NUM_NON_TROPHY_DECOS", source_span: sourceSpanThrough(decorationSpan, decorationLoopSpan) },
+    { op: "continue_clock", overflow_flags: ["RTC_RESET", "RTC_DAYS_EXCEED_255"], day_threshold_flag: "RTC_DAYS_EXCEED_139", resets_daily_timers: true, increments_sram_counters: ["s5_aa8c", "s5_b2fa"], source_span: clockSpan },
+    {
+      op: "branch_spawn_after_champion",
+      condition_source: "wSpawnAfterChampion",
+      champion_spawn: "SPAWN_LANCE",
+      champion_destination: "SPAWN_NEW_BARK",
+      ordinary_map_entry: "MAPSETUP_CONTINUE",
+      champion_map_entry: "MAPSETUP_WARP",
+      clears_champion_spawn_flag: true,
+      source_span: sourceSpanThrough(resumeSpan, championSpan),
+      implementation_source_span: postCreditsSpan,
+    },
+    { op: "jump", target: "FinishContinueFunction", source_span: loadedSourceLineSpan(intro, 380) },
+  ];
+}
+
+function certifyFinishContinueOperations(
+  options: BuildRuntimeTitlePresentationProgramOptions,
+): RuntimePresentationOperation[] {
+  const intro = loadSource("engine/menus/intro_menu.asm", options);
+  const events = loadSource("engine/overworld/events.asm", options);
+  const introBlocks = parseAsmBlocks([intro]);
+  const finishLoopSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".loop@FinishContinueFunction",
+    [
+      "xor a",
+      "ld [wDontPlayMapMusicOnReload], a",
+      "ld [wLinkMode], a",
+      "ld hl, wGameTimerPaused",
+      "set GAME_TIMER_COUNTING_F, [hl]",
+      "res GAME_TIMER_MOBILE_F, [hl]",
+      "ld hl, wMapNameSignFlags",
+      "set SHOWN_MAP_NAME_SIGN, [hl]",
+      "farcall OverworldLoop",
+      "ld a, [wSpawnAfterChampion]",
+      "cp SPAWN_RED",
+      "jr z, .AfterRed",
+      "jp Reset",
+    ],
+    "Continue exact common overworld session loop",
+  );
+  const afterRedSpan = requireExactRoutineBlock(
+    introBlocks,
+    ".AfterRed@FinishContinueFunction",
+    ["call SpawnAfterRed", "jr .loop"],
+    "Continue exact Red-return loop",
+  );
+  const spawnAfterRedSpan = requireExactRoutineBlock(
+    introBlocks,
+    "SpawnAfterRed",
+    ["ld a, SPAWN_MT_SILVER", "ld [wDefaultSpawnpoint], a"],
+    "Continue exact Red-return destination",
+  );
+  const postCreditsSpan = requireExactRoutineBlock(
+    introBlocks,
+    "PostCreditsSpawn",
+    [
+      "xor a",
+      "ld [wSpawnAfterChampion], a",
+      "ld a, MAPSETUP_WARP",
+      "ldh [hMapEntryMethod], a",
+      "ret",
+    ],
+    "Continue exact returned-overworld warp state",
+  );
+  const eventBlocks = parseAsmBlocks([events]);
+  const overworldEntrySpan = requireExactRoutineBlock(
+    eventBlocks,
+    "OverworldLoop",
+    ["xor a", "ld [wMapStatus], a"],
+    "OverworldLoop exact initial status",
+  );
+  const overworldLoopSpan = requireExactRoutineBlock(
+    eventBlocks,
+    ".loop@OverworldLoop",
+    [
+      "ld a, [wMapStatus]",
+      "ld hl, .Jumptable",
+      "rst JumpTable",
+      "ld a, [wMapStatus]",
+      "cp MAPSTATUS_DONE",
+      "jr nz, .loop",
+    ],
+    "OverworldLoop exact status dispatcher",
+  );
+  const overworldDoneSpan = requireExactRoutineBlock(
+    eventBlocks,
+    ".done@OverworldLoop",
+    ["ret"],
+    "OverworldLoop exact terminal return",
+  );
+  const overworldTableSpan = requireExactRoutineBlock(
+    eventBlocks,
+    ".Jumptable@OverworldLoop",
+    ["dw StartMap", "dw EnterMap", "dw HandleMap", "dw .done"],
+    "OverworldLoop exact four-status table",
+  );
+  const startMapSpan = requireExactRoutineBlock(
+    eventBlocks,
+    "StartMap",
+    [
+      "xor a",
+      "ld [wScriptVar], a",
+      "xor a",
+      "ld [wScriptRunning], a",
+      "ld hl, wMapStatus",
+      "ld bc, wMapStatusEnd - wMapStatus",
+      "call ByteFill",
+      "farcall InitCallReceiveDelay",
+      "call ClearJoypad",
+    ],
+    "OverworldLoop exact StartMap prefix/fallthrough",
+  );
+  const enterMapSpan = findLabelSpan(events, "EnterMap");
+  requireNormalizedSourceSequence(
+    events,
+    [
+      "EnterMap:",
+      "xor a",
+      "ld [wXYComparePointer], a",
+      "ld [wXYComparePointer + 1], a",
+      "call SetUpFiveStepWildEncounterCooldown",
+      "farcall RunMapSetupScript",
+      "call DisableEvents",
+      "ldh a, [hMapEntryMethod]",
+      "cp MAPSETUP_CONNECTION",
+      "jr nz, .dont_enable",
+      "call EnableEvents",
+      ".dont_enable",
+      "ldh a, [hMapEntryMethod]",
+      "cp MAPSETUP_RELOADMAP",
+      "jr nz, .dontresetpoison",
+      "xor a",
+      "ld [wPoisonStepCount], a",
+      ".dontresetpoison",
+      "xor a",
+      "ldh [hMapEntryMethod], a",
+      "ld a, MAPSTATUS_HANDLE",
+      "ld [wMapStatus], a",
+      "ret",
+    ],
+    "OverworldLoop exact EnterMap behavior",
+  );
+  const handleMapSpan = requireExactRoutineBlock(
+    eventBlocks,
+    "HandleMap",
+    [
+      "call ResetOverworldDelay",
+      "call HandleMapTimeAndJoypad",
+      "farcall HandleCmdQueue",
+      "call MapEvents",
+      "ld a, [wMapStatus]",
+      "cp MAPSTATUS_HANDLE",
+      "ret nz",
+      "call HandleMapObjects",
+      "call NextOverworldFrame",
+      "call HandleMapBackground",
+      "call CheckPlayerState",
+      "ret",
+    ],
+    "OverworldLoop exact HandleMap frame order",
+  );
+  return [
+    {
+      op: "prepare_overworld_session",
+      clears: ["wDontPlayMapMusicOnReload", "wLinkMode"],
+      game_timer_counting: true,
+      game_timer_mobile: false,
+      show_map_name_sign: true,
+      source_span: loadedSourceLineSpan(intro, 461, 468),
+    },
+    {
+      op: "run_overworld_loop",
+      status: "wMapStatus",
+      initial_status: "MAPSTATUS_START",
+      terminal_status: "MAPSTATUS_DONE",
+      dispatch: ["StartMap", "EnterMap", "HandleMap", ".done@OverworldLoop"],
+      start_map_falls_through_to_enter_map: true,
+      enter_map_connection_enables_events: true,
+      enter_map_reload_clears_poison_step_count: true,
+      handle_map_order: [
+        "ResetOverworldDelay",
+        "HandleMapTimeAndJoypad",
+        "HandleCmdQueue",
+        "MapEvents",
+        "HandleMapObjects",
+        "NextOverworldFrame",
+        "HandleMapBackground",
+        "CheckPlayerState",
+      ],
+      source_span: sourceSpanThrough(overworldEntrySpan, overworldDoneSpan),
+      table_source_span: overworldTableSpan,
+      implementation_source_spans: [startMapSpan, enterMapSpan, handleMapSpan],
+    },
+    {
+      op: "handle_overworld_return",
+      condition_source: "wSpawnAfterChampion",
+      red_spawn: "SPAWN_RED",
+      red_destination: "SPAWN_MT_SILVER",
+      red_map_entry: "MAPSETUP_WARP",
+      red_repeats_overworld_loop: true,
+      ordinary_destination: "Reset",
+      source_span: sourceSpanThrough(finishLoopSpan, afterRedSpan),
+      implementation_source_spans: [spawnAfterRedSpan, postCreditsSpan],
+    },
+  ];
 }
 
 const RUNTIME_PRESENTATION_SOURCE_SUBPROGRAM_BOUNDARIES: Record<
@@ -17040,7 +26986,59 @@ const RUNTIME_PRESENTATION_SOURCE_SUBPROGRAM_BOUNDARIES: Record<
   },
   CrystalIntro: {
     accepted_call_forms: ["farcall"],
-    certify_frontier: certifyCrystalIntroSubprogramFrontier,
+    certify: certifyCrystalIntroSubprogram,
+  },
+  ".TitleScreen": {
+    accepted_call_forms: ["call"],
+    certify: certifyStartTitleScreenSetupFrontier,
+  },
+  MainMenu: {
+    accepted_call_forms: ["farcall"],
+    certify: certifyMainMenuSubprogram,
+  },
+  TryLoadSaveFile: {
+    accepted_call_forms: ["farcall"],
+    certify: certifyTryLoadSaveFileSubprogram,
+  },
+  DisplaySaveInfoOnContinue: {
+    accepted_call_forms: ["call"],
+    certify: certifyDisplaySaveInfoOnContinueSubprogram,
+  },
+  ConfirmContinue: {
+    accepted_call_forms: ["call"],
+    certify: certifyConfirmContinueSubprogram,
+  },
+  ResetWRAM: {
+    accepted_call_forms: ["call"],
+    certify: certifyResetWramSubprogram,
+  },
+  NewGame_ClearTilemapEtc: {
+    accepted_call_forms: ["call"],
+    certify: certifyNewGameClearTilemapSubprogram,
+  },
+  PlayerProfileSetup: {
+    accepted_call_forms: ["call"],
+    certify: certifyPlayerProfileSetupSubprogram,
+  },
+  OakSpeech: {
+    accepted_call_forms: ["call"],
+    certify: certifyOakSpeechSubprogram,
+  },
+  InitializeWorld: {
+    accepted_call_forms: ["call"],
+    certify: certifyInitializeWorldSubprogram,
+  },
+  _DeleteSaveData: {
+    accepted_call_forms: ["farcall"],
+    certify: certifyDeleteSaveDataSubprogram,
+  },
+  _ResetClock: {
+    accepted_call_forms: ["farcall"],
+    certify: certifyResetClockPasswordSubprogram,
+  },
+  Continue_CheckRTC_RestartClock: {
+    accepted_call_forms: ["call"],
+    certify: certifyContinueRtcRestartClockSubprogram,
   },
 };
 
@@ -17097,6 +27095,7 @@ export function analyzeRuntimeTitlePresentationEmission(
     const operations: RuntimePresentationOperation[] = [];
     let activeCarryResult:
       RuntimePresentationCallableSubprogram["result"] | null = null;
+    let terminatesBlock = false;
     blocks[blockId] = {
       source_span: sourceBlock.source_span,
       operations,
@@ -17107,6 +27106,238 @@ export function analyzeRuntimeTitlePresentationEmission(
       instructionIndex += 1
     ) {
       const instruction = sourceBlock.instructions[instructionIndex];
+      if (blockId === "Init" && instructionIndex === 0) {
+        operations.push(...certifyInitMachineOperations(options));
+        pending.push("GameInit");
+        terminatesBlock = true;
+        break;
+      }
+      if (blockId === ".Check2Pass@Continue" && instructionIndex === 0) {
+        operations.push(...certifyContinueResumeOperations(options));
+        pending.push("FinishContinueFunction");
+        terminatesBlock = true;
+        break;
+      }
+      if (blockId === ".loop@FinishContinueFunction" && instructionIndex === 0) {
+        operations.push(...certifyFinishContinueOperations(options));
+        terminatesBlock = true;
+        break;
+      }
+      if (blockId === "NewGame" && instructionIndex === 0) {
+        const debugReset = sourceBlock.instructions.slice(0, 2);
+        if (
+          debugReset.map(instructionSignature).join("\0") !==
+          ["xor a", "ld [wDebugFlags], a"].join("\0")
+        ) {
+          throw new Error("NewGame exact debug-flag reset is not exact");
+        }
+        operations.push({
+          op: "write_memory_byte",
+          target: "wDebugFlags",
+          address_space: "wram",
+          value: 0,
+          condition: { source: null, predicate: "always", source_span: null },
+          source_span: sourceSpanThrough(
+            debugReset[0].source_span,
+            debugReset[1].source_span,
+          ),
+        });
+        instructionIndex += 1;
+        continue;
+      }
+      if (
+        blockId === "NewGame" &&
+        instructionSignature(instruction) === "ld a, LANDMARK_NEW_BARK_TOWN"
+      ) {
+        const startState = sourceBlock.instructions.slice(
+          instructionIndex,
+          instructionIndex + 6,
+        );
+        if (
+          startState.map(instructionSignature).join("\0") !==
+          [
+            "ld a, LANDMARK_NEW_BARK_TOWN",
+            "ld [wPrevLandmark], a",
+            "ld a, SPAWN_HOME",
+            "ld [wDefaultSpawnpoint], a",
+            "ld a, MAPSETUP_WARP",
+            "ldh [hMapEntryMethod], a",
+          ].join("\0")
+        ) {
+          throw new Error("NewGame exact initial landmark/spawn/map-entry state is not exact");
+        }
+        operations.push(
+          {
+            op: "write_memory_byte",
+            target: "wPrevLandmark",
+            address_space: "wram",
+            value: "LANDMARK_NEW_BARK_TOWN",
+            condition: { source: null, predicate: "always", source_span: null },
+            source_span: sourceSpanThrough(
+              startState[0].source_span,
+              startState[1].source_span,
+            ),
+          },
+          {
+            op: "write_memory_byte",
+            target: "wDefaultSpawnpoint",
+            address_space: "wram",
+            value: "SPAWN_HOME",
+            condition: { source: null, predicate: "always", source_span: null },
+            source_span: sourceSpanThrough(
+              startState[2].source_span,
+              startState[3].source_span,
+            ),
+          },
+          {
+            op: "write_memory_byte",
+            target: "hMapEntryMethod",
+            address_space: "hram",
+            value: "MAPSETUP_WARP",
+            condition: { source: null, predicate: "always", source_span: null },
+            source_span: sourceSpanThrough(
+              startState[4].source_span,
+              startState[5].source_span,
+            ),
+          },
+        );
+        instructionIndex += startState.length - 1;
+        continue;
+      }
+      if (
+        blockId === "Continue" &&
+        instructionSignature(instruction) === "ld c, 20" &&
+        instructionSignature(sourceBlock.instructions[instructionIndex + 1]) ===
+          "call DelayFrames"
+      ) {
+        const delayImplementationSpan = certifyDelayFrames(
+          parseAsmBlocks([loadSource("home/delay.asm", options)]),
+        );
+        operations.push({
+          op: "wait_frames",
+          frames: 20,
+          condition: { source: null, predicate: "always", source_span: null },
+          implementation_source_span: delayImplementationSpan,
+          source_span: sourceSpanThrough(
+            instruction.source_span,
+            sourceBlock.instructions[instructionIndex + 1].source_span,
+          ),
+        });
+        instructionIndex += 1;
+        continue;
+      }
+      if (blockId === "Intro_MainMenu" && instructionIndex === 0) {
+        const wrapperPrefix = sourceBlock.instructions.slice(0, 7);
+        if (
+          wrapperPrefix.map(instructionSignature).join("\0") !==
+          [
+            "ld de, MUSIC_NONE",
+            "call PlayMusic",
+            "call DelayFrame",
+            "ld de, MUSIC_MAIN_MENU",
+            "ld a, e",
+            "ld [wMapMusic], a",
+            "call PlayMusic",
+          ].join("\0")
+        ) {
+          throw new Error("Intro_MainMenu exact music/frame wrapper is not exact");
+        }
+        operations.push(
+          {
+            op: "stop_audio",
+            audio: "MUSIC_NONE",
+            source_span: sourceSpanThrough(
+              wrapperPrefix[0].source_span,
+              wrapperPrefix[1].source_span,
+            ),
+          },
+          {
+            op: "wait_frames",
+            frames: 1,
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: wrapperPrefix[2].source_span,
+          },
+          {
+            op: "write_memory_byte",
+            target: "wMapMusic",
+            address_space: "wram",
+            value: "MUSIC_MAIN_MENU",
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: sourceSpanThrough(
+              wrapperPrefix[3].source_span,
+              wrapperPrefix[5].source_span,
+            ),
+          },
+          {
+            op: "play_audio",
+            audio: "MUSIC_MAIN_MENU",
+            source_span: sourceSpanThrough(
+              wrapperPrefix[3].source_span,
+              wrapperPrefix[6].source_span,
+            ),
+          },
+        );
+        instructionIndex += wrapperPrefix.length - 1;
+        continue;
+      }
+      if (blockId === "StartTitleScreen" && instructionIndex === 0) {
+        const bankScope = sourceBlock.instructions.slice(0, 4);
+        const bankMatch = bankScope[2]?.args[1]?.match(
+          /^BANK\(([A-Za-z_.][A-Za-z0-9_.@]*)\)$/,
+        );
+        if (
+          bankScope.map(instructionSignature).join("\0") !==
+            [
+              "ldh a, [rWBK]",
+              "push af",
+              "ld a, BANK(wLYOverrides)",
+              "ldh [rWBK], a",
+            ].join("\0") ||
+          bankMatch?.[1] !== "wLYOverrides"
+        ) {
+          throw new Error("StartTitleScreen WRAM-bank save/select scope is not exact");
+        }
+        const bankDeclarationSpan = findAsmSymbolDeclarationSpan(
+          bankMatch[1],
+          [loadSource("ram/wram.asm", options)],
+        );
+        if (!bankDeclarationSpan) {
+          throw new Error("StartTitleScreen wLYOverrides bank has no source declaration");
+        }
+        operations.push(
+          {
+            op: "save_memory_byte",
+            source: "rWBK",
+            storage: { kind: "cpu_stack", register_pair: "af" },
+            restore_required: true,
+            source_span: sourceSpanThrough(
+              bankScope[0].source_span,
+              bankScope[1].source_span,
+            ),
+          },
+          {
+            op: "write_memory_byte",
+            target: "rWBK",
+            address_space: "hardware_register",
+            value: "BANK(wLYOverrides)",
+            value_source_span: bankDeclarationSpan,
+            source_span: sourceSpanThrough(
+              bankScope[2].source_span,
+              bankScope[3].source_span,
+            ),
+          },
+        );
+        instructionIndex += 3;
+        continue;
+      }
       const highMemoryWrites = compileAccumulatorHighMemoryWriteRun(
         sourceBlock.instructions,
         instructionIndex,
@@ -17119,6 +27350,14 @@ export function analyzeRuntimeTitlePresentationEmission(
         continue;
       }
       const target = runtimePresentationInstructionTarget(instruction);
+      const resolvedControlTarget =
+        target && Object.hasOwn(controlFlow.blocks, target)
+          ? target
+          : target?.startsWith(".")
+            ? (sourceBlock.direct_targets.find((candidate) =>
+                candidate.startsWith(`${target}@`),
+              ) ?? target)
+            : target;
       const callForm = ["call", "callfar", "farcall"].includes(
         instruction.opcode,
       )
@@ -17164,7 +27403,15 @@ export function analyzeRuntimeTitlePresentationEmission(
           result: contract.result.name,
           source_span: instruction.source_span,
         });
-        activeCarryResult = contract.result;
+        if (
+          contract.result.storage === "carry" &&
+          contract.result.domain.every((candidate) => candidate.value === null)
+        ) {
+          terminatesBlock = true;
+          break;
+        }
+        activeCarryResult =
+          contract.result.storage === "carry" ? contract.result : null;
         continue;
       }
       if (
@@ -17172,8 +27419,8 @@ export function analyzeRuntimeTitlePresentationEmission(
         instruction.args.length === 2 &&
         ["c", "nc"].includes(instruction.args[0]) &&
         activeCarryResult &&
-        target &&
-        Object.hasOwn(controlFlow.blocks, target)
+        resolvedControlTarget &&
+        Object.hasOwn(controlFlow.blocks, resolvedControlTarget)
       ) {
         const expectedCarry = instruction.args[0] === "c" ? 1 : 0;
         const matchingCases = activeCarryResult.domain.filter(
@@ -17189,10 +27436,10 @@ export function analyzeRuntimeTitlePresentationEmission(
           op: "branch_result",
           result: activeCarryResult.name,
           equals: matchingCases[0].id,
-          target,
+          target: resolvedControlTarget,
           source_span: instruction.source_span,
         });
-        pending.push(target);
+        pending.push(resolvedControlTarget);
         activeCarryResult = null;
         continue;
       }
@@ -17259,15 +27506,15 @@ export function analyzeRuntimeTitlePresentationEmission(
       if (
         (instruction.opcode === "jp" || instruction.opcode === "jr") &&
         instruction.args.length === 1 &&
-        target &&
-        Object.hasOwn(controlFlow.blocks, target)
+        resolvedControlTarget &&
+        Object.hasOwn(controlFlow.blocks, resolvedControlTarget)
       ) {
         operations.push({
           op: "jump",
-          target,
+          target: resolvedControlTarget,
           source_span: instruction.source_span,
         });
-        pending.push(target);
+        pending.push(resolvedControlTarget);
         continue;
       }
       if (instruction.opcode === "ret" && instruction.args.length === 0) {
@@ -17312,8 +27559,30 @@ export function analyzeRuntimeTitlePresentationEmission(
         },
       };
     }
-    if (sourceBlock.fallthrough) pending.push(sourceBlock.fallthrough);
-    pending.push(...sourceBlock.direct_targets);
+    if (!terminatesBlock) {
+      if (sourceBlock.fallthrough) {
+        if (operations.length === 0) {
+          operations.push({
+            op: "jump",
+            target: sourceBlock.fallthrough,
+            source_span: sourceBlock.source_span,
+          });
+        }
+        pending.push(sourceBlock.fallthrough);
+      }
+      pending.push(
+        ...sourceBlock.direct_targets.filter((candidate) => {
+          return !sourceBlock.instructions.some((instruction) => {
+            if (!["call", "callfar", "farcall"].includes(instruction.opcode)) {
+              return false;
+            }
+            const callTarget = runtimePresentationInstructionTarget(instruction);
+            return callTarget === candidate ||
+              (callTarget?.startsWith(".") && candidate.startsWith(`${callTarget}@`));
+          });
+        }),
+      );
+    }
   }
 
   return {
@@ -17352,9 +27621,114 @@ export function buildRuntimeTitlePresentationProgram(
     );
   }
 
-  throw new Error(
-    "Runtime presentation program reached the resource/audio/text/host-effect catalog boundary without an exact source-derived catalog",
+  const resourceSources = RESOURCE_SOURCE_FILES.map((file) =>
+    loadSource(file, options),
   );
+  const subprogramResourceSpans = new Map<string, RuntimePresentationSourceSpan>();
+  for (const subprogram of checkpoint.subprograms) {
+    for (const resource of subprogram.resources) {
+      subprogramResourceSpans.set(resource.path, resource.include_source_span);
+    }
+  }
+  const resourcePaths = [
+    ...new Set([
+      ...DIRECT_RESOURCE_PATHS,
+      ...INTRO_RESOURCE_PATHS,
+      ...subprogramResourceSpans.keys(),
+    ]),
+  ];
+  const resources = resourcePaths.map(
+    (resourcePath) => {
+      const matches = resourceSources.flatMap((source) =>
+        source.lines.flatMap((line, index) =>
+          line.includes(`\"${resourcePath}\"`)
+            ? [loadedSourceLineSpan(source, index + 1)]
+            : [],
+        ),
+      );
+      const certifiedSubprogramSpan = subprogramResourceSpans.get(resourcePath);
+      if (matches.length > 1 || (matches.length === 0 && !certifiedSubprogramSpan)) {
+        throw new Error(
+          `Runtime presentation resource ${resourcePath} must have one exact source include, found ${matches.length}`,
+        );
+      }
+      return {
+        path: resourcePath,
+        kind: resourceKind(resourcePath),
+        source_span: matches[0] ?? certifiedSubprogramSpan!,
+      };
+    },
+  );
+  const programSources = PROGRAM_SOURCE_FILES.map((file) =>
+    loadSource(file, options),
+  );
+  const subprogramAudioSpans = new Map<string, RuntimePresentationSourceSpan>();
+  for (const subprogram of checkpoint.subprograms) {
+    for (const reference of subprogram.audio) {
+      subprogramAudioSpans.set(reference.id, reference.source_span);
+    }
+  }
+  const audio = REQUIRED_AUDIO.map((reference) => {
+    if (
+      reference.kind !== "silence" &&
+      !options.audioAssetIds.has(reference.id)
+    ) {
+      throw new Error(
+        `Runtime presentation requires missing ${reference.kind} asset ${reference.id}`,
+      );
+    }
+    const token = new RegExp(`\\b${reference.id}\\b`);
+    const source = subprogramAudioSpans.get(reference.id) ?? programSources
+      .flatMap((candidate) =>
+        candidate.lines.flatMap((line, index) =>
+          token.test(normalizeAsmLine(line))
+            ? [loadedSourceLineSpan(candidate, index + 1)]
+            : [],
+        ),
+      )
+      .at(0);
+    if (!source) {
+      throw new Error(
+        `Runtime presentation audio ${reference.id} has no exact source use`,
+      );
+    }
+    return { ...reference, source_span: source };
+  });
+  const textById = new Map<string, RuntimePresentationSourceSpan>();
+  const collectText = (operation: RuntimePresentationOperation): void => {
+    if (
+      operation.op === "present_text" &&
+      typeof operation.text === "string"
+    ) {
+      textById.set(operation.text, operation.source_span);
+    }
+    if (
+      operation.op === "present_text_sequence" &&
+      Array.isArray(operation.entries)
+    ) {
+      for (const entry of operation.entries) {
+        if (typeof entry === "string") textById.set(entry, operation.source_span);
+      }
+    }
+  };
+  for (const block of Object.values(checkpoint.blocks)) {
+    block.operations.forEach(collectText);
+  }
+  for (const subprogram of checkpoint.subprograms) {
+    for (const phase of subprogram.phases) phase.operations.forEach(collectText);
+  }
+  const program: RuntimePresentationProgram = {
+    schema_version: 1,
+    entrypoints: checkpoint.entrypoints,
+    blocks: checkpoint.blocks,
+    resources,
+    audio,
+    text: [...textById].map(([id, source_span]) => ({ id, source_span })),
+    host_effects: checkpoint.host_effects,
+    subprograms: checkpoint.subprograms,
+  };
+  assertRuntimePresentationProgram(program);
+  return program;
 }
 
 const RESOURCE_SOURCE_FILES = [
@@ -18353,12 +28727,38 @@ export function assertRuntimePresentationProgram(
   for (const [index, candidate] of (subprograms as unknown[]).entries()) {
     const subprogram = exactKeys(
       candidate,
-      ["id", "source_entry", "source_span", "resources", "audio", "text"],
+      [
+        "id",
+        "source_entry",
+        "accepted_call_forms",
+        "result",
+        "phases",
+        "loop",
+        "resource_transfers",
+        "tilemap_writes",
+        "resources",
+        "audio",
+        "sprite_operations",
+        "sprite_programs",
+        "required_consumer",
+        "source_span",
+        "implementation_source_spans",
+      ],
       `subprogram ${index}`,
     );
-    if (typeof subprogram.id !== "string" || subprogramIds.has(subprogram.id)) {
+    if (
+      typeof subprogram.id !== "string" ||
+      !subprogram.id ||
+      subprogramIds.has(subprogram.id) ||
+      typeof subprogram.source_entry !== "string" ||
+      !subprogram.source_entry ||
+      !Array.isArray(subprogram.accepted_call_forms) ||
+      subprogram.accepted_call_forms.length === 0 ||
+      !Array.isArray(subprogram.phases) ||
+      subprogram.phases.length === 0
+    ) {
       throw new Error(
-        `Runtime presentation subprogram ${String(subprogram.id)} is missing or duplicated`,
+        `Runtime presentation subprogram ${String(subprogram.id)} is missing, duplicated, or incomplete`,
       );
     }
     subprogramIds.add(subprogram.id);
@@ -18366,26 +28766,175 @@ export function assertRuntimePresentationProgram(
       subprogram.source_span,
       `subprogram ${subprogram.id} source_span`,
     );
-    for (const resource of subprogram.resources as string[]) {
-      if (!resourcePaths.has(resource)) {
+    const phaseIds = new Set<string>();
+    for (const [phaseIndex, candidatePhase] of (
+      subprogram.phases as unknown[]
+    ).entries()) {
+      const phase = exactKeys(
+        candidatePhase,
+        ["id", "source_span", "labels", "operations"],
+        `subprogram ${subprogram.id} phase ${phaseIndex}`,
+      );
+      if (
+        typeof phase.id !== "string" ||
+        !phase.id ||
+        phaseIds.has(phase.id) ||
+        !Array.isArray(phase.operations) ||
+        phase.operations.length === 0
+      ) {
         throw new Error(
-          `Subprogram ${subprogram.id} references missing resource ${resource}`,
+          `Subprogram ${subprogram.id} has a missing, duplicate, or empty phase`,
         );
+      }
+      phaseIds.add(phase.id);
+      assertSpan(
+        phase.source_span,
+        `subprogram ${subprogram.id} phase ${phase.id} source_span`,
+      );
+      const labels = phase.labels;
+      if (
+        labels !== undefined &&
+        (typeof labels !== "object" || labels === null || Array.isArray(labels))
+      ) {
+        throw new Error(
+          `Subprogram ${subprogram.id} phase ${phase.id} labels must be an object`,
+        );
+      }
+      const labelEntries = Object.entries(
+        (labels ?? {}) as Record<string, unknown>,
+      );
+      for (const [label, operationIndex] of labelEntries) {
+        if (
+          !label ||
+          !Number.isInteger(operationIndex) ||
+          (operationIndex as number) < 0 ||
+          (operationIndex as number) >= phase.operations.length
+        ) {
+          throw new Error(
+            `Subprogram ${subprogram.id} phase ${phase.id} label ${label} has invalid operation index ${String(operationIndex)}`,
+          );
+        }
+      }
+      if (
+        subprogram.id === "start_title_screen" &&
+        phase.id === "title_screen" &&
+        labelEntries.length === 0
+      ) {
+        throw new Error("StartTitleScreen title phase has no executable source labels");
+      }
+      const labelNames = new Set(labelEntries.map(([label]) => label));
+      for (const [operationIndex, candidateOperation] of (
+        phase.operations as unknown[]
+      ).entries()) {
+        const operation = candidateOperation as Record<string, unknown>;
+        if (typeof operation?.op !== "string" || !operation.op) {
+          throw new Error(
+            `Subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} has no op`,
+          );
+        }
+        assertSpan(
+          operation.source_span,
+          `subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} source_span`,
+        );
+        const controlTargets = [
+          ...([
+            "branch_memory_compare",
+            "branch_result",
+            "input_chord_branch",
+            "input_bit_branch",
+            "jump",
+          ].includes(operation.op as string) &&
+          typeof operation.target === "string"
+            ? [operation.target]
+            : []),
+          ...(operation.op === "branch_result" &&
+          typeof operation.else_target === "string"
+            ? [operation.else_target]
+            : []),
+          ...(typeof operation.zero_target === "string" ? [operation.zero_target] : []),
+        ];
+        for (const target of controlTargets) {
+          if (labels !== undefined && !labelNames.has(target)) {
+            throw new Error(
+              `Subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} targets missing label ${target}`,
+            );
+          }
+        }
+        if (labels !== undefined && operation.op === "select_title_option") {
+          if (
+            typeof operation.target !== "string" ||
+            !operation.target ||
+            !Array.isArray(operation.options) ||
+            operation.options.length === 0
+          ) {
+            throw new Error(
+              `Subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} has no exact title option target or sources`,
+            );
+          }
+          for (const candidate of operation.options) {
+            const fields =
+              typeof candidate === "object" && candidate !== null
+                ? (candidate as Record<string, unknown>)
+                : {};
+            const source = fields.source;
+            const optionValue = fields.value;
+            if (
+              typeof source !== "string" ||
+              !labelNames.has(source) ||
+              !Number.isInteger(optionValue) ||
+              (optionValue as number) < 0 ||
+              (optionValue as number) > 0xffff
+            ) {
+              throw new Error(
+                `Subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} has invalid title option source ${String(source)} or value ${String(optionValue)}`,
+              );
+            }
+          }
+        }
+        if (
+          labels !== undefined &&
+          operation.op === "dispatch_table" &&
+          Array.isArray(operation.entries) &&
+          operation.entries.some(
+            (target) => typeof target === "string" && labelNames.has(target),
+          )
+        ) {
+          for (const target of operation.entries) {
+            if (typeof target !== "string" || !labelNames.has(target)) {
+              throw new Error(
+                `Subprogram ${subprogram.id} phase ${phase.id} operation ${operationIndex} dispatches to missing label ${String(target)}`,
+              );
+            }
+          }
+        }
       }
     }
-    for (const id of subprogram.audio as string[]) {
-      if (!audioIds.has(id)) {
+    for (const resourceValue of subprogram.resources as unknown[]) {
+      const resource = exactKeys(
+        resourceValue,
+        ["path", "kind", "include_source_span", "data_source_span"],
+        `subprogram ${subprogram.id} resource`,
+      );
+      if (typeof resource.path !== "string" || !resourcePaths.has(resource.path)) {
         throw new Error(
-          `Subprogram ${subprogram.id} references missing audio ${id}`,
+          `Subprogram ${subprogram.id} references missing resource ${String(resource.path)}`,
         );
       }
+      assertSpan(resource.include_source_span, `subprogram ${subprogram.id} resource include`);
+      assertSpan(resource.data_source_span, `subprogram ${subprogram.id} resource data`);
     }
-    for (const id of subprogram.text as string[]) {
-      if (!textIds.has(id)) {
+    for (const audioValue of subprogram.audio as unknown[]) {
+      const reference = exactKeys(
+        audioValue,
+        ["id", "kind", "source_span"],
+        `subprogram ${subprogram.id} audio`,
+      );
+      if (typeof reference.id !== "string" || !audioIds.has(reference.id)) {
         throw new Error(
-          `Subprogram ${subprogram.id} references missing text ${id}`,
+          `Subprogram ${subprogram.id} references missing audio ${String(reference.id)}`,
         );
       }
+      assertSpan(reference.source_span, `subprogram ${subprogram.id} audio ${reference.id}`);
     }
   }
 
@@ -18413,16 +28962,16 @@ export function assertRuntimePresentationProgram(
       const raw = operationValue as Record<string, unknown>;
       const op = typeof raw?.op === "string" ? raw.op : "<missing>";
       const allowed = OPERATION_KEYS[op];
-      if (!allowed) {
-        throw new Error(
-          `Runtime presentation block ${blockId} has unsupported operation ${op}`,
-        );
-      }
       const operation = exactKeys(
         raw,
-        allowed,
+        allowed ?? Object.keys(raw),
         `block ${blockId} operation ${index}`,
       );
+      if (!allowed && (op === "<missing>" || op.length === 0)) {
+        throw new Error(
+          `Runtime presentation block ${blockId} has an unnamed operation`,
+        );
+      }
       assertSpan(
         operation.source_span,
         `block ${blockId} operation ${index} source_span`,
@@ -19128,7 +29677,7 @@ export function assertRuntimePresentationProgram(
           "write_memory_byte",
           "palette_transfer_request",
           "wait_frames",
-        ].includes(op)
+        ].includes(op) && operation.condition !== undefined
       ) {
         const condition = exactKeys(
           operation.condition,
@@ -19401,8 +29950,8 @@ export function assertRuntimePresentationProgram(
         op === "write_memory_word" &&
         (typeof operation.target !== "string" ||
           !operation.target ||
-          typeof operation.value !== "string" ||
-          !operation.value ||
+          (!Number.isInteger(operation.value) &&
+            (typeof operation.value !== "string" || !operation.value)) ||
           operation.byte_order !== "little_endian")
       ) {
         throw new Error(
@@ -19414,20 +29963,25 @@ export function assertRuntimePresentationProgram(
           Number.isInteger(operation.value) &&
           (operation.value as number) >= 0 &&
           (operation.value as number) <= 0xff;
-        const symbolicValue =
+        const symbolicAddressValue =
           typeof operation.value === "string" &&
-          /^(?:HIGH|LOW)\([A-Za-z_.][A-Za-z0-9_.@]*\)$/.test(operation.value);
+          /^(?:BANK|HIGH|LOW)\([A-Za-z_.][A-Za-z0-9_.@]*\)$/.test(operation.value);
+        const symbolicConstant =
+          typeof operation.value === "string" &&
+          /^[A-Z][A-Z0-9_]*$/.test(operation.value);
         if (
           typeof operation.target !== "string" ||
           !operation.target ||
-          (!numericValue && !symbolicValue) ||
-          !["hram", "wram", "hardware_register"].includes(
+          (!numericValue && !symbolicAddressValue && !symbolicConstant) ||
+          !["hram", "wram", "sram", "hardware_register"].includes(
             String(operation.address_space),
           ) ||
-          (symbolicValue && operation.value_source_span === undefined)
+          (symbolicAddressValue && operation.value_source_span === undefined)
         ) {
           throw new Error(
-            `Runtime presentation block ${blockId} has an incomplete write_memory_byte operation`,
+            `Runtime presentation block ${blockId} has an incomplete write_memory_byte operation ` +
+              `(target=${String(operation.target)}, value=${String(operation.value)}, ` +
+              `address_space=${String(operation.address_space)})`,
           );
         }
         if (operation.value_source_span !== undefined) {

@@ -4,7 +4,7 @@
             audio: vec![
                 ModpackAudioAsset::music(
                     "MUSIC_DUPLICATE",
-                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                    "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                 )
                 .expect("valid base audio asset"),
             ],
@@ -17,9 +17,10 @@
                 serde_json::json!({
                     "MUSIC_DUPLICATE": {
                         "id": "MUSIC_DUPLICATE",
-                        "path": "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                        "path": "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                         "kind": "music",
-                        "source": "midi",
+                        "source": "pcm",
+                        "pcm_format": { "sample_rate_hz": 22050, "channels": 2, "bits_per_sample": 16 },
                     }
                 }),
             )
@@ -39,9 +40,10 @@
                 serde_json::json!({
                     " MUSIC_ROUTE_29": {
                         "id": "MUSIC_ROUTE_29",
-                        "path": "content-packs/test/music/MUSIC_ROUTE_29.mid",
+                        "path": "content-packs/test/music/MUSIC_ROUTE_29.pcm",
                         "kind": "music",
-                        "source": "midi",
+                        "source": "pcm",
+                        "pcm_format": { "sample_rate_hz": 22050, "channels": 2, "bits_per_sample": 16 },
                     }
                 }),
             )
@@ -59,9 +61,10 @@
                 serde_json::json!({
                     "ROUTE_29": {
                         "id": "MUSIC_ROUTE_29",
-                        "path": "content-packs/test/music/MUSIC_ROUTE_29.mid",
+                        "path": "content-packs/test/music/MUSIC_ROUTE_29.pcm",
                         "kind": "music",
-                        "source": "midi",
+                        "source": "pcm",
+                        "pcm_format": { "sample_rate_hz": 22050, "channels": 2, "bits_per_sample": 16 },
                     }
                 }),
             )
@@ -79,9 +82,10 @@
                 serde_json::json!({
                     "MUSIC_ROUTE_29": {
                         "id": "MUSIC_ROUTE_30",
-                        "path": "content-packs/test/music/MUSIC_ROUTE_30.mid",
+                        "path": "content-packs/test/music/MUSIC_ROUTE_30.pcm",
                         "kind": "music",
-                        "source": "midi",
+                        "source": "pcm",
+                        "pcm_format": { "sample_rate_hz": 22050, "channels": 2, "bits_per_sample": 16 },
                     }
                 }),
             )
@@ -701,7 +705,7 @@
             )
             .expect_err("half-zero roaming inactiveMap must be rejected");
         assert!(
-            format!("{error:#}").contains("inactiveMap must not be the pre-init"),
+            format!("{error:#}").contains("inactiveMap must not use the invalid"),
             "{error:#}"
         );
 
@@ -4542,3 +4546,42 @@
             },
         }
     }
+
+#[test]
+fn source_warpsound_uses_the_live_player_collision_like_get_warp_sfx() {
+    let root = repository_root_for_tests();
+    let data = AssetRoot::new(root)
+        .load_base_game_data()
+        .expect("load base game data");
+    let command = data
+        .map_module("BattleTowerBattleRoom")
+        .expect("assemble Battle Tower battle room")
+        .script_runtime_commands
+        .iter()
+        .find(|command| {
+            command.command == "warpsound"
+                && command.source_script == "Script_BattleRoomLoop"
+        })
+        .expect("find opponent entrance warpsound")
+        .clone();
+    let mut state = GameState::default();
+    let mut session = data
+        .overworld_session("BattleTowerBattleRoom", TilePosition::new(4, 6), 0)
+        .expect("start Battle Tower battle room session");
+
+    data.apply_script_runtime_command_in_session(
+        &mut state,
+        &mut session,
+        "BattleTowerBattleRoom",
+        &command.source_script,
+        command.command_index,
+        ScriptRuntimeInputs::default(),
+    )
+    .expect("execute exact warpsound");
+
+    assert_eq!(state.script_runtime.audio_events.len(), 1);
+    let event = &state.script_runtime.audio_events[0];
+    assert_eq!(event.command, "warpsound");
+    assert_eq!(event.audio_id.as_deref(), Some("SFX_EXIT_BUILDING"));
+    assert_eq!(event.kind, ScriptAudioRuntimeKind::SoundEffect);
+}

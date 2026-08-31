@@ -2248,33 +2248,6 @@ const exportStoryEventScriptConstants = () => {
   }
 };
 
-const exportRuntimeTitleScreen = () => {
-  const targetPath = path.join(
-    outDir,
-    "content-packs",
-    "core-modular",
-    "runtime_title_screen",
-    "title.json"
-  );
-  if (!fs.existsSync(targetPath)) {
-    return;
-  }
-  const introMenu = fs.readFileSync(
-    path.join(disassemblyRoot, "engine", "menus", "intro_menu.asm"),
-    "utf8"
-  );
-  const matches = [...introMenu.matchAll(/; Play the title screen music\.\s*\n\s*ld de,\s*([A-Z0-9_]+)/g)];
-  if (matches.length !== 1) {
-    throw new Error(
-      `Expected exactly one source title-music load in intro_menu.asm, found ${matches.length}.`
-    );
-  }
-  fs.writeFileSync(
-    targetPath,
-    `${JSON.stringify({ title_music: matches[0][1] }, null, 2)}\n`
-  );
-};
-
 const parseNonTrainerNames = () => {
   const filePath = path.join(disassemblyRoot, "data", "phone", "non_trainer_names.asm");
   const entries = {};
@@ -2511,7 +2484,6 @@ const exportRuntimeAssets = ({
   exportPermanentPhoneNumbers();
   exportInitializeEvents({ projectRoot });
   exportStoryEventScriptConstants();
-  exportRuntimeTitleScreen();
   exportPhoneContacts();
   exportAsmText();
   exportMoveNames();

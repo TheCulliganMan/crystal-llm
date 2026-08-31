@@ -22,20 +22,33 @@ import { SettingsPanel } from "./settings-panel";
 import { VisualDebugPanel } from "./visual-debug-panel";
 import { KeybindingsEditor } from "./keybindings-editor";
 import type { BrandTheme } from "./settings-panel";
-import { MultiplayerMenu, type MultiplayerLeaderboardEntry } from "@/components/multiplayer-menu";
+import {
+  MultiplayerMenu,
+  type MultiplayerLeaderboardEntry,
+} from "@/components/multiplayer-menu";
+import {
+  MultiplayerChat,
+  type MultiplayerChatLine,
+} from "@/components/multiplayer-chat";
 import { WebRTCConnection } from "@pokecrystal/core/multiplayer/webrtc-connection";
 import { WebRTCBattleTransport } from "@pokecrystal/core/multiplayer/webrtc-battle-transport";
 import { useMultiplayerStore } from "@pokecrystal/core/multiplayer/multiplayer-store";
+import {
+  MatchmakingService,
+  type MatchmakingMode,
+} from "@pokecrystal/core/multiplayer/matchmaking-service";
 import {
   OverworldPresenceManager,
   type MultiplayerInteractionKind,
   type MultiplayerInteractionRequest,
   type MultiplayerInteractionResponse,
+  type MultiplayerChatChannel,
+  type MultiplayerChatMessage,
 } from "@pokecrystal/core/multiplayer/overworld-presence";
 import { LinkCableEmulator } from "@pokecrystal/core/multiplayer/link-cable";
 import { TradeManager } from "@pokecrystal/core/multiplayer/trade-manager";
 import type { RemoteOverworldPlayer } from "@pokecrystal/core/types/overworld";
-import type { Pokemon } from "@pokecrystal/core/core/models";
+import { pokemonSpeciesDisplayName, type Pokemon } from "@pokecrystal/core/core/models";
 import { PlayerGender, TimeOfDay } from "@pokecrystal/core/core/enums";
 import { canonicaliseTimeOfDay, DAY_HOUR, MORN_HOUR, NITE_HOUR } from "@pokecrystal/core/engine/systems/time";
 import { GameButton } from "@pokecrystal/core/input/config";
@@ -256,6 +269,38 @@ const LOADING_STALL_ANIMATION_MS = 24000;
 const LOADING_STALL_PROGRESS_FLOOR = CORE_ASSET_PROGRESS_CAP;
 const LOADING_STALL_PROGRESS_CEIL = CORE_DATA_PROGRESS_CAP - 0.01;
 const MULTIPLAYER_SESSION_TIMEOUT_MS = 20_000;
+const MULTIPLAYER_WORLD_ID = process.env.NEXT_PUBLIC_POKECRYSTAL_WORLD_ID?.trim() || "main";
+const MULTIPLAYER_MODPACK_ID =
+  process.env.NEXT_PUBLIC_POKECRYSTAL_MODPACK_ID?.trim() || "core-modular";
+
+const readMultiplayerIceServers = (): RTCIceServer[] | undefined => {
+  const raw = process.env.NEXT_PUBLIC_POKECRYSTAL_ICE_SERVERS?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error("expected a JSON array");
+    }
+    const servers = parsed.filter((entry): entry is RTCIceServer => {
+      if (!entry || typeof entry !== "object") return false;
+      const urls = (entry as { urls?: unknown }).urls;
+      return typeof urls === "string" || (
+        Array.isArray(urls) && urls.length > 0 && urls.every((url) => typeof url === "string")
+      );
+    });
+    if (servers.length !== parsed.length || servers.length === 0) {
+      throw new Error("every ICE server requires urls");
+    }
+    return servers;
+  } catch (error) {
+    console.error("[multiplayer] Invalid NEXT_PUBLIC_POKECRYSTAL_ICE_SERVERS", error);
+    return undefined;
+  }
+};
+
+const MULTIPLAYER_ICE_SERVERS = readMultiplayerIceServers();
 
 const isSupabaseClientUnavailableError = (error: unknown): boolean =>
   error instanceof Error && error.message === "Supabase client not initialized";
@@ -487,6 +532,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const mpConnectionRef = useRef<WebRTCConnection | null>(null);
   const activeSessionRef = useRef<ActiveMultiplayerSession | null>(null);
   const presenceManagerRef = useRef<OverworldPresenceManager | null>(null);
+  const matchmakingServiceRef = useRef<MatchmakingService | null>(null);
+  const handledMatchIdRef = useRef<string | null>(null);
   const presenceSyncTimerRef = useRef<number | null>(null);
   const remotePlayersHandlerRef = useRef<((players: RemoteOverworldPlayer[]) => void) | null>(null);
   const interactionRequestHandlerRef = useRef<
@@ -495,6 +542,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const interactionResponseHandlerRef = useRef<
     ((response: MultiplayerInteractionResponse) => void) | null
   >(null);
+  const chatMessageHandlerRef = useRef<((message: MultiplayerChatMessage) => void) | null>(null);
   const frontendPlayerCountRef = useRef(0);
   const presenceAiCountRef = useRef(0);
   const apiMcpCountRef = useRef(0);
@@ -545,6 +593,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     kind: MultiplayerInteractionKind;
   } | null>(null);
   const [interactionStatus, setInteractionStatus] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<MultiplayerChatLine[]>([]);
+  const [blockedChatUserIds, setBlockedChatUserIds] = useState<Set<string>>(() => new Set());
   const [remotePlayers, setRemotePlayers] = useState<RemoteOverworldPlayer[]>([]);
   const [selectedRemoteUserId, setSelectedRemoteUserId] = useState<string | null>(null);
   const [multiplayerLeaderboard, setMultiplayerLeaderboard] = useState<MultiplayerLeaderboardEntry[]>([]);
@@ -558,6 +608,13 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const onlineAiCount = useMultiplayerStore((state) => state.onlineAiCount);
   const remoteSpritesVisible = useMultiplayerStore((state) => state.remoteSpritesVisible);
   const crowdViewEnabled = useMultiplayerStore((state) => state.crowdViewEnabled);
+  const matchmakingQueueMode = useMultiplayerStore((state) => state.queueMode);
+  const currentMatchId = useMultiplayerStore((state) => state.currentMatchId);
+  const currentMatchChannelName = useMultiplayerStore((state) => state.currentMatchChannelName);
+  const currentMatchMode = useMultiplayerStore((state) => state.currentMode);
+  const currentOpponentId = useMultiplayerStore((state) => state.opponentId);
+  const currentOpponentName = useMultiplayerStore((state) => state.opponentName);
+  const currentMatchIsHost = useMultiplayerStore((state) => state.isHost);
   const latestRemotePlayersRef = useRef<RemoteOverworldPlayer[]>([]);
   const supabaseClientRef = useRef(createSupabaseBrowserClient());
   const hydratedSupabaseSettingsRef = useRef(false);
@@ -628,11 +685,20 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
       if (manager && interactionResponseHandlerRef.current) {
         manager.offInteractionResponse(interactionResponseHandlerRef.current);
       }
+      if (manager && chatMessageHandlerRef.current) {
+        manager.offChatMessage(chatMessageHandlerRef.current);
+      }
       void manager?.disconnect();
       presenceManagerRef.current = null;
       remotePlayersHandlerRef.current = null;
       interactionRequestHandlerRef.current = null;
       interactionResponseHandlerRef.current = null;
+      chatMessageHandlerRef.current = null;
+      const matchmaking = matchmakingServiceRef.current;
+      matchmakingServiceRef.current = null;
+      if (matchmaking) {
+        void matchmaking.leaveQueue().catch(() => undefined).finally(() => matchmaking.destroy());
+      }
     };
   }, []);
 
@@ -771,6 +837,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     gameRef.current?.onMultiplayerBattleComplete(null);
     gameRef.current?.clearMultiplayerBattleTransport();
     activeSession?.connection.destroy();
+    handledMatchIdRef.current = null;
+    useMultiplayerStore.getState().clearMatch();
     if (nextStatus !== undefined) {
       setInteractionStatus(nextStatus);
     }
@@ -791,6 +859,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
             channelName: session.requestId,
             peerUserId: session.peerUserId,
             mode: session.kind,
+            modpackId: MULTIPLAYER_MODPACK_ID,
             outcome,
             metadata,
           }),
@@ -822,9 +891,18 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
       return;
     }
 
+    if (useMultiplayerStore.getState().inQueue) {
+      void matchmakingServiceRef.current?.leaveQueue().catch((error) => {
+        console.warn("[play-panel] failed to leave queue before starting session", error);
+      });
+    }
     clearActiveSession();
 
-    const connection = new WebRTCConnection({ matchId: requestId, isHost });
+    const connection = new WebRTCConnection({
+      matchId: requestId,
+      isHost,
+      iceServers: MULTIPLAYER_ICE_SERVERS,
+    });
     const session: ActiveMultiplayerSession = {
       requestId,
       kind,
@@ -985,6 +1063,80 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     });
   }, [clearActiveSession, persistMultiplayerMatch, playerName]);
 
+  const handleJoinMatchmaking = useCallback(async (mode: MatchmakingMode) => {
+    const store = useMultiplayerStore.getState();
+    if (!supabaseUserId) {
+      store.setError("Sign in to use matchmaking.");
+      return;
+    }
+    try {
+      const service = matchmakingServiceRef.current ?? new MatchmakingService();
+      matchmakingServiceRef.current = service;
+      if (store.inQueue) {
+        await service.leaveQueue();
+      }
+      const partyPreview = gameRef.current?.getPartyPokemon().map((pokemon) => ({
+        species: pokemonSpeciesDisplayName(pokemon.species),
+        level: pokemon.level,
+      }));
+      const rating = multiplayerLeaderboard.find((entry) => entry.id === supabaseUserId)
+        ?.link_battle_rating ?? undefined;
+      await service.joinQueue({
+        mode,
+        modpackId: MULTIPLAYER_MODPACK_ID,
+        rating: rating ?? undefined,
+        partyPreview,
+      });
+      setInteractionStatus(`Searching the ${mode} queue for a compatible trainer...`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to join matchmaking.";
+      store.setError(message);
+      setInteractionStatus(message);
+    }
+  }, [multiplayerLeaderboard, supabaseUserId]);
+
+  const handleLeaveMatchmaking = useCallback(async () => {
+    try {
+      await matchmakingServiceRef.current?.leaveQueue();
+      setInteractionStatus("Left the matchmaking queue.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to leave matchmaking.";
+      useMultiplayerStore.getState().setError(message);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (
+      !currentMatchId
+      || !currentMatchChannelName
+      || handledMatchIdRef.current === currentMatchId
+      || !currentOpponentId
+      || !currentOpponentName
+      || (currentMatchMode !== "battle" && currentMatchMode !== "trade")
+      || !gameRef.current
+    ) {
+      return;
+    }
+    handledMatchIdRef.current = currentMatchId;
+    setInteractionStatus(`Match found: ${currentOpponentName}. Connecting...`);
+    beginMultiplayerSession(
+      currentMatchMode,
+      currentMatchChannelName,
+      currentMatchIsHost,
+      currentOpponentId,
+      currentOpponentName,
+    );
+  }, [
+    beginMultiplayerSession,
+    currentMatchId,
+    currentMatchChannelName,
+    currentMatchIsHost,
+    currentMatchMode,
+    currentOpponentId,
+    currentOpponentName,
+    loadingGame,
+  ]);
+
   const handleLoadProgress = useCallback((progress: GameLoadProgress) => {
     if (!mountedRef.current) {
       return;
@@ -1142,7 +1294,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
 
     void (async () => {
       try {
-        const manager = new OverworldPresenceManager();
+        const manager = new OverworldPresenceManager({
+          worldId: MULTIPLAYER_WORLD_ID,
+          modpackId: MULTIPLAYER_MODPACK_ID,
+        });
         const initialGame = gameRef.current;
         const initialOverworld = initialGame?.getOverworld?.();
         const initialMapName = initialGame ? initialGame.getCurrentMapName() : "Unknown";
@@ -1202,12 +1357,31 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
             return null;
           });
         };
+        const chatHandler = (message: MultiplayerChatMessage) => {
+          setChatMessages((current) => [
+            ...current.slice(-99),
+            {
+              messageId: message.messageId,
+              userId: message.fromUserId,
+              playerName: message.fromPlayerName,
+              text: message.text,
+              outgoing: false,
+              channel: message.channel,
+              timestampMs: message.timestampMs,
+            },
+          ]);
+          if (message.channel === "whisper") {
+            setSelectedRemoteUserId(message.fromUserId);
+          }
+        };
         manager.onRemotePlayersChange(handler);
         manager.onInteractionRequest(requestHandler);
         manager.onInteractionResponse(responseHandler);
+        manager.onChatMessage(chatHandler);
         remotePlayersHandlerRef.current = handler;
         interactionRequestHandlerRef.current = requestHandler;
         interactionResponseHandlerRef.current = responseHandler;
+        chatMessageHandlerRef.current = chatHandler;
         presenceManagerRef.current = manager;
         setIncomingRequest(null);
         setOutgoingRequest(null);
@@ -1264,13 +1438,18 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     if (manager && interactionResponseHandlerRef.current) {
       manager.offInteractionResponse(interactionResponseHandlerRef.current);
     }
+    if (manager && chatMessageHandlerRef.current) {
+      manager.offChatMessage(chatMessageHandlerRef.current);
+    }
     void manager?.disconnect();
     presenceManagerRef.current = null;
     remotePlayersHandlerRef.current = null;
     interactionRequestHandlerRef.current = null;
     interactionResponseHandlerRef.current = null;
+    chatMessageHandlerRef.current = null;
     setIncomingRequest(null);
     setOutgoingRequest(null);
+    setChatMessages([]);
     setInteractionStatus(null);
 
     mp.setConnectionState("disconnected");
@@ -1352,6 +1531,71 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
   const handleRequestTrade = useCallback(() => {
     sendInteractionRequest("trade");
   }, [sendInteractionRequest]);
+
+  const handleSendChat = useCallback((channel: MultiplayerChatChannel, text: string) => {
+    const manager = presenceManagerRef.current;
+    const eligiblePlayers = latestRemotePlayersRef.current.filter((player) => player.entityType === "player");
+    const target = eligiblePlayers.find((player) => player.userId === selectedRemoteUserId)
+      ?? eligiblePlayers[0]
+      ?? null;
+    if (!manager || (channel === "whisper" && !target)) {
+      setInteractionStatus(channel === "whisper"
+        ? "Select an online trainer before whispering."
+        : "Connect to multiplayer before sending a message.");
+      return;
+    }
+    void manager.sendChatMessage(channel, text, channel === "whisper" ? target?.userId ?? null : null).then((message) => {
+      setChatMessages((current) => [
+        ...current.slice(-99),
+        {
+          messageId: message.messageId,
+          userId: supabaseUserId ?? "local",
+          playerName,
+          text: message.text,
+          outgoing: true,
+          channel: message.channel,
+          timestampMs: message.timestampMs,
+        },
+      ]);
+    }).catch((error) => {
+      setInteractionStatus(error instanceof Error ? error.message : "Failed to send message.");
+    });
+  }, [playerName, selectedRemoteUserId, supabaseUserId]);
+
+  const handleToggleChatBlock = useCallback((userId: string) => {
+    setBlockedChatUserIds((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) {
+        next.delete(userId);
+      } else {
+        next.add(userId);
+      }
+      presenceManagerRef.current?.setBlockedUserIds(next);
+      return next;
+    });
+  }, []);
+
+  const handleReportChat = useCallback((message: MultiplayerChatLine) => {
+    void fetch("/api/multiplayer/chat/reports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messageId: message.messageId,
+        reportedUserId: message.userId,
+        playerName: message.playerName,
+        channel: message.channel,
+        text: message.text,
+      }),
+    }).then(async (response) => {
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? "Failed to report message.");
+      }
+      setInteractionStatus(`Reported ${message.playerName}'s message to moderators.`);
+    }).catch((error) => {
+      setInteractionStatus(error instanceof Error ? error.message : "Failed to report message.");
+    });
+  }, []);
 
   const respondToIncomingRequest = useCallback((accepted: boolean) => {
     const manager = presenceManagerRef.current;
@@ -1831,6 +2075,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           onSelectRemotePlayer={setSelectedRemoteUserId}
           onAcceptRequest={handleAcceptRequest}
           onDeclineRequest={handleDeclineRequest}
+          onJoinMatchmaking={handleJoinMatchmaking}
+          onLeaveMatchmaking={handleLeaveMatchmaking}
           isAuthenticated={Boolean(supabaseUserId)}
           authLabel="Sign in from the account menu to join live multiplayer."
           remotePlayers={remotePlayers}
@@ -1852,6 +2098,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
               : null
           }
           interactionStatusLabel={interactionStatus}
+          queueMode={matchmakingQueueMode}
         />
       );
     }
@@ -1890,6 +2137,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     handleRequestTrade,
     handleAcceptRequest,
     handleDeclineRequest,
+    handleJoinMatchmaking,
+    handleLeaveMatchmaking,
     supabaseUserId,
     remotePlayers,
     selectedRemoteUserId,
@@ -1901,6 +2150,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     outgoingRequest,
     incomingRequest,
     interactionStatus,
+    matchmakingQueueMode,
     handleLoadSave,
     playerGender,
     applyGender,
@@ -1918,6 +2168,26 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     skipToPlayEnabled,
     applySkipToPlayEnabled,
   ]);
+
+  const multiplayerChatDock = (
+    <MultiplayerChat
+      messages={chatMessages}
+      systemMessages={interactionStatus ? [interactionStatus] : undefined}
+      remotePlayers={remotePlayers}
+      selectedRemoteUserId={selectedRemoteUserId}
+      blockedUserIds={blockedChatUserIds}
+      onSelectRemotePlayer={setSelectedRemoteUserId}
+      onSend={handleSendChat}
+      onReport={handleReportChat}
+      onToggleBlock={handleToggleChatBlock}
+      onOpenLobby={() => {
+        setUtilityPanelView("multiplayer");
+        if (!isDesktopVariant) {
+          setUtilityPanelOpen(true);
+        }
+      }}
+    />
+  );
 
   if (isDesktopVariant) {
     return (
@@ -1988,7 +2258,7 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
           <aside
             id="desktop-sidebar"
             data-testid="desktop-sidebar"
-            className="flex w-[22rem] max-w-[34vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
+            className="flex w-[26rem] max-w-[40vw] shrink-0 flex-col overflow-hidden border-l border-white/10 bg-[#101010]"
           >
             <div className="border-b border-white/10 p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
@@ -2045,7 +2315,10 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                 ))}
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4 text-base-content">
+            <div className="min-h-[18rem] flex-[1.2] p-3">
+              {multiplayerChatDock}
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto border-t border-white/10 p-3 text-base-content">
               <div className="rounded border border-white/10 bg-base-100 p-3">
                 {desktopPanelContent}
               </div>
@@ -2060,9 +2333,13 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
       <div
         className="grid h-full min-h-0 gap-2"
-        style={{ gridTemplateColumns: "1fr" }}
+        style={{
+          gridTemplateColumns: hasMounted && !isCompactLayoutReady && !isFullscreen && !secureMode
+            ? "minmax(0, 1fr) 18rem"
+            : "1fr",
+        }}
       >
-        <div className="min-h-0">
+        <div className="min-h-0 min-w-0 overflow-hidden">
           <div
             ref={fullscreenContainerRef}
             className="flex h-full min-h-0 flex-col gap-2"
@@ -2306,6 +2583,11 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
             ) : null}
           </div>
         </div>
+        {hasMounted && !isCompactLayoutReady && !isFullscreen && !secureMode ? (
+          <aside className="min-h-0 p-1 pl-0" data-testid="play-chat-dock">
+            {multiplayerChatDock}
+          </aside>
+        ) : null}
       </div>
 
       {controlsOpen ? (
@@ -2434,7 +2716,9 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-4" style={{ maxHeight: MODAL_BODY_MAX_HEIGHT }}>
               {utilityPanelView === "multiplayer" ? (
-                <MultiplayerMenu
+                <div className="grid min-h-0 gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
+                  <div className="h-[min(32rem,58dvh)] min-h-[20rem]">{multiplayerChatDock}</div>
+                  <MultiplayerMenu
                   onConnect={handleMultiplayerConnect}
                   onDisconnect={handleMultiplayerDisconnect}
                   onToggleRemoteSprites={handleToggleRemoteSprites}
@@ -2444,6 +2728,8 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                   onSelectRemotePlayer={setSelectedRemoteUserId}
                   onAcceptRequest={handleAcceptRequest}
                   onDeclineRequest={handleDeclineRequest}
+                  onJoinMatchmaking={handleJoinMatchmaking}
+                  onLeaveMatchmaking={handleLeaveMatchmaking}
                   isAuthenticated={Boolean(supabaseUserId)}
                   authLabel="Sign in from the account menu to join live multiplayer."
                   remotePlayers={remotePlayers}
@@ -2465,7 +2751,9 @@ export const PlayPanel = ({ variant = "default" }: PlayPanelProps) => {
                       : null
                   }
                   interactionStatusLabel={interactionStatus}
-                />
+                  queueMode={matchmakingQueueMode}
+                  />
+                </div>
               ) : null}
               {utilityPanelView === "settings" ? (
                 <SettingsPanel

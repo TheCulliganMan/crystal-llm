@@ -168,7 +168,7 @@
         assert_eq!(
             lucky_reset.outcome.effect,
             SpecialRoutineEffect::ResetLuckyNumberShowFlag {
-                lucky_number: 258,
+                lucky_number: 513,
                 lucky_number_day: 4,
                 random_state_after: crystal_core::random::CrystalRandomState { add: 2, sub: 2 }
             }
@@ -182,8 +182,8 @@
         assert_eq!(
             lucky_print.outcome.effect,
             SpecialRoutineEffect::PrintTodaysLuckyNumber {
-                lucky_number: 258,
-                formatted: "00258".to_string()
+                lucky_number: 513,
+                formatted: "00513".to_string()
             }
         );
         assert_eq!(
@@ -193,11 +193,11 @@
                 .named_buffers
                 .get("STRING_BUFFER_3")
                 .map(String::as_str),
-            Some("00258")
+            Some("00513")
         );
 
         let mut winner = wounded_runtime_pokemon("CHIKORITA");
-        winner.original_trainer_id = 1_358;
+        winner.original_trainer_id = 1_613;
         session
             .state
             .storage
@@ -211,7 +211,7 @@
         assert_eq!(
             lucky_winner.outcome.effect,
             SpecialRoutineEffect::CheckForLuckyNumberWinners {
-                lucky_number: 258,
+                lucky_number: 513,
                 tier: 3,
                 source: Some(
                     crystal_core::systems::special_routines::LuckyNumberWinnerSource::Party
@@ -980,6 +980,17 @@
                 .hp,
             healed_hp
         );
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .active_battle_combat
+                .as_ref()
+                .expect("active combat")
+                .player
+                .hp,
+            healed_hp
+        );
         assert_eq!(session.state.script_runtime.item_use_events.len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1042,6 +1053,17 @@
             .as_ref()
             .expect("lead");
         assert_eq!(lead.stat_boosts[&crystal_core::models::Stat::Attack], 1);
+        assert_eq!(
+            session
+                .state
+                .script_runtime
+                .active_battle_combat
+                .as_ref()
+                .expect("active combat")
+                .player
+                .stat_boosts[&crystal_core::models::Stat::Attack],
+            1
+        );
         assert_eq!(
             session.state.bag.quantity(&runtime.data.items["X_ATTACK"]),
             0
@@ -1178,6 +1200,14 @@
             .expect("lead");
         assert_eq!(lead.hp, full_hp);
         assert_eq!(lead.status, None);
+        let combat = session
+            .state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("active combat");
+        assert_eq!(combat.player.hp, full_hp);
+        assert_eq!(combat.player.status, None);
         assert_eq!(
             session
                 .state
@@ -2300,6 +2330,14 @@
             .expect("player");
         assert_eq!(pokemon.moves[0].current_pp, 30);
         assert_eq!(pokemon.moves[1].current_pp, 1);
+        assert!(
+            session
+                .state
+                .script_runtime
+                .active_battle_combat
+                .is_none(),
+            "field item use must not fabricate a battle-combat copy"
+        );
         assert_eq!(session.state.bag.quantity(&runtime.data.items["ETHER"]), 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4011,10 +4049,10 @@
     fn runtime_sweet_scent_menu_defers_rng_and_battle_until_exact_script_boundaries() {
         let root = temp_repository_root("field-move-sweet-scent");
         write_grass_tileset(&root, "johto");
-        write_midi(
+        write_pcm(
             &root
                 .join("apps/web/assets/data")
-                .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+                .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
         );
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_grass_encounter();
@@ -4122,10 +4160,10 @@
     fn runtime_sweet_scent_exact_callasm_returns_false_on_missing_surface_without_rng() {
         let root = temp_repository_root("field-move-sweet-scent-missing-surface");
         write_grass_tileset(&root, "johto");
-        write_midi(
+        write_pcm(
             &root
                 .join("apps/web/assets/data")
-                .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+                .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
         );
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_grass_encounter();
@@ -4183,10 +4221,10 @@
     fn runtime_sweet_scent_preserves_roaming_battle_identity_through_startbattle() {
         let root = temp_repository_root("field-move-sweet-scent-roaming");
         write_grass_tileset(&root, "johto");
-        write_midi(
+        write_pcm(
             &root
                 .join("apps/web/assets/data")
-                .join("content-packs/test/music/MUSIC_ROUTE_29.mid"),
+                .join("content-packs/test/music/MUSIC_ROUTE_29.pcm"),
         );
         let asset_root = AssetRoot::new(&root);
         let mut data = minimal_runtime_data_with_grass_encounter();
@@ -4623,6 +4661,73 @@
         assert_eq!(pokemon.moves[0].current_pp, 30);
         assert_eq!(pokemon.moves[1].current_pp, 1);
         assert_eq!(session.state.bag.quantity(&runtime.data.items["ETHER"]), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_battle_pp_up_does_not_change_the_loaded_battle_move() {
+        let root = temp_repository_root("battle-item-pp-up-live-boundary");
+        write_floor_tileset(&root, "johto");
+        let asset_root = AssetRoot::new(&root);
+        let mut data = minimal_runtime_data_with_scripted_battles();
+        let mut pp_up = runtime_item("PP_UP", item_pocket("ITEM"));
+        pp_up.effect = "MOD_PP_UP".to_string();
+        pp_up.pp_up_stages = Some(1);
+        pp_up.field_menu = "ITEMMENU_PARTY".to_string();
+        pp_up.field_usable = true;
+        pp_up.battle_menu = "ITEMMENU_PARTY".to_string();
+        pp_up.battle_usable = true;
+        pp_up.consumable = true;
+        data.items.insert("PP_UP".to_string(), pp_up);
+        sync_runtime_move_tables(&mut data);
+        let runtime = CrystalRuntime::from_compiled_pack(
+            &asset_root,
+            CompiledGamePack::new_unchecked_for_tests(data, report()),
+            identity(),
+        )
+        .expect("runtime");
+        let mut session = runtime
+            .start_overworld_session(&asset_root, 0)
+            .expect("overworld session");
+        let mut player = Pokemon::new_for_tests(runtime_species(), 8, Dv::default());
+        player.moves = vec![LearnedMove {
+            name: "TACKLE".to_string(),
+            current_pp: 20,
+            pp_ups: 0,
+        }];
+        session
+            .state
+            .storage
+            .register_capture_in_box(0, player)
+            .expect("register player");
+        session.state.sync_party_from_storage();
+        session
+            .state
+            .bag
+            .add_item(&runtime.data.items["PP_UP"], 1)
+            .expect("add PP Up");
+        session
+            .start_scripted_wild_battle(&runtime, "RuntimeMap", "RuntimeWildScript", 4)
+            .expect("scripted wild battle starts");
+
+        session
+            .use_bag_item_on_battle_party_move(&runtime, "PP_UP", 0, Some(0))
+            .expect("use PP Up");
+
+        let stored = session.state.storage.party.pokemon[0]
+            .as_ref()
+            .expect("lead");
+        assert_eq!(stored.moves[0].pp_ups, 1);
+        assert!(stored.moves[0].current_pp > 20);
+        let active = &session
+            .state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .expect("active combat")
+            .player;
+        assert_eq!(active.moves[0].pp_ups, 0);
+        assert_eq!(active.moves[0].current_pp, 20);
         let _ = std::fs::remove_dir_all(root);
     }
 

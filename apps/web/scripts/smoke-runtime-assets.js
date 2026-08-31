@@ -68,7 +68,7 @@ const BINARY_TYPES = new Set([
   ".tilemap",
   ".attrmap",
   ".rle",
-  ".mp3",
+  ".pcm",
 ]);
 
 const inferType = (relativePath) => {

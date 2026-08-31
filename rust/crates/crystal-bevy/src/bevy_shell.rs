@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
-#[cfg(all(not(test), target_arch = "wasm32"))]
-use std::{cell::RefCell, rc::Rc};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bevy::ecs::query::QueryFilter;
@@ -29,10 +28,12 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use chrono::{Datelike, Local as ChronoLocal, Timelike};
 use crystal_assets::{
     RuntimeBadgeRegion, RuntimeBugContestAction, RuntimeCurrencyAccount, RuntimeDayCareAction,
-    RuntimeDayCareCaretaker, RuntimeGameCornerService, RuntimeGraphicsSpecial,
-    RuntimeHappinessServiceRoutine, RuntimeLinkBattleResult, RuntimeMysteryGiftAction,
-    RuntimePartyCheckSpecial, RuntimePhoneRandomSpecial, RuntimeShuckieAction,
-    RuntimeStoryGateSpecial,
+    RuntimeDayCareCaretaker, RuntimeGameCornerService, RuntimeGenderMenuDefinition,
+    RuntimeGraphicsSpecial, RuntimeHappinessServiceRoutine, RuntimeLinkBattleResult,
+    RuntimeMysteryGiftAction, RuntimePartyCheckSpecial, RuntimePhoneRandomSpecial,
+    RuntimePresentationPhaseMachine, RuntimePresentationProgram, RuntimeShuckieAction,
+    RuntimeStoryGateSpecial, RuntimeTitleMainMenuDefinition, RuntimeTitleMainMenuItem,
+    RuntimeTitlePresentationParameters,
 };
 
 use crate::assets::{
@@ -43,20 +44,25 @@ use crate::assets::{
     RuntimeScriptRuntimeQueueDrainResult,
 };
 use crate::audio::{AudioKind, AudioPcmFormat, AudioProgramSource};
+use crate::core::battle::start::LinkBattleStart;
 use crate::core::battle::turn::{BattleAction, active_battle_combat_state};
 use crate::core::input::GameButton;
 use crate::core::models::Dv;
 use crate::core::multiplayer::{
     BattleActionFrame, DeterministicInputJournal, DeterministicInputJournalFrame,
-    DeterministicReplayBundle, LinkMessage, LockstepFrame, MenuChoiceFrame, MenuChoiceResultFrame,
-    PlayerInputFrame, SaveResumeReplayBundle, SessionRuntimeCommandFrame,
-    SessionRuntimeCommandResultFrame, SessionSaveCheckpointFrame, StateChecksum,
-    StateChecksumFrame, encode_link_message_bytes,
+    DeterministicReplayBundle, LinkBattleRngFrame, LinkMessage, LinkPartyFrame, LockstepFrame,
+    MenuChoiceFrame, MenuChoiceResultFrame, PlayerInputFrame, SaveResumeReplayBundle,
+    SessionRuntimeCommandFrame, SessionRuntimeCommandResultFrame, SessionSaveCheckpointFrame,
+    StateChecksum, StateChecksumFrame, TradeConfirmation, TradeOffer, TradeSyncBuffer,
+    encode_link_message_bytes,
 };
 use crate::core::random::BattleRandomSource;
+#[cfg(test)]
+use crate::core::state::SlotMachineState;
 use crate::core::state::{
-    BattleScene, BattleStyle, FrameType, MenuAccount, PLAYER_GENDER_FEMALE, PLAYER_GENDER_MALE,
-    PrintOption, ScriptFadeColor, ScriptFadeDirection, Sound, TextSpeed,
+    BattleScene, BattleStyle, CardFlipInput, CardFlipPhase, FrameType, MenuAccount,
+    PLAYER_GENDER_FEMALE, PLAYER_GENDER_MALE, PrintOption, ScriptFadeColor, ScriptFadeDirection,
+    SlotMachineInput, SlotMachinePhase, Sound, TextSpeed,
 };
 use crate::core::systems::battle_items::{
     BattleItemError, BattleItemOutcome, ITEM_EFFECT_BEHAVIOR_EVOLUTION_STONE,
@@ -88,8 +94,7 @@ use crate::{
     CrystalRuntime, RuntimeBagItemSnapshot, RuntimeBattleKind, RuntimeCompiledScriptCursor,
     RuntimeElevatorSnapshot, RuntimeFlyDestinationKey, RuntimeGameShell,
     RuntimeLinkSessionDescriptor, RuntimeMapCatalogSnapshot, RuntimePendingScriptRequest,
-    RuntimeResolvedAudioPlaybackKind, RuntimeRtcSample, RuntimeShellSnapshot, RuntimeTilesetKey,
-    assets::AssetRoot,
+    RuntimeResolvedAudioPlaybackKind, RuntimeRtcSample, RuntimeShellSnapshot, assets::AssetRoot,
 };
 
 mod intro_renderer;
@@ -263,6 +268,17 @@ pub enum BevyShellStart {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BevyMultiplayerConfig {
+    pub server_url: String,
+    pub server_token: Option<String>,
+    pub world_id: String,
+    pub player_id: u64,
+    pub display_name: String,
+    pub rating: i32,
+    pub rating_range: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BevyShellConfig {
     pub quick_save_path: Option<PathBuf>,
@@ -271,8 +287,13 @@ pub struct BevyShellConfig {
     /// location tools can force either side of a 2D/2.5D comparison.
     pub voxel_view_enabled: Option<bool>,
     pub window_title: Option<String>,
+    pub multiplayer: Option<BevyMultiplayerConfig>,
     #[cfg(feature = "location-tester")]
     pub render_test_screenshot: Option<PathBuf>,
+    /// Fixed 24-hour clock used by deterministic location screenshots.
+    /// Normal play continues to use the live/new-game clock path.
+    #[cfg(feature = "location-tester")]
+    pub render_test_hour: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,7 +641,12 @@ struct BevyRuntimeShell {
     shell: RuntimeGameShell,
     latest_rtc_sample: Option<RuntimeRtcSample>,
     intro_screen: Option<VisibleIntroScreen>,
+    intro_sprite_bundle: Option<SpriteAnimRuntimeBundle>,
     title_menu: Option<TitleMenu>,
+    /// NewGame has executed ResetWRAM but has not yet reached the first
+    /// playable overworld boundary. VBlank_Normal remains authoritative
+    /// throughout gender, clock, Oak, and naming presentation.
+    new_game_pre_overworld: bool,
     visible_continue_screen: Option<VisibleContinueScreen>,
     credits_screen: Option<VisibleCreditsScreen>,
     last_error: Option<String>,
@@ -628,18 +654,21 @@ struct BevyRuntimeShell {
     last_audio_events: Vec<String>,
     pending_audio: Vec<BevyAudioCommand>,
     audio_source_cache: HashMap<BevyAudioCacheKey, CachedPcmAudio>,
-    trainer_items_used: BTreeSet<String>,
     pending_music_stop: bool,
+    pending_full_audio_reset: bool,
     transient_audio_playing: bool,
+    active_transient_kind: Option<ModpackAudioKind>,
+    current_sfx_priority: u8,
     active_music: Option<String>,
     faded_music: Option<String>,
+    music_volume: u8,
+    music_fade: Option<VisibleMusicFade>,
     last_battle_cry_key: Option<String>,
     pending_battle_cries_after_messages: VecDeque<(String, String, String)>,
     battle_enemy_send_out_pending: bool,
     battle_player_send_out_pending: bool,
     battle_enemy_hp_at_player_send_out: Option<u16>,
     pending_battle_scenes_after_message: VecDeque<(String, Box<RuntimeShellSnapshot>)>,
-    pending_enemy_response_after_capture: Option<(String, String)>,
     pending_plain_battle_map_reload: bool,
     last_overworld_input: Option<VisibleOverworldInputRecord>,
     overworld_interaction_consumed_a: bool,
@@ -690,6 +719,8 @@ struct BevyRuntimeShell {
     deterministic_session_checkpoint: Option<SessionSaveCheckpointFrame>,
     deterministic_input_frames: VecDeque<PlayerInputFrame>,
     deterministic_battle_actions: VecDeque<BattleActionFrame>,
+    pending_link_battle_action: Option<BattleAction>,
+    pending_link_battle_replacement: Option<usize>,
     deterministic_menu_results: VecDeque<MenuChoiceResultFrame>,
     last_runtime_action: Option<VisibleRuntimeActionRecord>,
     quick_save_path: Option<PathBuf>,
@@ -714,7 +745,6 @@ struct BevyRuntimeShell {
     pending_day_of_week: Option<PendingDayOfWeekPrompt>,
     pending_trainer_sight: Option<PendingTrainerSight>,
     pending_trainer_intro: Option<PendingTrainerIntro>,
-    previous_map_sign_landmark: Option<String>,
     visible_map_name_sign: Option<VisibleMapNameSign>,
     pending_delete_save: Option<VisibleDeleteSaveScreen>,
     pending_clock_reset: Option<VisibleClockResetScreen>,
@@ -744,7 +774,7 @@ struct BevyRuntimeShell {
     pending_gift_pokemon_nickname: Option<PendingGiftPokemonNickname>,
     pending_gift_pokemon_pc_notice: bool,
     pending_egg_hatch_nickname: Option<PendingEggHatchNickname>,
-    visible_item_ball_notice: Option<VisibleItemBallNotice>,
+    visible_field_item_notice: Option<VisibleFieldItemNotice>,
     party_menu_open: bool,
     party_summary_open: bool,
     party_summary_page: u8,
@@ -756,6 +786,12 @@ struct BevyRuntimeShell {
     held_item_swap_prompt: bool,
     pending_contextual_field_move: Option<PartyFieldMove>,
     pending_script_party_selection: Option<PendingScriptPartySelection>,
+    pending_link_trade_party_slot: Option<Option<usize>>,
+    pending_link_trade_confirmation: Option<bool>,
+    pending_link_trade_save: bool,
+    pending_link_room_selection: Option<u8>,
+    pending_linked_friend_wait: bool,
+    pending_link_room_session: bool,
     pending_npc_trade_commit: Option<PendingNpcTradeCommit>,
     pending_photo_studio_commit: Option<usize>,
     kurt_apricorn_cursor: Option<MenuCursor>,
@@ -821,6 +857,7 @@ struct BevyRuntimeShell {
     wait_play_sfx_completion: Option<VisibleWaitPlaySfxCompletion>,
     special_boundary_queue: VecDeque<SpecialBoundaryDisplay>,
     visible_special_text_pause_frames: Option<u8>,
+    visible_internal_special_delay_frames: Option<u8>,
     pending_special_cry: Option<String>,
     pending_special_sound: Option<String>,
     visible_balance_overlay: Option<VisibleBalanceOverlay>,
@@ -906,7 +943,7 @@ struct BevyRuntimeShell {
     pending_field_battle_entry: bool,
     pending_field_notice_effect_frames: Option<u8>,
     visible_cut_animation: Option<VisibleCutAnimation>,
-    visible_whirlpool_animation: Option<VisibleWhirlpoolAnimation>,
+    pending_whirlpool_sound_wait: bool,
     visible_headbutt_animation: Option<VisibleHeadbuttAnimation>,
     visible_flash_animation: Option<VisibleFlashAnimation>,
     visible_fly_animation: Option<VisibleFlyAnimation>,
@@ -1052,6 +1089,14 @@ struct VisibleMapNameSign {
     frames_remaining: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleMusicFade {
+    target_music: String,
+    rate: u8,
+    count: u8,
+    fading_in: bool,
+}
+
 const SAVE_TEXT_WOULD_YOU_LIKE: &str = "_WouldYouLikeToSaveTheGameText";
 const SAVE_TEXT_MOVE_MON_WITHOUT_MAIL: &str = "_MoveMonWOMailSaveText";
 const SAVE_TEXT_CHANGE_BOX: &str = "_ChangeBoxSaveText";
@@ -1064,6 +1109,7 @@ const SAVE_TEXT_CORRUPTED: &str = "_SaveFileCorruptedText";
 struct NativeAudioBackend {
     output: Option<NativeAudioOutput>,
     music_sink: Option<rodio::Sink>,
+    music_volume: f32,
     transient_sinks: Vec<rodio::Sink>,
     transient_audio_id: Option<String>,
     transient_deadline: Option<Instant>,
@@ -1088,6 +1134,7 @@ impl NativeAudioBackend {
         Self {
             output: None,
             music_sink: None,
+            music_volume: 1.0,
             transient_sinks: Vec::new(),
             transient_audio_id: None,
             transient_deadline: None,
@@ -1158,6 +1205,13 @@ impl NativeAudioBackend {
         }
     }
 
+    fn set_music_volume(&mut self, volume: u8) {
+        self.music_volume = f32::from(volume.min(7)) / 7.0;
+        if let Some(sink) = self.music_sink.as_ref() {
+            sink.set_volume(self.music_volume);
+        }
+    }
+
     fn stop_transient(&mut self) {
         for sink in self.transient_sinks.drain(..) {
             sink.stop();
@@ -1182,7 +1236,12 @@ impl NativeAudioBackend {
         false
     }
 
-    fn play(&mut self, command: &BevyAudioCommand, audio: &CachedPcmAudio) -> Result<()> {
+    fn play(
+        &mut self,
+        command: &BevyAudioCommand,
+        audio: &CachedPcmAudio,
+        sound: Sound,
+    ) -> Result<()> {
         use rodio::Source as _;
 
         let dispatch_started_at = Instant::now();
@@ -1209,7 +1268,10 @@ impl NativeAudioBackend {
             .as_ref()
             .expect("native audio output initialized");
         let sink = rodio::Sink::try_new(&output.handle).context("create native audio sink")?;
-        let samples = pcm_i16_samples(audio)?;
+        if matches!(command.kind, ModpackAudioKind::Music) {
+            sink.set_volume(self.music_volume);
+        }
+        let samples = pcm_samples_for_sound_option(&pcm_i16_samples(audio)?, sound);
         let channels = u16::from(audio.format.channels);
         let sample_rate = audio.format.sample_rate_hz;
         let frame_count = samples.len() / usize::from(channels);
@@ -1269,16 +1331,9 @@ impl NativeAudioBackend {
 #[cfg(all(not(test), target_arch = "wasm32"))]
 struct BrowserAudioBackend {
     context: Option<web_sys::AudioContext>,
-    music: Option<web_sys::AudioBufferSourceNode>,
+    music: Option<(web_sys::AudioBufferSourceNode, web_sys::GainNode)>,
+    music_volume: f32,
     transient: Option<(web_sys::AudioBufferSourceNode, f64)>,
-    sidecars: Rc<RefCell<HashMap<String, BrowserPcmSidecarState>>>,
-}
-
-#[cfg(all(not(test), target_arch = "wasm32"))]
-enum BrowserPcmSidecarState {
-    Loading,
-    Ready(Vec<u8>),
-    Failed(String),
 }
 
 #[cfg(all(not(test), target_arch = "wasm32"))]
@@ -1287,49 +1342,23 @@ impl BrowserAudioBackend {
         Self {
             context: None,
             music: None,
+            music_volume: 1.0,
             transient: None,
-            sidecars: Rc::new(RefCell::new(HashMap::new())),
         }
-    }
-
-    fn poll_pcm_sidecar(&mut self, path: &str) -> Result<Option<Vec<u8>>> {
-        let state = { self.sidecars.borrow_mut().remove(path) };
-        if let Some(state) = state {
-            return match state {
-                BrowserPcmSidecarState::Loading => {
-                    self.sidecars
-                        .borrow_mut()
-                        .insert(path.to_string(), BrowserPcmSidecarState::Loading);
-                    Ok(None)
-                }
-                BrowserPcmSidecarState::Ready(bytes) => Ok(Some(bytes)),
-                BrowserPcmSidecarState::Failed(error) => {
-                    Err(anyhow::anyhow!("fetch PCM sidecar {path}: {error}"))
-                }
-            };
-        }
-        self.sidecars
-            .borrow_mut()
-            .insert(path.to_string(), BrowserPcmSidecarState::Loading);
-        let states = Rc::clone(&self.sidecars);
-        let path = path.to_string();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = fetch_browser_bytes(&path).await;
-            states.borrow_mut().insert(
-                path,
-                match result {
-                    Ok(bytes) => BrowserPcmSidecarState::Ready(bytes),
-                    Err(error) => BrowserPcmSidecarState::Failed(format!("{error:#}")),
-                },
-            );
-        });
-        Ok(None)
     }
 
     fn stop_music(&mut self) {
-        if let Some(source) = self.music.take() {
+        if let Some((source, gain)) = self.music.take() {
             let _ = source.stop_with_when(0.0);
             let _ = source.disconnect();
+            let _ = gain.disconnect();
+        }
+    }
+
+    fn set_music_volume(&mut self, volume: u8) {
+        self.music_volume = f32::from(volume.min(7)) / 7.0;
+        if let Some((_, gain)) = self.music.as_ref() {
+            gain.gain().set_value(self.music_volume);
         }
     }
 
@@ -1351,7 +1380,12 @@ impl BrowserAudioBackend {
         finished
     }
 
-    fn play(&mut self, command: &BevyAudioCommand, audio: &CachedPcmAudio) -> Result<()> {
+    fn play(
+        &mut self,
+        command: &BevyAudioCommand,
+        audio: &CachedPcmAudio,
+        sound: Sound,
+    ) -> Result<()> {
         if matches!(command.kind, ModpackAudioKind::Music) {
             self.stop_music();
         } else {
@@ -1370,7 +1404,7 @@ impl BrowserAudioBackend {
         context
             .resume()
             .map_err(|error| anyhow::anyhow!("resume browser AudioContext: {error:?}"))?;
-        let samples = pcm_i16_samples(audio)?;
+        let samples = pcm_samples_for_sound_option(&pcm_i16_samples(audio)?, sound);
         let channels = usize::from(audio.format.channels);
         let frame_count = samples.len() / channels;
         let buffer = context
@@ -1403,49 +1437,33 @@ impl BrowserAudioBackend {
                 source.set_loop_end(end as f64 / rate);
             }
         }
-        source
-            .connect_with_audio_node(&context.destination())
-            .map_err(|error| anyhow::anyhow!("connect browser PCM source: {error:?}"))?;
+        let music_gain = if matches!(command.kind, ModpackAudioKind::Music) {
+            let gain = context
+                .create_gain()
+                .map_err(|error| anyhow::anyhow!("create browser music gain: {error:?}"))?;
+            gain.gain().set_value(self.music_volume);
+            source
+                .connect_with_audio_node(&gain)
+                .map_err(|error| anyhow::anyhow!("connect browser music source: {error:?}"))?;
+            gain.connect_with_audio_node(&context.destination())
+                .map_err(|error| anyhow::anyhow!("connect browser music gain: {error:?}"))?;
+            Some(gain)
+        } else {
+            source
+                .connect_with_audio_node(&context.destination())
+                .map_err(|error| anyhow::anyhow!("connect browser PCM source: {error:?}"))?;
+            None
+        };
         source
             .start()
             .map_err(|error| anyhow::anyhow!("start browser PCM source: {error:?}"))?;
         if matches!(command.kind, ModpackAudioKind::Music) {
-            self.music = Some(source);
+            self.music = Some((source, music_gain.expect("music gain was created")));
         } else {
             self.transient = Some((source, js_sys::Date::now() + buffer.duration() * 1_000.0));
         }
         Ok(())
     }
-}
-
-#[cfg(all(not(test), target_arch = "wasm32"))]
-async fn fetch_browser_bytes(path: &str) -> Result<Vec<u8>> {
-    use wasm_bindgen::JsCast as _;
-    use wasm_bindgen_futures::JsFuture;
-
-    let window = web_sys::window().context("browser window is unavailable")?;
-    let response = JsFuture::from(window.fetch_with_str(path))
-        .await
-        .map_err(|error| anyhow::anyhow!("fetch {path}: {error:?}"))?
-        .dyn_into::<web_sys::Response>()
-        .map_err(|error| anyhow::anyhow!("decode {path} response: {error:?}"))?;
-    if !response.ok() {
-        anyhow::bail!(
-            "fetch {path}: HTTP {} {}",
-            response.status(),
-            response.status_text()
-        );
-    }
-    let buffer = response
-        .array_buffer()
-        .map_err(|error| anyhow::anyhow!("read {path} response: {error:?}"))?;
-    let buffer = JsFuture::from(buffer)
-        .await
-        .map_err(|error| anyhow::anyhow!("read {path} bytes: {error:?}"))?;
-    let bytes = js_sys::Uint8Array::new(&buffer);
-    let mut output = vec![0; bytes.length() as usize];
-    bytes.copy_to(&mut output);
-    Ok(output)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1457,10 +1475,15 @@ fn one_shot_playback_finished(
     sink_finished || deadline.is_some_and(|deadline| now >= deadline)
 }
 
-fn continuous_game_winit_settings() -> WinitSettings {
+fn low_power_unfocused_game_winit_settings() -> WinitSettings {
+    let game_tick = Duration::from_secs_f64(f64::from(GAME_TICK_SECONDS));
     WinitSettings {
+        // Focused presentation stays synchronized to requestAnimationFrame.
+        // Timer-driven redraws visibly expose the moving LCD surface edge on
+        // some browser/display combinations during camera interpolation.
+        // Snapshot caching keeps these display-only frames inexpensive.
         focused_mode: UpdateMode::Continuous,
-        unfocused_mode: UpdateMode::Continuous,
+        unfocused_mode: UpdateMode::reactive_low_power(game_tick),
     }
 }
 
@@ -1475,9 +1498,15 @@ fn low_latency_game_window(title: String) -> Window {
         // later.
         present_mode: PresentMode::AutoVsync,
         desired_maximum_frame_latency: NonZeroU32::new(1),
-        // The game is a fixed 160x144 LCD presentation at 4x. A resizable
-        // window exposes non-Game-Boy space and breaks the integer scale.
-        resizable: false,
+        // Native play keeps the fixed 4x LCD window. The browser surface is
+        // resizable so Bevy receives the actual CSS/fullscreen dimensions and
+        // can scale the complete presentation instead of retaining a centered
+        // 640x576 surface inside a larger canvas.
+        resizable: cfg!(target_arch = "wasm32"),
+        #[cfg(target_arch = "wasm32")]
+        canvas: Some("#crystal-canvas".to_string()),
+        #[cfg(target_arch = "wasm32")]
+        fit_canvas_to_parent: true,
         ..default()
     }
 }
@@ -1497,7 +1526,8 @@ fn native_audio_repeats_without_pcm_loop(command: &BevyAudioCommand) -> bool {
     // A rendered PCM asset is finite unless the exporter supplied exact loop
     // sample bounds.  Repeating the whole file restarts one-shot score cues
     // such as the Crystal opening and makes them play forever.
-    command.looped && matches!(command.mode, ModpackAudioPlaybackMode::SequencedMidi)
+    let _ = command;
+    false
 }
 
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
@@ -1778,6 +1808,60 @@ fn record_visible_battle_action_frame(
     Ok(())
 }
 
+fn queue_visible_link_battle_action(
+    runtime_shell: &mut BevyRuntimeShell,
+    action: BattleAction,
+) -> Result<()> {
+    anyhow::ensure!(
+        runtime_shell.pending_link_battle_action.is_none(),
+        "a Colosseum action is already waiting for the peer"
+    );
+    let combat = active_battle_combat_state(runtime_shell.shell.session().state())?;
+    let turn = u64::from(combat.turn).saturating_add(1);
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let action_frame = BattleActionFrame::new(
+        LOCAL_PLAYER_ID,
+        turn,
+        action.clone(),
+        format!("{:08x}", snapshot.state_checksum.hash()),
+    )
+    .context("visible runtime produced invalid Colosseum action")?;
+    runtime_shell
+        .deterministic_battle_actions
+        .push_back(action_frame);
+    runtime_shell.pending_link_battle_action = Some(action);
+    reset_visible_battle_action_cursors(runtime_shell);
+    set_shell_action_status(runtime_shell, "WAITING FOR LINK OPPONENT");
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
+fn queue_visible_link_battle_replacement(
+    runtime_shell: &mut BevyRuntimeShell,
+    party_index: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        runtime_shell.pending_link_battle_replacement.is_none(),
+        "a Colosseum replacement is already waiting to be sent"
+    );
+    let combat = active_battle_combat_state(runtime_shell.shell.session().state())?;
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let action_frame = BattleActionFrame::new(
+        LOCAL_PLAYER_ID,
+        u64::from(combat.turn),
+        BattleAction::Switch { party_index },
+        format!("{:08x}", snapshot.state_checksum.hash()),
+    )
+    .context("visible runtime produced invalid Colosseum replacement")?;
+    runtime_shell
+        .deterministic_battle_actions
+        .push_back(action_frame);
+    runtime_shell.pending_link_battle_replacement = Some(party_index);
+    set_shell_action_status(runtime_shell, "WAITING FOR LINK REPLACEMENT");
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(())
+}
+
 fn record_visible_battle_item_action_frame(
     runtime_shell: &mut BevyRuntimeShell,
     item_id: &str,
@@ -1795,11 +1879,22 @@ struct TitleMenu {
     spawn_identifier: u16,
     save_path: Option<PathBuf>,
     cursor: MenuCursor,
+    presentation_machine: RuntimePresentationPhaseMachine,
+    main_menu: RuntimeTitleMainMenuDefinition,
     phase: VisibleTitlePhase,
     frame: u32,
     main_menu_frame: u32,
     scx: u8,
     title_timer: u16,
+    entrance_start_scx: u8,
+    entrance_scroll_step: u8,
+    crystal_oam_target: String,
+    crystal_initial_y: u8,
+    suicune_frames: Vec<u8>,
+    suicune_selector_mask: u8,
+    suicune_selector_shift_left: u8,
+    suicune_selector_swap_nibbles: bool,
+    joypad_mask: u8,
     clock_reset_trigger: bool,
 }
 
@@ -1825,8 +1920,27 @@ struct VisibleIntroScreen {
     global_anim_x_offset: u8,
     sprite_count: u8,
     sprites: Vec<VisibleIntroSprite>,
+    background_binding: Option<VisibleIntroBackgroundBinding>,
     palette_effect: VisibleIntroPaletteEffect,
     finished: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleIntroBackgroundBinding {
+    dispatcher_entry: usize,
+    tilemap_resource: String,
+    attrmap_resource: String,
+    palette_resource: String,
+    tile_bindings: Vec<VisibleIntroBgTileBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleIntroBgTileBinding {
+    tile_id_start: u8,
+    tile_id_end: u8,
+    target_vram_bank: u8,
+    resource: String,
+    resource_tile_start: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1843,8 +1957,10 @@ enum VisibleIntroPaletteEffect {
 struct VisibleIntroSprite {
     x: i16,
     y: i16,
+    tile_id: u8,
     oam_attr: u8,
     gfx_name: String,
+    gfx_tile_base: u8,
     jumptable_index: u8,
     frame_timer: u8,
     frameset_step: i16,
@@ -1952,8 +2068,7 @@ enum VisibleTitlePhase {
     Timer,
     PressStart,
     MainMenu,
-    Timeout,
-    Exiting,
+    FadeOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2033,16 +2148,9 @@ enum VisibleCreditsOp {
     End,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitleMenuOption {
-    Continue,
-    NewGame,
-    Options,
-    MysteryGift,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VisibleGenderSelection {
+    definition: RuntimeGenderMenuDefinition,
     selected_index: usize,
     confirmed: bool,
     confirm_countdown: u8,
@@ -2135,22 +2243,36 @@ struct PendingEggHatchNickname {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum VisibleItemBallPhase {
+enum VisibleFieldItemPhase {
     FoundText,
     FanfarePause { frames_remaining: u8 },
+    SpecialSoundWait,
+    AwaitingPrompt,
+    PromptEachQueuedPage,
     PocketText,
     BagFullFoundText,
     BagFullText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VisibleItemBallNotice {
+enum VisibleFieldItemPresentation {
+    ItemBall,
+    HiddenItem { sound_id: Option<String> },
+    FruitTree { sound_id: Option<String> },
+    VerboseGrant { sound_id: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VisibleFieldItemNotice {
+    sound_trigger_text: String,
     pocket_text: String,
-    phase: VisibleItemBallPhase,
+    presentation: VisibleFieldItemPresentation,
+    phase: VisibleFieldItemPhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PendingScriptPartySelection {
+    LinkTrade,
     BillsGrandfather,
     ReturnShuckie,
     CheckMagikarpLength,
@@ -2213,7 +2335,11 @@ struct SpecialBoundaryDisplay {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisibleWaitPlaySfxCompletion {
     FieldNotice(String),
+    FieldItemPocketText,
+    VerboseItemPrompt,
     SpecialBoundary(SpecialBoundaryDisplay),
+    FlashFieldMove,
+    WhirlpoolFieldMove,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2223,7 +2349,6 @@ struct VisibleUnownPuzzle {
     holding_piece: Option<u8>,
     cursor_x: usize,
     cursor_y: usize,
-    moves: u16,
     solved: bool,
 }
 
@@ -2475,12 +2600,6 @@ struct VisibleCutAnimation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct VisibleWhirlpoolAnimation {
-    target_tile: TilePosition,
-    frame: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VisibleHeadbuttAnimation {
     target_tile: TilePosition,
     facing: Direction,
@@ -2510,6 +2629,7 @@ enum VisibleFlyAnimationPhase {
 struct VisibleFlyAnimation {
     phase: VisibleFlyAnimationPhase,
     frame: u8,
+    actor_party_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2526,6 +2646,10 @@ struct VisibleMagnetTrain {
     final_position: i16,
     position: i16,
     offset: i16,
+    player_x: i16,
+    player_sprite_visible: bool,
+    player_sprite_frame: u8,
+    player_sprite_duration: u8,
     wait_counter: u16,
     phase: u8,
     arrival_sfx_played: bool,
@@ -2797,7 +2921,36 @@ struct PendingTrainerIntro {
 struct VisibleEarthquake {
     intensity: u16,
     frames_remaining: u16,
+    shake_frames_remaining: u16,
     phase: u8,
+}
+
+impl VisibleEarthquake {
+    fn from_script(parameter: u16, shake_frames: u16, sleep_frames: u16) -> Self {
+        Self {
+            intensity: 1_u16 << ((parameter >> 6) & 0x3),
+            frames_remaining: shake_frames + sleep_frames,
+            shake_frames_remaining: shake_frames,
+            phase: 0,
+        }
+    }
+
+    fn screen_shake(parameter: u16) -> Self {
+        let frames = crate::core::timing::wrapping_byte_counter_ticks((parameter & 0x3f) as u8);
+        Self {
+            intensity: 1_u16 << ((parameter >> 6) & 0x3),
+            frames_remaining: frames,
+            shake_frames_remaining: frames,
+            phase: 0,
+        }
+    }
+
+    fn advance(&mut self, frames: u32) {
+        self.frames_remaining = visible_effect_frames_after_ticks(self.frames_remaining, frames);
+        self.shake_frames_remaining =
+            visible_effect_frames_after_ticks(self.shake_frames_remaining, frames);
+        self.phase = self.phase.wrapping_add(frames as u8) % 4;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2970,6 +3123,7 @@ enum VisiblePlayerPcAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VisiblePcConfirmation {
+    LinkTrade,
     TossItem {
         item_id: String,
         stack_index: usize,
@@ -3143,7 +3297,6 @@ impl BevyAudioCacheKey {
                 ModpackAudioKind::Cry => "cry",
             },
             mode: match command.mode {
-                ModpackAudioPlaybackMode::SequencedMidi => "sequenced_midi",
                 ModpackAudioPlaybackMode::RawPcm => "raw_pcm",
             },
             looped: command.looped,
@@ -3153,15 +3306,13 @@ impl BevyAudioCacheKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BevyAudioAction {
+    StopMusic { audio_id: String },
     Play(BevyAudioCommand),
     FadeMusic { audio_id: String, fade_frames: u16 },
     WaitForSoundEffect,
 }
 
 fn enqueue_bevy_audio_command(queue: &mut Vec<BevyAudioCommand>, command: BevyAudioCommand) {
-    if matches!(command.kind, ModpackAudioKind::Music) {
-        clear_pending_music_commands(queue);
-    }
     queue.push(command);
 }
 
@@ -3169,21 +3320,44 @@ fn clear_pending_music_commands(queue: &mut Vec<BevyAudioCommand>) {
     queue.retain(|pending| !matches!(pending.kind, ModpackAudioKind::Music));
 }
 
-fn coalesce_pending_transient_audio(pending: Vec<BevyAudioCommand>) -> Vec<BevyAudioCommand> {
-    let last_music = pending
-        .iter()
-        .rposition(|command| matches!(command.kind, ModpackAudioKind::Music));
-    let last_transient = pending
-        .iter()
-        .rposition(|command| !matches!(command.kind, ModpackAudioKind::Music));
-    pending
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _command)| {
-            (Some(*index) == last_music) || (Some(*index) == last_transient)
-        })
-        .map(|(_, command)| command)
-        .collect()
+fn source_ordered_pending_audio(
+    pending: Vec<BevyAudioCommand>,
+    active_transient_kind: Option<ModpackAudioKind>,
+    current_sfx_priority: u8,
+    sfx_priorities: &BTreeMap<String, u8>,
+) -> Result<Vec<BevyAudioCommand>> {
+    let mut accepted = Vec::with_capacity(pending.len());
+    let mut transient_active = active_transient_kind.is_some();
+    let mut sfx_priority_register = current_sfx_priority;
+    for command in pending {
+        match command.kind {
+            ModpackAudioKind::Music if command.audio_id == "MUSIC_NONE" => anyhow::bail!(
+                "MUSIC_NONE reached the playback queue instead of the _InitSound reset boundary"
+            ),
+            ModpackAudioKind::Music => accepted.push(command),
+            ModpackAudioKind::Cry => {
+                transient_active = true;
+                accepted.push(command);
+            }
+            ModpackAudioKind::SoundEffect => {
+                let priority = sfx_priorities
+                    .get(&command.audio_id)
+                    .copied()
+                    .with_context(|| {
+                        format!(
+                            "queued sound effect {} has no ASM priority byte",
+                            command.audio_id
+                        )
+                    })?;
+                if !transient_active || priority <= sfx_priority_register {
+                    transient_active = true;
+                    sfx_priority_register = priority;
+                    accepted.push(command);
+                }
+            }
+        }
+    }
+    Ok(accepted)
 }
 
 #[derive(Resource)]
@@ -3269,7 +3443,7 @@ impl NativeRtcSource {
         Self::SystemLocal
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "location-tester"))]
     fn fixed(sample: RuntimeRtcSample) -> Self {
         Self::Fixed(sample)
     }
@@ -3405,8 +3579,63 @@ struct RenderedViewport {
     player_sprite_mode: Option<MovementMode>,
     player_sprite_walking: Option<bool>,
     object_sprite_walking: Option<bool>,
+    /// True while at least one retained object transform is interpolating
+    /// from its pre-command tile. The semantic snapshot already contains the
+    /// destination, so its ordinary world key cannot identify the landing.
+    object_motion_active: bool,
     #[cfg(test)]
     terrain_scan_count: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteAnimRuntimeBundle {
+    oam_sets: BTreeMap<String, SpriteAnimOamSet>,
+    framesets: BTreeMap<String, SpriteAnimFrameset>,
+    objects: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteAnimOamSet {
+    name: String,
+    tile_offset: i16,
+    pieces: Vec<SpriteAnimOamPiece>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteAnimOamPiece {
+    x: i16,
+    y: i16,
+    tile: i16,
+    attributes: u8,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteAnimFrameset {
+    name: String,
+    steps: Vec<SpriteAnimFrameStep>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpriteAnimFrameStep {
+    oam_set: Option<String>,
+    duration: u16,
+    attr_flags: u8,
+    command: String,
+}
+
+struct MagnetTrainBase {
+    rgba: Vec<u8>,
+    palette_indices: Vec<u8>,
+}
+
+struct MagnetTrainPlayerFrames {
+    standing: Vec<u8>,
+    walking: Vec<u8>,
 }
 
 #[derive(Resource, Default)]
@@ -3427,7 +3656,8 @@ struct RenderedTilesetArt {
     heal_machine_ball_cache: Option<[SpriteFrame; 4]>,
     heal_machine_lamp_cache: Option<[SpriteFrame; 4]>,
     heal_machine_ball_error: Option<String>,
-    magnet_train_base_cache: Option<Vec<u8>>,
+    magnet_train_base_cache: HashMap<String, MagnetTrainBase>,
+    magnet_train_player_cache: HashMap<(bool, String), MagnetTrainPlayerFrames>,
     magnet_train_base_error: Option<String>,
     diploma_base_cache: Option<Vec<u8>>,
     diploma_base_error: Option<String>,
@@ -3507,7 +3737,7 @@ struct RenderedTilesetArt {
     intro_scene_errors: HashMap<IntroSceneArtKey, String>,
     intro_source_cache: HashMap<String, image::RgbaImage>,
     intro_palette_cache: HashMap<String, Vec<Palette>>,
-    intro_sprite_bundle_cache: Option<serde_json::Value>,
+    intro_sprite_bundle_cache: Option<SpriteAnimRuntimeBundle>,
     pokemon_cache: HashMap<PokemonArtKey, SpriteFrame>,
     pokemon_errors: HashMap<PokemonArtKey, String>,
     pokepic_cache: HashMap<String, SpriteFrame>,
@@ -4191,6 +4421,12 @@ struct PlayfieldPriorityTile;
 #[derive(Component)]
 struct PlayerMarker;
 
+#[derive(Component)]
+struct MultiplayerGhost {
+    user_id: String,
+    display_tile: Vec2,
+}
+
 /// The player has one retained entity; walking animation swaps its texture
 /// instead of forcing `render_playfield` to rebuild the complete map.
 #[derive(Component)]
@@ -4317,6 +4553,7 @@ pub fn run_bevy_shell(
     start: BevyShellStart,
     config: BevyShellConfig,
 ) -> Result<()> {
+    let multiplayer_config = config.multiplayer.clone();
     #[cfg(feature = "voxel-view")]
     let voxel_view_enabled = config.voxel_view_enabled.unwrap_or(false);
     let window_title = config
@@ -4325,21 +4562,41 @@ pub fn run_bevy_shell(
         .unwrap_or_else(|| "Pokemon Crystal Rust".to_string());
     #[cfg(feature = "location-tester")]
     let render_test_screenshot = config.render_test_screenshot.clone();
+    #[cfg(feature = "location-tester")]
+    let native_rtc_source = config
+        .render_test_hour
+        .map(|hour| {
+            NativeRtcSource::fixed(RuntimeRtcSample {
+                date: GameDate::new(2000, 1, 1),
+                hour,
+                minute: 0,
+                second: 0,
+            })
+        })
+        .unwrap_or_else(NativeRtcSource::system_local);
+    #[cfg(not(feature = "location-tester"))]
+    let native_rtc_source = NativeRtcSource::system_local();
     let runtime_shell = initialize_bevy_runtime_shell(asset_root, runtime, start, config)?;
+    let multiplayer_runtime = multiplayer_config
+        .map(|config| MultiplayerRuntime::new(&runtime_shell, config))
+        .transpose()?;
 
     let mut app = App::new();
     #[cfg(all(not(test), not(target_arch = "wasm32")))]
     app.insert_non_send_resource(NativeAudioBackend::new());
     #[cfg(all(not(test), target_arch = "wasm32"))]
     app.insert_non_send_resource(BrowserAudioBackend::new());
+    if let Some(multiplayer_runtime) = multiplayer_runtime {
+        app.insert_non_send_resource(multiplayer_runtime);
+    }
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.07, 0.06)))
         .insert_resource(classic_pixel_art_msaa())
         .insert_resource(runtime_shell)
         // Oak fades, script emotes, and WaitSFX are Game Boy frame loops.
         // Keep driving them while the host window is unfocused; reactive
         // low-power mode can be suspended by macOS and strand those loops.
-        .insert_resource(continuous_game_winit_settings())
-        .insert_resource(NativeRtcSource::system_local())
+        .insert_resource(low_power_unfocused_game_winit_settings())
+        .insert_resource(native_rtc_source)
         .insert_resource(RuntimeTickTimer::new(f64::from(GAME_TICK_SECONDS)))
         .insert_resource(VisibleSequenceTickClock::realtime())
         .insert_resource(RenderedViewport::default())
@@ -4350,6 +4607,7 @@ pub fn run_bevy_shell(
             ..default()
         }))
         .add_systems(Startup, setup_shell_view)
+        .add_systems(Update, poll_multiplayer.before(apply_keyboard_input))
         .add_systems(
             Update,
             release_input_on_focus_loss.before(apply_keyboard_input),
@@ -4423,6 +4681,12 @@ pub fn run_bevy_shell(
             apply_visible_battle_screen_offset.after(render_playfield),
         )
         .add_systems(Update, render_screen_fade_overlay.after(render_playfield))
+        .add_systems(
+            Update,
+            sync_multiplayer_ghosts
+                .after(render_playfield)
+                .after(sync_visible_player_sprite),
+        )
         .add_systems(Update, render_poison_flash_overlay.after(render_playfield))
         .add_systems(Update, refresh_status_text.after(render_playfield))
         .add_systems(Update, refresh_dialog_text.after(refresh_status_text))
@@ -4434,6 +4698,7 @@ pub fn run_bevy_shell(
             Update,
             publish_visual_world_frame
                 .after(sync_visible_player_sprite)
+                .after(sync_multiplayer_ghosts)
                 .after(sync_visible_object_sprites)
                 .after(sync_visible_ledge_jump)
                 .after(sync_visible_script_jump)
@@ -4445,7 +4710,7 @@ pub fn run_bevy_shell(
     #[cfg(feature = "voxel-view")]
     app.insert_resource(crystal_voxel_view::VoxelViewSettings {
         enabled: voxel_view_enabled,
-        allow_f3_toggle: true,
+        allow_f3_toggle: !cfg!(target_arch = "wasm32"),
     })
     .add_plugins(crystal_voxel_view::VoxelViewPlugin)
     .add_systems(
@@ -4663,17 +4928,34 @@ fn sync_manual_world_view_layers(
         Or<(
             With<PlayfieldTile>,
             With<PlayerMarker>,
+            With<MultiplayerGhost>,
             With<ObjectMarker>,
             With<LedgeShadowMarker>,
             With<GrassRustleMarker>,
         )>,
     >,
+    added_classic_world: Query<
+        Entity,
+        Or<(
+            Added<PlayfieldTile>,
+            Added<PlayerMarker>,
+            Added<MultiplayerGhost>,
+            Added<ObjectMarker>,
+            Added<LedgeShadowMarker>,
+            Added<GrassRustleMarker>,
+        )>,
+    >,
 ) {
-    for entity in &classic_world {
+    let entities = if settings.is_changed() {
+        classic_world.iter().collect::<Vec<_>>()
+    } else {
+        added_classic_world.iter().collect::<Vec<_>>()
+    };
+    for entity in entities {
         if settings.enabled {
             // Manual 2.5D selection parks the classic overworld on a layer
             // that no camera renders. Renderer readiness must never expose it;
-            // only the startup setting or F3 can return these entities to the
+            // only the presentation setting can return these entities to the
             // main layer. UI, dialogue, battle, and fades remain on layer 0.
             commands
                 .entity(entity)
@@ -4901,7 +5183,7 @@ pub fn smoke_visible_shell_title(
         let options = visible_title_menu_options(&runtime_shell, &title);
         let Some(index) = options
             .iter()
-            .position(|option| matches!(option, TitleMenuOption::Continue))
+            .position(|option| option.dispatch_target == "MainMenu_Continue")
         else {
             anyhow::bail!("visible shell title Continue requested without a configured save path");
         };
@@ -4912,7 +5194,7 @@ pub fn smoke_visible_shell_title(
         let options = visible_title_menu_options(&runtime_shell, &title);
         let Some(index) = options
             .iter()
-            .position(|option| matches!(option, TitleMenuOption::NewGame))
+            .position(|option| option.dispatch_target == "MainMenu_NewGame")
         else {
             anyhow::bail!("visible shell title New Game option missing");
         };
@@ -4929,12 +5211,8 @@ pub fn smoke_visible_shell_title(
         .title_menu
         .as_ref()
         .map(|title| {
-            selected_visible_title_menu_option(&runtime_shell, title).map(|option| match option {
-                TitleMenuOption::Continue => "CONTINUE".to_string(),
-                TitleMenuOption::NewGame => "NEW_GAME".to_string(),
-                TitleMenuOption::Options => "OPTIONS".to_string(),
-                TitleMenuOption::MysteryGift => "MYSTERY_GIFT".to_string(),
-            })
+            selected_visible_title_menu_option(&runtime_shell, title)
+                .and_then(|option| visible_title_menu_selection_id(&option).map(str::to_string))
         })
         .context("visible shell title menu closed before selection")??;
     select_visible_title_menu_option(&mut runtime_shell)?;
@@ -5005,7 +5283,7 @@ pub fn smoke_visible_shell_title_name_input(
     let options = visible_title_menu_options(&runtime_shell, &title);
     let Some(index) = options
         .iter()
-        .position(|option| matches!(option, TitleMenuOption::NewGame))
+        .position(|option| option.dispatch_target == "MainMenu_NewGame")
     else {
         anyhow::bail!("visible title New Game option missing");
     };
@@ -5017,13 +5295,11 @@ pub fn smoke_visible_shell_title_name_input(
         .clone()
         .context("visible title menu closed before capture")?;
     let title_entries = visible_title_menu_entries(&runtime_shell, &title)?;
-    let selected =
-        selected_visible_title_menu_option(&runtime_shell, &title).map(|option| match option {
-            TitleMenuOption::Continue => "CONTINUE".to_string(),
-            TitleMenuOption::NewGame => "NEW_GAME".to_string(),
-            TitleMenuOption::Options => "OPTIONS".to_string(),
-            TitleMenuOption::MysteryGift => "MYSTERY_GIFT".to_string(),
-        })?;
+    let selected = visible_title_menu_selection_id(&selected_visible_title_menu_option(
+        &runtime_shell,
+        &title,
+    )?)?
+    .to_string();
     select_visible_title_menu_option(&mut runtime_shell)?;
     complete_visible_smoke_gender_if_needed(&mut runtime_shell)?;
     // A normal Bevy update samples the host RTC before the clock-setting UI
@@ -5746,6 +6022,17 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
         if let Some(frames) = runtime_shell.visible_script_delay_frames.as_mut() {
             *frames = frames.saturating_sub(1);
         }
+        if runtime_shell.pending_linked_friend_wait {
+            break;
+        }
+        if let Some(frames) = runtime_shell.visible_internal_special_delay_frames.as_mut() {
+            *frames = frames.saturating_sub(1);
+            if *frames == 0 {
+                runtime_shell.visible_internal_special_delay_frames = None;
+                continue_visible_script_after_prompt(runtime_shell)?;
+            }
+            continue;
+        }
         if runtime_shell.visible_special_text_pause_frames.is_some() {
             advance_visible_special_text_pause(runtime_shell)?;
             continue;
@@ -5821,8 +6108,7 @@ fn settle_visible_shell_smoke_until_idle(runtime_shell: &mut BevyRuntimeShell) -
             emote.frames_remaining = emote.frames_remaining.saturating_sub(1);
         }
         if let Some(earthquake) = runtime_shell.visible_earthquake.as_mut() {
-            earthquake.frames_remaining = earthquake.frames_remaining.saturating_sub(1);
-            earthquake.phase = earthquake.phase.wrapping_add(1) % 4;
+            earthquake.advance(1);
         }
         // The real Bevy update loop reveals field text autonomously between
         // joypad presses. Smoke sessions must advance that same presentation
@@ -6012,7 +6298,6 @@ fn advance_visible_smoke_walk_warp_phase(runtime_shell: &mut BevyRuntimeShell) -
     match phase {
         VisibleWalkWarpPhase::FadeOut => {
             reset_visible_navigation_state(runtime_shell);
-            suppress_visible_map_name_sign_for_current_map(runtime_shell)?;
             queue_visible_current_music(runtime_shell)?;
             runtime_shell.visible_walk_warp_phase = Some(VisibleWalkWarpPhase::FadeIn);
         }
@@ -6086,32 +6371,90 @@ fn initialize_bevy_runtime_shell(
     let initial_player_name_prompt = matches!(&start, BevyShellStart::NewGame { .. });
     #[cfg(not(any(test, feature = "location-tester")))]
     let initial_player_name_prompt = false;
+    let title_parameters = matches!(&start, BevyShellStart::Title { .. })
+        .then(|| {
+            RuntimeTitlePresentationParameters::from_program(runtime.title_presentation_program())
+        })
+        .transpose()?;
+    let title_main_menu = matches!(&start, BevyShellStart::Title { .. })
+        .then(|| RuntimeTitleMainMenuDefinition::from_program(runtime.title_presentation_program()))
+        .transpose()?;
     let title_menu = match &start {
         BevyShellStart::Title {
             spawn_identifier,
             save_path,
-        } => Some(TitleMenu {
-            spawn_identifier: *spawn_identifier,
-            save_path: save_path.clone(),
-            cursor: MenuCursor {
-                surface_id: "title".to_string(),
-                option_index: 0,
-            },
-            phase: VisibleTitlePhase::Entrance,
-            frame: 0,
-            main_menu_frame: 0,
-            scx: VISIBLE_TITLE_ENTRANCE_START_SCX,
-            title_timer: 0,
-            clock_reset_trigger: false,
-        }),
+        } => {
+            let parameters =
+                title_parameters.context("title presentation parameters are missing")?;
+            let main_menu = title_main_menu.context("title main menu definition is missing")?;
+            let mut presentation_machine = RuntimePresentationPhaseMachine::new(
+                runtime.title_presentation_program(),
+                "start_title_screen",
+                "title_screen",
+            )?;
+            presentation_machine
+                .memory
+                .insert("hSCX".to_string(), u16::from(parameters.entrance_start_scx));
+            presentation_machine
+                .memory
+                .insert("wJumptableIndex".to_string(), 0);
+            presentation_machine
+                .memory
+                .insert("wTitleScreenTimer".to_string(), 0);
+            presentation_machine
+                .memory
+                .insert("hClockResetTrigger".to_string(), 0);
+            presentation_machine
+                .memory
+                .insert("wMusicFade".to_string(), 0);
+            presentation_machine.memory.insert(
+                parameters.crystal_oam_target.clone(),
+                u16::from(parameters.crystal_initial_y),
+            );
+            Some(TitleMenu {
+                spawn_identifier: *spawn_identifier,
+                save_path: save_path.clone(),
+                cursor: MenuCursor {
+                    surface_id: "title".to_string(),
+                    option_index: 0,
+                },
+                presentation_machine,
+                main_menu,
+                phase: VisibleTitlePhase::Entrance,
+                frame: 0,
+                main_menu_frame: 0,
+                scx: parameters.entrance_start_scx,
+                title_timer: 0,
+                entrance_start_scx: parameters.entrance_start_scx,
+                entrance_scroll_step: parameters.entrance_scroll_step,
+                crystal_oam_target: parameters.crystal_oam_target,
+                crystal_initial_y: parameters.crystal_initial_y,
+                suicune_frames: parameters.suicune_frames,
+                suicune_selector_mask: parameters.suicune_selector_mask,
+                suicune_selector_shift_left: parameters.suicune_selector_shift_left,
+                suicune_selector_swap_nibbles: parameters.suicune_selector_swap_nibbles,
+                joypad_mask: 0,
+                clock_reset_trigger: false,
+            })
+        }
         BevyShellStart::LoadSave { .. } => None,
         #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { .. } => None,
         #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGameAtRuntimeTile { .. } => None,
     };
-    let intro_screen = matches!(&start, BevyShellStart::Title { .. })
-        .then(VisibleIntroScreen::new_for_presentation);
+    let mut intro_screen =
+        matches!(&start, BevyShellStart::Title { .. }).then(VisibleIntroScreen::new);
+    if let Some(intro) = intro_screen.as_mut() {
+        apply_visible_intro_background_binding(
+            intro,
+            &runtime.data().runtime_title_screen.program,
+        )?;
+    }
+    let intro_sprite_bundle = intro_screen
+        .as_ref()
+        .map(|_| load_intro_sprite_anim_bundle(runtime.data().sprite_anim_bundle.as_str()))
+        .transpose()?;
     let mut shell = match start {
         #[cfg(any(test, feature = "location-tester"))]
         BevyShellStart::NewGame { spawn_identifier } => {
@@ -6139,6 +6482,24 @@ fn initialize_bevy_runtime_shell(
             save_path: _,
         } => RuntimeGameShell::new_game(asset_root.clone(), runtime.clone(), spawn_identifier)?,
     };
+    if let Some(save_path) = title_menu
+        .as_ref()
+        .and_then(|title| title.save_path.as_ref())
+        && let Ok(saved_state) = shell.runtime().load_save(save_path)
+    {
+        // GameInit's TryLoadSaveData restores wOptions before the intro. The
+        // Lucky-ID routine later reads its two SRAM fields directly during
+        // ResetWRAM, so retain those alongside the title's live hRandom state.
+        let title_state = shell.session_mut().state_mut();
+        title_state.options = saved_state.options;
+        title_state.lucky_number_day = saved_state.lucky_number_day;
+        title_state.lucky_id_number = saved_state.lucky_id_number;
+    }
+    #[cfg(feature = "location-tester")]
+    if let Some(hour) = config.render_test_hour {
+        anyhow::ensure!(hour < 24, "render-test hour {hour} is outside 0..24");
+        shell.update_clock_from_datetime(GameDate::new(2000, 1, 1), hour, 0, 0)?;
+    }
     if title_menu.is_some() || initial_player_name_prompt {
         // MainMenu clears GAME_TIMER_COUNTING_F. The bit is armed only when
         // the new-game introduction reaches FinishContinue.
@@ -6173,7 +6534,9 @@ fn initialize_bevy_runtime_shell(
         shell,
         latest_rtc_sample: None,
         intro_screen,
+        intro_sprite_bundle,
         title_menu,
+        new_game_pre_overworld: false,
         visible_continue_screen: None,
         credits_screen: None,
         last_error: None,
@@ -6181,18 +6544,21 @@ fn initialize_bevy_runtime_shell(
         last_audio_events: Vec::new(),
         pending_audio: Vec::new(),
         audio_source_cache: HashMap::new(),
-        trainer_items_used: BTreeSet::new(),
         pending_music_stop: false,
+        pending_full_audio_reset: false,
         transient_audio_playing: false,
+        active_transient_kind: None,
+        current_sfx_priority: 0,
         active_music: None,
         faded_music: None,
+        music_volume: 7,
+        music_fade: None,
         last_battle_cry_key: None,
         pending_battle_cries_after_messages: VecDeque::new(),
         battle_enemy_send_out_pending: false,
         battle_player_send_out_pending: false,
         battle_enemy_hp_at_player_send_out: None,
         pending_battle_scenes_after_message: VecDeque::new(),
-        pending_enemy_response_after_capture: None,
         pending_plain_battle_map_reload: false,
         last_overworld_input: None,
         overworld_interaction_consumed_a: false,
@@ -6233,6 +6599,8 @@ fn initialize_bevy_runtime_shell(
         deterministic_session_checkpoint,
         deterministic_input_frames: VecDeque::new(),
         deterministic_battle_actions: VecDeque::new(),
+        pending_link_battle_action: None,
+        pending_link_battle_replacement: None,
         deterministic_menu_results: VecDeque::new(),
         last_runtime_action: None,
         quick_save_path: config.quick_save_path,
@@ -6260,19 +6628,6 @@ fn initialize_bevy_runtime_shell(
         pending_day_of_week: None,
         pending_trainer_sight: None,
         pending_trainer_intro: None,
-        previous_map_sign_landmark: if matches!(
-            initial_snapshot.overworld.map_name.as_str(),
-            "Route35NationalParkGate" | "Route36NationalParkGate"
-        ) {
-            Some("__MAP_NAME_SIGN_SENTINEL__".to_string())
-        } else {
-            initial_snapshot
-                .presentation
-                .pokegear_landmarks
-                .map_to_landmark
-                .get(&initial_snapshot.overworld.map_name)
-                .cloned()
-        },
         visible_map_name_sign: None,
         pending_delete_save: None,
         pending_clock_reset: None,
@@ -6299,7 +6654,7 @@ fn initialize_bevy_runtime_shell(
         pending_gift_pokemon_nickname: None,
         pending_gift_pokemon_pc_notice: false,
         pending_egg_hatch_nickname: None,
-        visible_item_ball_notice: None,
+        visible_field_item_notice: None,
         party_menu_open: false,
         party_summary_open: false,
         party_summary_page: 1,
@@ -6311,6 +6666,12 @@ fn initialize_bevy_runtime_shell(
         held_item_swap_prompt: false,
         pending_contextual_field_move: None,
         pending_script_party_selection: None,
+        pending_link_trade_party_slot: None,
+        pending_link_trade_confirmation: None,
+        pending_link_trade_save: false,
+        pending_link_room_selection: None,
+        pending_linked_friend_wait: false,
+        pending_link_room_session: false,
         pending_npc_trade_commit: None,
         pending_photo_studio_commit: None,
         kurt_apricorn_cursor: None,
@@ -6374,6 +6735,7 @@ fn initialize_bevy_runtime_shell(
         wait_play_sfx_completion: None,
         special_boundary_queue: VecDeque::new(),
         visible_special_text_pause_frames: None,
+        visible_internal_special_delay_frames: None,
         pending_special_cry: None,
         pending_special_sound: None,
         visible_balance_overlay: None,
@@ -6459,7 +6821,7 @@ fn initialize_bevy_runtime_shell(
         pending_field_battle_entry: false,
         pending_field_notice_effect_frames: None,
         visible_cut_animation: None,
-        visible_whirlpool_animation: None,
+        pending_whirlpool_sound_wait: false,
         visible_headbutt_animation: None,
         visible_flash_animation: None,
         visible_fly_animation: None,
@@ -6512,6 +6874,7 @@ fn initialize_bevy_runtime_shell(
 }
 
 include!("bevy_shell/deterministic_session.rs");
+include!("bevy_shell/multiplayer.rs");
 include!("bevy_shell/field_travel.rs");
 include!("bevy_shell/trainer_card.rs");
 include!("bevy_shell/title_menu.rs");

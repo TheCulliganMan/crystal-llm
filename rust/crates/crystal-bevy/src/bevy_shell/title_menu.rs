@@ -1,17 +1,15 @@
-fn visible_title_menu_options(
+fn visible_title_menu_options<'a>(
     runtime_shell: &BevyRuntimeShell,
-    title: &TitleMenu,
-) -> Vec<TitleMenuOption> {
-    let mut options = Vec::new();
-    if title_continue_save_path(runtime_shell, title).is_some() {
-        options.push(TitleMenuOption::Continue);
-    }
-    options.push(TitleMenuOption::NewGame);
-    options.push(TitleMenuOption::Options);
-    if visible_title_mystery_gift_unlocked(runtime_shell, title) {
-        options.push(TitleMenuOption::MysteryGift);
-    }
-    options
+    title: &'a TitleMenu,
+) -> &'a [RuntimeTitleMainMenuItem] {
+    let variant = if title_continue_save_path(runtime_shell, title).is_none() {
+        title.main_menu.new_game_variant
+    } else if visible_title_mystery_gift_unlocked(runtime_shell, title) {
+        title.main_menu.mystery_variant
+    } else {
+        title.main_menu.continue_variant
+    };
+    &title.main_menu.variants[variant]
 }
 
 fn visible_title_mystery_gift_unlocked(
@@ -75,25 +73,10 @@ impl VisibleIntroScreen {
             global_anim_x_offset: 0,
             sprite_count: 0,
             sprites: Vec::new(),
+            background_binding: None,
             palette_effect: VisibleIntroPaletteEffect::None,
             finished: false,
         }
-    }
-
-    /// Start native presentation at the first clearly visible point of the
-    /// opening Unown fade. The ASM prelude before this point is an opaque
-    /// black LCD; presenting it in a desktop window is indistinguishable from
-    /// a failed renderer or a hung pack load.
-    fn new_for_presentation() -> Self {
-        let mut intro = Self::new();
-        intro.jumptable_index = 1;
-        intro.scene_frame_counter = 8;
-        intro.scene_timer = 8;
-        intro.palette_effect = VisibleIntroPaletteEffect::UnownFade {
-            palette_idx: 0,
-            timer: 8,
-        };
-        intro
     }
 
     fn scene_name(&self) -> &'static str {
@@ -105,19 +88,34 @@ impl VisibleIntroScreen {
 }
 
 fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let Some(intro) = runtime_shell.intro_screen.as_mut() else {
+    let Some(intro) = runtime_shell.intro_screen.as_ref() else {
         return Ok(());
     };
     if intro.finished || intro.jumptable_index >= VISIBLE_INTRO_SCENE_NAMES.len() {
         return finish_visible_intro_screen(runtime_shell, "complete");
     }
     if intro.scene_delay_frames > 0 {
-        intro.scene_delay_frames = intro.scene_delay_frames.saturating_sub(1);
-        if intro.scene_delay_frames == 0 {
-            visible_intro_next_scene(intro);
-            apply_visible_intro_sprite_pipeline(intro);
+        let delay_finished = {
+            let intro = runtime_shell
+                .intro_screen
+                .as_mut()
+                .context("intro screen disappeared during its scene delay")?;
+            intro.scene_delay_frames = intro.scene_delay_frames.saturating_sub(1);
+            if intro.scene_delay_frames == 0 {
+                visible_intro_next_scene(intro);
+                true
+            } else {
+                false
+            }
+        };
+        if delay_finished {
+            apply_visible_intro_sprite_pipeline_for_shell(runtime_shell)?;
         }
-        if intro.finished {
+        if runtime_shell
+            .intro_screen
+            .as_ref()
+            .is_some_and(|intro| intro.finished)
+        {
             return finish_visible_intro_screen(runtime_shell, "complete");
         }
         return Ok(());
@@ -135,12 +133,12 @@ fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     } else {
         0
     };
+    if delay == 0 {
+        apply_visible_intro_sprite_pipeline_for_shell(runtime_shell)?;
+    }
     let Some(intro) = runtime_shell.intro_screen.as_mut() else {
         return Ok(());
     };
-    if delay == 0 {
-        apply_visible_intro_sprite_pipeline(intro);
-    }
     if scene_finished {
         if delay > 0 {
             intro.scene_delay_frames = delay;
@@ -159,9 +157,15 @@ fn tick_visible_intro_screen(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 }
 
 fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool> {
+    let intro_program = &runtime_shell.runtime.data().runtime_title_screen.program;
+    let sprite_bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .context("visible intro has no pack-owned sprite animation bundle")?;
     let Some(intro) = runtime_shell.intro_screen.as_mut() else {
         return Ok(false);
     };
+    apply_visible_intro_background_binding(intro, intro_program)?;
     match intro.jumptable_index {
         0 => {
             clear_visible_intro_sprites(intro);
@@ -176,7 +180,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
                 return Ok(true);
             }
             if frame == 0x60 {
-                init_visible_intro_unown_anim(intro, 11 * 8, 11 * 8)?;
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 159)?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -210,7 +214,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
                 return Ok(true);
             }
             if frame == 0x20 {
-                init_visible_intro_unown_anim(intro, 15 * 8, 7 * 8)?;
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 305)?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -218,7 +222,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
                     "SFX_INTRO_UNOWN_2",
                 )?;
             } else if frame == 0x60 {
-                init_visible_intro_unown_anim(intro, 5 * 8, 14 * 8)?;
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 318)?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -235,7 +239,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         }
         6 => {
             clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_SUICUNE", 27 * 8, 13 * 8 + 4)?;
+            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 393)?;
             intro.global_anim_x_offset = 0xf0;
             intro.scene_frame_counter = 0;
             intro.scene_timer = 0;
@@ -279,7 +283,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         9 => {
             let frame = intro.scene_frame_counter;
             if frame == 0x20 {
-                spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_WOOPER", 6 * 8, 22 * 8)?;
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 494)?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -288,12 +292,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
                 )?;
             }
             if frame == 0x40 {
-                spawn_visible_intro_sprite(
-                    intro,
-                    "SPRITE_ANIM_OBJ_INTRO_PICHU",
-                    16 * 8,
-                    21 * 8 + 1,
-                )?;
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 486)?;
                 queue_visible_sound_effect(
                     runtime_shell.shell.runtime().audio(),
                     &mut runtime_shell.pending_audio,
@@ -357,7 +356,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         }
         12 => {
             clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_SUICUNE", 13 * 8 + 4, 11 * 8)?;
+            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 673)?;
             // IntroScene13 reloads the forest BG and then zeros hSCX/hSCY.
             // Preserve that setup boundary so stale scroll cannot rearrange
             // the otherwise-correct tilemap on the Suicune run.
@@ -396,10 +395,13 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         }
         14 => {
             clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_UNOWN_F", 5 * 8, 8 * 8)?;
-            let suicune =
-                spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY", 0, 12 * 8)?;
-            suicune.gfx_name = "suicune_jump".to_string();
+            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 784)?;
+            let suicune_range =
+                spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 787)?;
+            anyhow::ensure!(
+                suicune_range.len() == 1,
+                "IntroScene15 must activate exactly one departing sprite"
+            );
             intro.scroll_x = 0;
             intro.scroll_y = 144;
             intro.palette_effect = VisibleIntroPaletteEffect::None;
@@ -434,7 +436,7 @@ fn step_visible_intro_scene(runtime_shell: &mut BevyRuntimeShell) -> Result<bool
         }
         18 => {
             clear_visible_intro_sprites(intro);
-            spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY", 0, 12 * 8)?;
+            spawn_visible_intro_sprite_program_group(intro, sprite_bundle, intro_program, 936)?;
             intro.scroll_x = 0;
             intro.scroll_y = (-5_i16 * SOURCE_TILE_SIZE as i16).rem_euclid(256) as u8;
             intro.global_anim_x_offset = 0;
@@ -549,18 +551,143 @@ fn clear_visible_intro_sprites(intro: &mut VisibleIntroScreen) {
     intro.sprite_count = 0;
 }
 
+fn apply_visible_intro_background_binding(
+    intro: &mut VisibleIntroScreen,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    let subprogram = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .context("runtime title presentation has no crystal_intro subprogram")?;
+    let phase = subprogram
+        .phases
+        .iter()
+        .find(|phase| phase.id == "scene_dispatch")
+        .context("crystal_intro has no scene_dispatch phase")?;
+    let mut matching = phase.operations.iter().filter(|operation| {
+        operation.op == "intro_background_binding"
+            && operation
+                .fields
+                .get("dispatcher_entry")
+                .and_then(serde_json::Value::as_u64)
+                == Some(intro.jumptable_index as u64)
+    });
+    let operation = matching.next().with_context(|| {
+        format!(
+            "crystal_intro has no background binding for dispatcher entry {}",
+            intro.jumptable_index
+        )
+    })?;
+    anyhow::ensure!(
+        matching.next().is_none(),
+        "crystal_intro has duplicate background bindings for dispatcher entry {}",
+        intro.jumptable_index
+    );
+    let string_field = |field: &str| -> Result<String> {
+        operation
+            .fields
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .with_context(|| {
+                format!(
+                    "crystal_intro background binding {} has no exact {field}",
+                    intro.jumptable_index
+                )
+            })
+    };
+    anyhow::ensure!(
+        operation
+            .fields
+            .get("tile_addressing")
+            .and_then(serde_json::Value::as_str)
+            == Some("signed_8800"),
+        "crystal_intro background binding {} has unsupported tile addressing",
+        intro.jumptable_index
+    );
+    let raw_tiles = operation
+        .fields
+        .get("tile_bindings")
+        .and_then(serde_json::Value::as_array)
+        .context("crystal_intro background binding has no exact tile bindings")?;
+    let byte_field = |tile: &serde_json::Value, field: &str| -> Result<u8> {
+        u8::try_from(
+            tile.get(field)
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| format!("intro background tile binding has no exact {field}"))?,
+        )
+        .with_context(|| format!("intro background tile binding {field} exceeds one byte"))
+    };
+    let mut occupied = [[false; 256]; 2];
+    let mut tile_bindings = Vec::with_capacity(raw_tiles.len());
+    for tile in raw_tiles {
+        let start = byte_field(tile, "tile_id_start")?;
+        let end = byte_field(tile, "tile_id_end")?;
+        let bank = byte_field(tile, "target_vram_bank")?;
+        anyhow::ensure!(
+            start <= end,
+            "intro background tile binding has reversed range"
+        );
+        anyhow::ensure!(
+            bank <= 1,
+            "intro background tile binding has invalid VRAM bank {bank}"
+        );
+        for tile_id in start..=end {
+            anyhow::ensure!(
+                !occupied[usize::from(bank)][usize::from(tile_id)],
+                "intro background tile binding overlaps bank {bank} tile {tile_id:#04x}"
+            );
+            occupied[usize::from(bank)][usize::from(tile_id)] = true;
+        }
+        let resource_tile_start = u16::try_from(
+            tile.get("resource_tile_start")
+                .and_then(serde_json::Value::as_u64)
+                .context("intro background tile binding has no resource tile start")?,
+        )
+        .context("intro background resource tile start exceeds two bytes")?;
+        let resource = tile
+            .get("resource")
+            .and_then(serde_json::Value::as_str)
+            .context("intro background tile binding has no resource")?;
+        anyhow::ensure!(
+            resource.starts_with("gfx/intro/")
+                && (resource.ends_with(".2bpp") || resource.ends_with(".2bpp.lz")),
+            "intro background tile binding has unsupported resource {resource}"
+        );
+        tile_bindings.push(VisibleIntroBgTileBinding {
+            tile_id_start: start,
+            tile_id_end: end,
+            target_vram_bank: bank,
+            resource: resource.to_string(),
+            resource_tile_start,
+        });
+    }
+    intro.background_binding = Some(VisibleIntroBackgroundBinding {
+        dispatcher_entry: intro.jumptable_index,
+        tilemap_resource: string_field("tilemap_resource")?,
+        attrmap_resource: string_field("attrmap_resource")?,
+        palette_resource: string_field("palette_resource")?,
+        tile_bindings,
+    });
+    Ok(())
+}
+
 fn spawn_visible_intro_sprite<'a>(
     intro: &'a mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
     object_name: &str,
     x: i16,
     y: i16,
 ) -> Result<&'a mut VisibleIntroSprite> {
-    let (frameset_name, anim_function, gfx_name) = visible_intro_sprite_definition(object_name)?;
+    let (frameset_name, anim_function) = visible_intro_sprite_definition(bundle, object_name)?;
     intro.sprites.push(VisibleIntroSprite {
         x,
         y,
+        tile_id: 0,
         oam_attr: 0,
-        gfx_name: gfx_name.to_string(),
+        gfx_name: String::new(),
+        gfx_tile_base: 0,
         jumptable_index: 0,
         frame_timer: 0,
         frameset_step: -1,
@@ -569,9 +696,9 @@ fn spawn_visible_intro_sprite<'a>(
         y_offset: 0,
         var1: 0,
         var2: 0,
-        frameset_name: frameset_name.to_string(),
+        frameset_name,
         object_name: object_name.to_string(),
-        anim_function: anim_function.to_string(),
+        anim_function,
         current_oam_set: None,
         attr_flags: 0,
     });
@@ -580,114 +707,602 @@ fn spawn_visible_intro_sprite<'a>(
 }
 
 fn visible_intro_sprite_definition(
+    bundle: &SpriteAnimRuntimeBundle,
     object_name: &str,
-) -> Result<(&'static str, &'static str, &'static str)> {
-    Ok(match object_name {
-        "SPRITE_ANIM_OBJ_INTRO_SUICUNE" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE",
-            "SPRITE_ANIM_FUNC_INTRO_SUICUNE",
-            "suicune_run",
-        ),
-        "SPRITE_ANIM_OBJ_INTRO_PICHU" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_PICHU",
-            "SPRITE_ANIM_FUNC_INTRO_PICHU_WOOPER",
-            "pichu_wooper",
-        ),
-        "SPRITE_ANIM_OBJ_INTRO_WOOPER" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_WOOPER",
-            "SPRITE_ANIM_FUNC_INTRO_PICHU_WOOPER",
-            "pichu_wooper",
-        ),
-        "SPRITE_ANIM_OBJ_INTRO_UNOWN" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_1",
-            "SPRITE_ANIM_FUNC_INTRO_UNOWN",
-            "pulse",
-        ),
-        "SPRITE_ANIM_OBJ_INTRO_UNOWN_F" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F",
-            "SPRITE_ANIM_FUNC_INTRO_UNOWN_F",
-            "unown_back",
-        ),
-        "SPRITE_ANIM_OBJ_INTRO_SUICUNE_AWAY" => (
-            "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_AWAY",
-            "SPRITE_ANIM_FUNC_INTRO_SUICUNE_AWAY",
-            "suicune_back",
-        ),
-        other => anyhow::bail!("unknown intro sprite object {other}"),
-    })
+) -> Result<(String, String)> {
+    let object = bundle
+        .objects
+        .get(object_name)
+        .with_context(|| format!("pack-owned intro sprite object {object_name} is missing"))?;
+    let declared_name = object
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .context("intro sprite object has no exact name")?;
+    anyhow::ensure!(
+        declared_name == object_name,
+        "intro sprite object {object_name} contains mismatched name {declared_name}"
+    );
+    let frameset_name = object
+        .get("frameset")
+        .and_then(serde_json::Value::as_str)
+        .context("intro sprite object has no exact frameset")?;
+    anyhow::ensure!(
+        bundle.framesets.contains_key(frameset_name),
+        "intro sprite object {object_name} references missing frameset {frameset_name}"
+    );
+    let anim_function = object
+        .get("function")
+        .and_then(serde_json::Value::as_str)
+        .context("intro sprite object has no exact animation function")?;
+    Ok((frameset_name.to_string(), anim_function.to_string()))
 }
 
-fn init_visible_intro_unown_anim(intro: &mut VisibleIntroScreen, x: i16, y: i16) -> Result<()> {
-    const FRAMES: [&str; 4] = [
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_4",
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_3",
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_1",
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_2",
-    ];
-    const AMPLITUDES: [u8; 4] = [0x08, 0x18, 0x28, 0x38];
-    for (frameset_name, amplitude) in FRAMES.into_iter().zip(AMPLITUDES) {
-        let sprite = spawn_visible_intro_sprite(intro, "SPRITE_ANIM_OBJ_INTRO_UNOWN", x, y)?;
+fn spawn_visible_intro_sprite_program_group(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+    allocation_source_line: u64,
+) -> Result<std::ops::Range<usize>> {
+    let subprogram = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .context("runtime title presentation has no crystal_intro subprogram")?;
+    let matching = subprogram
+        .sprite_programs
+        .iter()
+        .filter(|sprite_program| {
+            sprite_program
+                .pointer("/allocation_source_span/start_line")
+                .and_then(serde_json::Value::as_u64)
+                == Some(allocation_source_line)
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !matching.is_empty(),
+        "crystal_intro has no sprite program allocated at engine/movie/intro.asm:{allocation_source_line}"
+    );
+
+    let start = intro.sprites.len();
+    for sprite_program in matching {
+        let string_at = |pointer: &str, field: &str| -> Result<&str> {
+            sprite_program
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .with_context(|| {
+                    format!(
+                        "crystal_intro sprite program at line {allocation_source_line} has no exact {field}"
+                    )
+                })
+        };
+        let byte_at = |field: &str| -> Result<u8> {
+            let value = sprite_program
+                .pointer(&format!("/initial_memory/{field}"))
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| {
+                    format!(
+                        "crystal_intro sprite program at line {allocation_source_line} has no exact initial {field}"
+                    )
+                })?;
+            u8::try_from(value).with_context(|| {
+                format!(
+                    "crystal_intro sprite program at line {allocation_source_line} initial {field} exceeds one byte"
+                )
+            })
+        };
+
+        let object_name = string_at("/object/symbol", "object symbol")?;
+        let frameset_name = string_at("/frameset/symbol", "frameset symbol")?;
+        let callback_name = string_at("/callback/symbol", "callback symbol")?;
+        let graphic_resource = string_at("/graphic_binding/resource", "graphic resource")?;
+        let gfx_name = graphic_resource
+            .strip_prefix("gfx/intro/")
+            .and_then(|name| name.strip_suffix(".lz").or(Some(name)))
+            .and_then(|name| name.strip_suffix(".2bpp"))
+            .with_context(|| {
+                format!(
+                    "crystal_intro sprite program at line {allocation_source_line} has unsupported graphic resource {graphic_resource}"
+                )
+            })?;
+        let sprite = spawn_visible_intro_sprite(
+            intro,
+            bundle,
+            object_name,
+            i16::from(byte_at("xcoord")?),
+            i16::from(byte_at("ycoord")?),
+        )?;
+        anyhow::ensure!(
+            sprite.anim_function == callback_name,
+            "crystal_intro sprite program at line {allocation_source_line} callback {callback_name} disagrees with pack object callback {}",
+            sprite.anim_function
+        );
+        anyhow::ensure!(
+            bundle.framesets.contains_key(frameset_name),
+            "crystal_intro sprite program at line {allocation_source_line} references missing frameset {frameset_name}"
+        );
+        anyhow::ensure!(
+            byte_at("duration")? == 0
+                && byte_at("duration_offset")? == 0
+                && byte_at("frame")? == u8::MAX,
+            "crystal_intro sprite program at line {allocation_source_line} has unsupported initial frame timing"
+        );
         sprite.frameset_name = frameset_name.to_string();
-        sprite.var1 = amplitude;
-        sprite.jumptable_index = 0;
+        sprite.gfx_name = gfx_name.to_string();
+        sprite.gfx_tile_base = u8::try_from(
+            sprite_program
+                .pointer("/graphic_binding/tile_base")
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| {
+                    format!(
+                        "crystal_intro sprite program at line {allocation_source_line} has no exact graphic tile base"
+                    )
+                })?,
+        )
+        .context("intro sprite graphic tile base exceeds one byte")?;
+        sprite.tile_id = byte_at("tile_id")?;
+        sprite.jumptable_index = byte_at("jumptable_index")?;
+        sprite.var1 = byte_at("var1")?;
+        sprite.var2 = byte_at("var2")?;
+        sprite.x_offset = i16::from(byte_at("xoffset")? as i8);
+        sprite.y_offset = i16::from(byte_at("yoffset")? as i8);
+    }
+    Ok(start..intro.sprites.len())
+}
+
+fn apply_visible_intro_sprite_pipeline_for_shell(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
+    let program = &runtime_shell.runtime.data().runtime_title_screen.program;
+    let bundle = runtime_shell
+        .intro_sprite_bundle
+        .as_ref()
+        .context("visible intro has no pack-owned sprite animation bundle")?;
+    let intro = runtime_shell
+        .intro_screen
+        .as_mut()
+        .context("visible intro sprite pipeline has no active intro")?;
+    apply_visible_intro_sprite_pipeline(intro, bundle, program)
+}
+
+fn apply_visible_intro_sprite_pipeline(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    if intro.jumptable_index == 20 {
+        intro.scene_timer = 0;
+    }
+    apply_visible_intro_sprite_anim_functions(intro, bundle, program)?;
+    update_visible_intro_sprite_animations(intro, bundle)?;
+    intro.sprite_count = intro.sprites.len().min(u8::MAX as usize) as u8;
+    Ok(())
+}
+
+fn apply_visible_intro_sprite_anim_functions(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+    program: &RuntimePresentationProgram,
+) -> Result<()> {
+    let scene_frame_counter = intro.scene_frame_counter;
+    let scene_timer = intro.scene_timer;
+    for sprite in &mut intro.sprites {
+        let callback = visible_intro_sprite_callback(program, &sprite.anim_function)?;
+        execute_visible_intro_sprite_callback(
+            sprite,
+            bundle,
+            callback,
+            scene_frame_counter,
+            scene_timer,
+        )?;
     }
     Ok(())
 }
 
-fn apply_visible_intro_sprite_pipeline(intro: &mut VisibleIntroScreen) {
-    if intro.jumptable_index == 20 {
-        intro.scene_timer = 0;
-    }
-    apply_visible_intro_sprite_anim_functions(intro);
-    update_visible_intro_sprite_animations(intro);
-    intro.sprite_count = intro.sprites.len().min(u8::MAX as usize) as u8;
-}
-
-fn apply_visible_intro_sprite_anim_functions(intro: &mut VisibleIntroScreen) {
-    for sprite in &mut intro.sprites {
-        match sprite.anim_function.as_str() {
-            "SPRITE_ANIM_FUNC_INTRO_SUICUNE" => {
-                if intro.scene_timer == 0 {
-                    sprite.y_offset = 0;
-                    continue;
-                }
-                sprite.var2 = sprite.var2.wrapping_add(2);
-                let angle = (!sprite.var2).wrapping_add(1);
-                sprite.y_offset = visible_intro_sine(angle, 32);
-                sprite.x_offset = 0;
-                if sprite.frameset_name != "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_2" {
-                    sprite.frameset_name = "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_2".to_string();
-                    sprite.frameset_step = -1;
-                    sprite.frame_timer = 0;
-                    sprite.current_oam_set = None;
-                }
+fn visible_intro_sprite_callback<'a>(
+    program: &'a RuntimePresentationProgram,
+    callback_name: &str,
+) -> Result<&'a serde_json::Value> {
+    let subprogram = program
+        .subprograms
+        .iter()
+        .find(|subprogram| subprogram.id == "crystal_intro")
+        .context("runtime title presentation has no crystal_intro subprogram")?;
+    let mut callbacks = subprogram
+        .sprite_programs
+        .iter()
+        .filter_map(|sprite_program| {
+            let callback = sprite_program.get("callback")?;
+            (callback.get("symbol")?.as_str()? == callback_name).then_some(callback)
+        });
+    let callback = callbacks.next().with_context(|| {
+        format!("crystal_intro has no exported callback program {callback_name}")
+    })?;
+    for duplicate in callbacks {
+        for field in [
+            "kind",
+            "symbol",
+            "target",
+            "instructions",
+            "per_tick_struct_deltas",
+            "host_operations",
+            "outer_memory_reads",
+            "labels",
+        ] {
+            anyhow::ensure!(
+                duplicate.get(field) == callback.get(field),
+                "crystal_intro callback program {callback_name} has conflicting {field} definitions"
+            );
+        }
+        let expected_reinitializations = callback
+            .get("frameset_reinitializations")
+            .and_then(serde_json::Value::as_array)
+            .context("intro callback has no exact frameset reinitialization list")?;
+        let duplicate_reinitializations = duplicate
+            .get("frameset_reinitializations")
+            .and_then(serde_json::Value::as_array)
+            .context("duplicate intro callback has no exact frameset reinitialization list")?;
+        anyhow::ensure!(
+            duplicate_reinitializations.len() == expected_reinitializations.len(),
+            "crystal_intro callback program {callback_name} has conflicting frameset reinitialization counts"
+        );
+        for (expected, duplicate) in expected_reinitializations
+            .iter()
+            .zip(duplicate_reinitializations)
+        {
+            for field in [
+                "frameset",
+                "guard",
+                "application",
+                "source_span",
+                "implementation_source_span",
+            ] {
+                anyhow::ensure!(
+                    duplicate.get(field) == expected.get(field),
+                    "crystal_intro callback program {callback_name} has conflicting frameset reinitialization {field}"
+                );
             }
-            "SPRITE_ANIM_FUNC_INTRO_PICHU_WOOPER" => {
-                if sprite.var1 < 20 {
-                    sprite.var1 = sprite.var1.wrapping_add(2);
-                }
-                let angle = (!sprite.var1).wrapping_add(1);
-                sprite.y_offset = visible_intro_sine(angle, 32);
-                sprite.x_offset = 0;
-            }
-            "SPRITE_ANIM_FUNC_INTRO_UNOWN" => {
-                let direction = sprite.var1;
-                let distance = sprite.jumptable_index;
-                sprite.y_offset = visible_intro_sine(direction, i16::from(distance));
-                sprite.x_offset = visible_intro_cosine(direction, i16::from(distance));
-                sprite.jumptable_index = sprite.jumptable_index.wrapping_add(3);
-            }
-            "SPRITE_ANIM_FUNC_INTRO_UNOWN_F" => {}
-            "SPRITE_ANIM_FUNC_INTRO_SUICUNE_AWAY" => {
-                sprite.y = sprite.y.saturating_add(16);
-                sprite.x_offset = 0;
-            }
-            _ => {}
         }
     }
+    anyhow::ensure!(
+        callback.get("kind").and_then(serde_json::Value::as_str) == Some("direct"),
+        "crystal_intro callback program {callback_name} is not direct"
+    );
+    Ok(callback)
 }
 
-fn update_visible_intro_sprite_animations(intro: &mut VisibleIntroScreen) {
+#[derive(Clone, Copy)]
+struct VisibleIntroCallbackFlags {
+    zero: bool,
+    carry: bool,
+}
+
+enum VisibleIntroCallbackStackValue {
+    Af {
+        a: u8,
+        a_symbol: Option<String>,
+        flags: VisibleIntroCallbackFlags,
+    },
+    De(u8),
+}
+
+fn execute_visible_intro_sprite_callback(
+    sprite: &mut VisibleIntroSprite,
+    bundle: &SpriteAnimRuntimeBundle,
+    callback: &serde_json::Value,
+    scene_frame_counter: u8,
+    scene_timer: u8,
+) -> Result<()> {
+    let instructions = callback
+        .get("instructions")
+        .and_then(serde_json::Value::as_array)
+        .context("intro callback has no exact instruction list")?;
+    let labels = callback
+        .get("labels")
+        .and_then(serde_json::Value::as_object)
+        .context("intro callback has no exact label table")?;
+    let callback_name = callback
+        .get("symbol")
+        .and_then(serde_json::Value::as_str)
+        .context("intro callback has no symbol")?;
+    let mut a = 0_u8;
+    let mut a_symbol = None;
+    let mut d = 0_u8;
+    let mut hl = None::<String>;
+    let mut flags = VisibleIntroCallbackFlags {
+        zero: false,
+        carry: false,
+    };
+    let mut stack = Vec::new();
+    let mut pc = 0_usize;
+    let mut steps = 0_usize;
+    while pc < instructions.len() {
+        steps += 1;
+        anyhow::ensure!(
+            steps <= instructions.len().saturating_mul(4).max(1),
+            "intro callback {callback_name} exceeded its bounded instruction budget"
+        );
+        let instruction = &instructions[pc];
+        pc += 1;
+        let opcode = instruction
+            .get("opcode")
+            .and_then(serde_json::Value::as_str)
+            .context("intro callback instruction has no opcode")?;
+        let args = instruction
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .context("intro callback instruction has no argument list")?
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .context("intro callback instruction argument is not a string")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        match (opcode, args.as_slice()) {
+            ("ld", ["hl", field]) => {
+                visible_intro_callback_field_name(field)?;
+                hl = Some((*field).to_string());
+            }
+            ("ld", ["a", "[hl]"]) => {
+                a = read_visible_intro_callback_field(
+                    sprite,
+                    hl.as_deref().context("intro callback reads unset hl")?,
+                )?;
+                a_symbol = None;
+            }
+            ("ld", ["d", "[hl]"]) => {
+                d = read_visible_intro_callback_field(
+                    sprite,
+                    hl.as_deref().context("intro callback reads unset hl")?,
+                )?;
+            }
+            ("ld", ["[hl]", "a"]) => write_visible_intro_callback_field(
+                sprite,
+                hl.as_deref().context("intro callback writes unset hl")?,
+                a,
+            )?,
+            ("ld", ["[hl]", value]) => write_visible_intro_callback_field(
+                sprite,
+                hl.as_deref().context("intro callback writes unset hl")?,
+                parse_visible_intro_callback_byte(value)?,
+            )?,
+            ("ld", ["a", source]) if source.starts_with('[') && source.ends_with(']') => {
+                let source_symbol = &source[1..source.len() - 1];
+                a = read_visible_intro_callback_outer_byte(
+                    callback,
+                    source_symbol,
+                    scene_frame_counter,
+                    scene_timer,
+                )?;
+                a_symbol = None;
+            }
+            ("ld", ["a", value]) => {
+                if value.starts_with("SPRITE_ANIM_FRAMESET_") {
+                    a_symbol = Some((*value).to_string());
+                } else {
+                    a = parse_visible_intro_callback_byte(value)?;
+                    a_symbol = None;
+                }
+            }
+            ("ld", ["d", value]) => d = parse_visible_intro_callback_byte(value)?,
+            ("add", ["hl", "bc"]) => {
+                anyhow::ensure!(hl.is_some(), "intro callback adds bc to unset hl");
+            }
+            ("add", [value]) => {
+                a = a.wrapping_add(parse_visible_intro_callback_byte(value)?);
+                a_symbol = None;
+            }
+            ("cp", [value]) => {
+                let value = parse_visible_intro_callback_byte(value)?;
+                flags.zero = a == value;
+                flags.carry = a < value;
+            }
+            ("and", ["a"]) => {
+                flags.zero = a == 0;
+                flags.carry = false;
+                a_symbol = None;
+            }
+            ("xor", [value]) => {
+                a ^= parse_visible_intro_callback_byte(value)?;
+                flags.zero = a == 0;
+                flags.carry = false;
+                a_symbol = None;
+            }
+            ("inc", ["a"]) => {
+                a = a.wrapping_add(1);
+                flags.zero = a == 0;
+                a_symbol = None;
+            }
+            ("inc", ["[hl]"]) => {
+                let field = hl
+                    .as_deref()
+                    .context("intro callback increments unset hl")?;
+                let value = read_visible_intro_callback_field(sprite, field)?.wrapping_add(1);
+                write_visible_intro_callback_field(sprite, field, value)?;
+            }
+            ("push", ["af"]) => stack.push(VisibleIntroCallbackStackValue::Af {
+                a,
+                a_symbol: a_symbol.clone(),
+                flags,
+            }),
+            ("push", ["de"]) => stack.push(VisibleIntroCallbackStackValue::De(d)),
+            ("pop", ["af"]) => match stack.pop() {
+                Some(VisibleIntroCallbackStackValue::Af {
+                    a: saved_a,
+                    a_symbol: saved_symbol,
+                    flags: saved_flags,
+                }) => {
+                    a = saved_a;
+                    a_symbol = saved_symbol;
+                    flags = saved_flags;
+                }
+                _ => anyhow::bail!("intro callback {callback_name} has an AF stack mismatch"),
+            },
+            ("pop", ["de"]) => match stack.pop() {
+                Some(VisibleIntroCallbackStackValue::De(saved_d)) => d = saved_d,
+                _ => anyhow::bail!("intro callback {callback_name} has a DE stack mismatch"),
+            },
+            ("call", ["AnimSeqs_Sine"]) => {
+                a = visible_intro_sine(a, i16::from(d)) as i8 as u8;
+                a_symbol = None;
+            }
+            ("call", ["AnimSeqs_Cosine"]) => {
+                a = visible_intro_cosine(a, i16::from(d)) as i8 as u8;
+                a_symbol = None;
+            }
+            ("call", ["_ReinitSpriteAnimFrame"]) => {
+                let frameset_name = a_symbol
+                    .take()
+                    .context("intro callback reinitializer has no symbolic frameset in a")?;
+                anyhow::ensure!(
+                    bundle.framesets.contains_key(&frameset_name),
+                    "intro callback reinitializes missing frameset {frameset_name}"
+                );
+                sprite.frameset_name = frameset_name;
+                sprite.frameset_step = -1;
+                sprite.frame_timer = 0;
+                sprite.current_oam_set = None;
+            }
+            ("jr" | "jp", [condition, label]) => {
+                if visible_intro_callback_condition(condition, flags)? {
+                    let target = labels
+                        .get(*label)
+                        .and_then(serde_json::Value::as_u64)
+                        .with_context(|| {
+                            format!("intro callback {callback_name} has no label {label}")
+                        })?;
+                    pc = usize::try_from(target).context("intro callback label exceeds usize")?;
+                    anyhow::ensure!(
+                        pc < instructions.len(),
+                        "intro callback {callback_name} label {label} is out of bounds"
+                    );
+                }
+            }
+            ("ret", []) => {
+                anyhow::ensure!(
+                    stack.is_empty(),
+                    "intro callback {callback_name} returned with a nonempty stack"
+                );
+                return Ok(());
+            }
+            ("ret", [condition]) => {
+                if visible_intro_callback_condition(condition, flags)? {
+                    anyhow::ensure!(
+                        stack.is_empty(),
+                        "intro callback {callback_name} returned with a nonempty stack"
+                    );
+                    return Ok(());
+                }
+            }
+            _ => anyhow::bail!(
+                "intro callback {callback_name} uses unsupported instruction {opcode} {}",
+                args.join(", ")
+            ),
+        }
+    }
+    anyhow::bail!("intro callback {callback_name} fell off its instruction program")
+}
+
+fn visible_intro_callback_field_name(field: &str) -> Result<()> {
+    match field {
+        "SPRITEANIMSTRUCT_XCOORD"
+        | "SPRITEANIMSTRUCT_YCOORD"
+        | "SPRITEANIMSTRUCT_XOFFSET"
+        | "SPRITEANIMSTRUCT_YOFFSET"
+        | "SPRITEANIMSTRUCT_JUMPTABLE_INDEX"
+        | "SPRITEANIMSTRUCT_VAR1"
+        | "SPRITEANIMSTRUCT_VAR2" => Ok(()),
+        other => anyhow::bail!("intro callback addresses unsupported sprite field {other}"),
+    }
+}
+
+fn read_visible_intro_callback_field(sprite: &VisibleIntroSprite, field: &str) -> Result<u8> {
+    visible_intro_callback_field_name(field)?;
+    Ok(match field {
+        "SPRITEANIMSTRUCT_XCOORD" => sprite.x as u8,
+        "SPRITEANIMSTRUCT_YCOORD" => sprite.y as u8,
+        "SPRITEANIMSTRUCT_XOFFSET" => sprite.x_offset as i8 as u8,
+        "SPRITEANIMSTRUCT_YOFFSET" => sprite.y_offset as i8 as u8,
+        "SPRITEANIMSTRUCT_JUMPTABLE_INDEX" => sprite.jumptable_index,
+        "SPRITEANIMSTRUCT_VAR1" => sprite.var1,
+        "SPRITEANIMSTRUCT_VAR2" => sprite.var2,
+        _ => unreachable!("validated intro callback field"),
+    })
+}
+
+fn write_visible_intro_callback_field(
+    sprite: &mut VisibleIntroSprite,
+    field: &str,
+    value: u8,
+) -> Result<()> {
+    visible_intro_callback_field_name(field)?;
+    match field {
+        "SPRITEANIMSTRUCT_XCOORD" => sprite.x = i16::from(value),
+        "SPRITEANIMSTRUCT_YCOORD" => sprite.y = i16::from(value),
+        "SPRITEANIMSTRUCT_XOFFSET" => sprite.x_offset = i16::from(value as i8),
+        "SPRITEANIMSTRUCT_YOFFSET" => sprite.y_offset = i16::from(value as i8),
+        "SPRITEANIMSTRUCT_JUMPTABLE_INDEX" => sprite.jumptable_index = value,
+        "SPRITEANIMSTRUCT_VAR1" => sprite.var1 = value,
+        "SPRITEANIMSTRUCT_VAR2" => sprite.var2 = value,
+        _ => unreachable!("validated intro callback field"),
+    }
+    Ok(())
+}
+
+fn read_visible_intro_callback_outer_byte(
+    callback: &serde_json::Value,
+    source_symbol: &str,
+    scene_frame_counter: u8,
+    scene_timer: u8,
+) -> Result<u8> {
+    let canonical = callback
+        .get("outer_memory_reads")
+        .and_then(serde_json::Value::as_array)
+        .context("intro callback has no outer memory read catalog")?
+        .iter()
+        .find(|read| {
+            read.get("source_symbol")
+                .and_then(serde_json::Value::as_str)
+                == Some(source_symbol)
+        })
+        .and_then(|read| read.get("symbol"))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("intro callback has no WRAM alias for {source_symbol}"))?;
+    match canonical {
+        "wIntroSceneFrameCounter" => Ok(scene_frame_counter),
+        "wIntroSceneTimer" => Ok(scene_timer),
+        other => anyhow::bail!("intro callback reads unsupported WRAM byte {other}"),
+    }
+}
+
+fn parse_visible_intro_callback_byte(value: &str) -> Result<u8> {
+    let parsed = if let Some(hex) = value.strip_prefix('$') {
+        u16::from_str_radix(hex, 16)
+            .with_context(|| format!("invalid intro callback byte {value}"))?
+    } else {
+        value
+            .parse::<u16>()
+            .with_context(|| format!("invalid intro callback byte {value}"))?
+    };
+    u8::try_from(parsed).with_context(|| format!("intro callback byte {value} exceeds one byte"))
+}
+
+fn visible_intro_callback_condition(
+    condition: &str,
+    flags: VisibleIntroCallbackFlags,
+) -> Result<bool> {
+    match condition {
+        "z" => Ok(flags.zero),
+        "nz" => Ok(!flags.zero),
+        "c" => Ok(flags.carry),
+        "nc" => Ok(!flags.carry),
+        other => anyhow::bail!("intro callback uses unsupported condition {other}"),
+    }
+}
+
+fn update_visible_intro_sprite_animations(
+    intro: &mut VisibleIntroScreen,
+    bundle: &SpriteAnimRuntimeBundle,
+) -> Result<()> {
     let mut next = Vec::with_capacity(intro.sprites.len());
     for mut sprite in intro.sprites.drain(..) {
         if sprite.start_delay > 0 {
@@ -695,10 +1310,7 @@ fn update_visible_intro_sprite_animations(intro: &mut VisibleIntroScreen) {
             next.push(sprite);
             continue;
         }
-        let Some(frameset) = visible_intro_frameset_steps(&sprite.frameset_name) else {
-            next.push(sprite);
-            continue;
-        };
+        let frameset = visible_intro_frameset_steps(bundle, &sprite.frameset_name)?;
         let mut removed = false;
         let mut step_index = sprite.frameset_step;
         loop {
@@ -714,33 +1326,41 @@ fn update_visible_intro_sprite_animations(intro: &mut VisibleIntroScreen) {
                 break;
             }
             let step = &frameset[usize::try_from(step_index).unwrap_or(0)];
-            match step.command {
-                IntroFrameCommand::Frame => {
-                    sprite.current_oam_set = step.oam_set.map(str::to_string);
+            match step.command.as_str() {
+                "frame" => {
+                    sprite.current_oam_set = step.oam_set.clone();
                     sprite.attr_flags = step.attr_flags;
-                    sprite.frame_timer = step.duration.saturating_sub(1);
+                    sprite.frame_timer = u8::try_from(step.duration)
+                        .context("intro frame duration exceeds one byte")?
+                        .saturating_sub(1);
                     break;
                 }
-                IntroFrameCommand::Wait => {
-                    sprite.frame_timer = step.duration.saturating_sub(1);
+                "wait" => {
+                    sprite.frame_timer = u8::try_from(step.duration)
+                        .context("intro wait duration exceeds one byte")?
+                        .saturating_sub(1);
                     break;
                 }
-                IntroFrameCommand::Restart => {
+                "restart" => {
                     step_index = -1;
                     sprite.frame_timer = 0;
                     continue;
                 }
-                IntroFrameCommand::End => {
+                "end" => {
                     // `oamend` rewinds the frame cursor to the preceding
                     // OAM frame, so the last image is held indefinitely.
                     step_index = step_index.saturating_sub(2);
                     sprite.frame_timer = 0;
                     continue;
                 }
-                IntroFrameCommand::Delete => {
+                "delete" => {
                     removed = true;
                     break;
                 }
+                command => anyhow::bail!(
+                    "intro frameset {} reached unsupported command {command}",
+                    sprite.frameset_name
+                ),
             }
         }
         sprite.frameset_step = step_index;
@@ -749,115 +1369,18 @@ fn update_visible_intro_sprite_animations(intro: &mut VisibleIntroScreen) {
         }
     }
     intro.sprites = next;
+    Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct IntroFrameStep {
-    oam_set: Option<&'static str>,
-    duration: u8,
-    attr_flags: u8,
-    command: IntroFrameCommand,
-}
-
-#[derive(Clone, Copy)]
-enum IntroFrameCommand {
-    Frame,
-    Wait,
-    Restart,
-    End,
-    Delete,
-}
-
-fn visible_intro_frameset_steps(name: &str) -> Option<Vec<IntroFrameStep>> {
-    let frame = |oam_set, duration, attr_flags| IntroFrameStep {
-        oam_set: Some(oam_set),
-        duration,
-        attr_flags,
-        command: IntroFrameCommand::Frame,
-    };
-    let restart = IntroFrameStep {
-        oam_set: None,
-        duration: 0,
-        attr_flags: 0,
-        command: IntroFrameCommand::Restart,
-    };
-    let delete = IntroFrameStep {
-        oam_set: None,
-        duration: 0,
-        attr_flags: 0,
-        command: IntroFrameCommand::Delete,
-    };
-    let end = IntroFrameStep {
-        oam_set: None,
-        duration: 0,
-        attr_flags: 0,
-        command: IntroFrameCommand::End,
-    };
-    Some(match name {
-        "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_1", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_2", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_3", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_4", 3, 0),
-            restart,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_2" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_4", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_1", 7, 0),
-            end,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_PICHU" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_PICHU_1", 32, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_PICHU_2", 7, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_PICHU_3", 7, 0),
-            end,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_WOOPER" => {
-            vec![frame("SPRITE_ANIM_OAMSET_INTRO_WOOPER", 3, 0), end]
-        }
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_1" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_1", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_2", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_3", 7, 0),
-            delete,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_2" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_1", 3, 0x20),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_2", 3, 0x20),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_3", 7, 0x20),
-            delete,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_3" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_1", 3, 0x40),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_2", 3, 0x40),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_3", 7, 0x40),
-            delete,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_4" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_1", 3, 0x60),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_2", 3, 0x60),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_3", 7, 0x60),
-            delete,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F_2" => vec![
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_F_2_1", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_F_2_2", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_F_2_3", 3, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_F_2_4", 7, 0),
-            frame("SPRITE_ANIM_OAMSET_INTRO_UNOWN_F_2_5", 7, 0),
-            end,
-        ],
-        "SPRITE_ANIM_FRAMESET_INTRO_SUICUNE_AWAY" => {
-            vec![frame("SPRITE_ANIM_OAMSET_INTRO_SUICUNE_AWAY", 3, 0), end]
-        }
-        "SPRITE_ANIM_FRAMESET_INTRO_UNOWN_F" => vec![IntroFrameStep {
-            oam_set: None,
-            duration: 1,
-            attr_flags: 0,
-            command: IntroFrameCommand::Wait,
-        }],
-        _ => return None,
-    })
+fn visible_intro_frameset_steps<'a>(
+    bundle: &'a SpriteAnimRuntimeBundle,
+    name: &str,
+) -> Result<&'a [SpriteAnimFrameStep]> {
+    bundle
+        .framesets
+        .get(name)
+        .map(|frameset| frameset.steps.as_slice())
+        .with_context(|| format!("pack-owned intro frameset {name} is missing"))
 }
 
 // Exact `sine_table 32` expansion used by `calc_sine_wave` in the ASM.
@@ -998,6 +1521,43 @@ fn skip_visible_intro_screen(
     finish_visible_intro_screen(runtime_shell, "skip")
 }
 
+fn reset_visible_title_program(title: &mut TitleMenu) {
+    title.phase = VisibleTitlePhase::Entrance;
+    title.frame = 0;
+    title.main_menu_frame = 0;
+    title.scx = title.entrance_start_scx;
+    title.title_timer = 0;
+    title.joypad_mask = 0;
+    title.clock_reset_trigger = false;
+    title.presentation_machine.interpreter.operation_index = 0;
+    title.presentation_machine.interpreter.current_label = None;
+    title
+        .presentation_machine
+        .memory
+        .insert("hSCX".to_string(), u16::from(title.entrance_start_scx));
+    title
+        .presentation_machine
+        .memory
+        .insert("wJumptableIndex".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("wTitleScreenTimer".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("hClockResetTrigger".to_string(), 0);
+    title
+        .presentation_machine
+        .memory
+        .insert("wMusicFade".to_string(), 0);
+    title.presentation_machine.memory.insert(
+        title.crystal_oam_target.clone(),
+        u16::from(title.crystal_initial_y),
+    );
+    title.presentation_machine.values.clear();
+}
+
 fn finish_visible_intro_screen(
     runtime_shell: &mut BevyRuntimeShell,
     reason: &'static str,
@@ -1019,12 +1579,7 @@ fn finish_visible_intro_screen(
         format!("intro:{reason}:music:none"),
     )?;
     if let Some(title) = runtime_shell.title_menu.as_mut() {
-        title.phase = VisibleTitlePhase::Entrance;
-        title.frame = 0;
-        title.main_menu_frame = 0;
-        title.scx = VISIBLE_TITLE_ENTRANCE_START_SCX;
-        title.title_timer = 0;
-        title.clock_reset_trigger = false;
+        reset_visible_title_program(title);
         queue_visible_sound_effect(
             runtime_shell.shell.runtime().audio(),
             &mut runtime_shell.pending_audio,
@@ -1063,34 +1618,148 @@ fn tick_visible_title_screen_state(runtime_shell: &mut BevyRuntimeShell) {
     if runtime_shell.intro_screen.is_some() {
         return;
     }
-    let Some(title) = runtime_shell.title_menu.as_mut() else {
+    if runtime_shell.pending_delete_save.is_some() || runtime_shell.pending_clock_reset.is_some() {
         return;
+    }
+    let execution = (|| -> Result<(Vec<crystal_assets::RuntimePresentationOperation>, Option<u16>)> {
+        let BevyRuntimeShell {
+            runtime,
+            title_menu,
+            ..
+        } = runtime_shell;
+        let Some(title) = title_menu.as_mut() else {
+            return Ok((Vec::new(), None));
+        };
+        title.frame = title.frame.saturating_add(1);
+        if matches!(title.phase, VisibleTitlePhase::MainMenu) {
+            title.main_menu_frame = title.main_menu_frame.saturating_add(1);
+            title.joypad_mask = 0;
+            return Ok((Vec::new(), None));
+        }
+        let scene = title
+            .presentation_machine
+            .memory
+            .get("wJumptableIndex")
+            .copied()
+            .context("runtime title program has no wJumptableIndex")?;
+        let scene_label = title.presentation_machine.dispatch_label(
+            runtime.title_presentation_program(),
+            "TitleScreenScene",
+            usize::from((scene & 0x7f) as u8),
+        )?;
+        if scene_label == "TitleScreenEnd"
+            && let Some(fade) = title.presentation_machine.memory.get_mut("wMusicFade")
+            && *fade > 0
+        {
+            *fade -= 1;
+        }
+        let joypad_mask = std::mem::take(&mut title.joypad_mask);
+        let run = title.presentation_machine.run_from_label(
+            runtime.title_presentation_program(),
+            &scene_label,
+            joypad_mask,
+        )?;
+        let scene = title
+            .presentation_machine
+            .memory
+            .get("wJumptableIndex")
+            .copied()
+            .context("runtime title program has no wJumptableIndex after scene execution")?;
+        title.scx = title
+            .presentation_machine
+            .memory
+            .get("hSCX")
+            .copied()
+            .context("runtime title program has no hSCX after scene execution")? as u8;
+        title.title_timer = title
+            .presentation_machine
+            .memory
+            .get("wTitleScreenTimer")
+            .copied()
+            .context("runtime title program has no wTitleScreenTimer after scene execution")?;
+        title.clock_reset_trigger = title
+            .presentation_machine
+            .memory
+            .get("hClockResetTrigger")
+            .copied()
+            .context("runtime title program has no hClockResetTrigger")?
+            == 0x34;
+        title.phase = match scene & 0x7f {
+            0 => VisibleTitlePhase::Entrance,
+            1 => VisibleTitlePhase::Timer,
+            2 => VisibleTitlePhase::PressStart,
+            3 => VisibleTitlePhase::FadeOut,
+            value => anyhow::bail!("runtime title program produced invalid scene {value}"),
+        };
+        let selected_option = if scene & 0x80 != 0 {
+            Some(
+                title
+                .presentation_machine
+                .memory
+                .get("wTitleScreenSelectedOption")
+                .copied()
+                .context("runtime title program exited without a selected option")?,
+            )
+        } else {
+            None
+        };
+        Ok((run.effects, selected_option))
+    })();
+    let (effects, selected_option) = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            record_visible_runtime_system_error(runtime_shell, error);
+            return;
+        }
     };
-    title.frame = title.frame.saturating_add(1);
-    match title.phase {
-        VisibleTitlePhase::Entrance => {
-            if title.scx == 0 {
-                title.phase = VisibleTitlePhase::Timer;
-                title.title_timer = 0;
+    for operation in effects {
+        if operation.op == "play_audio"
+            && let Some(audio) = operation
+                .fields
+                .get("audio")
+                .and_then(serde_json::Value::as_str)
+            && let Err(error) = queue_visible_intro_music(runtime_shell, audio)
+        {
+            record_visible_runtime_system_error(runtime_shell, error);
+            return;
+        }
+    }
+    match selected_option {
+        Some(0) => {
+            if let Err(error) = open_visible_title_main_menu(runtime_shell) {
+                record_visible_runtime_system_error(runtime_shell, error);
+            }
+        }
+        Some(1) => {
+            if let Err(error) = open_visible_delete_save_screen(runtime_shell) {
+                record_visible_runtime_system_error(runtime_shell, error);
+            }
+        }
+        Some(2) => {
+            let mut intro = VisibleIntroScreen::new();
+            if let Err(error) = apply_visible_intro_background_binding(
+                &mut intro,
+                &runtime_shell.runtime.data().runtime_title_screen.program,
+            ) {
+                record_visible_runtime_system_error(runtime_shell, error);
                 return;
             }
-            title.scx = title.scx.saturating_sub(VISIBLE_TITLE_ENTRANCE_SCROLL_STEP);
+            runtime_shell.intro_screen = Some(intro);
+            if let Some(title) = runtime_shell.title_menu.as_mut() {
+                reset_visible_title_program(title);
+            }
+            set_shell_action_status(runtime_shell, "CRYSTAL INTRO");
         }
-        VisibleTitlePhase::Timer => {
-            title.phase = VisibleTitlePhase::PressStart;
-            title.title_timer = VISIBLE_TITLE_TIMEOUT_FRAMES;
-        }
-        VisibleTitlePhase::PressStart => {
-            if title.title_timer == 0 {
-                title.phase = VisibleTitlePhase::Timeout;
-            } else {
-                title.title_timer = title.title_timer.saturating_sub(1);
+        Some(4) => {
+            if let Err(error) = open_visible_clock_reset_screen(runtime_shell) {
+                record_visible_runtime_system_error(runtime_shell, error);
             }
         }
-        VisibleTitlePhase::MainMenu => {
-            title.main_menu_frame = title.main_menu_frame.saturating_add(1);
-        }
-        VisibleTitlePhase::Timeout | VisibleTitlePhase::Exiting => {}
+        Some(value) => record_visible_runtime_system_error(
+            runtime_shell,
+            anyhow::anyhow!("runtime title program selected invalid option {value}"),
+        ),
+        None => {}
     }
 }
 
@@ -1125,10 +1794,24 @@ fn open_visible_title_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<
     let Some(title) = runtime_shell.title_menu.as_mut() else {
         return handle_visible_no_active_title_menu(runtime_shell, "start");
     };
+    title
+        .presentation_machine
+        .memory
+        .insert("wTitleScreenSelectedOption".to_string(), 0);
+    let scene = title
+        .presentation_machine
+        .memory
+        .entry("wJumptableIndex".to_string())
+        .or_insert(0);
+    *scene |= 0x80;
     title.phase = VisibleTitlePhase::MainMenu;
     title.main_menu_frame = 0;
     title.clock_reset_trigger = false;
-    title.cursor.option_index = title.cursor.option_index.min(menu_len.saturating_sub(1));
+    title.cursor.option_index = title
+        .main_menu
+        .default_option
+        .saturating_sub(1)
+        .min(menu_len.saturating_sub(1));
     record_visible_runtime_action(runtime_shell, "title:start:main_menu")?;
     runtime_shell
         .last_audio_events
@@ -1140,8 +1823,13 @@ fn open_visible_title_main_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<
 
 fn open_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     reset_visible_navigation_state(runtime_shell);
+    let definition = RuntimeGenderMenuDefinition::from_program(
+        runtime_shell.runtime.title_presentation_program(),
+    )?;
+    let selected_index = definition.default_option - 1;
     runtime_shell.pending_gender_selection = Some(VisibleGenderSelection {
-        selected_index: 0,
+        definition,
+        selected_index,
         confirmed: false,
         confirm_countdown: 0,
         fade_counter: 0,
@@ -1464,9 +2152,9 @@ fn commit_visible_time_set_selection(
 ) -> Result<()> {
     let target = ClockTime::new(0, time_set.hour, time_set.minute, 0);
     let rtc = required_native_rtc_sample(runtime_shell)?;
-    let update = runtime_shell.shell.set_manual_clock_time(
-        rtc.date, rtc.hour, rtc.minute, rtc.second, target,
-    )?;
+    let update = runtime_shell
+        .shell
+        .set_manual_clock_time(rtc.date, rtc.hour, rtc.minute, rtc.second, target)?;
     time_set.reaction_text = visible_time_set_reaction_text(time_set.hour, time_set.minute);
     record_visible_runtime_action(
         runtime_shell,
@@ -1477,11 +2165,7 @@ fn commit_visible_time_set_selection(
     )?;
     runtime_shell.last_audio_events.push(format!(
         "time set {:02}:{:02} tod={:?} game={}:{}",
-        time_set.hour,
-        time_set.minute,
-        update.time_of_day,
-        update.hour,
-        update.minute
+        time_set.hour, time_set.minute, update.time_of_day, update.hour, update.minute
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     Ok(())
@@ -1856,9 +2540,7 @@ fn drive_visible_oak_intro_text(oak_intro: &mut VisibleOakIntroSequence) {
 }
 
 fn finish_visible_oak_intro_page(oak_intro: &mut VisibleOakIntroSequence) {
-    if oak_intro.scene_phase == VisibleOakIntroPhase::TextOne
-        && oak_intro.text_queue.is_empty()
-    {
+    if oak_intro.scene_phase == VisibleOakIntroPhase::TextOne && oak_intro.text_queue.is_empty() {
         // OakText2 terminates directly into the Wooper cry; its only prompt is
         // OakText3 after WaitSFX, so there is no input wait before the cry.
         oak_intro.waiting_for_input = false;
@@ -2118,11 +2800,18 @@ fn move_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell, delta: is
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }
-    let current = gender.selected_index.min(1);
+    let item_count = gender.definition.items.len();
+    let current = gender.selected_index;
+    anyhow::ensure!(
+        current < item_count,
+        "gender selection cursor {current} is out of range"
+    );
     let next = if delta.is_negative() {
-        current.checked_sub(delta.unsigned_abs()).unwrap_or(1)
+        current
+            .checked_sub(delta.unsigned_abs())
+            .unwrap_or(item_count - 1)
     } else {
-        (current + delta as usize) % 2
+        (current + delta as usize) % item_count
     };
     gender.selected_index = next;
     record_visible_runtime_action(runtime_shell, format!("gender:cursor:{current}->{next}"))?;
@@ -2141,7 +2830,7 @@ fn confirm_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell) -> Res
         return Ok(());
     }
     gender.confirmed = true;
-    gender.confirm_countdown = VISIBLE_GENDER_CONFIRM_DELAY_FRAMES;
+    gender.confirm_countdown = gender.definition.confirm_delay_frames;
     let selected_gender = visible_gender_selected_gender(gender);
     record_visible_runtime_action(runtime_shell, format!("gender:confirm:{selected_gender:?}"))?;
     runtime_shell
@@ -2156,10 +2845,10 @@ fn confirm_visible_gender_selection(runtime_shell: &mut BevyRuntimeShell) -> Res
 }
 
 fn visible_gender_selected_gender(gender: &VisibleGenderSelection) -> VisiblePlayerGender {
-    if gender.selected_index == 1 {
-        VisiblePlayerGender::Girl
-    } else {
-        VisiblePlayerGender::Boy
+    match gender.definition.values.get(gender.selected_index).copied() {
+        Some(PLAYER_GENDER_MALE) => VisiblePlayerGender::Boy,
+        Some(PLAYER_GENDER_FEMALE) => VisiblePlayerGender::Girl,
+        _ => unreachable!("validated gender definition and cursor must remain in range"),
     }
 }
 
@@ -2178,14 +2867,16 @@ fn visible_player_gender_value(gender: VisiblePlayerGender) -> u8 {
 }
 
 fn visible_gender_entries(gender: &VisibleGenderSelection) -> Vec<String> {
-    ["BOY", "GIRL"]
-        .into_iter()
+    gender
+        .definition
+        .items
+        .iter()
         .enumerate()
         .map(|(index, label)| {
-            if index == gender.selected_index.min(1) {
-                format!("> {label}")
+            if index == gender.selected_index {
+                format!("> {}", label.to_uppercase())
             } else {
-                format!("  {label}")
+                format!("  {}", label.to_uppercase())
             }
         })
         .collect()
@@ -2205,9 +2896,12 @@ fn handle_visible_no_gender_selection(
 }
 
 fn advance_visible_title_to_press_start(runtime_shell: &mut BevyRuntimeShell) {
-    for _ in
-        0..=usize::from(VISIBLE_TITLE_ENTRANCE_START_SCX / VISIBLE_TITLE_ENTRANCE_SCROLL_STEP + 2)
-    {
+    let maximum_frames = runtime_shell
+        .title_menu
+        .as_ref()
+        .map(|title| usize::from(title.entrance_start_scx / title.entrance_scroll_step) + 2)
+        .unwrap_or(0);
+    for _ in 0..=maximum_frames {
         if runtime_shell
             .title_menu
             .as_ref()
@@ -2278,8 +2972,7 @@ fn visible_title_menu_entries(
             VisibleTitlePhase::Entrance | VisibleTitlePhase::Timer => "TITLE SCREEN".to_string(),
             VisibleTitlePhase::PressStart => "PRESS START".to_string(),
             VisibleTitlePhase::MainMenu => unreachable!(),
-            VisibleTitlePhase::Timeout => "TIMEOUT".to_string(),
-            VisibleTitlePhase::Exiting => "EXITING".to_string(),
+            VisibleTitlePhase::FadeOut => "FADE OUT".to_string(),
         }]);
     }
     let options = visible_title_menu_options(runtime_shell, title);
@@ -2289,13 +2982,7 @@ fn visible_title_menu_entries(
         .enumerate()
         .map(|(index, option)| {
             let marker = if index == selected { ">" } else { " " };
-            let label = match option {
-                TitleMenuOption::Continue => "CONTINUE",
-                TitleMenuOption::NewGame => "NEW GAME",
-                TitleMenuOption::Options => "OPTION",
-                TitleMenuOption::MysteryGift => "MYSTERY GIFT",
-            };
-            format!("{marker}{label}")
+            format!("{marker}{}", option.label)
         })
         .collect())
 }
@@ -2359,10 +3046,20 @@ fn press_visible_title_direction_button(
 fn selected_visible_title_menu_option(
     runtime_shell: &BevyRuntimeShell,
     title: &TitleMenu,
-) -> Result<TitleMenuOption> {
+) -> Result<RuntimeTitleMainMenuItem> {
     let options = visible_title_menu_options(runtime_shell, title);
     let selected = title.cursor.option_index.min(options.len() - 1);
-    Ok(options[selected])
+    Ok(options[selected].clone())
+}
+
+fn visible_title_menu_selection_id(option: &RuntimeTitleMainMenuItem) -> Result<&'static str> {
+    match option.dispatch_target.as_str() {
+        "MainMenu_Continue" => Ok("CONTINUE"),
+        "MainMenu_NewGame" => Ok("NEW_GAME"),
+        "MainMenu_Option" => Ok("OPTIONS"),
+        "MainMenu_MysteryGift" => Ok("MYSTERY_GIFT"),
+        target => anyhow::bail!("unsupported source main-menu dispatch target {target}"),
+    }
 }
 
 fn press_visible_title_confirm_button(
@@ -2373,7 +3070,33 @@ fn press_visible_title_confirm_button(
         return handle_visible_no_active_title_menu(runtime_shell, "confirm");
     };
     if !visible_title_main_menu_ready(title) {
-        return open_visible_title_main_menu(runtime_shell);
+        let mask = match input {
+            GameButton::A => 0x01,
+            GameButton::Start => 0x08,
+            _ => {
+                return record_visible_runtime_action(
+                    runtime_shell,
+                    "input:title:pre_menu:ignored",
+                );
+            }
+        };
+        let title = runtime_shell
+            .title_menu
+            .as_mut()
+            .context("title menu disappeared before source input sampling")?;
+        title.joypad_mask = mask;
+        runtime_shell.last_error = None;
+        tick_visible_title_screen_state(runtime_shell);
+        if let Some(title) = runtime_shell.title_menu.as_mut() {
+            title.joypad_mask = 0;
+        }
+        if let Some(error) = runtime_shell.last_error.clone() {
+            anyhow::bail!(error);
+        }
+        return Ok(());
+    }
+    if input != GameButton::A {
+        return record_visible_runtime_action(runtime_shell, "input:title:main_menu:ignored");
     }
     let action = format!("input:title:{input:?}:confirm");
     record_visible_runtime_action(runtime_shell, action.clone())?;
@@ -2387,6 +3110,25 @@ fn press_visible_title_cancel_button(runtime_shell: &mut BevyRuntimeShell) -> Re
         record_visible_runtime_action(runtime_shell, "input:title:B:continue_back")?;
         set_shell_action_status(runtime_shell, "TITLE");
         mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+    if runtime_shell
+        .title_menu
+        .as_ref()
+        .is_some_and(visible_title_main_menu_ready)
+    {
+        stop_visible_silent_music(
+            runtime_shell,
+            "MUSIC_NONE",
+            "audio:music:main_menu_cancel:stop",
+        )?;
+        if let Some(title) = runtime_shell.title_menu.as_mut() {
+            reset_visible_title_program(title);
+            title.cursor.option_index = 0;
+        }
+        queue_visible_shell_sound_effect(runtime_shell, "SFX_TITLE_SCREEN_ENTRANCE")?;
+        record_visible_runtime_action(runtime_shell, "input:title:B:restart_title")?;
+        set_shell_action_status(runtime_shell, "TITLE");
         return Ok(());
     }
     record_visible_runtime_action(runtime_shell, "input:title:B:cancel")?;
@@ -2425,12 +3167,7 @@ fn close_visible_delete_save_screen(
 ) -> Result<()> {
     runtime_shell.pending_delete_save = None;
     if let Some(title) = runtime_shell.title_menu.as_mut() {
-        title.phase = VisibleTitlePhase::Entrance;
-        title.frame = 0;
-        title.main_menu_frame = 0;
-        title.scx = VISIBLE_TITLE_ENTRANCE_START_SCX;
-        title.title_timer = 0;
-        title.clock_reset_trigger = false;
+        reset_visible_title_program(title);
         title.cursor.option_index = 0;
     }
     record_visible_runtime_action(runtime_shell, format!("delete_save:{reason}:close"))?;
@@ -2517,12 +3254,7 @@ fn close_visible_clock_reset_screen(
 ) -> Result<()> {
     runtime_shell.pending_clock_reset = None;
     if let Some(title) = runtime_shell.title_menu.as_mut() {
-        title.phase = VisibleTitlePhase::Entrance;
-        title.frame = 0;
-        title.main_menu_frame = 0;
-        title.scx = VISIBLE_TITLE_ENTRANCE_START_SCX;
-        title.title_timer = 0;
-        title.clock_reset_trigger = false;
+        reset_visible_title_program(title);
         title.cursor.option_index = 0;
     }
     record_visible_runtime_action(runtime_shell, format!("clock_reset:{reason}:close"))?;
@@ -2613,10 +3345,7 @@ fn confirm_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> R
             )?;
             runtime_shell.last_audio_events.push(format!(
                 "clock reset day={} game={}:{} checksum={:?}",
-                update.day_of_week,
-                update.hour,
-                update.minute,
-                update.state_checksum
+                update.day_of_week, update.hour, update.minute, update.state_checksum
             ));
             close_visible_clock_reset_screen(runtime_shell, "confirm")
         }
@@ -2626,10 +3355,6 @@ fn confirm_visible_clock_reset_screen(runtime_shell: &mut BevyRuntimeShell) -> R
 const VISIBLE_CREDITS_SKIP_THRESHOLD: u16 = 0x0d;
 const VISIBLE_CREDITS_ALLOW_SKIP_BIT: u8 = 6;
 const VISIBLE_CREDITS_EXIT_BIT: u8 = 7;
-const VISIBLE_TITLE_ENTRANCE_START_SCX: u8 = 112;
-const VISIBLE_TITLE_ENTRANCE_SCROLL_STEP: u8 = 4;
-const VISIBLE_TITLE_TIMEOUT_FRAMES: u16 = 73 * 60 + 36;
-const VISIBLE_GENDER_CONFIRM_DELAY_FRAMES: u8 = 10;
 const VISIBLE_GENDER_FADE_IN_FRAMES: u8 = 8;
 
 fn visible_credits_initial_jumptable_index(allow_skip: bool) -> u8 {
@@ -2653,6 +3378,7 @@ fn open_visible_credits_screen(
     runtime_shell.special_boundary = None;
     runtime_shell.special_boundary_queue.clear();
     runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.visible_internal_special_delay_frames = None;
     runtime_shell.pending_photo_studio_commit = None;
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;
@@ -2689,15 +3415,7 @@ fn open_visible_credits_screen(
 fn queue_visible_credits_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let silent = "MUSIC_NONE";
     let credits = "MUSIC_CREDITS";
-    if runtime_shell
-        .shell
-        .runtime()
-        .audio()
-        .playback_entry(AudioKind::Music, silent)
-        .is_some()
-    {
-        stop_visible_silent_music(runtime_shell, silent, "audio:music:credits:none")?;
-    }
+    stop_visible_silent_music(runtime_shell, silent, "audio:music:credits:none")?;
     let playback = runtime_shell
         .shell
         .runtime()

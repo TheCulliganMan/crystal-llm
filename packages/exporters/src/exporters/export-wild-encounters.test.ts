@@ -1,7 +1,13 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { exportWildEncounters, mergeWildEncounterData, parseWildEncounters } from "./export-wild-encounters";
+import {
+  exportWildEncounters,
+  mergeWildEncounterData,
+  parseWildEncounters,
+  parseWildEncounterSwarmDeclarations,
+  parseWildEncounterSwarms,
+} from "./export-wild-encounters";
 
 var mockDisassemblyRoot = "";
 
@@ -76,6 +82,43 @@ describe("export-wild-encounters", () => {
     expect(() => mergeWildEncounterData([[water], [water]])).toThrow(
       "Duplicate water wild encounter data for Route29."
     );
+  });
+
+  it("binds swarm grass tables to their exact script token and engine flag", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wild-swarms-"));
+    const phonePath = path.join(dir, "arnie.asm");
+    const swarmPath = path.join(dir, "swarm_grass.asm");
+    fs.writeFileSync(
+      phonePath,
+      [
+        "setflag ENGINE_YANMA_SWARM",
+        "getmonname STRING_BUFFER_4, YANMA",
+        "swarm SWARM_YANMA, ROUTE_35",
+      ].join("\n"),
+      "utf8",
+    );
+    const rows = (species: string) => ["; morn", "; day", "; nite"]
+      .flatMap((time) => [time, ...Array.from({ length: 7 }, () => `db 12, ${species}`)]);
+    fs.writeFileSync(
+      swarmPath,
+      ["map_id ROUTE_35", "db 10 percent, 10 percent, 10 percent", ...rows("YANMA"), "db -1"].join("\n"),
+      "utf8",
+    );
+
+    const declarations = parseWildEncounterSwarmDeclarations([phonePath]);
+    const swarms = parseWildEncounterSwarms(swarmPath, declarations);
+
+    expect(swarms).toEqual([
+      expect.objectContaining({
+        map_name: "Route35",
+        swarm_token: "SWARM_YANMA",
+        override: expect.objectContaining({
+          engine_flag: "ENGINE_YANMA_SWARM",
+          grass_rates: { morning: 10, day: 10, night: 10 },
+        }),
+      }),
+    ]);
+    expect(swarms[0].override.grass.night).toHaveLength(7);
   });
 
   it("requires all canonical wild encounter source files", () => {

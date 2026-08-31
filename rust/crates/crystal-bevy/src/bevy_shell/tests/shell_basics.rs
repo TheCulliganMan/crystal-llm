@@ -21,6 +21,20 @@ fn bevy_shell_source() -> &'static str {
 }
 
 #[test]
+fn battle_items_have_no_split_enemy_response_path() {
+    let source = include_str!("../economy.rs");
+    assert!(
+        !source.contains("RetainedSnapshot") && !source.contains("EnemyMoveAiState"),
+        "battle item turns must not fall back to renderer snapshot AI state"
+    );
+    assert!(
+        !source.contains("resolve_visible_battle_enemy_response_after_player_item")
+            && !source.contains("resolve_active_battle_enemy_action_with_ai"),
+        "Bag and Ball actions must settle their response in the recorded core turn"
+    );
+}
+
+#[test]
 fn map_refresh_commands_do_not_run_map_entry_callbacks_or_restart_music() {
     let source = include_str!("../credits.rs");
     let body = source
@@ -68,23 +82,19 @@ fn visible_newloadmap_commits_the_staged_destination_before_map_setup() {
     let target_tile = TilePosition::new(target.tile_x, target.tile_y);
     {
         let state = runtime_shell.shell.session_mut().state_mut();
-        state.script_runtime.pending_script_warp = Some(
-            crystal_core::state::ScriptWarpRequest {
-                target_map: target.map_name.clone(),
-                tile: target_tile,
-                facing: None,
-                source_script: "WarpToSpawnPoint".to_string(),
-                command_index: 0,
-            },
-        );
-        state.script_runtime.pending_map_load = Some(
-            crystal_core::state::ScriptMapLoadRequest {
-                command: "newloadmap".to_string(),
-                map_setup: Some("MAPSETUP_FLY".to_string()),
-                source_script: ".FlyScript@FlyFunction".to_string(),
-                command_index: 8,
-            },
-        );
+        state.script_runtime.pending_script_warp = Some(crystal_core::state::ScriptWarpRequest {
+            target_map: target.map_name.clone(),
+            tile: target_tile,
+            facing: None,
+            source_script: "WarpToSpawnPoint".to_string(),
+            command_index: 0,
+        });
+        state.script_runtime.pending_map_load = Some(crystal_core::state::ScriptMapLoadRequest {
+            command: "newloadmap".to_string(),
+            map_setup: Some("MAPSETUP_FLY".to_string()),
+            source_script: ".FlyScript@FlyFunction".to_string(),
+            command_index: 8,
+        });
     }
     mark_runtime_snapshot_dirty(&mut runtime_shell);
     let staged = runtime_shell.shell.snapshot().expect("staged snapshot");
@@ -164,6 +174,48 @@ fn release_hotkey_mapper_has_no_space_or_escape_aliases() {
 }
 
 #[test]
+fn release_start_key_never_aliases_the_a_button() {
+    let source = bevy_shell_source();
+    assert!(
+        !source.contains("keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter)"),
+        "Enter is PAD_START and must not share an A-button branch"
+    );
+    assert!(
+        !source.contains("Enter-as-confirm"),
+        "the release shell must not retain a desktop Start-to-A convention"
+    );
+}
+
+#[test]
+fn hm_animation_source_keeps_fly_species_owned_and_removes_invented_whirlpool_overlay() {
+    let rendering = include_str!("../menu_rendering.rs");
+    let fly = rendering
+        .split_once("fn spawn_visible_fly_animation")
+        .expect("FLY renderer")
+        .1
+        .split_once("fn spawn_visible_headbutt_animation")
+        .expect("end of FLY renderer")
+        .0;
+
+    assert!(
+        fly.contains("animation.actor_party_index")
+            && fly.contains(".menu_icons")
+            && fly.contains("animation.frame / 8")
+            && fly.contains("icon_flip_x")
+            && !fly.contains("ICON_BIRD"),
+        "Fly must use the selected species icon and Frameset_RedWalk cycle"
+    );
+    let render_pipeline = rendering
+        .split_once("struct VisibleFlyObjectState")
+        .expect("end of overworld render pipeline")
+        .0;
+    assert!(
+        !render_pipeline.contains("spawn_visible_whirlpool_animation("),
+        "DisappearWhirlpool redraws replacement block $36 and must not render an overlay"
+    );
+}
+
+#[test]
 fn visible_cut_commits_the_block_at_the_source_callasm_boundary() {
     let mut runtime_shell = route36_overworld_shell_for_battle_render_regression();
     let map_name = runtime_shell.shell.session.overworld.map.name.clone();
@@ -173,35 +225,33 @@ fn visible_cut_commits_the_block_at_the_source_callasm_boundary() {
         .session
         .state
         .script_runtime
-        .pending_block_field_move = Some(
-        crystal_core::systems::field_moves::FieldMoveBlockOutcome {
-        move_id: "CUT".to_string(),
-        actor_party_index: 0,
-        actor_species: "CYNDAQUIL".to_string(),
-        map_name: map_name.clone(),
-        tileset_name: "johto".to_string(),
-        metatile_x: 0,
-        metatile_y: 0,
-        previous_block_id: 0x5b,
-        replacement_block_id: 0x3c,
-        variant: "tree".to_string(),
-        },
-    );
+        .pending_block_field_move =
+        Some(crystal_core::systems::field_moves::FieldMoveBlockOutcome {
+            move_id: "CUT".to_string(),
+            actor_party_index: 0,
+            actor_species: "CYNDAQUIL".to_string(),
+            map_name: map_name.clone(),
+            tileset_name: "johto".to_string(),
+            metatile_x: 0,
+            metatile_y: 0,
+            previous_block_id: 0x5b,
+            replacement_block_id: 0x3c,
+            variant: "tree".to_string(),
+        });
     runtime_shell.visible_cut_animation = Some(VisibleCutAnimation {
         target_tile: TilePosition::new(0, 0),
         facing: Direction::Down,
         variant: "tree".to_string(),
         frame: 0,
     });
-    runtime_shell.pending_field_notice_effect_frames = Some(32);
+    runtime_shell.pending_field_notice_effect_frames = Some(34);
 
     assert_eq!(
         runtime_shell.shell.session.overworld.map.metatile_at(0, 0),
         Some(0x5b)
     );
     assert!(
-        begin_pending_field_notice_effect(&mut runtime_shell)
-            .expect("begin source Cut effect")
+        begin_pending_field_notice_effect(&mut runtime_shell).expect("begin source Cut effect")
     );
     assert_eq!(
         runtime_shell.shell.session.overworld.map.metatile_at(0, 0),
@@ -237,16 +287,15 @@ fn visible_flash_sets_the_status_bit_at_the_source_callasm_boundary() {
         .session
         .state
         .script_runtime
-        .pending_flash_field_move = Some(
-        crystal_core::systems::field_moves::FieldMoveFlagOutcome {
+        .pending_flash_field_move =
+        Some(crystal_core::systems::field_moves::FieldMoveFlagOutcome {
             move_id: "FLASH".to_string(),
             actor_party_index: 0,
             actor_species: "CYNDAQUIL".to_string(),
             engine_flag: "STATUSFLAGS_FLASH".to_string(),
             was_set: false,
             is_set: true,
-        },
-    );
+        });
     runtime_shell.visible_flash_animation = Some(VisibleFlashAnimation { frame: 0 });
     runtime_shell.pending_field_notice_effect_frames = Some(16);
 
@@ -260,8 +309,7 @@ fn visible_flash_sets_the_status_bit_at_the_source_callasm_boundary() {
         Ok(false)
     );
     assert!(
-        begin_pending_field_notice_effect(&mut runtime_shell)
-            .expect("begin source Flash effect")
+        begin_pending_field_notice_effect(&mut runtime_shell).expect("begin source Flash effect")
     );
     assert_eq!(
         runtime_shell
@@ -307,8 +355,8 @@ fn visible_surf_moves_only_at_the_source_slow_step_boundary() {
         .session
         .state
         .script_runtime
-        .pending_surf_field_move = Some(
-        crystal_core::systems::field_moves::FieldMoveTravelOutcome {
+        .pending_surf_field_move =
+        Some(crystal_core::systems::field_moves::FieldMoveTravelOutcome {
             move_id: "SURF".to_string(),
             actor_party_index: 0,
             actor_species: "CYNDAQUIL".to_string(),
@@ -317,8 +365,7 @@ fn visible_surf_moves_only_at_the_source_slow_step_boundary() {
             to_tile,
             steps: 1,
             mode: MovementMode::Surf,
-        },
-    );
+        });
     runtime_shell.pending_surf_start_from = Some(from_tile);
     runtime_shell.pending_field_notice_effect_frames = Some(16);
 
@@ -328,8 +375,7 @@ fn visible_surf_moves_only_at_the_source_slow_step_boundary() {
         MovementMode::Normal
     );
     assert!(
-        begin_pending_field_notice_effect(&mut runtime_shell)
-            .expect("begin source Surf slow_step")
+        begin_pending_field_notice_effect(&mut runtime_shell).expect("begin source Surf slow_step")
     );
     assert_eq!(runtime_shell.shell.session.overworld.player.tile, to_tile);
     assert_eq!(
@@ -355,16 +401,17 @@ fn visible_waterfall_commits_each_source_loop_step_individually() {
     let from_tile = runtime_shell.shell.session.overworld.player.tile;
     let to_tile = TilePosition::new(from_tile.x, from_tile.y - 1);
     let map_name = runtime_shell.shell.session.overworld.map.name.clone();
-    runtime_shell.shell.session.state.overworld = crystal_core::state::OverworldMemory::from_snapshot(
-        &runtime_shell.shell.session.overworld.snapshot(),
-    );
+    runtime_shell.shell.session.state.overworld =
+        crystal_core::state::OverworldMemory::from_snapshot(
+            &runtime_shell.shell.session.overworld.snapshot(),
+        );
     runtime_shell
         .shell
         .session
         .state
         .script_runtime
-        .pending_waterfall_field_move = Some(
-        crystal_core::systems::field_moves::FieldMoveTravelOutcome {
+        .pending_waterfall_field_move =
+        Some(crystal_core::systems::field_moves::FieldMoveTravelOutcome {
             move_id: "WATERFALL".to_string(),
             actor_party_index: 0,
             actor_species: "CYNDAQUIL".to_string(),
@@ -373,8 +420,7 @@ fn visible_waterfall_commits_each_source_loop_step_individually() {
             to_tile,
             steps: 1,
             mode: MovementMode::Surf,
-        },
-    );
+        });
 
     assert_eq!(runtime_shell.shell.session.overworld.player.tile, from_tile);
     execute_visible_pending_waterfall_step(&mut runtime_shell, 0, 1)
@@ -773,7 +819,10 @@ fn every_asm_writetext_is_a_synchronous_print_boundary() {
         "asm_dialogue_census total={total} waitbutton={followed_by_waitbutton} promptbutton={followed_by_promptbutton} yesorno={followed_by_yesorno} other={followed_by_other}"
     );
 
-    assert!(total > 1_900, "ASM dialogue census covered only {total} text commands");
+    assert!(
+        total > 1_900,
+        "ASM dialogue census covered only {total} text commands"
+    );
     assert!(
         followed_by_waitbutton > 1_400,
         "ASM dialogue census covered only {followed_by_waitbutton} writetext -> waitbutton pairs"
@@ -898,9 +947,18 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
                         .is_some_and(|args| args.iter().any(|value| value.as_str() == Some(arg)))
             })
         };
-        assert!(has_command("pokepic", starter), "{elm_script} shows the wrong starter");
-        assert!(has_command("setevent", starter_event), "{elm_script} sets the wrong event");
-        assert!(has_command("givepoke", starter), "{elm_script} grants the wrong starter");
+        assert!(
+            has_command("pokepic", starter),
+            "{elm_script} shows the wrong starter"
+        );
+        assert!(
+            has_command("setevent", starter_event),
+            "{elm_script} sets the wrong event"
+        );
+        assert!(
+            has_command("givepoke", starter),
+            "{elm_script} grants the wrong starter"
+        );
 
         let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
             asset_root.clone(),
@@ -944,7 +1002,10 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
             )
             .expect("run starter-dependent rival branch");
         assert!(
-            matches!(run.boundary, Some(crate::RuntimeCompiledScriptBoundary::ActiveBattle(_))),
+            matches!(
+                run.boundary,
+                Some(crate::RuntimeCompiledScriptBoundary::ActiveBattle(_))
+            ),
             "{starter} branch did not reach the rival battle: {run:?}"
         );
         let battle_step = run
@@ -980,8 +1041,9 @@ fn all_elm_starters_complete_the_full_asm_rival_battle_branch() {
             .unwrap_or_else(|error| panic!("{starter} rival battle snapshot failed: {error:#}"));
         shell.session_mut().state.random_state =
             crystal_core::random::CrystalRandomState::default();
-        shell.session_mut().divider =
-            crystal_core::random::RuntimeDividerSource::replay(deterministic_battle_divider_trace(0));
+        shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay(
+            deterministic_battle_divider_trace(0),
+        );
         let mut turns = 0usize;
         let trainer_defeated = loop {
             turns += 1;
@@ -1129,7 +1191,10 @@ fn cherrygrove_can_lose_battle_resumes_the_opposite_asm_branch_without_whiteout(
     assert!(completion.continued_after_battle);
     assert_eq!(shell.session().state().battle_result & 0x3f, 1);
     assert!(!shell.has_active_battle());
-    assert_eq!(shell.snapshot().expect("loss snapshot").overworld.map_name, "CherrygroveCity");
+    assert_eq!(
+        shell.snapshot().expect("loss snapshot").overworld.map_name,
+        "CherrygroveCity"
+    );
 
     let reload = shell
         .run_compiled_script_until_boundary(
@@ -1175,15 +1240,9 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
         .expect("repository root");
     let asset_root = AssetRoot::new(repo_root);
     let runtime = workspace_desktop_runtime(&asset_root);
-    let mut shell = RuntimeGameShell::new_game_at_runtime_tile(
-        asset_root,
-        runtime,
-        1,
-        "AzaleaTown",
-        5,
-        10,
-    )
-    .expect("start Azalea Rival branch");
+    let mut shell =
+        RuntimeGameShell::new_game_at_runtime_tile(asset_root, runtime, 1, "AzaleaTown", 5, 10)
+            .expect("start Azalea Rival branch");
     shell
         .set_script_flag_for_smoke("EVENT_GOT_CYNDAQUIL_FROM_ELM")
         .expect("set selected starter event");
@@ -1241,8 +1300,9 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
     );
 
     shell.session_mut().state.random_state = crystal_core::random::CrystalRandomState::default();
-    shell.session_mut().divider =
-        crystal_core::random::RuntimeDividerSource::replay(deterministic_battle_divider_trace(0x1234));
+    shell.session_mut().divider = crystal_core::random::RuntimeDividerSource::replay(
+        deterministic_battle_divider_trace(0x1234),
+    );
 
     let mut defeated_species = Vec::new();
     let mut turns = 0usize;
@@ -1298,7 +1358,10 @@ fn azalea_rival_full_multi_pokemon_battle_advances_every_party_slot_then_resumes
     assert!(completion.continued_after_battle);
     let reload = shell
         .run_compiled_script_until_boundary(
-            battle_step.next_cursor.clone().expect("Azalea postbattle cursor"),
+            battle_step
+                .next_cursor
+                .clone()
+                .expect("Azalea postbattle cursor"),
             16,
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
@@ -1551,16 +1614,29 @@ fn visible_sequence_clock_recovers_normal_low_refresh_cadence_without_unbounded_
 }
 
 #[test]
-fn interruption_unfocused_game_window_keeps_presentation_sequences_running() {
-    let settings = continuous_game_winit_settings();
-    assert_eq!(settings.focused_mode, UpdateMode::Continuous);
-    assert_eq!(settings.unfocused_mode, UpdateMode::Continuous);
+fn game_window_keeps_focused_rendering_display_synchronized_and_caps_unfocused_updates() {
+    let settings = low_power_unfocused_game_winit_settings();
+    let expected_wait = std::time::Duration::from_secs_f64(f64::from(GAME_TICK_SECONDS));
+    assert_eq!(
+        settings.focused_mode,
+        UpdateMode::Continuous,
+        "focused camera interpolation must remain synchronized to browser animation frames"
+    );
+    assert_eq!(
+        settings.unfocused_mode,
+        UpdateMode::reactive_low_power(expected_wait),
+        "unfocused presentation sequences must keep advancing without a busy redraw loop"
+    );
 }
 
 #[test]
 fn game_window_uses_a_single_frame_low_latency_swapchain() {
     let window = low_latency_game_window("test".to_string());
 
+    assert!(
+        !window.resizable,
+        "native play must retain the fixed integer-scaled LCD window"
+    );
     assert_eq!(window.present_mode, PresentMode::AutoVsync);
     assert_eq!(
         window.desired_maximum_frame_latency,
@@ -1611,27 +1687,64 @@ fn interruption_emotes_consume_every_bounded_catch_up_tick() {
 }
 
 #[test]
-fn transient_audio_queue_keeps_only_the_latest_sfx_or_cry() {
+fn transient_audio_queue_obeys_asm_sfx_priority_order() {
     let command = |audio_id: &str, kind: ModpackAudioKind| BevyAudioCommand {
         audio_id: audio_id.to_string(),
         kind,
         mode: ModpackAudioPlaybackMode::RawPcm,
         looped: false,
     };
-    let queue = coalesce_pending_transient_audio(vec![
-        command("MUSIC_OLD", ModpackAudioKind::Music),
-        command("SFX_OLD", ModpackAudioKind::SoundEffect),
-        command("CRY_OLD", ModpackAudioKind::Cry),
-        command("MUSIC_ROUTE_29", ModpackAudioKind::Music),
-        command("SFX_NEW", ModpackAudioKind::SoundEffect),
+    let priorities = BTreeMap::from([
+        ("SFX_HIGH".to_string(), 0x01),
+        ("SFX_LOW".to_string(), 0x40),
     ]);
+    let queue = source_ordered_pending_audio(
+        vec![
+            command("MUSIC_OLD", ModpackAudioKind::Music),
+            command("SFX_HIGH", ModpackAudioKind::SoundEffect),
+            command("SFX_LOW", ModpackAudioKind::SoundEffect),
+            command("MUSIC_ROUTE_29", ModpackAudioKind::Music),
+        ],
+        None,
+        0,
+        &priorities,
+    )
+    .expect("source-ordered audio queue");
     assert_eq!(
         queue
             .iter()
             .map(|command| command.audio_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["MUSIC_ROUTE_29", "SFX_NEW"]
+        vec!["MUSIC_OLD", "SFX_HIGH", "MUSIC_ROUTE_29"],
+        "accepted PlayMusic/PlaySFX calls must reach the backend in source order even when a later command interrupts them"
     );
+
+    let lower_priority = source_ordered_pending_audio(
+        vec![command("SFX_LOW", ModpackAudioKind::SoundEffect)],
+        Some(ModpackAudioKind::SoundEffect),
+        0x01,
+        &priorities,
+    )
+    .expect("lower-priority interruption check");
+    assert!(lower_priority.is_empty());
+
+    let higher_priority = source_ordered_pending_audio(
+        vec![command("SFX_HIGH", ModpackAudioKind::SoundEffect)],
+        Some(ModpackAudioKind::SoundEffect),
+        0x40,
+        &priorities,
+    )
+    .expect("higher-priority interruption check");
+    assert_eq!(higher_priority[0].audio_id, "SFX_HIGH");
+
+    let equal_priority = source_ordered_pending_audio(
+        vec![command("SFX_HIGH", ModpackAudioKind::SoundEffect)],
+        Some(ModpackAudioKind::SoundEffect),
+        0x01,
+        &priorities,
+    )
+    .expect("equal-priority interruption check");
+    assert_eq!(equal_priority[0].audio_id, "SFX_HIGH");
 }
 
 #[test]
@@ -1971,7 +2084,10 @@ fn interactive_bevy_schedule_performance_benchmark() {
         );
         let phase_names = ["input", "pre_render", "render_playfield", "post_render_ui"];
         for (index, phase_name) in phase_names.into_iter().enumerate() {
-            let mut values = phases.iter().map(|sample| sample[index]).collect::<Vec<_>>();
+            let mut values = phases
+                .iter()
+                .map(|sample| sample[index])
+                .collect::<Vec<_>>();
             values.sort_unstable();
             let total = values.iter().copied().sum::<Duration>();
             eprintln!(
@@ -1984,7 +2100,12 @@ fn interactive_bevy_schedule_performance_benchmark() {
     }
 
     fn take_phases(app: &mut App) -> Vec<[Duration; 4]> {
-        std::mem::take(&mut app.world_mut().resource_mut::<ScheduleProfileProbe>().phases)
+        std::mem::take(
+            &mut app
+                .world_mut()
+                .resource_mut::<ScheduleProfileProbe>()
+                .phases,
+        )
     }
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -2075,11 +2196,8 @@ fn screen_fade_preserves_sixty_hz_duration_below_sixty_fps() {
     assert_eq!(fade.elapsed_frames, 3);
     assert_eq!(fade.alpha, 12);
 
-    let mut stalled = VisibleScreenFade::new(
-        ScriptFadeColor::Black,
-        ScriptFadeDirection::Out,
-        1_000,
-    );
+    let mut stalled =
+        VisibleScreenFade::new(ScriptFadeColor::Black, ScriptFadeDirection::Out, 1_000);
     stalled.advance(2.0);
     assert_eq!(
         stalled.elapsed_frames,
@@ -2087,8 +2205,7 @@ fn screen_fade_preserves_sixty_hz_duration_below_sixty_fps() {
     );
     stalled.advance(0.0);
     assert_eq!(
-        stalled.elapsed_frames,
-        MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as u16,
+        stalled.elapsed_frames, MAX_VISIBLE_SEQUENCE_CATCH_UP_FRAMES as u16,
         "a fade must not replay discarded stall time on later host updates"
     );
 }
@@ -2117,20 +2234,13 @@ fn intro_renderer_preserves_every_semantic_frame() {
 
 #[test]
 fn title_art_cache_tracks_native_eight_frame_animation_cadence() {
-    let mut title = TitleMenu {
-        spawn_identifier: 0,
-        save_path: None,
-        cursor: MenuCursor {
-            surface_id: "title".to_string(),
-            option_index: 0,
-        },
-        phase: VisibleTitlePhase::PressStart,
-        frame: 15,
-        main_menu_frame: 0,
-        scx: 0,
-        title_timer: 0,
-        clock_reset_trigger: false,
-    };
+    let mut title = core_modular_title_shell_for_test()
+        .title_menu
+        .expect("title menu");
+    title.phase = VisibleTitlePhase::PressStart;
+    title.frame = 15;
+    title.scx = 0;
+    title.title_timer = 0;
     assert_eq!(title_screen_art_key(&title).frame, 8);
     title.frame = 16;
     assert_eq!(title_screen_art_key(&title).frame, 16);
@@ -2176,7 +2286,12 @@ fn field_dialogue_reveal_uses_the_selected_text_speed() {
 #[test]
 fn field_dialogue_printer_obeys_mid_speed_and_never_advances_without_input() {
     let mut runtime_shell = core_modular_title_shell_for_test();
-    runtime_shell.shell.session_mut().state_mut().options.text_speed = TextSpeed::Mid;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state_mut()
+        .options
+        .text_speed = TextSpeed::Mid;
     runtime_shell.field_notice = Some("AB".to_string());
     mark_runtime_snapshot_dirty(&mut runtime_shell);
 
@@ -2310,11 +2425,34 @@ fn renderer_readiness_cannot_switch_the_manually_selected_world_view_to_2d() {
         .entity(classic_world)
         .get::<bevy::render::view::RenderLayers>()
         .expect("manual 2.5D selection must park the classic overworld");
-    assert!(hidden_layers.intersects(
-        &bevy::render::view::RenderLayers::layer(
+    assert!(
+        hidden_layers.intersects(&bevy::render::view::RenderLayers::layer(
             crystal_voxel_view::HIDDEN_CLASSIC_WORLD_RENDER_LAYER,
-        )
-    ));
+        ))
+    );
+
+    let subsequently_spawned_world = app.world_mut().spawn(ObjectMarker).id();
+    app.update();
+    assert!(
+        app.world()
+            .entity(subsequently_spawned_world)
+            .get::<bevy::render::view::RenderLayers>()
+            .is_some_and(|layers| layers.intersects(&bevy::render::view::RenderLayers::layer(
+                crystal_voxel_view::HIDDEN_CLASSIC_WORLD_RENDER_LAYER,
+            ))),
+        "new classic-world entities must inherit the selected layer without rescanning every retained entity"
+    );
+
+    app.world_mut().clear_trackers();
+    app.update();
+    assert!(
+        !app.world()
+            .entity(classic_world)
+            .get_ref::<bevy::render::view::RenderLayers>()
+            .expect("retained classic-world layer")
+            .is_changed(),
+        "an unchanged view selection must not rewrite every retained entity each frame"
+    );
 
     // No VoxelViewStatus resource exists in this app. That is deliberate:
     // readiness, errors, and build state are structurally unable to affect

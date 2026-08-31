@@ -291,10 +291,16 @@ struct ActorTextureAssets {
     material: Handle<StandardMaterial>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ActorMaterialKey {
+    texture: AssetId<Image>,
+    remote_player: bool,
+}
+
 #[derive(Resource, Default)]
 struct ActorIdCache {
     entities: HashMap<VisualActorId, Entity>,
-    textures: HashMap<AssetId<Image>, ActorTextureAssets>,
+    textures: HashMap<ActorMaterialKey, ActorTextureAssets>,
 }
 
 #[derive(Resource, Default)]
@@ -959,8 +965,7 @@ fn sync_actor_cards(
 
     let mut used_textures = HashSet::with_capacity(frame.actors.len());
     for (actor, transform, mesh) in prepared {
-        let texture_id = actor.texture.id();
-        used_textures.insert(texture_id);
+        used_textures.insert(actor_material_key(actor));
         let material = actor_material(actor, cache, materials);
 
         let existing = cache.entities.get(&actor.id).copied();
@@ -1154,26 +1159,39 @@ fn actor_material(
     cache: &mut ActorIdCache,
     materials: &mut Assets<StandardMaterial>,
 ) -> Handle<StandardMaterial> {
-    if let Some(assets) = cache.textures.get(&actor.texture.id()) {
+    let key = actor_material_key(actor);
+    if let Some(assets) = cache.textures.get(&key) {
         return assets.material.clone();
     }
+    let (base_color, alpha_mode) = if key.remote_player {
+        (Color::srgba(0.48, 0.88, 1.0, 0.62), AlphaMode::Blend)
+    } else {
+        (Color::WHITE, AlphaMode::Mask(0.5))
+    };
     let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+        base_color,
         base_color_texture: Some(actor.texture.clone()),
         perceptual_roughness: 1.0,
         reflectance: 0.0,
         unlit: voxel_material_unlit(),
-        alpha_mode: AlphaMode::Mask(0.5),
+        alpha_mode,
         cull_mode: None,
         ..default()
     });
     cache.textures.insert(
-        actor.texture.id(),
+        key,
         ActorTextureAssets {
             material: material.clone(),
         },
     );
     material
+}
+
+fn actor_material_key(actor: &VisualActor) -> ActorMaterialKey {
+    ActorMaterialKey {
+        texture: actor.texture.id(),
+        remote_player: matches!(actor.id, VisualActorId::RemotePlayer(_)),
+    }
 }
 
 fn actor_transform(
@@ -1428,6 +1446,40 @@ mod renderer_tests {
                 / 45.0_f32.to_radians().sin();
         assert!((pull - expected).abs() < 0.001);
         assert!(pull > 10.0 && pull < 11.0);
+    }
+
+    #[test]
+    fn remote_player_uses_a_distinct_material_without_changing_its_footing() {
+        let texture = Handle::weak_from_u128(1);
+        let player = VisualActor {
+            id: VisualActorId::Player,
+            source_id: "player".into(),
+            texture: texture.clone(),
+            center: Vec2::ZERO,
+            size: Vec2::splat(16.0),
+            flip_x: false,
+            above_priority: false,
+        };
+        let remote = VisualActor {
+            id: VisualActorId::RemotePlayer(7),
+            source_id: "remote_player".into(),
+            texture,
+            ..player.clone()
+        };
+        assert_ne!(actor_material_key(&player), actor_material_key(&remote));
+
+        let frame = VisualWorldFrame {
+            viewport_size: Vec2::splat(16.0),
+            tile_size: Vec2::splat(8.0),
+            grid_size: UVec2::new(2, 2),
+            ..default()
+        };
+        let heights = vec![0.0; 4];
+        assert_eq!(
+            actor_transform(&frame, &player, &heights),
+            actor_transform(&frame, &remote, &heights),
+            "remote players must use the same world-to-voxel transform as the local player"
+        );
     }
 
     #[test]

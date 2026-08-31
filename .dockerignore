@@ -2,6 +2,8 @@
 **/.next
 **/.git
 **/.DS_Store
+rust/target
+rust/target-*
 save_data
 memory_db
 *.log

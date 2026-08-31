@@ -129,6 +129,7 @@ describe("MultiplayerMenu", () => {
       await flushPromises();
     });
 
+
     expect(onToggleRemoteSprites).toHaveBeenCalledTimes(1);
     expect(onToggleCrowdView).toHaveBeenCalledTimes(1);
     expect(onRequestBattle).toHaveBeenCalledTimes(1);
@@ -173,6 +174,40 @@ describe("MultiplayerMenu", () => {
     await act(async () => {
       root.unmount();
     });
+    container.remove();
+  });
+
+  it("joins and leaves global matchmaking queues", async () => {
+    const onJoinMatchmaking = jest.fn();
+    const onLeaveMatchmaking = jest.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<MultiplayerMenu onJoinMatchmaking={onJoinMatchmaking} />);
+      await flushPromises();
+    });
+    (container.querySelector('[data-testid="join-battle-queue"]') as HTMLButtonElement)
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onJoinMatchmaking).toHaveBeenCalledWith("battle");
+
+    await act(async () => {
+      useMultiplayerStore.getState().setInQueue(true, "battle");
+      root.render(
+        <MultiplayerMenu
+          queueMode="battle"
+          onJoinMatchmaking={onJoinMatchmaking}
+          onLeaveMatchmaking={onLeaveMatchmaking}
+        />,
+      );
+      await flushPromises();
+    });
+    (container.querySelector('[data-testid="leave-matchmaking"]') as HTMLButtonElement)
+      .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onLeaveMatchmaking).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
     container.remove();
   });
 });

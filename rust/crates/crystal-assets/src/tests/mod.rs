@@ -38,6 +38,39 @@ fn roaming_catalog_for_tests(first_species: &str, second_species: &str) -> Roami
     }
 }
 
+fn map_name_sign_landmarks_for_tests(
+    maps: impl IntoIterator<Item = &'static str>,
+) -> PokegearLandmarksPayload {
+    let definitions = [
+        (0, "LANDMARK_SPECIAL"),
+        (1, "LANDMARK_NEW_BARK_TOWN"),
+        (2, "LANDMARK_ROUTE_29"),
+        (0x11, "LANDMARK_RADIO_TOWER"),
+        (0x3b, "LANDMARK_UNDERGROUND_PATH"),
+        (0x44, "LANDMARK_POWER_PLANT"),
+        (0x46, "LANDMARK_LAV_RADIO_TOWER"),
+        (0x5a, "LANDMARK_INDIGO_PLATEAU"),
+    ];
+    PokegearLandmarksPayload {
+        landmarks: definitions
+            .into_iter()
+            .map(|(id, constant)| PokegearLandmark {
+                id,
+                constant: constant.to_string(),
+                label: constant.to_string(),
+                name: constant.to_string(),
+                x: 0,
+                y: 0,
+                region: "JOHTO".to_string(),
+            })
+            .collect(),
+        map_to_landmark: maps
+            .into_iter()
+            .map(|map| (map.to_string(), "LANDMARK_ROUTE_29".to_string()))
+            .collect(),
+    }
+}
+
 fn bug_contest_encounters_for_tests()
 -> Vec<crystal_core::systems::special_routines::BugContestEncounterEntry> {
     let mut encounters = (0..10)

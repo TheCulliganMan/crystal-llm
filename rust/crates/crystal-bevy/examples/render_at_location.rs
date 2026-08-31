@@ -44,6 +44,7 @@ struct Args {
     list_maps: bool,
     screenshot: Option<PathBuf>,
     output_dir: Option<PathBuf>,
+    hour: u8,
 }
 
 fn main() -> Result<()> {
@@ -112,6 +113,7 @@ fn main() -> Result<()> {
                 args.view.label()
             )),
             render_test_screenshot: args.screenshot,
+            render_test_hour: Some(args.hour),
             ..Default::default()
         },
     )
@@ -158,6 +160,8 @@ fn render_map_batch(args: &Args, runtime: &CrystalRuntime) -> Result<()> {
             .arg(tile_y.to_string())
             .arg("--view")
             .arg(view)
+            .arg("--hour")
+            .arg(args.hour.to_string())
             .arg("--screenshot")
             .arg(&output)
             .status()
@@ -229,6 +233,8 @@ fn render_both(args: &Args) -> Result<()> {
             .arg(map)
             .arg("--view")
             .arg(view)
+            .arg("--hour")
+            .arg(args.hour.to_string())
             .arg("--screenshot")
             .arg(&output);
         if let Some(x) = args.tile_x {
@@ -295,6 +301,7 @@ fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut list_maps = false;
     let mut screenshot = None;
     let mut output_dir = None;
+    let mut hour = 12;
     let mut values = values.into_iter();
     while let Some(flag) = values.next() {
         match flag.as_str() {
@@ -310,6 +317,10 @@ fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Args> {
             "--x" => tile_x = Some(next_value(&mut values, "--x")?.parse::<i16>()?),
             "--y" => tile_y = Some(next_value(&mut values, "--y")?.parse::<i16>()?),
             "--view" => view = ViewMode::parse(&next_value(&mut values, "--view")?)?,
+            "--hour" => {
+                hour = next_value(&mut values, "--hour")?.parse::<u8>()?;
+                ensure_render_hour(hour)?;
+            }
             "--list-maps" => list_maps = true,
             "--screenshot" => {
                 screenshot = Some(PathBuf::from(next_value(&mut values, "--screenshot")?))
@@ -335,7 +346,15 @@ fn parse_args(values: impl IntoIterator<Item = String>) -> Result<Args> {
         list_maps,
         screenshot,
         output_dir,
+        hour,
     })
+}
+
+fn ensure_render_hour(hour: u8) -> Result<()> {
+    if hour >= 24 {
+        bail!("--hour must be in 0..24");
+    }
+    Ok(())
 }
 
 fn next_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -346,7 +365,11 @@ fn next_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
 
 fn print_usage() {
     println!(
-        "cargo run -p crystal-bevy --example render_at_location --features location-tester -- \\\n+         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \\\n+         [--view 2d|2.5d|both] [--screenshot <output-or-prefix.png>] | \\\n+         (--maps <id,id,...> | --all-maps) --output-dir <directory> \\\n+         [--view 2d|2.5d|both]]"
+        r#"cargo run -p crystal-bevy --example render_at_location --features location-tester -- \
+         --pack <game.crystalpack> [--list-maps | --map <id> [--x <tile>] [--y <tile>] \
+         [--view 2d|2.5d|both] [--hour <0..23>] [--screenshot <output-or-prefix.png>] | \
+         (--maps <id,id,...> | --all-maps) --output-dir <directory> \
+         [--view 2d|2.5d|both] [--hour <0..23>]]"#
     );
 }
 
@@ -360,6 +383,14 @@ mod tests {
         assert_eq!(ViewMode::parse("2.5d").unwrap(), ViewMode::TwoPointFiveD);
         assert_eq!(ViewMode::parse("both").unwrap(), ViewMode::Both);
         assert!(ViewMode::parse("3d").is_err());
+    }
+
+    #[test]
+    fn validates_deterministic_render_hour() {
+        assert!(ensure_render_hour(0).is_ok());
+        assert!(ensure_render_hour(12).is_ok());
+        assert!(ensure_render_hour(23).is_ok());
+        assert!(ensure_render_hour(24).is_err());
     }
 
     #[test]

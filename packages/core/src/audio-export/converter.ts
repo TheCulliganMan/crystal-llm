@@ -12,15 +12,12 @@ import {
   GB_DUTY_PATTERNS,
   MAX_COMMANDS_PER_CHANNEL,
   MAX_WAVE_AMPLITUDE,
-  MP3_EXPORT_BITRATE,
-  MP3_EXPORT_SAMPLE_RATE,
   NOTE_INDEX,
   PAN_CROSSFEED,
   SAMPLE_RATE,
   SOUND_LOOP_INFINITE_REPEAT_LIMIT,
   WAVE_NOTE_FREQUENCY_SCALAR,
 } from "./constants";
-import { MidiRecorder } from "./midi-recorder";
 import type { ParsedMusicData, AudioCommand } from "./parsers";
 import { createChannelState, type ChannelState, type NoiseNote } from "./schemas";
 import { computeIntegral, noiseKernelWrapper, pulseKernel, waveKernel } from "./synthesis";
@@ -34,42 +31,41 @@ import {
   ticksToFrames,
 } from "./utils";
 
-export type ConvertFormat = "pcm" | "midi";
+export type ConvertFormat = "pcm";
 
-interface MidiEvent {
+export type MidiNoteEvent = {
+  channel: number;
+  note: number;
   startSample: number;
   durationSamples: number;
-  note: number;
   velocity: number;
-  channel: number;
-}
+};
 
 export interface ConverterResult {
   stereo: Int16Array;
   sampleRate: number;
-  midiBytes?: Uint8Array;
+  midiNotes: MidiNoteEvent[];
   metadata: {
     durationSeconds: number;
-    bitrate?: string;
-    exportSampleRate?: number;
     loopFramesByChannel?: Record<number, number>;
     loopSamplesByChannel?: Record<number, number>;
   };
 }
 
-interface WavConverterOptions {
+interface PcmConverterOptions {
   waveInstrumentMap?: Record<number, number>;
   qualityMode?: "accurate" | "enhanced";
   infiniteLoopRepeatLimit?: number;
   loopedMusicExportSeconds?: number | null;
   soloChannel?: number | null;
+  collectMidiNotes?: boolean;
   /** Exact wCryPitch value installed by _PlayCry. */
   cryPitch?: number | null;
   /** Exact wCryLength value installed as tempo on every non-noise cry channel. */
   cryLength?: number | null;
 }
 
-export class WavConverter {
+export class PcmConverter {
   private readonly musicData: ParsedMusicData;
   private readonly drumkits: Record<number, Record<number, NoiseNote[]>>;
   private readonly waveSamples: Record<number, number[]>;
@@ -79,13 +75,14 @@ export class WavConverter {
   private channelLoopPoints = new Map<number, [number, number]>();
   private channelFrameTotals = new Map<number, number>();
   private channelSampleTotals = new Map<number, number>();
-  private midiEvents = new Map<number, MidiEvent[]>();
+  private midiNotes: MidiNoteEvent[] = [];
   private nr50Events: Array<{ offset: number; left: number; right: number }> = [{ offset: 0, left: 7, right: 7 }];
   private sharedSampleRemainder = 0;
   private readonly qualityMode: "accurate" | "enhanced";
   private readonly infiniteLoopRepeatLimit: number;
   private readonly loopedMusicExportSeconds: number | null;
   private readonly soloChannel: number | null;
+  private readonly collectMidiNotes: boolean;
   private readonly cryPitch: number | null;
   private readonly cryLength: number | null;
   private sharedTempoEvents: Array<{ frame: number; tempo: number; remainder: number }> = [];
@@ -100,7 +97,7 @@ export class WavConverter {
     musicData: ParsedMusicData,
     drumkits: Record<number, Record<number, NoiseNote[]>>,
     waveSamples: Record<number, number[]>,
-    options?: WavConverterOptions,
+    options?: PcmConverterOptions,
   ) {
     this.musicData = musicData;
     this.drumkits = drumkits;
@@ -111,13 +108,14 @@ export class WavConverter {
       }
     }
     this.waveInstrumentMap = options?.waveInstrumentMap ?? Object.fromEntries(Object.keys(waveSamples).map((k) => [Number(k), Number(k)]));
-    this.qualityMode = options?.qualityMode ?? "enhanced";
+    this.qualityMode = options?.qualityMode ?? "accurate";
     this.infiniteLoopRepeatLimit = Math.max(1, options?.infiniteLoopRepeatLimit ?? SOUND_LOOP_INFINITE_REPEAT_LIMIT);
     this.loopedMusicExportSeconds =
       options && Object.prototype.hasOwnProperty.call(options, "loopedMusicExportSeconds")
         ? options.loopedMusicExportSeconds ?? null
         : DEFAULT_LOOPED_MUSIC_EXPORT_SECONDS;
     this.soloChannel = options?.soloChannel ?? null;
+    this.collectMidiNotes = options?.collectMidiNotes ?? false;
     this.cryPitch = options?.cryPitch == null ? null : options.cryPitch & 0xffff;
     this.cryLength = options?.cryLength == null ? null : options.cryLength & 0xffff;
     this.nextWaveSampleIndex = Math.max(0x10, maxObjectKey(this.waveSamples, -1) + 1);
@@ -129,7 +127,7 @@ export class WavConverter {
     this.channelLoopPoints.clear();
     this.channelFrameTotals.clear();
     this.channelSampleTotals.clear();
-    this.midiEvents.clear();
+    this.midiNotes = [];
     this.nr50Events = [{ offset: 0, left: 7, right: 7 }];
     this.sharedSampleRemainder = 0;
     this.sharedTempoEvents = [];
@@ -152,7 +150,10 @@ export class WavConverter {
       );
     }
 
-    this.ensureAllChannelsSynced(format === "midi" ? "midi" : "mp3");
+    if (format !== "pcm") {
+      throw new Error("Unsupported audio output format: " + String(format));
+    }
+    this.ensureAllChannelsSynced();
 
     const stereo = this.mixStereo();
     const loopFramesByChannel = Object.fromEntries(
@@ -162,41 +163,12 @@ export class WavConverter {
       Array.from(this.channelLoopPoints.entries()).map(([channel, [, sample]]) => [channel, sample]),
     );
 
-    if (format === "midi") {
-      const recorder = new MidiRecorder({ sampleRate: SAMPLE_RATE });
-      for (const [sourceChannel, entries] of this.midiEvents.entries()) {
-        for (const entry of entries) {
-          recorder.recordNote({
-            channel: Math.max(0, Math.min(15, sourceChannel - 1)),
-            note: entry.note,
-            velocity: entry.velocity,
-            startSample: entry.startSample,
-            durationSamples: entry.durationSamples,
-          });
-        }
-      }
-      const midiBytes = recorder.toBytes();
-      return {
-        stereo,
-        sampleRate: SAMPLE_RATE,
-        midiBytes,
-        metadata: {
-          durationSeconds: stereo.length / 2 / SAMPLE_RATE,
-          bitrate: MP3_EXPORT_BITRATE,
-          exportSampleRate: MP3_EXPORT_SAMPLE_RATE,
-          loopFramesByChannel,
-          loopSamplesByChannel,
-        },
-      };
-    }
-
     return {
       stereo,
       sampleRate: SAMPLE_RATE,
+      midiNotes: [...this.midiNotes],
       metadata: {
         durationSeconds: stereo.length / 2 / SAMPLE_RATE,
-        bitrate: MP3_EXPORT_BITRATE,
-        exportSampleRate: MP3_EXPORT_SAMPLE_RATE,
         loopFramesByChannel,
         loopSamplesByChannel,
       },
@@ -524,13 +496,13 @@ export class WavConverter {
             audio = this.applyVolumeEnvelope(audio, state.volume_envelope, sampleTotal);
           }
           segments.push({ audio: toInt16ArrayTrunc(audio), pan: state.current_pan });
-          this.pushMidiEvent(channelNumber, {
-            startSample: sampleTotal,
-            durationSamples: samples,
-            note: this.frequencyToMidi(regToFreqWave(baseReg)),
-            velocity: this.velocityFromWaveVolume(state.wave_volume),
-            channel: channelNumber,
-          });
+          this.recordMidiNote(
+            channelNumber,
+            regToFreqWave(baseReg),
+            sampleTotal,
+            samples,
+            this.velocityFromWaveVolume(state.wave_volume),
+          );
         } else {
           const baseReg = this.noteToRegisterPulse(noteNameRaw, state);
           this.resetVibratoNoteState(state, baseReg);
@@ -610,13 +582,13 @@ export class WavConverter {
             audio = this.applyVolumeEnvelope(audio, state.volume_envelope, sampleTotal);
           }
           segments.push({ audio: toInt16ArrayTrunc(audio), pan: state.current_pan });
-          this.pushMidiEvent(channelNumber, {
-            startSample: sampleTotal,
-            durationSamples: samples,
-            note: this.frequencyToMidi(this.registerToFrequency(baseReg)),
-            velocity: this.velocityFromEnvelope(state.volume_envelope),
-            channel: channelNumber,
-          });
+          this.recordMidiNote(
+            channelNumber,
+            this.registerToFrequency(baseReg),
+            sampleTotal,
+            samples,
+            this.velocityFromEnvelope(state.volume_envelope),
+          );
         }
 
         frameTotal += frames;
@@ -663,13 +635,13 @@ export class WavConverter {
         }
         audio = this.applyVolumeEnvelope(audio, [volume, fade], sampleTotal);
         segments.push({ audio: toInt16ArrayTrunc(audio), pan: state.current_pan });
-        this.pushMidiEvent(channelNumber, {
-          startSample: sampleTotal,
-          durationSamples: samples,
-          note: this.frequencyToMidi(frequency),
-          velocity: this.velocityFromEnvelope([volume, fade]),
-          channel: channelNumber,
-        });
+        this.recordMidiNote(
+          channelNumber,
+          frequency,
+          sampleTotal,
+          samples,
+          this.velocityFromEnvelope([volume, fade]),
+        );
         frameTotal += frames;
         sampleTotal += samples;
         continue;
@@ -697,13 +669,13 @@ export class WavConverter {
           audio = this.applyVolumeEnvelope(audio, state.volume_envelope, sampleTotal);
         }
         segments.push({ audio: toInt16ArrayTrunc(audio), pan: state.current_pan });
-        this.pushMidiEvent(channelNumber, {
-          startSample: sampleTotal,
-          durationSamples: samples,
-          note: this.frequencyToMidi(freq),
-          velocity: this.velocityFromWaveVolume(state.wave_volume),
-          channel: channelNumber,
-        });
+        this.recordMidiNote(
+          channelNumber,
+          freq,
+          sampleTotal,
+          samples,
+          this.velocityFromWaveVolume(state.wave_volume),
+        );
         frameTotal += frames;
         sampleTotal += samples;
         continue;
@@ -727,6 +699,12 @@ export class WavConverter {
         };
         const audio = this.renderNoise(samples, note, state, sampleTotal);
         segments.push({ audio, pan: state.current_pan });
+        this.recordMidiPercussion(
+          note.frequency,
+          sampleTotal,
+          samples,
+          this.velocityFromEnvelope([note.volume, note.fade]),
+        );
         frameTotal += frames;
         sampleTotal += samples;
         continue;
@@ -748,6 +726,7 @@ export class WavConverter {
         const samples = this.framesToSamplesPrecise(frames);
         const audio = this.renderDrum(currentDrumkit, instrument, samples, state, sampleTotal);
         segments.push({ audio, pan: state.current_pan });
+        this.recordMidiPercussion(instrument, sampleTotal, samples, 100);
         frameTotal += frames;
         sampleTotal += samples;
         continue;
@@ -1094,7 +1073,7 @@ export class WavConverter {
     return loopExtended;
   }
 
-  private ensureAllChannelsSynced(exportFormat: "pcm" | "midi" | "mp3"): void {
+  private ensureAllChannelsSynced(): void {
     if (this.channelFrameTotals.size === 0) {
       return;
     }
@@ -1112,7 +1091,7 @@ export class WavConverter {
       return;
     }
 
-    const loopTarget = this.targetLoopedMusicSampleBudget(exportFormat);
+    const loopTarget = this.targetLoopedMusicSampleBudget();
     if (loopTarget != null && loopTarget > maxSamplesPresent) {
       const primary = this.primaryChannelNumber;
       if (primary != null) {
@@ -1148,10 +1127,7 @@ export class WavConverter {
     }
   }
 
-  private targetLoopedMusicSampleBudget(exportFormat: "pcm" | "midi" | "mp3"): number | null {
-    if (exportFormat !== "mp3") {
-      return null;
-    }
+  private targetLoopedMusicSampleBudget(): number | null {
     if (this.qualityMode === "accurate") {
       return null;
     }
@@ -1892,31 +1868,53 @@ export class WavConverter {
     return samples;
   }
 
-  private pushMidiEvent(channel: number, event: MidiEvent): void {
-    const list = this.midiEvents.get(channel) ?? [];
-    list.push(event);
-    this.midiEvents.set(channel, list);
+  private recordMidiNote(
+    sourceChannel: number,
+    frequency: number,
+    startSample: number,
+    durationSamples: number,
+    velocity: number,
+  ): void {
+    if (!this.collectMidiNotes || frequency <= 0 || durationSamples <= 0) {
+      return;
+    }
+    const note = Math.max(0, Math.min(127, rintEven(69 + 12 * Math.log2(frequency / 440))));
+    const channel = (sourceChannel - 1) % 4;
+    this.midiNotes.push({
+      channel: channel === 3 ? 9 : channel,
+      note,
+      startSample,
+      durationSamples,
+      velocity: Math.max(1, Math.min(127, velocity)),
+    });
   }
 
-  private frequencyToMidi(freq: number): number {
-    if (freq <= 0) {
-      return 0;
+  private recordMidiPercussion(
+    instrument: number,
+    startSample: number,
+    durationSamples: number,
+    velocity: number,
+  ): void {
+    if (!this.collectMidiNotes) {
+      return;
     }
-    const midi = rintEven(69 + 12 * Math.log2(freq / 440));
-    return Math.max(0, Math.min(127, midi));
+    this.midiNotes.push({
+      channel: 9,
+      note: 35 + (Math.abs(instrument) % 47),
+      startSample,
+      durationSamples,
+      velocity: Math.max(1, Math.min(127, velocity)),
+    });
   }
 
   private velocityFromEnvelope(envelope: [number, number] | null): number {
     const initial = envelope?.[0] ?? 15;
-    return Math.max(1, Math.min(127, rintEven((Math.max(0, Math.min(15, initial)) / 15.0) * 127.0)));
+    return rintEven((Math.max(0, Math.min(15, initial)) / 15) * 127);
   }
 
   private velocityFromWaveVolume(volume: number): number {
-    const scale = ({ 0: 0.0, 1: 1.0, 2: 0.5, 3: 0.25 } as const)[volume & 0x3] ?? 0.0;
-    if (scale <= 0) {
-      return 1;
-    }
-    return Math.max(1, Math.min(127, rintEven(127.0 * scale)));
+    const scale = [0, 1, 0.5, 0.25][volume & 0x3] ?? 0;
+    return Math.max(1, rintEven(127 * scale));
   }
 
   private normalizeEnvelopeFade(fade: number): number {

@@ -90,6 +90,13 @@ describe("exportTrainers", () => {
           "	dw CONTEXT_USE | SWITCH_SOMETIMES",
         ].join("\n") as never;
       }
+      if (file.endsWith(path.join("data", "trainers", "dvs.asm"))) {
+        return [
+          "TrainerClassDVs:",
+          "\tdn 9, 8, 8, 8 ; YOUNGSTER",
+          "\tassert_table_length NUM_TRAINER_CLASSES",
+        ].join("\n") as never;
+      }
       throw new Error(`unexpected read ${file}`);
     });
   });
@@ -113,9 +120,70 @@ describe("exportTrainers", () => {
         ai_move_flags: (1 << 0) | (1 << 8),
         ai_item_switch_flags: (1 << 6) | (1 << 2),
         encounter_music: "MUSIC_YOUNGSTER_ENCOUNTER",
-        party: [expect.objectContaining({ species: expect.objectContaining({ id: "CHIKORITA" }) })],
+        party: [expect.objectContaining({
+          species: expect.objectContaining({ id: "CHIKORITA" }),
+          dvs: { attack: 9, defense: 8, speed: 8, special: 8, hp: 8 },
+        })],
       }),
     ]);
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith("trainers.json", trainers, { indent: 2 });
+  });
+
+  it("preserves the lower RIVAL2 DVs from the source class table", () => {
+    jest.spyOn(fs, "readFileSync").mockImplementation((filePath: fs.PathOrFileDescriptor) => {
+      const file = String(filePath);
+      if (file.endsWith(path.join("data", "trainers", "parties.asm"))) {
+        return [
+          '\tdb "?", TRAINERTYPE_NORMAL',
+          "\tdb 40, CHIKORITA",
+          "\tdb -1",
+          '\tdb "?", TRAINERTYPE_NORMAL',
+          "\tdb 40, CHIKORITA",
+          "\tdb -1",
+        ].join("\n") as never;
+      }
+      if (file.endsWith(path.join("constants", "trainer_constants.asm"))) {
+        return [
+          "trainerclass POKEMON_PROF",
+          "trainerclass RIVAL1",
+          "\tconst RIVAL1_TEST",
+          "trainerclass RIVAL2",
+          "\tconst RIVAL2_TEST",
+        ].join("\n") as never;
+      }
+      if (file.endsWith(path.join("data", "trainers", "attributes.asm"))) {
+        return [
+          "\tdb NO_ITEM, NO_ITEM ; items",
+          "\tdb 1 ; base reward",
+          "\tdw NO_AI",
+          "\tdw NO_AI",
+          "\tdb NO_ITEM, NO_ITEM ; items",
+          "\tdb 1 ; base reward",
+          "\tdw NO_AI",
+          "\tdw NO_AI",
+          "\tdb NO_ITEM, NO_ITEM ; items",
+          "\tdb 1 ; base reward",
+          "\tdw NO_AI",
+          "\tdw NO_AI",
+        ].join("\n") as never;
+      }
+      if (file.endsWith(path.join("data", "trainers", "dvs.asm"))) {
+        return [
+          "\tdn 9, 8, 8, 8 ; POKEMON_PROF",
+          "\tdn 13, 13, 13, 13 ; RIVAL1",
+          "\tdn 9, 8, 8, 8 ; RIVAL2",
+        ].join("\n") as never;
+      }
+      throw new Error(`unexpected read ${file}`);
+    });
+
+    const trainers = exportTrainers([species("CHIKORITA")]);
+
+    expect(trainers[0].party[0].dvs).toEqual({
+      attack: 13, defense: 13, speed: 13, special: 13, hp: 15,
+    });
+    expect(trainers[1].party[0].dvs).toEqual({
+      attack: 9, defense: 8, speed: 8, special: 8, hp: 8,
+    });
   });
 });

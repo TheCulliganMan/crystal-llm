@@ -53,8 +53,7 @@
         "to": "web-standalone/apps/web/public",
         "filter": [
           "**/*",
-          "!downloads{,/**/*}",
-          "!ffmpeg{,/**/*}"
+          "!downloads{,/**/*}"
         ]
       },
       {

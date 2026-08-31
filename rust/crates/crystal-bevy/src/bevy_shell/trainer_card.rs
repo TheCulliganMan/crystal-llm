@@ -1,10 +1,9 @@
 fn open_visible_trainer_card(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    let frame_phase = snapshot.state_checksum.frame() % 64;
+    let frame_phase = runtime_shell.shell.session().state().vblank_counter & 0x3f;
     runtime_shell.trainer_card_open = true;
     runtime_shell.trainer_card_page = VisibleTrainerCardPage::Info;
     runtime_shell.trainer_card_colon_visible = frame_phase >= 32;
-    runtime_shell.trainer_card_colon_ticks = (frame_phase % 32) as u8;
+    runtime_shell.trainer_card_colon_ticks = frame_phase % 32;
     runtime_shell.trainer_card_badge_frame = 0;
     runtime_shell.trainer_card_badge_ticks = 0;
     close_visible_party_detail_state(runtime_shell);
@@ -326,22 +325,30 @@ fn open_visible_field_pack_pocket(
         FieldPackPocket::Custom(pocket_id) => format!("custom:{pocket_id}"),
     };
     match &pocket {
-        FieldPackPocket::Items => runtime_shell.bag_cursor = Some(MenuCursor {
-            surface_id: "bag:items".to_string(),
-            option_index: runtime_shell.field_pack_cursor_positions[0],
-        }),
-        FieldPackPocket::Balls => runtime_shell.ball_cursor = Some(MenuCursor {
-            surface_id: "bag:balls".to_string(),
-            option_index: runtime_shell.field_pack_cursor_positions[1],
-        }),
-        FieldPackPocket::KeyItems => runtime_shell.key_item_cursor = Some(MenuCursor {
-            surface_id: "bag:key-items".to_string(),
-            option_index: runtime_shell.field_pack_cursor_positions[2],
-        }),
-        FieldPackPocket::TmHm => runtime_shell.tmhm_cursor = Some(MenuCursor {
-            surface_id: "bag:tmhm".to_string(),
-            option_index: runtime_shell.field_pack_cursor_positions[3],
-        }),
+        FieldPackPocket::Items => {
+            runtime_shell.bag_cursor = Some(MenuCursor {
+                surface_id: "bag:items".to_string(),
+                option_index: runtime_shell.field_pack_cursor_positions[0],
+            })
+        }
+        FieldPackPocket::Balls => {
+            runtime_shell.ball_cursor = Some(MenuCursor {
+                surface_id: "bag:balls".to_string(),
+                option_index: runtime_shell.field_pack_cursor_positions[1],
+            })
+        }
+        FieldPackPocket::KeyItems => {
+            runtime_shell.key_item_cursor = Some(MenuCursor {
+                surface_id: "bag:key-items".to_string(),
+                option_index: runtime_shell.field_pack_cursor_positions[2],
+            })
+        }
+        FieldPackPocket::TmHm => {
+            runtime_shell.tmhm_cursor = Some(MenuCursor {
+                surface_id: "bag:tmhm".to_string(),
+                option_index: runtime_shell.field_pack_cursor_positions[3],
+            })
+        }
         FieldPackPocket::Custom(_) => {}
     }
     match pocket {
@@ -948,9 +955,7 @@ fn advance_visible_pokegear_phone_call(
     }
 }
 
-fn dismiss_visible_pokegear_no_service_prompt(
-    runtime_shell: &mut BevyRuntimeShell,
-) -> Result<()> {
+fn dismiss_visible_pokegear_no_service_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     anyhow::ensure!(
         runtime_shell
             .pokegear_phone_call
@@ -996,11 +1001,10 @@ fn begin_visible_incoming_phone_sequence(
     match effect {
         crate::core::systems::script_runtime::ScriptPhoneCallasmPresentation::RingTwice => {
             queue_visible_shell_sound_effect(runtime_shell, "SFX_CALL")?;
-            runtime_shell.incoming_phone_sequence =
-                Some(VisibleIncomingPhoneSequence::RingTwice {
-                    frames_remaining: 120,
-                    second_ring_started: false,
-                });
+            runtime_shell.incoming_phone_sequence = Some(VisibleIncomingPhoneSequence::RingTwice {
+                frames_remaining: 120,
+                second_ring_started: false,
+            });
         }
         crate::core::systems::script_runtime::ScriptPhoneCallasmPresentation::HangUp => {
             queue_visible_shell_sound_effect(runtime_shell, "SFX_HANG_UP")?;
@@ -1206,35 +1210,27 @@ fn visible_pokegear_radio_station(
             }
             .to_string(),
         )),
-        "LuckyChannel" if in_johto => {
-            Some(("LUCKY_CHANNEL", "MUSIC_GAME_CORNER".to_string()))
-        }
+        "LuckyChannel" if in_johto => Some(("LUCKY_CHANNEL", "MUSIC_GAME_CORNER".to_string())),
         "BuenasPassword" if in_johto => {
             Some(("BUENAS_PASSWORD", "MUSIC_BUENAS_PASSWORD".to_string()))
         }
         "RuinsOfAlphRadio" if landmark_constant == Some("LANDMARK_RUINS_OF_ALPH") => {
             Some(("UNOWN_RADIO", "MUSIC_RUINS_OF_ALPH_RADIO".to_string()))
         }
-        "PlacesAndPeople" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => Some((
-            "PLACES_AND_PEOPLE",
-            "MUSIC_VIRIDIAN_CITY".to_string(),
-        )),
+        "PlacesAndPeople" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => {
+            Some(("PLACES_AND_PEOPLE", "MUSIC_VIRIDIAN_CITY".to_string()))
+        }
         "LetsAllSing" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => {
             Some(("LETS_ALL_SING", "MUSIC_BICYCLE".to_string()))
         }
-        "PokeFluteRadio" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => Some((
-            "POKE_FLUTE_RADIO",
-            "MUSIC_POKE_FLUTE_CHANNEL".to_string(),
-        )),
+        "PokeFluteRadio" if !in_johto && flags.contains("ENGINE_EXPN_CARD") => {
+            Some(("POKE_FLUTE_RADIO", "MUSIC_POKE_FLUTE_CHANNEL".to_string()))
+        }
         "EvolutionRadio"
             if flags.contains("ENGINE_ROCKET_SIGNAL_ON_CH20")
                 && matches!(
                     landmark_constant,
-                    Some(
-                        "LANDMARK_MAHOGANY_TOWN"
-                            | "LANDMARK_ROUTE_43"
-                            | "LANDMARK_LAKE_OF_RAGE"
-                    )
+                    Some("LANDMARK_MAHOGANY_TOWN" | "LANDMARK_ROUTE_43" | "LANDMARK_LAKE_OF_RAGE")
                 ) =>
         {
             Some((
@@ -1250,22 +1246,31 @@ fn toggle_visible_pokegear_page(runtime_shell: &mut BevyRuntimeShell) -> Result<
     cycle_visible_pokegear_page(runtime_shell, 1)
 }
 
-fn cycle_visible_pokegear_page(
-    runtime_shell: &mut BevyRuntimeShell,
-    delta: isize,
-) -> Result<()> {
+fn cycle_visible_pokegear_page(runtime_shell: &mut BevyRuntimeShell, delta: isize) -> Result<()> {
     if !runtime_shell.pokegear_menu_open {
         return handle_visible_no_active_pokegear(runtime_shell, "page_toggle");
     }
     let snapshot = runtime_shell.shell.snapshot()?;
     let mut pages = vec![PokegearPage::Clock];
-    if snapshot.progression.active_engine_flags.contains("ENGINE_MAP_CARD") {
+    if snapshot
+        .progression
+        .active_engine_flags
+        .contains("ENGINE_MAP_CARD")
+    {
         pages.push(PokegearPage::Map);
     }
-    if snapshot.progression.active_engine_flags.contains("ENGINE_PHONE_CARD") {
+    if snapshot
+        .progression
+        .active_engine_flags
+        .contains("ENGINE_PHONE_CARD")
+    {
         pages.push(PokegearPage::Phone);
     }
-    if snapshot.progression.active_engine_flags.contains("ENGINE_RADIO_CARD") {
+    if snapshot
+        .progression
+        .active_engine_flags
+        .contains("ENGINE_RADIO_CARD")
+    {
         pages.push(PokegearPage::Radio);
     }
     let current = pages
@@ -1301,9 +1306,7 @@ fn cycle_visible_pokegear_page(
                     == *current_landmark
             })
             .with_context(|| {
-                format!(
-                    "current Pokegear landmark {current_landmark} is outside the active region"
-                )
+                format!("current Pokegear landmark {current_landmark} is outside the active region")
             })?;
     }
     runtime_shell.pokegear_radio_station = None;
@@ -1375,7 +1378,7 @@ fn close_visible_field_pack_without_log(runtime_shell: &mut BevyRuntimeShell) {
     runtime_shell.pending_field_battle_entry = false;
     runtime_shell.pending_field_notice_effect_frames = None;
     runtime_shell.visible_cut_animation = None;
-    runtime_shell.visible_whirlpool_animation = None;
+    runtime_shell.pending_whirlpool_sound_wait = false;
     runtime_shell.visible_headbutt_animation = None;
     runtime_shell.visible_flash_animation = None;
     runtime_shell.visible_fly_animation = None;
@@ -1693,8 +1696,7 @@ fn confirm_visible_tmhm_target(runtime_shell: &mut BevyRuntimeShell) -> Result<(
                 );
             }
             Err(error) if tmhm_error_is_play_refusal(&error) => {
-                let (text_target, move_id, wrong_sfx) = match error
-                    .downcast_ref::<TmHmLearnError>()
+                let (text_target, move_id, wrong_sfx) = match error.downcast_ref::<TmHmLearnError>()
                 {
                     Some(TmHmLearnError::CannotLearn { move_id, .. }) => {
                         ("_TMHMNotCompatibleText", move_id.as_str(), true)
@@ -1750,12 +1752,12 @@ fn confirm_visible_tmhm_target(runtime_shell: &mut BevyRuntimeShell) -> Result<(
             .get(selected)
             .map(|learned| learned.name.as_str())
             .context("TM/HM replacement cursor is outside the move list")?;
-        let is_hm = snapshot.items.iter().any(|item| {
-            !item.consumable && item.tmhm_move.as_deref() == Some(forgotten_move)
-        });
+        let is_hm = snapshot
+            .items
+            .iter()
+            .any(|item| !item.consumable && item.tmhm_move.as_deref() == Some(forgotten_move));
         if is_hm {
-            runtime_shell.pending_tmhm_text_stage =
-                Some(VisibleTmHmTextStage::RestoreMovePrompt);
+            runtime_shell.pending_tmhm_text_stage = Some(VisibleTmHmTextStage::RestoreMovePrompt);
             let pages = visible_move_learning_text_pages(
                 runtime_shell,
                 "_MoveCantForgetHMText",
@@ -1976,12 +1978,13 @@ fn confirm_visible_field_pack_target(
         return Ok(());
     }
     let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
-    if slot.pokemon.is_egg
-        || slot.pokemon.species.id == "EGG"
-    {
+    if slot.pokemon.is_egg || slot.pokemon.species.id == "EGG" {
         record_visible_runtime_action(
             runtime_shell,
-            format!("pack:target:{}:egg_refused", field_pack_target_mode_label(mode)),
+            format!(
+                "pack:target:{}:egg_refused",
+                field_pack_target_mode_label(mode)
+            ),
         )?;
         runtime_shell
             .last_audio_events
@@ -2072,7 +2075,11 @@ fn open_visible_save_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.save_flow = Some(VisibleSaveFlow {
         stage: VisibleSaveFlowStage::Prompt,
         origin: VisibleSaveFlowOrigin::StartMenu,
-        save_exists: path.exists(),
+        save_exists: runtime_shell
+            .shell
+            .runtime()
+            .load_save_summary(&path)
+            .is_ok(),
         yes_no_index: 0,
     });
     close_visible_party_detail_state(runtime_shell);
@@ -2208,7 +2215,9 @@ fn finish_visible_save_flow(
     close_visible_save_menu(runtime_shell);
     match origin {
         VisibleSaveFlowOrigin::StartMenu => continue_visible_script_after_prompt(runtime_shell),
-        VisibleSaveFlowOrigin::BillsPcMove if saved => open_visible_bill_pc_move_mode(runtime_shell),
+        VisibleSaveFlowOrigin::BillsPcMove if saved => {
+            open_visible_bill_pc_move_mode(runtime_shell)
+        }
         VisibleSaveFlowOrigin::BillsPcMove => {
             runtime_shell.bill_pc_action_cursor = Some(MenuCursor {
                 surface_id: "pc:bill-actions".to_string(),
@@ -2295,6 +2304,7 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
         return Ok(());
     };
     runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.visible_internal_special_delay_frames = None;
     if boundary.label == "WaitSfx" && !visible_wait_sfx_finished(runtime_shell) {
         runtime_shell.special_boundary = Some(boundary);
         runtime_shell
@@ -2483,11 +2493,8 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
                 "Press B to Cancel".to_string(),
             ],
         });
-        let no_photo = visible_exported_special_text_boundaries(
-            runtime_shell,
-            "NoPhotoText",
-            "_NoPhotoText",
-        )?;
+        let no_photo =
+            visible_exported_special_text_boundaries(runtime_shell, "NoPhotoText", "_NoPhotoText")?;
         runtime_shell.special_boundary_queue.extend(no_photo);
         set_shell_action_status(runtime_shell, "PRINTER ERROR 2");
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -2619,15 +2626,10 @@ fn close_visible_special_boundary(runtime_shell: &mut BevyRuntimeShell) -> Resul
     if matches!(
         boundary.label.as_str(),
         "NameRaterHelloText" | "NameRaterBetterNameText" | "DeleterIntroText"
-    )
-        && matches!(
-            runtime_shell.pc_confirmation,
-            Some(
-                VisiblePcConfirmation::ScriptPartyIntro(_)
-                    | VisiblePcConfirmation::NameRaterRename
-            )
-        )
-    {
+    ) && matches!(
+        runtime_shell.pc_confirmation,
+        Some(VisiblePcConfirmation::ScriptPartyIntro(_) | VisiblePcConfirmation::NameRaterRename)
+    ) {
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -3115,7 +3117,8 @@ fn move_visible_party_summary_pokemon(
     let next = if delta.is_negative() {
         current.checked_sub(delta.unsigned_abs())
     } else {
-        current.checked_add(delta as usize)
+        current
+            .checked_add(delta as usize)
             .filter(|next| *next < snapshot.party.slots.len())
     };
     let Some(next) = next else {
@@ -3206,12 +3209,9 @@ fn confirm_visible_party_give_take(runtime_shell: &mut BevyRuntimeShell) -> Resu
     {
         return confirm_visible_party_mail_action(runtime_shell);
     }
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.party_give_take_cursor,
-        "party:give-take",
-        2,
-    )
-    .context("party GIVE/TAKE menu requires a valid cursor")?;
+    let selected =
+        strict_readonly_cursor_index(&runtime_shell.party_give_take_cursor, "party:give-take", 2)
+            .context("party GIVE/TAKE menu requires a valid cursor")?;
     runtime_shell.party_give_take_cursor = None;
     if selected == 0 {
         let party_index = selected_party_index(runtime_shell)?;
@@ -3260,7 +3260,11 @@ fn confirm_visible_party_mail_action(runtime_shell: &mut BevyRuntimeShell) -> Re
     let slot = selected_party_slot_snapshot(&snapshot, runtime_shell.party_cursor)?;
     match selected {
         0 => {
-            let mail = slot.pokemon.mail.as_ref().context("selected Pokemon has no Mail")?;
+            let mail = slot
+                .pokemon
+                .mail
+                .as_ref()
+                .context("selected Pokemon has no Mail")?;
             record_visible_runtime_action(runtime_shell, "party:mail:read")?;
             runtime_shell.pending_mail_read = Some(VisibleMailRead { mail: mail.clone() });
             runtime_shell.field_notice = None;
@@ -3290,7 +3294,9 @@ fn resolve_visible_party_mail_take_prompt(
     runtime_shell: &mut BevyRuntimeShell,
     accepted: bool,
 ) -> Result<()> {
-    let stage = runtime_shell.party_mail_take_stage.context("no party Mail prompt")?;
+    let stage = runtime_shell
+        .party_mail_take_stage
+        .context("no party Mail prompt")?;
     let party_index = selected_party_index(runtime_shell)?;
     runtime_shell.field_notice = None;
     runtime_shell.field_notice_queue.clear();
@@ -3301,7 +3307,8 @@ fn resolve_visible_party_mail_take_prompt(
             surface_id: "party:mail-lose-message".to_string(),
             option_index: 0,
         });
-        runtime_shell.field_notice = Some("The MAIL's message will be lost. Is that OK?".to_string());
+        runtime_shell.field_notice =
+            Some("The MAIL's message will be lost. Is that OK?".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -3315,8 +3322,12 @@ fn resolve_visible_party_mail_take_prompt(
         runtime_shell.shell.discard_party_mail_to_bag(party_index)
     };
     match outcome {
-        Ok(_) if stage == 1 => runtime_shell.field_notice = Some("The MAIL was sent to your PC.".to_string()),
-        Ok(_) => runtime_shell.field_notice = Some("The MAIL was taken from the Pokemon.".to_string()),
+        Ok(_) if stage == 1 => {
+            runtime_shell.field_notice = Some("The MAIL was sent to your PC.".to_string())
+        }
+        Ok(_) => {
+            runtime_shell.field_notice = Some("The MAIL was taken from the Pokemon.".to_string())
+        }
         Err(error) if stage == 1 && error.to_string().contains("mailbox is full") => {
             runtime_shell.field_notice = Some("Your PC's MAILBOX is full.".to_string())
         }
@@ -3431,9 +3442,7 @@ fn cycle_visible_party_move_reorder_pokemon(
     for _ in 0..party_len {
         next = wrapped_index(next, party_len, delta);
         let pokemon = &snapshot.party.slots[next].pokemon;
-        if !pokemon.is_egg
-            && pokemon.species.id != "EGG"
-        {
+        if !pokemon.is_egg && pokemon.species.id != "EGG" {
             runtime_shell.party_cursor = next;
             runtime_shell.party_move_cursor = None;
             visible_cursor_index(
@@ -3562,8 +3571,7 @@ fn visible_party_actions(
         .iter()
         .map(|learned| learned.name.as_str())
         .collect::<Vec<_>>();
-    let is_egg = selected.pokemon.is_egg
-        || selected.pokemon.species.id == "EGG";
+    let is_egg = selected.pokemon.is_egg || selected.pokemon.species.id == "EGG";
     let link_mode = snapshot.link_session.link_mode != 0;
     let mut actions = Vec::new();
     if !is_egg && !link_mode {
@@ -3717,15 +3725,13 @@ fn confirm_visible_party_hp_transfer_target(runtime_shell: &mut BevyRuntimeShell
         .iter()
         .find(|slot| slot.index == source_index)
         .with_context(|| format!("party HP transfer source {source_index} left the party"))?;
-    let target_is_egg = target.pokemon.is_egg
-        || target.pokemon.species.id == "EGG";
+    let target_is_egg = target.pokemon.is_egg || target.pokemon.species.id == "EGG";
     let invalid_target = target.index == source_index
         || target_is_egg
         || target.pokemon.hp == 0
         || target.pokemon.hp >= target.pokemon.max_hp;
     if invalid_target {
-        runtime_shell.field_notice =
-            Some("That can't be used\non this POKéMON.".to_string());
+        runtime_shell.field_notice = Some("That can't be used\non this POKéMON.".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
@@ -4024,7 +4030,7 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
         return move_visible_time_set_direction(runtime_shell, VisibleTimeSetDirection::Left);
     }
     if runtime_shell.pending_gender_selection.is_some() {
-        return move_visible_gender_selection(runtime_shell, -1);
+        return Ok(());
     }
     if runtime_shell.save_menu_open {
         return move_visible_save_prompt_cursor(runtime_shell, -1);
@@ -4042,12 +4048,23 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
         return adjust_visible_pack_toss_quantity(runtime_shell, -10);
     }
     if runtime_shell.pc_confirmation.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.yes_no_cursor, "pc:confirmation".to_string(), 2, -1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.yes_no_cursor,
+            "pc:confirmation".to_string(),
+            2,
+            -1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if let Some(stage) = runtime_shell.party_mail_take_stage {
         return move_visible_cursor_slot(
             &mut runtime_shell.yes_no_cursor,
-            if stage == 1 { "party:mail-send-pc" } else { "party:mail-lose-message" }.to_string(),
+            if stage == 1 {
+                "party:mail-send-pc"
+            } else {
+                "party:mail-lose-message"
+            }
+            .to_string(),
             2,
             -1,
             &mut runtime_shell.last_audio_events,
@@ -4189,14 +4206,32 @@ fn move_visible_primary_cursor_left(runtime_shell: &mut BevyRuntimeShell) -> Res
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
         let option_count = visible_player_pc_actions(runtime_shell).len();
-        return move_visible_cursor_slot(&mut runtime_shell.player_pc_action_cursor, "pc:player-actions".to_string(), option_count, -1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.player_pc_action_cursor,
+            "pc:player-actions".to_string(),
+            option_count,
+            -1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_action_cursor.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_action_cursor, "pc:mailbox-actions".to_string(), VISIBLE_MAILBOX_ACTIONS.len(), -1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_action_cursor,
+            "pc:mailbox-actions".to_string(),
+            VISIBLE_MAILBOX_ACTIONS.len(),
+            -1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_cursor.is_some() {
         let count = snapshot.mailbox.len();
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_cursor, "pc:mailbox".to_string(), count, -1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_cursor,
+            "pc:mailbox".to_string(),
+            count,
+            -1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if visible_menu_has_selectable_options(&snapshot) {
         return move_visible_menu_cursor_horizontal(runtime_shell, -1);
@@ -4264,7 +4299,7 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
         return move_visible_time_set_direction(runtime_shell, VisibleTimeSetDirection::Right);
     }
     if runtime_shell.pending_gender_selection.is_some() {
-        return move_visible_gender_selection(runtime_shell, 1);
+        return Ok(());
     }
     if runtime_shell.save_menu_open {
         return move_visible_save_prompt_cursor(runtime_shell, 1);
@@ -4282,12 +4317,23 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
         return adjust_visible_pack_toss_quantity(runtime_shell, 10);
     }
     if runtime_shell.pc_confirmation.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.yes_no_cursor, "pc:confirmation".to_string(), 2, 1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.yes_no_cursor,
+            "pc:confirmation".to_string(),
+            2,
+            1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if let Some(stage) = runtime_shell.party_mail_take_stage {
         return move_visible_cursor_slot(
             &mut runtime_shell.yes_no_cursor,
-            if stage == 1 { "party:mail-send-pc" } else { "party:mail-lose-message" }.to_string(),
+            if stage == 1 {
+                "party:mail-send-pc"
+            } else {
+                "party:mail-lose-message"
+            }
+            .to_string(),
             2,
             1,
             &mut runtime_shell.last_audio_events,
@@ -4429,14 +4475,32 @@ fn move_visible_primary_cursor_right(runtime_shell: &mut BevyRuntimeShell) -> Re
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
         let option_count = visible_player_pc_actions(runtime_shell).len();
-        return move_visible_cursor_slot(&mut runtime_shell.player_pc_action_cursor, "pc:player-actions".to_string(), option_count, 1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.player_pc_action_cursor,
+            "pc:player-actions".to_string(),
+            option_count,
+            1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_action_cursor.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_action_cursor, "pc:mailbox-actions".to_string(), VISIBLE_MAILBOX_ACTIONS.len(), 1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_action_cursor,
+            "pc:mailbox-actions".to_string(),
+            VISIBLE_MAILBOX_ACTIONS.len(),
+            1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_cursor.is_some() {
         let count = snapshot.mailbox.len();
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_cursor, "pc:mailbox".to_string(), count, 1, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_cursor,
+            "pc:mailbox".to_string(),
+            count,
+            1,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if visible_menu_has_selectable_options(&snapshot) {
         return move_visible_menu_cursor_horizontal(runtime_shell, 1);
@@ -4477,7 +4541,12 @@ fn shift_visible_battle_pack_pocket(
     let item_ids = carried_battle_non_ball_item_ids(&snapshot);
     let ball_ids = carried_ball_item_ids(&snapshot);
     let key_count = carried_item_count(&snapshot.bag.key_items);
-    let tmhm_count = snapshot.bag.tm_hm.iter().filter(|item| item.quantity > 0).count();
+    let tmhm_count = snapshot
+        .bag
+        .tm_hm
+        .iter()
+        .filter(|item| item.quantity > 0)
+        .count();
     let current = if runtime_shell.ball_cursor.is_some() {
         FieldPackPocket::Balls
     } else if runtime_shell.key_item_cursor.is_some() {
@@ -4508,8 +4577,15 @@ fn shift_visible_battle_pack_pocket(
                 surface_id: "battle:bag-items".to_string(),
                 option_index: runtime_shell.field_pack_cursor_positions[0],
             });
-            visible_cursor_index(&mut runtime_shell.bag_cursor, "battle:bag-items", field_pack_selectable_count(item_ids.len()));
-            runtime_shell.field_pack_cursor_positions[0] = runtime_shell.bag_cursor.as_ref().map_or(0, |cursor| cursor.option_index);
+            visible_cursor_index(
+                &mut runtime_shell.bag_cursor,
+                "battle:bag-items",
+                field_pack_selectable_count(item_ids.len()),
+            );
+            runtime_shell.field_pack_cursor_positions[0] = runtime_shell
+                .bag_cursor
+                .as_ref()
+                .map_or(0, |cursor| cursor.option_index);
             FieldPackPocket::Items
         }
         FieldPackPocket::Balls => {
@@ -4517,8 +4593,15 @@ fn shift_visible_battle_pack_pocket(
                 surface_id: "bag:balls".to_string(),
                 option_index: runtime_shell.field_pack_cursor_positions[1],
             });
-            visible_cursor_index(&mut runtime_shell.ball_cursor, "bag:balls", field_pack_selectable_count(ball_ids.len()));
-            runtime_shell.field_pack_cursor_positions[1] = runtime_shell.ball_cursor.as_ref().map_or(0, |cursor| cursor.option_index);
+            visible_cursor_index(
+                &mut runtime_shell.ball_cursor,
+                "bag:balls",
+                field_pack_selectable_count(ball_ids.len()),
+            );
+            runtime_shell.field_pack_cursor_positions[1] = runtime_shell
+                .ball_cursor
+                .as_ref()
+                .map_or(0, |cursor| cursor.option_index);
             FieldPackPocket::Balls
         }
         FieldPackPocket::KeyItems => {
@@ -4526,8 +4609,15 @@ fn shift_visible_battle_pack_pocket(
                 surface_id: "bag:key-items".to_string(),
                 option_index: runtime_shell.field_pack_cursor_positions[2],
             });
-            visible_cursor_index(&mut runtime_shell.key_item_cursor, "bag:key-items", field_pack_selectable_count(key_count));
-            runtime_shell.field_pack_cursor_positions[2] = runtime_shell.key_item_cursor.as_ref().map_or(0, |cursor| cursor.option_index);
+            visible_cursor_index(
+                &mut runtime_shell.key_item_cursor,
+                "bag:key-items",
+                field_pack_selectable_count(key_count),
+            );
+            runtime_shell.field_pack_cursor_positions[2] = runtime_shell
+                .key_item_cursor
+                .as_ref()
+                .map_or(0, |cursor| cursor.option_index);
             FieldPackPocket::KeyItems
         }
         FieldPackPocket::TmHm => {
@@ -4535,15 +4625,25 @@ fn shift_visible_battle_pack_pocket(
                 surface_id: "bag:tmhm".to_string(),
                 option_index: runtime_shell.field_pack_cursor_positions[3],
             });
-            visible_cursor_index(&mut runtime_shell.tmhm_cursor, "bag:tmhm", field_pack_selectable_count(tmhm_count));
-            runtime_shell.field_pack_cursor_positions[3] = runtime_shell.tmhm_cursor.as_ref().map_or(0, |cursor| cursor.option_index);
+            visible_cursor_index(
+                &mut runtime_shell.tmhm_cursor,
+                "bag:tmhm",
+                field_pack_selectable_count(tmhm_count),
+            );
+            runtime_shell.field_pack_cursor_positions[3] = runtime_shell
+                .tmhm_cursor
+                .as_ref()
+                .map_or(0, |cursor| cursor.option_index);
             FieldPackPocket::TmHm
         }
         FieldPackPocket::Custom(_) => anyhow::bail!("battle Pack cannot open a custom pocket"),
     };
     runtime_shell.field_pack_pocket = None;
     runtime_shell.last_field_pack_pocket = next.clone();
-    set_shell_action_status(runtime_shell, format!("PACK {}", field_pack_pocket_label(&next)));
+    set_shell_action_status(
+        runtime_shell,
+        format!("PACK {}", field_pack_pocket_label(&next)),
+    );
     runtime_shell
         .last_audio_events
         .push("shifted battle Pack pocket".to_string());
@@ -4586,10 +4686,7 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
         return Ok(());
     }
     if runtime_shell.pc_item_quantity.is_some() {
-        return adjust_visible_pc_item_quantity(
-            runtime_shell,
-            if delta < 0 { 1 } else { -1 },
-        );
+        return adjust_visible_pc_item_quantity(runtime_shell, if delta < 0 { 1 } else { -1 });
     }
     if runtime_shell.options_menu_open {
         return move_visible_options_cursor(runtime_shell, delta);
@@ -4709,18 +4806,26 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
         return Ok(());
     }
     if runtime_shell.pack_toss.is_some() {
-        return adjust_visible_pack_toss_quantity(
-            runtime_shell,
-            if delta < 0 { 1 } else { -1 },
-        );
+        return adjust_visible_pack_toss_quantity(runtime_shell, if delta < 0 { 1 } else { -1 });
     }
     if runtime_shell.pc_confirmation.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.yes_no_cursor, "pc:confirmation".to_string(), 2, delta, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.yes_no_cursor,
+            "pc:confirmation".to_string(),
+            2,
+            delta,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if let Some(stage) = runtime_shell.party_mail_take_stage {
         return move_visible_cursor_slot(
             &mut runtime_shell.yes_no_cursor,
-            if stage == 1 { "party:mail-send-pc" } else { "party:mail-lose-message" }.to_string(),
+            if stage == 1 {
+                "party:mail-send-pc"
+            } else {
+                "party:mail-lose-message"
+            }
+            .to_string(),
             2,
             delta,
             &mut runtime_shell.last_audio_events,
@@ -4916,14 +5021,32 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
         let option_count = visible_player_pc_actions(runtime_shell).len();
-        return move_visible_cursor_slot(&mut runtime_shell.player_pc_action_cursor, "pc:player-actions".to_string(), option_count, delta, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.player_pc_action_cursor,
+            "pc:player-actions".to_string(),
+            option_count,
+            delta,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_action_cursor.is_some() {
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_action_cursor, "pc:mailbox-actions".to_string(), VISIBLE_MAILBOX_ACTIONS.len(), delta, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_action_cursor,
+            "pc:mailbox-actions".to_string(),
+            VISIBLE_MAILBOX_ACTIONS.len(),
+            delta,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.mailbox_cursor.is_some() {
         let count = snapshot.mailbox.len();
-        return move_visible_cursor_slot(&mut runtime_shell.mailbox_cursor, "pc:mailbox".to_string(), count, delta, &mut runtime_shell.last_audio_events);
+        return move_visible_cursor_slot(
+            &mut runtime_shell.mailbox_cursor,
+            "pc:mailbox".to_string(),
+            count,
+            delta,
+            &mut runtime_shell.last_audio_events,
+        );
     }
     if runtime_shell.pokedex_menu_open {
         return move_visible_pokedex_cursor(runtime_shell, delta);
@@ -5099,9 +5222,7 @@ fn move_visible_decoration_cursor(
             cursor,
             ..
         } => (cursor, "pc:decorations:items", decorations.len() + 2),
-        VisibleDecorationMenuPhase::Side { cursor, .. } => {
-            (cursor, "pc:decorations:side", 3)
-        }
+        VisibleDecorationMenuPhase::Side { cursor, .. } => (cursor, "pc:decorations:side", 3),
     };
     let mut slot = Some(cursor.clone());
     move_visible_cursor_slot(
@@ -5132,9 +5253,8 @@ fn adjust_visible_kurt_apricorn_quantity(
         .map(|(_, quantity)| *quantity)
         .context("Kurt quantity selection has no Apricorn type")?;
     let current = runtime_shell.kurt_apricorn_quantity.unwrap_or(1);
-    runtime_shell.kurt_apricorn_quantity = Some(
-        (i32::from(current) + i32::from(delta)).clamp(1, i32::from(maximum)) as u16,
-    );
+    runtime_shell.kurt_apricorn_quantity =
+        Some((i32::from(current) + i32::from(delta)).clamp(1, i32::from(maximum)) as u16);
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
 }

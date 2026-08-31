@@ -258,7 +258,12 @@ fn required_pack_item_entry(
         .items
         .iter()
         .find(|catalog| catalog.item_id == item.item_id)
-        .with_context(|| format!("field Pack item {} is missing from the catalog", item.item_id))?;
+        .with_context(|| {
+            format!(
+                "field Pack item {} is missing from the catalog",
+                item.item_id
+            )
+        })?;
     Ok(compact_scene_label(
         &format!(
             "{marker}{} x{:02}",
@@ -297,11 +302,7 @@ fn required_selected_field_pack_item_label(
         })?;
     let quantity = carried_item_quantity(snapshot, &item_id)
         .with_context(|| format!("selected field Pack item {item_id} has no carried quantity"))?;
-    required_pack_item_entry(
-        snapshot,
-        &RuntimeBagItemSnapshot { item_id, quantity },
-        "",
-    )
+    required_pack_item_entry(snapshot, &RuntimeBagItemSnapshot { item_id, quantity }, "")
 }
 
 fn pack_item_entry(
@@ -364,12 +365,8 @@ fn required_selected_tmhm_pack_entries(
     runtime_shell: &BevyRuntimeShell,
 ) -> Result<Vec<String>> {
     let row_count = field_pack_selectable_count(snapshot.bag.tm_hm.len());
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.tmhm_cursor,
-        "bag:tmhm",
-        row_count,
-    )
-    .context("TM/HM pocket has no valid cursor")?;
+    let selected = strict_readonly_cursor_index(&runtime_shell.tmhm_cursor, "bag:tmhm", row_count)
+        .context("TM/HM pocket has no valid cursor")?;
     windowed_index_range(selected, row_count)
         .map(|index| {
             let marker = if index == selected { ">" } else { " " };
@@ -394,15 +391,15 @@ fn required_tmhm_pack_entry(
         )
     })?;
     anyhow::ensure!(
-        snapshot.moves.iter().any(|move_data| move_data.move_id == move_id),
+        snapshot
+            .moves
+            .iter()
+            .any(|move_data| move_data.move_id == move_id),
         "TM/HM item {} references missing move {move_id}",
         tmhm.item_id
     );
     Ok(compact_scene_label(
-        &format!(
-            "{marker}{} x01",
-            item_display_name(snapshot, &tmhm.item_id)
-        ),
+        &format!("{marker}{} x01", item_display_name(snapshot, &tmhm.item_id)),
         30,
     ))
 }
@@ -429,10 +426,7 @@ fn tmhm_pack_entry(
         );
     };
     compact_scene_label(
-        &format!(
-            "{marker}{} x01",
-            item_display_name(snapshot, &tmhm.item_id)
-        ),
+        &format!("{marker}{} x01", item_display_name(snapshot, &tmhm.item_id)),
         30,
     )
 }
@@ -459,7 +453,10 @@ fn party_action_entry(
             30,
         ),
         PartyAction::Move => compact_scene_label(
-            &format!("{marker}MOVE {}", selected_party_action_subject(snapshot, runtime_shell)),
+            &format!(
+                "{marker}MOVE {}",
+                selected_party_action_subject(snapshot, runtime_shell)
+            ),
             30,
         ),
         PartyAction::Item => compact_scene_label(
@@ -612,7 +609,10 @@ fn party_slot_entry(
     selected: bool,
 ) -> String {
     let marker = if selected { ">" } else { " " };
-    compact_scene_label(&format!("{marker}{}", party_slot_summary(snapshot, slot)), 30)
+    compact_scene_label(
+        &format!("{marker}{}", party_slot_summary(snapshot, slot)),
+        30,
+    )
 }
 
 fn party_cancel_entry(selected: bool) -> String {
@@ -629,7 +629,10 @@ fn party_switch_slot_entry(
     let marker = if selected { ">" } else { " " };
     let source_marker = if source { "*" } else { "" };
     compact_scene_label(
-        &format!("{marker}{source_marker}{}", party_slot_summary(snapshot, slot)),
+        &format!(
+            "{marker}{source_marker}{}",
+            party_slot_summary(snapshot, slot)
+        ),
         30,
     )
 }
@@ -1120,7 +1123,13 @@ fn format_bag_details(
             lines,
         );
     }
-    append_item_section(snapshot, "pc_items", &snapshot.bag.pc_items, selected_pc_item, lines);
+    append_item_section(
+        snapshot,
+        "pc_items",
+        &snapshot.bag.pc_items,
+        selected_pc_item,
+        lines,
+    );
 }
 
 fn carried_item_count(items: &[RuntimeBagItemSnapshot]) -> usize {
@@ -1364,10 +1373,9 @@ fn format_progress_details(snapshot: &RuntimeShellSnapshot, lines: &mut Vec<Stri
     ));
     lines.push(format!("time={:?}", snapshot.progression.time));
     lines.push(format!(
-        "multiplayer frame={} state_hash={:#010x} rng_seed={:#010x} linked_menu_results={}",
+        "multiplayer frame={} state_hash={:#010x} linked_menu_results={}",
         snapshot.state_checksum.frame(),
         snapshot.state_checksum.hash(),
-        snapshot.progression.rng_seed,
         snapshot.linked_menu_results.len()
     ));
     for flag in snapshot.progression.active_engine_flags.iter().take(8) {

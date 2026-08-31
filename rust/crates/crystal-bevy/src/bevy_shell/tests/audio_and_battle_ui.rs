@@ -43,6 +43,333 @@ fn browser_audio_requires_a_real_user_gesture_before_starting_web_audio() {
 }
 
 #[test]
+fn music_none_reset_survives_a_following_music_request_until_playback() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.pending_music_stop = true;
+    runtime_shell.pending_full_audio_reset = true;
+    runtime_shell.active_music = Some("MUSIC_CREDITS".to_string());
+    runtime_shell.transient_audio_playing = true;
+    runtime_shell.active_transient_kind = Some(ModpackAudioKind::SoundEffect);
+
+    let mut app = App::new();
+    app.insert_resource(runtime_shell);
+    app.add_systems(Update, play_pending_audio);
+    app.world_mut().spawn(TransientAudioMarker);
+    app.update();
+
+    let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+    assert!(!runtime_shell.pending_music_stop);
+    assert!(!runtime_shell.pending_full_audio_reset);
+    assert!(!runtime_shell.transient_audio_playing);
+    assert!(runtime_shell.active_transient_kind.is_none());
+    assert_eq!(
+        app.world_mut()
+            .query_filtered::<Entity, With<TransientAudioMarker>>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn playmusic_music_none_resets_audio_without_queueing_a_fake_track() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.active_music = Some("MUSIC_ROUTE_29".to_string());
+    let checksum = runtime_shell
+        .shell
+        .state_checksum()
+        .expect("source state checksum");
+    let mut drained_batch = Vec::new();
+
+    apply_pending_audio_action(
+        &mut runtime_shell,
+        BevyAudioAction::StopMusic {
+            audio_id: "MUSIC_NONE".to_string(),
+        },
+        &mut drained_batch,
+        &checksum,
+    );
+
+    assert!(runtime_shell.pending_music_stop);
+    assert!(runtime_shell.pending_full_audio_reset);
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+    assert!(
+        drained_batch.is_empty(),
+        "PlayMusic(MUSIC_NONE) calls _InitSound; it does not start a silent audio program"
+    );
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let mut source_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 0,
+            map_name: "ElmsLab".to_string(),
+            tile_x: 5,
+            tile_y: 8,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize Elm's Lab shell");
+    let source_stop = source_shell
+        .shell
+        .script_audio_command_keys()
+        .into_iter()
+        .find(|key| {
+            key.map_name == "ElmsLab"
+                && key.source_script == "ElmsLabHealingMachine_HealParty"
+                && key.command == "playmusic"
+                && key.audio_id.as_deref() == Some("MUSIC_NONE")
+        })
+        .expect("exported Elm healing-machine PlayMusic(MUSIC_NONE)");
+    source_shell
+        .shell
+        .apply_script_audio_command(
+            &source_stop.map_name,
+            &source_stop.source_script,
+            source_stop.command_index,
+        )
+        .expect("execute exported Elm silence command");
+    let drain = source_shell
+        .shell
+        .drain_resolved_audio_events()
+        .expect("resolve exported Elm silence command");
+    apply_resolved_audio_drain(&mut source_shell, drain);
+    assert!(source_shell.pending_music_stop);
+    assert!(source_shell.pending_full_audio_reset);
+    assert_eq!(source_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+    assert!(!source_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::Music && command.audio_id == "MUSIC_NONE"
+    }));
+}
+
+#[test]
+fn magnet_train_playmusic2_waits_one_frame_between_stop_and_restart() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.pending_audio.clear();
+    runtime_shell.active_music = Some("MUSIC_ROUTE_29".to_string());
+
+    queue_visible_magnet_train_music(&mut runtime_shell)
+        .expect("begin source PlayMusic2 boundary");
+
+    assert!(runtime_shell.pending_music_stop);
+    assert!(
+        runtime_shell.pending_audio.is_empty(),
+        "PlayMusic2 stops music and executes DelayFrame before starting the replacement"
+    );
+
+    runtime_shell.visible_magnet_train = Some(VisibleMagnetTrain {
+        direction: 1,
+        hold_position: 64,
+        final_position: -96,
+        position: 96,
+        offset: 96,
+        player_x: -4,
+        player_sprite_visible: false,
+        player_sprite_frame: 0,
+        player_sprite_duration: 0,
+        wait_counter: 0,
+        phase: 0,
+        arrival_sfx_played: false,
+    });
+    advance_visible_magnet_train(&mut runtime_shell)
+        .expect("advance the PlayMusic2 DelayFrame boundary");
+
+    assert!(runtime_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::Music
+            && command.audio_id == "MUSIC_MAGNET_TRAIN"
+    }));
+}
+
+#[test]
+fn magnet_train_background_uses_source_attribute_palettes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let base = load_visible_magnet_train_base(&asset_root, "day")
+        .expect("Magnet Train background assembled from source tiles");
+    let palettes = load_tileset_palette_bank(&asset_root, "train_station", "day")
+        .expect("read source palette bank")
+        .expect("source palette bank");
+
+    for (pixel_index, pixel) in base.rgba.chunks_exact(4).enumerate() {
+        let tile_x = pixel_index % (20 * SOURCE_TILE_SIZE) / SOURCE_TILE_SIZE;
+        let tile_y = pixel_index / (20 * SOURCE_TILE_SIZE) / SOURCE_TILE_SIZE;
+        let palette_id = if tile_y == 8 && (7..13).contains(&tile_x) {
+            4 // PAL_BG_YELLOW
+        } else if tile_y < 4 || tile_y >= 14 {
+            2 // PAL_BG_GREEN
+        } else {
+            0 // PAL_BG_GRAY
+        };
+        let expected = palettes[palette_id][usize::from(base.palette_indices[pixel_index])];
+        assert_eq!(pixel, [expected[0], expected[1], expected[2], 255]);
+    }
+}
+
+#[test]
+fn magnet_train_frame_contains_the_source_gendered_player_sprite() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    runtime_shell.visible_continue_screen = None;
+    runtime_shell.visible_magnet_train = Some(VisibleMagnetTrain {
+        direction: 1,
+        hold_position: 64,
+        final_position: -96,
+        position: 64,
+        offset: 0,
+        player_x: 28,
+        player_sprite_visible: true,
+        player_sprite_frame: 0,
+        player_sprite_duration: 8,
+        wait_counter: 0,
+        phase: 2,
+        arrival_sfx_played: false,
+    });
+
+    let mut app = App::new();
+    app.insert_resource(runtime_shell)
+        .insert_resource(RenderedViewport::default())
+        .insert_resource(RenderedTilesetArt::default())
+        .init_resource::<Assets<Image>>()
+        .add_systems(Update, render_playfield);
+    app.update();
+
+    let world = app.world();
+    assert_eq!(world.resource::<BevyRuntimeShell>().last_error, None);
+    let frame = world
+        .resource::<RenderedTilesetArt>()
+        .intro_presented_surface
+        .as_ref()
+        .expect("Magnet Train must commit one native LCD frame");
+    let image = world
+        .resource::<Assets<Image>>()
+        .get(&frame.handle)
+        .expect("Magnet Train LCD image");
+    let rendered_art = world.resource::<RenderedTilesetArt>();
+    let player = &rendered_art
+        .magnet_train_player_cache
+        .values()
+        .next()
+        .expect("gendered player frame cache")
+        .standing;
+    let base = rendered_art
+        .magnet_train_base_cache
+        .values()
+        .next()
+        .expect("time-aware Magnet Train background cache");
+    let mut visible_player_pixel = false;
+    for row in 0..16 {
+        for col in 0..16 {
+            let player_offset = (row * 16 + col) * 4;
+            if player[player_offset + 3] == 0 {
+                continue;
+            }
+            let target_x = 12 + col;
+            let target_y = 61 + row;
+            let shifted_source_x = (target_x + 64) % (20 * SOURCE_TILE_SIZE);
+            if base.palette_indices[target_y * (20 * SOURCE_TILE_SIZE) + shifted_source_x] != 0 {
+                continue;
+            }
+            let target_offset = (target_y * (20 * SOURCE_TILE_SIZE) + target_x) * 4;
+            assert_eq!(
+                &image.data[target_offset..target_offset + 4],
+                &player[player_offset..player_offset + 4]
+            );
+            visible_player_pixel = true;
+        }
+    }
+    assert!(
+        visible_player_pixel,
+        "the gendered OAM frame must have at least one pixel above BG color zero"
+    );
+}
+
+#[test]
+fn magnet_train_player_uses_source_palettes_and_oam_priority() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let red = load_visible_magnet_train_player_frames(&asset_root, false, "day")
+        .expect("PAL_OW_RED player frames");
+    let blue = load_visible_magnet_train_player_frames(&asset_root, true, "day")
+        .expect("PAL_OW_BLUE player frames");
+    assert!(red.standing.chunks_exact(4).any(|pixel| {
+        pixel[3] != 0 && pixel[0] > pixel[1] && pixel[0] > pixel[2]
+    }));
+    assert!(blue.standing.chunks_exact(4).any(|pixel| {
+        pixel[3] != 0 && pixel[2] > pixel[0] && pixel[2] > pixel[1]
+    }));
+
+    const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
+    const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
+    let mut target = vec![0_u8; WIDTH * HEIGHT * 4];
+    let mut player = vec![0_u8; 16 * 16 * 4];
+    player[0..4].copy_from_slice(&[248, 56, 8, 255]);
+    let mut priority = vec![false; WIDTH * HEIGHT];
+    composite_visible_magnet_train_player(&mut target, &priority, &player, 0, 0, false);
+    assert_eq!(&target[0..4], &[0, 0, 0, 0]);
+
+    priority[0] = true;
+    composite_visible_magnet_train_player(&mut target, &priority, &player, 0, 0, false);
+    assert_eq!(&target[0..4], &[248, 56, 8, 255]);
+
+    target.fill(0);
+    player.fill(0);
+    player[15 * 4..15 * 4 + 4].copy_from_slice(&[80, 72, 248, 255]);
+    composite_visible_magnet_train_player(&mut target, &priority, &player, 0, 0, true);
+    assert_eq!(&target[0..4], &[80, 72, 248, 255]);
+}
+
+#[test]
+fn magnet_train_player_walk_cycle_and_global_offset_follow_sprite_anim_order() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.visible_magnet_train = Some(VisibleMagnetTrain {
+        direction: 1,
+        hold_position: 64,
+        final_position: -96,
+        position: 66,
+        offset: 0,
+        player_x: 27,
+        player_sprite_visible: false,
+        player_sprite_frame: 0,
+        player_sprite_duration: 0,
+        wait_counter: 0,
+        phase: 2,
+        arrival_sfx_played: false,
+    });
+
+    advance_visible_magnet_train(&mut runtime_shell).expect("first sprite-animation frame");
+    let animation = runtime_shell.visible_magnet_train.as_ref().unwrap();
+    assert!(animation.player_sprite_visible);
+    assert_eq!(animation.player_sprite_frame, 0);
+    assert_eq!(animation.player_sprite_duration, 8);
+    assert_eq!(animation.position, 65);
+    assert_eq!(animation.player_x, 28);
+
+    for _ in 0..8 {
+        advance_visible_magnet_train(&mut runtime_shell).expect("retain eight-count OAM frame");
+    }
+    let animation = runtime_shell.visible_magnet_train.as_ref().unwrap();
+    assert_eq!(animation.player_sprite_frame, 0);
+    assert_eq!(animation.player_sprite_duration, 0);
+    advance_visible_magnet_train(&mut runtime_shell).expect("advance to walking OAM set");
+    let animation = runtime_shell.visible_magnet_train.as_ref().unwrap();
+    assert_eq!(animation.player_sprite_frame, 1);
+    assert_eq!(animation.player_sprite_duration, 8);
+}
+
+#[test]
 fn waitsfx_keeps_a_sound_queued_earlier_in_the_same_audio_drain() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -87,6 +414,183 @@ fn waitsfx_keeps_a_sound_queued_earlier_in_the_same_audio_drain() {
 
     assert_eq!(drained_batch.len(), 1);
     assert_eq!(drained_batch[0].audio_id, "SFX_ITEM");
+}
+
+#[test]
+fn special_waitsfx_blocks_fly_and_rock_smash_until_the_transient_finishes() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_STRENGTH")
+        .expect("queue source sound before special WaitSFX");
+    let special = runtime_shell
+        .shell
+        .wait_sfx_special()
+        .expect("execute source WaitSFX special");
+
+    assert!(
+        activate_visible_special_routine_boundary(&mut runtime_shell, &special.outcome.effect)
+            .expect("activate special WaitSFX boundary")
+    );
+    assert!(runtime_shell.visible_wait_sfx_boundary);
+    assert!(
+        runtime_shell
+            .shell
+            .snapshot()
+            .expect("waiting snapshot")
+            .script_events
+            .waiting_for_sound_effect
+    );
+
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+        .expect("pending command keeps wait active");
+    assert!(runtime_shell.visible_wait_sfx_boundary);
+
+    runtime_shell.pending_audio.clear();
+    runtime_shell.transient_audio_playing = true;
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+        .expect("active transient keeps wait active");
+    assert!(runtime_shell.visible_wait_sfx_boundary);
+
+    runtime_shell.transient_audio_playing = false;
+    let snapshot = runtime_shell
+        .shell
+        .presentation_snapshot()
+        .expect("snapshot");
+    advance_visible_wait_sfx_boundary(&mut runtime_shell, &snapshot, false)
+        .expect("finished transient releases wait");
+    assert!(!runtime_shell.visible_wait_sfx_boundary);
+    assert!(
+        !runtime_shell
+            .shell
+            .snapshot()
+            .expect("released snapshot")
+            .script_events
+            .waiting_for_sound_effect
+    );
+}
+
+#[test]
+fn music_fade_keeps_the_old_track_until_the_asm_counter_finishes() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.active_music = Some("MUSIC_ROUTE_29".to_string());
+    begin_visible_music_fade(&mut runtime_shell, "MUSIC_NONE", 2)
+        .expect("begin source music fade");
+
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_ROUTE_29"));
+    assert!(!runtime_shell.pending_music_stop);
+    advance_visible_music_fade(&mut runtime_shell, 1).expect("first fade update");
+    assert_eq!(runtime_shell.music_volume, 6);
+    assert_eq!(runtime_shell.music_fade.as_ref().map(|fade| fade.count), Some(2));
+
+    advance_visible_music_fade(&mut runtime_shell, 20).expect("fade to zero volume");
+    assert_eq!(runtime_shell.music_volume, 0);
+    assert!(runtime_shell.music_fade.is_some());
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_ROUTE_29"));
+
+    advance_visible_music_fade(&mut runtime_shell, 1).expect("finish source fade");
+    assert!(runtime_shell.music_fade.is_none());
+    assert_eq!(runtime_shell.music_volume, 7);
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_NONE"));
+    assert!(runtime_shell.pending_music_stop);
+    assert!(runtime_shell.pending_full_audio_reset);
+
+    let mut replacement_shell = core_modular_title_shell_for_test();
+    replacement_shell.active_music = Some("MUSIC_ROUTE_29".to_string());
+    begin_visible_music_fade(&mut replacement_shell, "MUSIC_NEW_BARK_TOWN", 0)
+        .expect("begin zero-rate replacement fade");
+    advance_visible_music_fade(&mut replacement_shell, 8)
+        .expect("complete zero-rate replacement fade");
+    assert_eq!(
+        replacement_shell.active_music.as_deref(),
+        Some("MUSIC_NEW_BARK_TOWN")
+    );
+    assert!(replacement_shell.pending_audio.iter().any(|command| {
+        command.kind == ModpackAudioKind::Music
+            && command.audio_id == "MUSIC_NEW_BARK_TOWN"
+    }));
+
+    let mut bicycle_shell = core_modular_title_shell_for_test();
+    bicycle_shell.shell.session.overworld.player.mode = MovementMode::Bike;
+    bicycle_shell.active_music = Some("MUSIC_ROUTE_29".to_string());
+    begin_visible_music_fade(&mut bicycle_shell, "MUSIC_NEW_BARK_TOWN", 2)
+        .expect("begin bicycle replacement fade");
+    advance_visible_music_fade(&mut bicycle_shell, 22)
+        .expect("load bicycle fade target at zero volume");
+    assert_eq!(bicycle_shell.music_volume, 0);
+    assert!(bicycle_shell
+        .music_fade
+        .as_ref()
+        .is_some_and(|fade| fade.fading_in && fade.rate == 0 && fade.count == 0));
+    assert_eq!(
+        bicycle_shell.active_music.as_deref(),
+        Some("MUSIC_NEW_BARK_TOWN")
+    );
+    advance_visible_music_fade(&mut bicycle_shell, 7)
+        .expect("raise bicycle target to maximum volume");
+    assert_eq!(bicycle_shell.music_volume, 7);
+    assert!(bicycle_shell.music_fade.is_some());
+    advance_visible_music_fade(&mut bicycle_shell, 1)
+        .expect("finish bicycle fade-in on the next source update");
+    assert!(bicycle_shell.music_fade.is_none());
+}
+
+#[test]
+fn players_house_radio_uses_the_source_musicfadeout_without_stopping_music() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    let source_fade = runtime_shell
+        .shell
+        .script_audio_command_keys()
+        .into_iter()
+        .find(|key| {
+            key.map_name == "PlayersHouse2F"
+                && key.source_script == "PlayersHouseRadioScript"
+                && key.command == "musicfadeout"
+        })
+        .expect("exported PlayersHouseRadioScript musicfadeout command");
+    assert_eq!(source_fade.audio_id.as_deref(), Some("MUSIC_NEW_BARK_TOWN"));
+    assert_eq!(source_fade.fade_frames, Some(16));
+
+    runtime_shell.active_music = Some("MUSIC_POKEMON_TALK".to_string());
+    runtime_shell
+        .shell
+        .apply_script_audio_command(
+            &source_fade.map_name,
+            &source_fade.source_script,
+            source_fade.command_index,
+        )
+        .expect("execute the exported source fade command");
+    take_visible_pending_music_fade(&mut runtime_shell)
+        .expect("take the source script fade boundary");
+
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_POKEMON_TALK"));
+    assert!(!runtime_shell.pending_music_stop);
+    assert!(runtime_shell.music_fade.as_ref().is_some_and(|fade| {
+        fade.target_music == "MUSIC_NEW_BARK_TOWN"
+            && fade.rate == 16
+            && fade.count == 0
+            && !fade.fading_in
+    }));
+
+    let drain = runtime_shell
+        .shell
+        .drain_resolved_audio_events()
+        .expect("drain the matching source audio event");
+    apply_resolved_audio_drain(&mut runtime_shell, drain);
+    assert!(runtime_shell.music_fade.as_ref().is_some_and(|fade| {
+        fade.target_music == "MUSIC_NEW_BARK_TOWN"
+            && fade.rate == 16
+            && fade.count == 0
+            && !fade.fading_in
+    }));
+    assert_eq!(runtime_shell.active_music.as_deref(), Some("MUSIC_POKEMON_TALK"));
+    assert!(!runtime_shell.pending_music_stop);
 }
 
 #[test]
@@ -289,11 +793,11 @@ fn playback_cache_keeps_canonical_pcm_without_an_audio_container() {
         pcm.clone(),
         AudioPcmFormat {
             sample_rate_hz: 22_050,
-            channels: 1,
+            channels: 2,
             bits_per_sample: 16,
         },
         Some(0),
-        Some(2),
+        Some(1),
     )
     .expect("cache canonical PCM");
 
@@ -303,7 +807,7 @@ fn playback_cache_keeps_canonical_pcm_without_an_audio_container() {
         pcm_i16_samples(&cached).unwrap().as_ref(),
         &[0x1234, -0x1234]
     );
-    assert_eq!(cached.loop_range, Some((0, 2)));
+    assert_eq!(cached.loop_range, Some((0, 1)));
 }
 
 #[test]
@@ -319,7 +823,7 @@ fn playback_cache_reuses_preconverted_samples() {
         vec![0x34, 0x12, 0xcc, 0xed],
         AudioPcmFormat {
             sample_rate_hz: 22_050,
-            channels: 1,
+            channels: 2,
             bits_per_sample: 16,
         },
         None,
@@ -333,6 +837,43 @@ fn playback_cache_reuses_preconverted_samples() {
         Arc::ptr_eq(&first, &second),
         "replaying a cached SFX must not allocate and convert its PCM again"
     );
+}
+
+#[test]
+fn playback_cache_rejects_noncanonical_mono_pcm() {
+    let command = BevyAudioCommand {
+        audio_id: "SFX_TEST".to_string(),
+        kind: ModpackAudioKind::SoundEffect,
+        mode: ModpackAudioPlaybackMode::RawPcm,
+        looped: false,
+    };
+    let error = decoded_pcm_audio(
+        &command,
+        vec![0, 0],
+        AudioPcmFormat {
+            sample_rate_hz: 22_050,
+            channels: 1,
+            bits_per_sample: 16,
+        },
+        None,
+        None,
+    )
+    .expect_err("mono is not the one canonical stored audio type")
+    .to_string();
+
+    assert!(error.contains("22.05 kHz stereo signed 16-bit"), "{error}");
+}
+
+#[test]
+fn playback_sound_option_preserves_stereo_or_collapses_to_dual_mono() {
+    let samples: Arc<[i16]> = Arc::from([12_000, -8_000, -4_000, 10_000]);
+
+    let stereo = pcm_samples_for_sound_option(&samples, Sound::Stereo);
+    assert!(Arc::ptr_eq(&stereo, &samples));
+
+    let mono = pcm_samples_for_sound_option(&samples, Sound::Mono);
+    assert_eq!(mono.as_ref(), &[2_000, 2_000, 3_000, 3_000]);
+    assert!(!Arc::ptr_eq(&mono, &samples));
 }
 
 #[test]
@@ -410,8 +951,8 @@ fn title_music_queues_and_spawns_cached_pcm() {
     let mut transient_entities = world.query_filtered::<Entity, With<TransientAudioMarker>>();
     assert_eq!(
         transient_entities.iter(world).count(),
-        0,
-        "a replacement music command must stop stale transient audio"
+        1,
+        "PlayMusic must preserve the title entrance SFX on Crystal's separate SFX channels"
     );
 
     {
@@ -419,13 +960,13 @@ fn title_music_queues_and_spawns_cached_pcm() {
         runtime_shell.pending_audio.push(BevyAudioCommand {
             audio_id: title_music.clone(),
             kind: ModpackAudioKind::Music,
-            mode: ModpackAudioPlaybackMode::SequencedMidi,
+            mode: ModpackAudioPlaybackMode::RawPcm,
             looped: true,
         });
         runtime_shell.pending_audio.push(BevyAudioCommand {
             audio_id: title_music.clone(),
             kind: ModpackAudioKind::Music,
-            mode: ModpackAudioPlaybackMode::SequencedMidi,
+            mode: ModpackAudioPlaybackMode::RawPcm,
             looped: true,
         });
     }

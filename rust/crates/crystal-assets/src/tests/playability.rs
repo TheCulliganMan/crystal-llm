@@ -1937,25 +1937,29 @@
             audio: vec![
                 ModpackAudioAsset {
                     id: "MUSIC_ROUTE_29".to_string(),
-                    path: "content-packs/test/music/MUSIC_ROUTE_29.mid".to_string(),
+                    path: "content-packs/test/music/MUSIC_ROUTE_29.pcm".to_string(),
                     kind: ModpackAudioKind::Music,
-                    source: ModpackAudioSource::Midi,
+                    source: ModpackAudioSource::Pcm,
+                    sfx_priority: None,
                     pcm_format: None,
                     pcm_frame_count: None,
                     payload_hash: None,
                     loop_start_sample: None,
                     loop_end_sample: None,
+                    midi_program: None,
                 },
                 ModpackAudioAsset {
                     id: "CRY_HO_OH".to_string(),
-                    path: "content-packs/test/cries/CRY_HO_OH.mid".to_string(),
+                    path: "content-packs/test/cries/CRY_HO_OH.pcm".to_string(),
                     kind: ModpackAudioKind::Cry,
-                    source: ModpackAudioSource::Midi,
+                    source: ModpackAudioSource::Pcm,
+                    sfx_priority: None,
                     pcm_format: None,
                     pcm_frame_count: None,
                     payload_hash: None,
                     loop_start_sample: None,
                     loop_end_sample: None,
+                    midi_program: None,
                 },
             ],
             ..GameDataSet::default()
@@ -2060,14 +2064,16 @@
             .collect(),
             audio: vec![ModpackAudioAsset {
                 id: "CRY_HO_OH".to_string(),
-                path: "content-packs/test/cries/CRY_HO_OH.mid".to_string(),
+                path: "content-packs/test/cries/CRY_HO_OH.pcm".to_string(),
                 kind: ModpackAudioKind::Cry,
-                source: ModpackAudioSource::Midi,
+                source: ModpackAudioSource::Pcm,
+                sfx_priority: None,
                 pcm_format: None,
                 pcm_frame_count: None,
                 payload_hash: None,
                 loop_start_sample: None,
                 loop_end_sample: None,
+                midi_program: None,
             }],
             ..GameDataSet::default()
         };
@@ -2152,14 +2158,16 @@
             maps: [("Start".to_string(), module)].into_iter().collect(),
             audio: vec![ModpackAudioAsset {
                 id: "MUSIC_CUSTOM_ROUTE29".to_string(),
-                path: "content-packs/test/music/MUSIC_CUSTOM_ROUTE29.mid".to_string(),
+                path: "content-packs/test/music/MUSIC_CUSTOM_ROUTE29.pcm".to_string(),
                 kind: ModpackAudioKind::Music,
-                source: ModpackAudioSource::Midi,
+                source: ModpackAudioSource::Pcm,
+                sfx_priority: None,
                 pcm_format: None,
                 pcm_frame_count: None,
                 payload_hash: None,
                 loop_start_sample: None,
                 loop_end_sample: None,
+                midi_program: None,
             }],
             ..GameDataSet::default()
         };
@@ -2201,14 +2209,16 @@
             .collect(),
             audio: vec![ModpackAudioAsset {
                 id: "SFX_TACKLE".to_string(),
-                path: "content-packs/test/sfx/SFX_TACKLE.mid".to_string(),
+                path: "content-packs/test/sfx/SFX_TACKLE.pcm".to_string(),
                 kind: ModpackAudioKind::SoundEffect,
-                source: ModpackAudioSource::Midi,
+                source: ModpackAudioSource::Pcm,
+                sfx_priority: Some(0x41),
                 pcm_format: None,
                 pcm_frame_count: None,
                 payload_hash: None,
                 loop_start_sample: None,
                 loop_end_sample: None,
+                midi_program: None,
             }],
             ..GameDataSet::default()
         };
@@ -2280,34 +2290,36 @@
             audio: vec![
                 ModpackAudioAsset::music(
                     "MUSIC_ROUTE_29",
-                    "content-packs/test/music/MUSIC_ROUTE_29.mid",
+                    "content-packs/test/music/MUSIC_ROUTE_29.pcm",
                 )
                 .expect("map music asset"),
                 ModpackAudioAsset::sound_effect(
                     "SFX_GET_BADGE",
-                    "content-packs/test/sfx/SFX_GET_BADGE.mid",
+                    "content-packs/test/sfx/SFX_GET_BADGE.pcm",
+                    0x9c,
                 )
                 .expect("script sfx asset"),
                 ModpackAudioAsset::sound_effect(
                     "SFX_DEX_FANFARE_LESS_THAN_20",
-                    "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.mid",
+                    "content-packs/test/sfx/SFX_DEX_FANFARE_LESS_THAN_20.pcm",
+                    0x9f,
                 )
                 .expect("Oak fanfare asset"),
                 ModpackAudioAsset::cry(
                     "CRY_CHIKORITA",
-                    "content-packs/test/cries/CRY_CHIKORITA.mid",
+                    "content-packs/test/cries/CRY_CHIKORITA.pcm",
                 )
                 .expect("species cry asset"),
                 ModpackAudioAsset::music(
                     "MUSIC_POKE_FLUTE_CHANNEL",
-                    "content-packs/test/music/MUSIC_POKE_FLUTE_CHANNEL.mid",
+                    "content-packs/test/music/MUSIC_POKE_FLUTE_CHANNEL.pcm",
                 )
                 .expect("Poke Flute channel asset"),
-                ModpackAudioAsset::sound_effect("SFX_ITEM", "content-packs/test/sfx/SFX_ITEM.mid")
+                ModpackAudioAsset::sound_effect("SFX_ITEM", "content-packs/test/sfx/SFX_ITEM.pcm", 0x01)
                     .expect("Mystery Gift item sound asset"),
                 ModpackAudioAsset::music(
                     "MUSIC_UNUSED",
-                    "content-packs/test/music/MUSIC_UNUSED.mid",
+                    "content-packs/test/music/MUSIC_UNUSED.pcm",
                 )
                 .expect("unused music asset"),
             ],
@@ -2344,7 +2356,7 @@
     }
 
     #[test]
-    fn verifier_requires_music_none_to_be_declared_by_pack() {
+    fn verifier_treats_music_none_as_a_control_sentinel_without_an_audio_asset() {
         let mut module = test_map_module("Start", "START_MAP", None);
         module.script_audio_commands = vec![ScriptAudioCommand {
             command: "musicfadeout".to_string(),
@@ -2365,15 +2377,28 @@
             &PlayabilityRules::default(),
         );
 
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "unknown_script_music_id"
-                && diagnostic.subject == "Start:FadeScript:1"
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            (diagnostic.code == "unknown_script_music_id"
+                || diagnostic.code == "missing_special_routine_music_id")
                 && diagnostic.message.contains("MUSIC_NONE")
         }));
+
+        let mut invalid = data;
+        invalid.audio.push(
+            ModpackAudioAsset::music(
+                "MUSIC_NONE",
+                "content-packs/test/music/MUSIC_NONE.pcm",
+            )
+            .expect("shape-valid sentinel fixture"),
+        );
+        let report = verify_game_data(
+            &AssetRoot::new(repository_root_for_tests()),
+            &invalid,
+            &PlayabilityRules::default(),
+        );
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "missing_special_routine_music_id"
-                && diagnostic.subject == "special_routines:FadeOutMusic"
-                && diagnostic.message.contains("MUSIC_NONE")
+            diagnostic.code == "reserved_silent_music_asset"
+                && diagnostic.subject == "MUSIC_NONE"
         }));
     }
 

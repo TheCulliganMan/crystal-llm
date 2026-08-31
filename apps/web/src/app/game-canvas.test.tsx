@@ -1335,7 +1335,7 @@ describe("GameCanvas", () => {
     container.remove();
   });
 
-  it("ignores duplicate held control keydowns even when Electron does not mark them as repeats", async () => {
+  it("resolves the bound keyboard A key before ignoring duplicate held keydowns", async () => {
     const game = buildGameStub();
     (Game.create as jest.Mock).mockResolvedValueOnce(game);
 
@@ -1352,19 +1352,25 @@ describe("GameCanvas", () => {
     canvas?.focus();
 
     act(() => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", bubbles: true }));
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", bubbles: true }));
-      window.dispatchEvent(new KeyboardEvent("keyup", { key: "z", code: "KeyZ", bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", code: "KeyA", bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", code: "KeyA", bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "a", code: "KeyA", bubbles: true }));
     });
 
     expect(game.postEvent).toHaveBeenCalledTimes(2);
     expect(game.postEvent.mock.calls[0][0]).toMatchObject({
       type: "keydown",
+      key: "a",
+      code: "KeyA",
+      direction: null,
       button: "a",
       is_press: true,
     });
     expect(game.postEvent.mock.calls[1][0]).toMatchObject({
       type: "keyup",
+      key: "a",
+      code: "KeyA",
+      direction: null,
       button: "a",
       is_press: false,
     });

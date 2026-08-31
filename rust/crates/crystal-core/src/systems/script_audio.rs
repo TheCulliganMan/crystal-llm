@@ -92,6 +92,7 @@ pub enum ScriptAudioError {
     UnknownMusic { audio_id: String },
     InvalidSoundEffect { audio_id: String },
     UnknownSoundEffect { audio_id: String },
+    UnsetAccumulator { command: String },
     InvalidCrySpecies { species_id: String },
     UnknownCrySpecies { species_id: String },
     MissingCryMetadata { species_id: String },
@@ -126,6 +127,7 @@ pub const SCRIPT_AUDIO_SOUND_EFFECT_COMMANDS: &[&str] = &["playsound"];
 pub const SCRIPT_AUDIO_CRY_COMMANDS: &[&str] = &["cry"];
 pub const SCRIPT_AUDIO_MUSIC_FADE_COMMANDS: &[&str] = &["musicfadeout"];
 pub const SCRIPT_AUDIO_NO_PAYLOAD_COMMANDS: &[&str] = &["waitsfx"];
+pub const MUSIC_NONE_ID: &str = "MUSIC_NONE";
 
 pub fn is_known_script_audio_command(command: &str) -> bool {
     SCRIPT_AUDIO_MUSIC_COMMANDS.contains(&command)
@@ -186,7 +188,7 @@ pub fn script_audio_command_issues(
     let mut issues = Vec::new();
     match command.command.as_str() {
         "playmusic" => {
-            check_audio_id(
+            check_music_id(
                 command.audio_id.as_deref(),
                 music_ids,
                 ScriptAudioCommandIssue::MissingMusicId,
@@ -206,6 +208,7 @@ pub fn script_audio_command_issues(
             );
         }
         "cry" => match command.audio_id.as_deref() {
+            Some("0") => {}
             Some(species_id) if !is_exact_audio_token(species_id) => {
                 issues.push(ScriptAudioCommandIssue::InvalidCrySpecies);
             }
@@ -223,7 +226,7 @@ pub fn script_audio_command_issues(
             None => issues.push(ScriptAudioCommandIssue::MissingCrySpecies),
         },
         "musicfadeout" => {
-            check_audio_id(
+            check_music_id(
                 command.audio_id.as_deref(),
                 music_ids,
                 ScriptAudioCommandIssue::MissingMusicId,
@@ -274,7 +277,7 @@ pub fn resolve_script_audio_command(
             if !is_exact_audio_token(&audio_id) {
                 return Err(ScriptAudioError::InvalidMusic { audio_id });
             }
-            if !music_ids.contains(&audio_id) {
+            if audio_id != MUSIC_NONE_ID && !music_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownMusic { audio_id });
             }
             Ok(play_cue(command, ScriptAudioKind::Music, audio_id))
@@ -323,7 +326,7 @@ pub fn resolve_script_audio_command(
             if !is_exact_audio_token(&audio_id) {
                 return Err(ScriptAudioError::InvalidMusic { audio_id });
             }
-            if !music_ids.contains(&audio_id) {
+            if audio_id != MUSIC_NONE_ID && !music_ids.contains(&audio_id) {
                 return Err(ScriptAudioError::UnknownMusic { audio_id });
             }
             Ok(ScriptAudioCue::FadeMusic {
@@ -360,6 +363,17 @@ pub fn apply_script_audio_command(
     species: &BTreeMap<String, PokemonSpecies>,
     cry_by_species: &BTreeMap<String, String>,
 ) -> Result<ScriptAudioCue, ScriptAudioError> {
+    let mut command = command;
+    // Script_cry treats a zero low operand byte as "play wScriptVar". The
+    // canonical Strength script loads wStrengthSpecies through readmem and
+    // then deliberately executes `cry 0`.
+    if command.command == "cry" && command.audio_id.as_deref() == Some("0") {
+        command.audio_id = Some(state.script_runtime.script_value.clone().ok_or_else(|| {
+            ScriptAudioError::UnsetAccumulator {
+                command: command.command.clone(),
+            }
+        })?);
+    }
     let cue = resolve_script_audio_command(
         command,
         music_ids,
@@ -461,6 +475,23 @@ fn check_audio_id(
 ) {
     match audio_id {
         Some(audio_id) if !is_exact_audio_token(audio_id) => issues.push(invalid),
+        Some(audio_id) if known_ids.contains(audio_id) => {}
+        Some(_) => issues.push(unknown),
+        None => issues.push(missing),
+    }
+}
+
+fn check_music_id(
+    audio_id: Option<&str>,
+    known_ids: &BTreeSet<String>,
+    missing: ScriptAudioCommandIssue,
+    invalid: ScriptAudioCommandIssue,
+    unknown: ScriptAudioCommandIssue,
+    issues: &mut Vec<ScriptAudioCommandIssue>,
+) {
+    match audio_id {
+        Some(audio_id) if !is_exact_audio_token(audio_id) => issues.push(invalid),
+        Some(MUSIC_NONE_ID) => {}
         Some(audio_id) if known_ids.contains(audio_id) => {}
         Some(_) => issues.push(unknown),
         None => issues.push(missing),
@@ -1018,6 +1049,49 @@ mod tests {
             ScriptAudioCue::FadeMusic {
                 audio_id: "MUSIC_NEW_BARK_TOWN".to_string(),
                 fade_frames: 16,
+                source_script: "AudioScript".to_string(),
+                command_index: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn zero_cry_operand_uses_the_script_accumulator_species() {
+        let species = BTreeMap::from([("CHIKORITA".to_string(), species("CHIKORITA"))]);
+        let cries = BTreeSet::from(["CRY_CHIKORITA".to_string()]);
+        let cry_by_species =
+            BTreeMap::from([("CHIKORITA".to_string(), "CRY_CHIKORITA".to_string())]);
+        let mut state = GameState::default();
+        state.script_runtime.script_value = Some("CHIKORITA".to_string());
+
+        assert!(
+            script_audio_command_issues(
+                &command("cry", Some("0"), None),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &cries,
+                &species,
+                &cry_by_species,
+            )
+            .is_empty()
+        );
+        let cue = apply_script_audio_command(
+            &mut state,
+            command("cry", Some("0"), None),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &cries,
+            &species,
+            &cry_by_species,
+        )
+        .expect("cry 0 resolves wScriptVar");
+
+        assert_eq!(
+            cue,
+            ScriptAudioCue::Play {
+                command: "cry".to_string(),
+                kind: ScriptAudioKind::Cry,
+                audio_id: "CRY_CHIKORITA".to_string(),
                 source_script: "AudioScript".to_string(),
                 command_index: 7,
             }

@@ -211,12 +211,6 @@ fn finite_pcm_music_does_not_restart_when_its_playback_plan_requests_looping() {
         !native_audio_repeats_without_pcm_loop(&pcm_music),
         "a PCM asset without explicit loop bounds must end at its exported endpoint"
     );
-
-    let midi_music = BevyAudioCommand {
-        mode: ModpackAudioPlaybackMode::SequencedMidi,
-        ..pcm_music
-    };
-    assert!(native_audio_repeats_without_pcm_loop(&midi_music));
 }
 
 #[test]
@@ -236,6 +230,7 @@ fn map_debug_details_report_runtime_tiles_and_raw_event_coordinates() {
 
     let object = crate::core::map::ObjectEvent {
         sprite: "SPRITE_TEACHER".to_string(),
+        sprite_has_facings: true,
         x: 2,
         y: 3,
         spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN".to_string(),
@@ -1235,6 +1230,7 @@ fn overworld_actor_depth_is_viewport_relative_bounded_and_stably_ordered() {
 fn scripted_poke_ball_objects_use_item_ball_priority() {
     let object = crate::core::map::ObjectEvent {
         sprite: "SPRITE_POKE_BALL".to_string(),
+        sprite_has_facings: false,
         x: 6,
         y: 3,
         spritemovedata: "SPRITEMOVEDATA_STILL".to_string(),
@@ -1348,6 +1344,7 @@ fn fly_animation_retains_map_objects_without_accumulating_old_effect_frames() {
         .visible_fly_animation = Some(VisibleFlyAnimation {
             phase: VisibleFlyAnimationPhase::From,
             frame: 0,
+            actor_party_index: 0,
         });
 
     for frame in 0..12 {

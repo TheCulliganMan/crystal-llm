@@ -169,14 +169,16 @@ fn use_selected_active_battle_item(runtime_shell: &mut BevyRuntimeShell) -> Resu
 
 fn use_active_battle_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &str) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    if snapshot.battle.is_none() {
+    let Some(battle) = snapshot.battle.as_ref() else {
         return handle_visible_no_active_battle(runtime_shell, "active_item");
-    }
+    };
+    let battle_before_turn = battle.clone();
     record_visible_runtime_action(runtime_shell, format!("battle:item:{item_id}:active"))?;
-    let used = match runtime_shell
-        .shell
-        .use_bag_item_on_active_battle_pokemon(item_id)
-    {
+    let used = match resolve_active_battle_item_turn_with_enemy_ai(
+        runtime_shell,
+        battle,
+        item_id,
+    ) {
         Ok(used) => used,
         Err(error) if battle_item_error_is_play_refusal(&error) => {
             return handle_visible_battle_item_refusal(runtime_shell, item_id, error);
@@ -186,8 +188,13 @@ fn use_active_battle_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &
     record_visible_battle_item_action_frame(runtime_shell, item_id)?;
     reset_visible_battle_action_cursors(runtime_shell);
     runtime_shell.last_audio_events.push(format!(
-        "active battle item item={} item_use={:?} battle_item={:?} checksum={:?}",
-        item_id, used.item_use, used.battle_item, used.state_checksum
+        "active battle item turn item={} item_use={:?} battle_item={:?} enemy_action={:?} {} checksum={:?}",
+        item_id,
+        used.item_use,
+        used.battle_item,
+        used.enemy_action,
+        format_battle_turn_summary(&used.turn.outcome),
+        used.turn.state_checksum
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     set_shell_action_status(runtime_shell, format!("USED {item_id} IN BATTLE"));
@@ -203,8 +210,27 @@ fn use_active_battle_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &
         stage_visible_battle_item_use(runtime_shell, item_id)?;
     }
     stage_visible_battle_item_effect(runtime_shell, &snapshot, &used.battle_item, None)?;
-    resolve_visible_battle_enemy_response_after_player_item(runtime_shell, item_id)?;
-    Ok(())
+    let response_events = used
+        .turn
+        .outcome
+        .events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                crate::core::battle::turn::BattleEvent::ItemUsed {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                } | crate::core::battle::turn::BattleEvent::BattleItemEffect {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    stage_visible_battle_messages(runtime_shell, &snapshot, &response_events);
+    settle_visible_resolved_battle_turn(runtime_shell, &battle_before_turn)
 }
 
 fn use_selected_visible_battle_bag_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -274,7 +300,9 @@ fn use_selected_visible_battle_bag_item(runtime_shell: &mut BevyRuntimeShell) ->
     anyhow::bail!("battle item {item_id} has no declared battle payload")
 }
 
-fn selected_visible_battle_pack_action_item(runtime_shell: &mut BevyRuntimeShell) -> Result<String> {
+fn selected_visible_battle_pack_action_item(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<String> {
     let snapshot = runtime_shell.shell.snapshot()?;
     if runtime_shell.ball_cursor.is_some() {
         return selected_battle_ball_id(runtime_shell).map(|(_, item_id)| item_id);
@@ -292,7 +320,10 @@ fn selected_visible_battle_pack_action_item(runtime_shell: &mut BevyRuntimeShell
         item_ids.len(),
     )
     .context("battle Pack surface battle:bag-items is active without a valid cursor")?;
-    item_ids.get(index).cloned().context("battle Pack item cursor selected no item")
+    item_ids
+        .get(index)
+        .cloned()
+        .context("battle Pack item cursor selected no item")
 }
 
 fn open_visible_battle_pack_action_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -323,7 +354,11 @@ fn execute_visible_battle_pack_action(runtime_shell: &mut BevyRuntimeShell) -> R
     let item_id = selected_visible_battle_pack_action_item(runtime_shell)?;
     record_visible_runtime_action(
         runtime_shell,
-        format!("battle:pack:action:{}:{}", item_id, visible_field_pack_action_record_id(action)),
+        format!(
+            "battle:pack:action:{}:{}",
+            item_id,
+            visible_field_pack_action_record_id(action)
+        ),
     )?;
     close_visible_field_pack_action_menu(runtime_shell);
     match action {
@@ -419,12 +454,7 @@ fn move_visible_field_pack_action_cursor(
     let snapshot = runtime_shell.shell.snapshot()?;
     let pocket = active_visible_field_pack_pocket(runtime_shell);
     let in_battle = snapshot.battle.is_some();
-    let actions = visible_selected_pack_item_actions(
-        &snapshot,
-        runtime_shell,
-        &pocket,
-        in_battle,
-    )?;
+    let actions = visible_selected_pack_item_actions(&snapshot, runtime_shell, &pocket, in_battle)?;
     move_visible_cursor_slot(
         &mut runtime_shell.field_pack_action_cursor,
         "pack:actions".to_string(),
@@ -478,10 +508,7 @@ fn execute_visible_field_pack_action(runtime_shell: &mut BevyRuntimeShell) -> Re
     }
 }
 
-fn begin_visible_pack_toss(
-    runtime_shell: &mut BevyRuntimeShell,
-    item_id: String,
-) -> Result<()> {
+fn begin_visible_pack_toss(runtime_shell: &mut BevyRuntimeShell, item_id: String) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let max_quantity = carried_item_quantity(&snapshot, &item_id)
         .with_context(|| format!("selected toss item {item_id} is not carried"))?;
@@ -517,8 +544,8 @@ fn adjust_visible_pack_toss_quantity(
         1 => toss.quantity + 1,
         -1 if toss.quantity <= 1 => toss.max_quantity,
         -1 => toss.quantity - 1,
-        _ => (i32::from(toss.quantity) + i32::from(delta))
-            .clamp(1, i32::from(toss.max_quantity)) as u16,
+        _ => (i32::from(toss.quantity) + i32::from(delta)).clamp(1, i32::from(toss.max_quantity))
+            as u16,
     };
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -537,13 +564,10 @@ fn confirm_visible_pack_toss(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
-    let accepted = strict_readonly_cursor_index(
-        &runtime_shell.yes_no_cursor,
-        "pack:toss-confirm",
-        2,
-    )
-    .context("Pack toss confirmation requires a valid cursor")?
-        == 0;
+    let accepted =
+        strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pack:toss-confirm", 2)
+            .context("Pack toss confirmation requires a valid cursor")?
+            == 0;
     if !accepted {
         runtime_shell.pack_toss = None;
         runtime_shell.yes_no_cursor = None;
@@ -631,10 +655,7 @@ fn register_selected_visible_key_item(runtime_shell: &mut BevyRuntimeShell) -> R
         "registered key item {} previous={:?} checksum={:?}",
         registered.outcome.item_id, registered.outcome.previous_item_id, registered.state_checksum
     ));
-    set_shell_action_status(
-        runtime_shell,
-        format!("REGISTERED {display_name}"),
-    );
+    set_shell_action_status(runtime_shell, format!("REGISTERED {display_name}"));
     let notice = format!("Registered the\n{display_name}.");
     runtime_shell.field_notice = Some(notice);
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -673,7 +694,10 @@ fn visible_selected_pack_item_actions(
             vec![FieldPackAction::Quit]
         });
     }
-    let cant_toss = item.property.split('|').any(|flag| flag.trim() == "CANT_TOSS");
+    let cant_toss = item
+        .property
+        .split('|')
+        .any(|flag| flag.trim() == "CANT_TOSS");
     let cant_select = item
         .property
         .split('|')
@@ -757,7 +781,10 @@ fn use_visible_field_bag_item_by_id(
     }
     if item.repel_steps.is_some() {
         if snapshot.progression.repel_steps_remaining > 0 {
-            record_visible_runtime_action(runtime_shell, format!("field:item:{item_id}:repel_active"))?;
+            record_visible_runtime_action(
+                runtime_shell,
+                format!("field:item:{item_id}:repel_active"),
+            )?;
             runtime_shell.field_notice = Some(visible_asm_text(
                 &snapshot,
                 "RepelUsedEarlierIsStillInEffectText",
@@ -928,9 +955,12 @@ fn use_visible_field_bag_item_by_id(
                 "{} got off\nthe {}.",
                 snapshot.trainer.player_name, display_name
             ),
-        MovementMode::Skate | MovementMode::Surf | MovementMode::SurfPika => {
-            anyhow::bail!("bicycle use ended in invalid mode {:?}", item_use.mode_after)
-        }
+            MovementMode::Skate | MovementMode::Surf | MovementMode::SurfPika => {
+                anyhow::bail!(
+                    "bicycle use ended in invalid mode {:?}",
+                    item_use.mode_after
+                )
+            }
         });
         mark_runtime_snapshot_dirty(runtime_shell);
         continue_visible_script_after_prompt(runtime_shell)?;
@@ -1290,8 +1320,7 @@ fn item_targets_party_pokemon_fields(item: &crate::RuntimeItemCatalogSnapshot) -
     item.revive_hp_percent.is_some()
         || !item.status_heals.is_empty()
         || item.confusion_heal == Some(true)
-        || (item.pp_restore_scope.as_deref() == Some("ALL")
-            && item.pp_restore_points.is_some())
+        || (item.pp_restore_scope.as_deref() == Some("ALL") && item.pp_restore_points.is_some())
         || item.vitamin_stat.is_some()
         || item.rare_candy_level_gain.is_some()
         || item.party_special_effect
@@ -1449,7 +1478,10 @@ fn close_visible_battle_pack_target(runtime_shell: &mut BevyRuntimeShell) -> Res
     if runtime_shell.battle_pack_target_mode == Some(BattlePackTargetMode::PartyMove)
         && runtime_shell.party_move_cursor.take().is_some()
     {
-        record_visible_runtime_action(runtime_shell, "battle:pack_target:party_move:back_to_party")?;
+        record_visible_runtime_action(
+            runtime_shell,
+            "battle:pack_target:party_move:back_to_party",
+        )?;
         set_shell_action_status(runtime_shell, "USE ON WHICH POKEMON");
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
@@ -1509,11 +1541,8 @@ fn move_visible_battle_pack_target_cursor(
                 runtime_shell.party_cursor,
                 row_count,
             );
-            runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor,
-                row_count,
-                delta,
-            );
+            runtime_shell.party_cursor =
+                wrapped_index(runtime_shell.party_cursor, row_count, delta);
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
@@ -1535,11 +1564,8 @@ fn move_visible_battle_pack_target_cursor(
                 runtime_shell.party_cursor,
                 row_count,
             );
-            runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor,
-                row_count,
-                delta,
-            );
+            runtime_shell.party_cursor =
+                wrapped_index(runtime_shell.party_cursor, row_count, delta);
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
@@ -1596,11 +1622,8 @@ fn move_visible_battle_pack_target_secondary_cursor(
                 runtime_shell.party_cursor,
                 row_count,
             );
-            runtime_shell.party_cursor = wrapped_index(
-                runtime_shell.party_cursor,
-                row_count,
-                delta,
-            );
+            runtime_shell.party_cursor =
+                wrapped_index(runtime_shell.party_cursor, row_count, delta);
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
@@ -1636,7 +1659,9 @@ fn use_selected_battle_pack_target(
                 .slots
                 .iter()
                 .find(|slot| slot.index == party_index)
-                .with_context(|| format!("selected party index {party_index} is not in the party"))?;
+                .with_context(|| {
+                    format!("selected party index {party_index} is not in the party")
+                })?;
             if selected.pokemon.is_egg || selected.pokemon.species.id == "EGG" {
                 record_visible_runtime_action(
                     runtime_shell,
@@ -1734,38 +1759,51 @@ fn use_selected_battle_party_item_on(
         return Ok(());
     }
     let item_id = selected_battle_bag_item_id(runtime_shell)?;
-    let item = snapshot
+    let _item = snapshot
         .items
         .iter()
         .find(|item| item.item_id == item_id)
         .with_context(|| format!("selected battle item {item_id} is missing from item catalog"))?;
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("battle party item requires an active battle")?;
+    let battle_before_turn = battle.clone();
     record_visible_runtime_action(
         runtime_shell,
         format!("battle:item:{item_id}:party:{party_index}"),
     )?;
-    let use_result = if item.pp_restore_scope.as_deref() == Some("ALL")
-        && item.pp_restore_points.is_some()
-    {
-        runtime_shell
-            .shell
-            .use_bag_item_on_battle_party_move(&item_id, party_index, None)
-    } else {
-        runtime_shell
-            .shell
-            .use_bag_item_on_battle_party_pokemon(&item_id, party_index)
-    };
-    let used = match use_result {
+    let used = match resolve_active_battle_party_item_turn_with_enemy_ai(
+        runtime_shell,
+        battle,
+        &item_id,
+        party_index,
+        None,
+    ) {
         Ok(used) => used,
         Err(error) if battle_item_error_is_play_refusal(&error) => {
             return handle_visible_battle_item_refusal(runtime_shell, &item_id, error);
         }
         Err(error) => return Err(error),
     };
-    record_visible_battle_item_action_frame(runtime_shell, &item_id)?;
+    record_visible_battle_action_frame(
+        runtime_shell,
+        BattleAction::PartyItem {
+            item_id: item_id.clone(),
+            party_index,
+            move_slot: None,
+        },
+    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     runtime_shell.last_audio_events.push(format!(
-        "battle party item item={} party_index={} item_use={:?} battle_item={:?} checksum={:?}",
-        item_id, party_index, used.item_use, used.battle_item, used.state_checksum
+        "battle party item turn item={} party_index={} item_use={:?} battle_item={:?} enemy_action={:?} {} checksum={:?}",
+        item_id,
+        party_index,
+        used.item_use,
+        used.battle_item,
+        used.enemy_action,
+        format_battle_turn_summary(&used.turn.outcome),
+        used.turn.state_checksum
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     set_shell_action_status(
@@ -1778,8 +1816,27 @@ fn use_selected_battle_party_item_on(
         &used.battle_item,
         Some(party_index),
     )?;
-    resolve_visible_battle_enemy_response_after_player_item(runtime_shell, &item_id)?;
-    Ok(())
+    let response_events = used
+        .turn
+        .outcome
+        .events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                crate::core::battle::turn::BattleEvent::ItemUsed {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                } | crate::core::battle::turn::BattleEvent::BattlePartyItemEffect {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    stage_visible_battle_messages(runtime_shell, &snapshot, &response_events);
+    settle_visible_resolved_battle_turn(runtime_shell, &battle_before_turn)
 }
 
 fn use_selected_battle_party_move_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -1821,11 +1878,18 @@ fn use_selected_battle_party_move_item_on(
     }
     let move_slot = selected_party_move_slot(runtime_shell, party_index)?;
     let item_id = selected_battle_bag_item_id(runtime_shell)?;
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("battle party move item requires an active battle")?;
+    let battle_before_turn = battle.clone();
     record_visible_runtime_action(
         runtime_shell,
         format!("battle:item:{item_id}:party:{party_index}:move:{move_slot}"),
     )?;
-    let used = match runtime_shell.shell.use_bag_item_on_battle_party_move(
+    let used = match resolve_active_battle_party_item_turn_with_enemy_ai(
+        runtime_shell,
+        battle,
         &item_id,
         party_index,
         Some(move_slot),
@@ -1836,11 +1900,25 @@ fn use_selected_battle_party_move_item_on(
         }
         Err(error) => return Err(error),
     };
-    record_visible_battle_item_action_frame(runtime_shell, &item_id)?;
+    record_visible_battle_action_frame(
+        runtime_shell,
+        BattleAction::PartyItem {
+            item_id: item_id.clone(),
+            party_index,
+            move_slot: Some(move_slot),
+        },
+    )?;
     reset_visible_battle_action_cursors(runtime_shell);
     runtime_shell.last_audio_events.push(format!(
-        "battle party move item item={} party_index={} move_slot={} item_use={:?} battle_item={:?} checksum={:?}",
-        item_id, party_index, move_slot, used.item_use, used.battle_item, used.state_checksum
+        "battle party move item turn item={} party_index={} move_slot={} item_use={:?} battle_item={:?} enemy_action={:?} {} checksum={:?}",
+        item_id,
+        party_index,
+        move_slot,
+        used.item_use,
+        used.battle_item,
+        used.enemy_action,
+        format_battle_turn_summary(&used.turn.outcome),
+        used.turn.state_checksum
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
     set_shell_action_status(
@@ -1856,8 +1934,27 @@ fn use_selected_battle_party_move_item_on(
         &used.battle_item,
         Some(party_index),
     )?;
-    resolve_visible_battle_enemy_response_after_player_item(runtime_shell, &item_id)?;
-    Ok(())
+    let response_events = used
+        .turn
+        .outcome
+        .events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                crate::core::battle::turn::BattleEvent::ItemUsed {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                } | crate::core::battle::turn::BattleEvent::BattlePartyItemEffect {
+                    side: crate::core::battle::turn::BattleSide::Player,
+                    ..
+                }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    stage_visible_battle_messages(runtime_shell, &snapshot, &response_events);
+    settle_visible_resolved_battle_turn(runtime_shell, &battle_before_turn)
 }
 
 fn use_selected_battle_escape_item(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -1894,12 +1991,11 @@ fn use_battle_escape_item_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &
     ));
     runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
     mark_runtime_snapshot_dirty(runtime_shell);
-    if used.escaped {
-        finish_visible_wild_battle_exit(runtime_shell, scripted_static_wild, "battle_escape")?;
-    } else {
-        reset_visible_battle_action_cursors(runtime_shell);
-        resolve_visible_battle_enemy_response_after_player_item(runtime_shell, item_id)?;
-    }
+    anyhow::ensure!(
+        used.escaped,
+        "source-valid wild battle escape item did not set the forced battle exit"
+    );
+    finish_visible_wild_battle_exit(runtime_shell, scripted_static_wild, "battle_escape")?;
     runtime_shell.last_audio_events.push(format!(
         "battle escape item item={} item_use={:?} mode={:?} escaped={} checksum={:?}",
         item_id, used.item_use, used.battle_escape_mode, used.escaped, used.state_checksum
@@ -1919,38 +2015,7 @@ fn use_selected_guard_spec(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 }
 
 fn use_guard_spec_by_id(runtime_shell: &mut BevyRuntimeShell, item_id: &str) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    if snapshot.battle.is_none() {
-        return handle_visible_no_active_battle(runtime_shell, "guard_spec");
-    }
-    record_visible_runtime_action(runtime_shell, format!("battle:item:{item_id}:guard_spec"))?;
-    let used = match runtime_shell
-        .shell
-        .use_bag_guard_spec_in_active_battle(item_id)
-    {
-        Ok(used) => used,
-        Err(error) if battle_item_error_is_play_refusal(&error) => {
-            return handle_visible_battle_item_refusal(runtime_shell, item_id, error);
-        }
-        Err(error) => return Err(error),
-    };
-    record_visible_battle_item_action_frame(runtime_shell, item_id)?;
-    reset_visible_battle_action_cursors(runtime_shell);
-    runtime_shell.last_audio_events.push(format!(
-        "guard spec item={} item_use={:?} guard_turns {}->{} checksum={:?}",
-        item_id,
-        used.item_use,
-        used.stat_drop_guard_turns_before,
-        used.stat_drop_guard_turns_after,
-        used.state_checksum
-    ));
-    set_shell_action_status(
-        runtime_shell,
-        format!("GUARD SPEC {} TURNS", used.stat_drop_guard_turns_after),
-    );
-    stage_visible_battle_item_use(runtime_shell, item_id)?;
-    resolve_visible_battle_enemy_response_after_player_item(runtime_shell, item_id)?;
-    Ok(())
+    use_active_battle_item_by_id(runtime_shell, item_id)
 }
 
 fn start_or_complete_visible_scripted_trainer_battle(
@@ -2011,9 +2076,7 @@ fn complete_visible_scripted_wild_battle(
         runtime_shell,
         format!(
             "battle:complete_static_wild:{}:{}:{}",
-            origin.map_name,
-            origin.source_script,
-            origin.startbattle_command_index
+            origin.map_name, origin.source_script, origin.startbattle_command_index
         ),
     )?;
     let completed = runtime_shell
@@ -2116,9 +2179,9 @@ fn complete_visible_scripted_trainer_battle(
         )?;
     let completion = completed.completion;
     if won && let Some(prize_money) = completion.trainer_prize_money {
-        runtime_shell.battle_messages.push_back(format!(
-            "{player_name} got ¥{prize_money}\nfor winning!"
-        ));
+        runtime_shell
+            .battle_messages
+            .push_back(format!("{player_name} got ¥{prize_money}\nfor winning!"));
         if runtime_shell.shell.snapshot()?.trainer.moms_money
             > battle_before_completion.trainer.moms_money
         {
@@ -2128,7 +2191,9 @@ fn complete_visible_scripted_trainer_battle(
         }
         mark_runtime_snapshot_dirty(runtime_shell);
     }
-    queue_visible_pay_day_payout(runtime_shell, &battle_before_completion);
+    if won {
+        queue_visible_pay_day_payout(runtime_shell, &battle_before_completion);
+    }
     runtime_shell.last_audio_events.push(format!(
         "scripted trainer complete source={} resumed_steps={} checksum={:?}",
         key.source_script,
@@ -2187,9 +2252,7 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
     let move_selection_bypassed = battle.commands.player_forced_struggle
         || battle.commands.player_turn_automatic
         || battle.commands.player_fight_automatic;
-    if !move_selection_bypassed
-        && !battle.commands.player_move_slots.contains(&slot)
-    {
+    if !move_selection_bypassed && !battle.commands.player_move_slots.contains(&slot) {
         record_visible_runtime_action(runtime_shell, format!("battle:move:{slot}:unavailable"))?;
         runtime_shell
             .last_audio_events
@@ -2231,12 +2294,14 @@ fn resolve_visible_battle_move(runtime_shell: &mut BevyRuntimeShell, slot: usize
             return Ok(());
         }
     }
-    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+    let Some((enemy_action, turn)) = resolve_active_battle_turn_with_enemy_ai(
         runtime_shell,
-        &snapshot,
         battle,
         BattleAction::Move { slot },
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
     let enemy_slot = match &enemy_action {
         BattleAction::Move { slot } => Some(*slot),
         BattleAction::Switch { .. } => None,
@@ -2462,7 +2527,7 @@ fn finish_visible_wild_battle_with_first_move(runtime_shell: &mut BevyRuntimeShe
             reset_visible_battle_exit_state(runtime_shell);
             return Ok(());
         };
-        if battle.enemy_pokemon.hp == 0 {
+        if battle.enemy_pokemon.hp == 0 && !battle.enemy_spikes_zero_hp_unchecked {
             press_visible_battle_a_button(runtime_shell)?;
             continue;
         }
@@ -2673,7 +2738,8 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
                 &runtime_shell.ball_cursor,
                 "bag:balls",
                 field_pack_selectable_count(ball_ids.len()),
-            ) == Some(ball_ids.len()) {
+            ) == Some(ball_ids.len())
+            {
                 record_visible_runtime_action(runtime_shell, "battle:pack:cancel")?;
                 reset_visible_battle_item_cursors(runtime_shell);
                 set_shell_action_status(runtime_shell, "BATTLE");
@@ -2687,7 +2753,8 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
                 &runtime_shell.bag_cursor,
                 "battle:bag-items",
                 field_pack_selectable_count(item_ids.len()),
-            ) == Some(item_ids.len()) {
+            ) == Some(item_ids.len())
+            {
                 record_visible_runtime_action(runtime_shell, "battle:pack:cancel")?;
                 reset_visible_battle_item_cursors(runtime_shell);
                 set_shell_action_status(runtime_shell, "BATTLE");
@@ -2703,19 +2770,31 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
                 (
                     &runtime_shell.key_item_cursor,
                     "bag:key-items",
-                    snapshot.bag.key_items.iter().filter(|item| item.quantity > 0)
-                        .map(|item| item.item_id.clone()).collect::<Vec<_>>(),
+                    snapshot
+                        .bag
+                        .key_items
+                        .iter()
+                        .filter(|item| item.quantity > 0)
+                        .map(|item| item.item_id.clone())
+                        .collect::<Vec<_>>(),
                 )
             } else {
                 (
                     &runtime_shell.tmhm_cursor,
                     "bag:tmhm",
-                    snapshot.bag.tm_hm.iter().filter(|item| item.quantity > 0)
-                        .map(|item| item.item_id.clone()).collect::<Vec<_>>(),
+                    snapshot
+                        .bag
+                        .tm_hm
+                        .iter()
+                        .filter(|item| item.quantity > 0)
+                        .map(|item| item.item_id.clone())
+                        .collect::<Vec<_>>(),
                 )
             };
             let selected = strict_readonly_cursor_index(
-                cursor, surface_id, field_pack_selectable_count(item_ids.len()),
+                cursor,
+                surface_id,
+                field_pack_selectable_count(item_ids.len()),
             );
             if selected == Some(item_ids.len()) {
                 record_visible_runtime_action(runtime_shell, "battle:pack:cancel")?;
@@ -2726,7 +2805,7 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
             return open_visible_battle_pack_action_menu(runtime_shell);
         }
     }
-    if battle.enemy_pokemon.hp == 0 {
+    if battle.enemy_pokemon.hp == 0 && !battle.enemy_spikes_zero_hp_unchecked {
         return match battle.kind {
             RuntimeBattleKind::Trainer { .. } => {
                 let Some(enemy_index) = battle.active_enemy_party_index else {
@@ -2760,9 +2839,7 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
         return Ok(());
     }
     let selected_action = selected_visible_battle_action(runtime_shell, &snapshot, &battle)?;
-    if runtime_shell.battle_move_cursor.is_none()
-        && runtime_shell.battle_switch_cursor.is_none()
-    {
+    if runtime_shell.battle_move_cursor.is_none() && runtime_shell.battle_switch_cursor.is_none() {
         // The main 2D battle menu owns its confirmation click. Submenus own
         // their later confirmations independently; in particular the FIGHT
         // row must not double the post-MoveSelectionScreen click.
@@ -2801,9 +2878,7 @@ fn press_visible_battle_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result
             // Right+A stream selects its sole POKE BALL.
             throw_visible_battle_ball_id(runtime_shell, 0, "POKE_BALL".to_string())
         }
-        VisibleBattleAction::Pack
-            if battle.battle_type == "BATTLETYPE_CONTEST" =>
-        {
+        VisibleBattleAction::Pack if battle.battle_type == "BATTLETYPE_CONTEST" => {
             if snapshot.bug_contest.park_balls_remaining == 0 {
                 record_visible_runtime_action(runtime_shell, "battle:park_ball:none")?;
                 runtime_shell
@@ -3002,7 +3077,9 @@ fn attempt_visible_battle_run(runtime_shell: &mut BevyRuntimeShell) -> Result<()
     let Some(battle) = snapshot.battle.as_ref() else {
         return handle_visible_no_active_battle(runtime_shell, "run");
     };
-    if matches!(battle.kind, RuntimeBattleKind::Trainer { .. }) {
+    if matches!(battle.kind, RuntimeBattleKind::Trainer { .. })
+        && battle.battle_type != "BATTLETYPE_LINK"
+    {
         // BattleMenu_Run refuses trainer battles immediately. It does not
         // submit a turn or allow the opponent to attack.
         record_visible_runtime_action(runtime_shell, "battle:run:trainer_refused")?;
@@ -3021,12 +3098,14 @@ fn attempt_visible_battle_run(runtime_shell: &mut BevyRuntimeShell) -> Result<()
     }
     let battle_before_run = battle.clone();
     let scripted_static_wild = visible_static_wild_source(&snapshot, battle);
-    let (enemy_action, turn) = resolve_active_battle_turn_with_enemy_ai(
+    let Some((enemy_action, turn)) = resolve_active_battle_turn_with_enemy_ai(
         runtime_shell,
-        &snapshot,
         battle,
         BattleAction::Run,
-    )?;
+    )?
+    else {
+        return Ok(());
+    };
     let enemy_action_label = format!("enemy:{enemy_action:?}");
     record_visible_runtime_action(runtime_shell, "battle:run")?;
     record_visible_battle_action_frame(runtime_shell, BattleAction::Run)?;
@@ -3144,618 +3223,77 @@ fn selected_battle_move_cursor_is_cancel(
 ) -> Result<bool> {
     let total = battle_move_menu_option_count(snapshot, battle)
         .with_context(|| "active battle has no move menu option count")?;
-    let cursor_index = strict_readonly_cursor_index(
-        &runtime_shell.battle_move_cursor,
-        "battle:moves",
-        total,
-    )
-    .context("battle move surface battle:moves is active without a valid cursor")?;
+    let cursor_index =
+        strict_readonly_cursor_index(&runtime_shell.battle_move_cursor, "battle:moves", total)
+            .context("battle move surface battle:moves is active without a valid cursor")?;
     Ok(cursor_index >= battle.commands.player_move_slots.len())
 }
 
 fn selected_enemy_battle_move_slot_with_rng(
-    snapshot: &RuntimeShellSnapshot,
+    data: &crystal_assets::GameDataSet,
     battle: &crate::RuntimeBattleSnapshot,
+    combat: &crystal_core::battle::turn::BattleCombatState,
     rng: &mut dyn BattleRandomSource,
 ) -> Result<usize> {
-    let commands = &battle.commands;
-    if commands.enemy_move_slots.is_empty() {
-        // ParseEnemyAction selects STRUGGLE before wild slot sampling or
-        // trainer AI scoring when every move is absent, exhausted, or
-        // disabled. Slot zero is only the synthetic action carrier; core
-        // turn resolution does not index it for automatic STRUGGLE.
-        return Ok(0);
-    }
-    let Some(ai_flags) = (match &battle.kind {
-        RuntimeBattleKind::Trainer { ai_move_flags, .. } => Some(*ai_move_flags),
-        RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => None,
-    }) else {
-        let usable_slots = commands
-            .enemy_move_slots
-            .iter()
-            .copied()
-            .filter(|slot| {
-                battle
-                    .enemy_moves
-                    .get(*slot)
-                    .is_some_and(|learned| learned.current_pp > 0)
-            })
-            .collect::<BTreeSet<_>>();
-        loop {
-            let slot = usize::from(rng.battle_random_byte() & 3);
-            if usable_slots.contains(&slot) {
-                return Ok(slot);
-            }
-        }
+    let RuntimeBattleKind::Trainer { ai_move_flags, .. } = &battle.kind else {
+        anyhow::bail!("trainer move scorer received a wild battle");
     };
-
-    // Crystal initializes every move at score 20, applies the enabled trainer
-    // scoring layers, then chooses uniformly among the lowest scores.  This
-    // is intentionally expressed as a score table so additional ASM layers
-    // can be added without returning to uniform random selection.
-    let player_defender_types: [Option<&str>; 2] = battle
-        .active_player_party_index
-        .and_then(|active_index| {
-            snapshot
-                .party
-                .slots
-                .iter()
-                .find(|slot| slot.index == active_index)
-        })
-        .map(|slot| {
-            [
-                Some(slot.pokemon.species.type1.as_str()),
-                Some(slot.pokemon.species.type2.as_str()),
-            ]
-        })
-        .unwrap_or([Some("NONE"), Some("NONE")]);
-    let usable_slots = commands
-        .enemy_move_slots
-        .iter()
-        .copied()
-        .filter(|slot| {
-            battle
-                .enemy_moves
-                .get(*slot)
-                .is_some_and(|learned| learned.current_pp > 0)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut scored = Vec::with_capacity(battle.enemy_moves.len().min(4));
-    for slot in 0..battle.enemy_moves.len().min(4) {
-        let move_data = battle.enemy_moves.get(slot).and_then(|known| {
-            snapshot
-                .moves
-                .iter()
-                .find(|candidate| candidate.name == known.name || candidate.move_id == known.name)
-        });
-        let move_is_usable = usable_slots.contains(&slot);
-        let mut score = if move_is_usable { 20i16 } else { 80i16 };
-        if let Some(move_data) = move_data.filter(|_| move_is_usable) {
-            let is_status = move_data.power == 0;
-            // ASM: AI_BASIC dismisses sleep/toxic/poison/paralyze when the
-            // player already has any status condition.  These effects are
-            // represented by their exact compiled move-effect tokens; do not
-            // treat every zero-power move as status-only (screens, weather,
-            // and setup moves remain eligible for later AI layers).
-            if ai_flags & (1 << 0) != 0
-                && is_status_only_ai_effect(move_data.effect.as_str())
-                && player_has_status(snapshot, battle)
-            {
-                score += 10;
-            }
-            if !is_status {
-                let mut effectiveness_num = 1u32;
-                let mut effectiveness_den = 1u32;
-                for defender_type in player_defender_types
-                    .iter()
-                    .copied()
-                    .flatten()
-                    .filter(|defender_type| *defender_type != "NONE")
-                {
-                    if let Some(multiplier) = snapshot
-                        .battle_rules
-                        .type_effectiveness
-                        .matchups
-                        .get(&move_data.move_type)
-                        .and_then(|defenders| defenders.get(defender_type))
-                    {
-                        effectiveness_num =
-                            effectiveness_num.saturating_mul(u32::from(multiplier.numerator));
-                        effectiveness_den = effectiveness_den
-                            .saturating_mul(u32::from(multiplier.denominator.max(1)));
-                    }
-                }
-                if effectiveness_num == 0 {
-                    score += 40;
-                } else if effectiveness_num > effectiveness_den {
-                    score -= 5;
-                } else if effectiveness_num < effectiveness_den {
-                    score += 5;
-                }
-            }
-            if ai_flags & (1 << 3) != 0 {
-                score -= (move_data.power / 10).min(12) as i16;
-            }
-            if ai_flags & (1 << 6) != 0 {
-                score -= (move_data.power / 8).min(16) as i16;
-            }
-            if ai_flags & (1 << 8) != 0 && is_status {
-                score -= 6;
-            }
-            if ai_flags & (1 << 4) != 0 && move_data.accuracy >= 90 {
-                score -= 2;
-            }
-            if ai_flags & (1 << 9) != 0 && move_data.accuracy < 80 {
-                score += 4;
-            }
-        } else if move_is_usable {
-            score += 60;
-        }
-        scored.push((slot, score));
-    }
-    let best_score = scored.iter().map(|(_, score)| *score).min().unwrap_or(20);
-    let best = scored
-        .iter()
-        .filter_map(|(slot, score)| (*score == best_score).then_some(*slot))
-        .collect::<BTreeSet<_>>();
-    loop {
-        let slot = usize::from(rng.battle_random_byte() & 3);
-        if best.contains(&slot) {
-            return Ok(slot);
-        }
-    }
+    data.select_trainer_enemy_move_slot(combat, *ai_move_flags, rng)
 }
 
-fn is_status_only_ai_effect(effect: &str) -> bool {
-    matches!(
-        effect,
-        "SLEEP"
-            | "TOXIC"
-            | "POISON"
-            | "PARALYZE"
-            | "EFFECT_SLEEP"
-            | "EFFECT_TOXIC"
-            | "EFFECT_POISON"
-            | "EFFECT_PARALYZE"
-    )
+
+fn selected_wild_enemy_move_slot(
+    combat: &crystal_core::battle::turn::BattleCombatState,
+    rng: &mut dyn BattleRandomSource,
+) -> Result<usize> {
+    Ok(crystal_core::battle::turn::select_wild_enemy_move_slot(
+        combat, rng,
+    ))
 }
 
-fn player_has_status(
-    snapshot: &RuntimeShellSnapshot,
-    battle: &crate::RuntimeBattleSnapshot,
-) -> bool {
-    battle
-        .active_player_party_index
-        .and_then(|active| {
-            snapshot
-                .party
-                .slots
-                .iter()
-                .find(|slot| slot.index == active)
-        })
-        .and_then(|slot| slot.pokemon.status.as_deref())
-        .is_some_and(|status| !status.is_empty() && status != "NONE")
-}
-
-fn selected_enemy_battle_action(
-    snapshot: &RuntimeShellSnapshot,
+fn selected_enemy_trainer_post_order_action(
+    data: &crystal_assets::GameDataSet,
     battle: &crate::RuntimeBattleSnapshot,
     trainer_items_used: &mut BTreeSet<String>,
+    selected_move_slot: usize,
+    combat: &crystal_core::battle::turn::BattleCombatState,
     rng: &mut dyn BattleRandomSource,
 ) -> Result<BattleAction> {
-    sync_persisted_trainer_item_usage(battle, trainer_items_used);
     let RuntimeBattleKind::Trainer {
         trainer_id,
         ai_item_switch_flags,
         ..
     } = &battle.kind
     else {
-        if wild_enemy_should_flee(battle, rng) {
-            return Ok(BattleAction::Run);
-        }
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
-        return Ok(BattleAction::Move { slot });
+        anyhow::bail!("trainer post-order action requested for a wild battle");
     };
-    let switch_flags = if battle.battle_type == "BATTLETYPE_BATTLE_TOWER" {
-        snapshot
-            .trainers
-            .iter()
-            .find(|trainer| trainer.trainer_class == "FALKNER")
-            .context("Battle Tower AI requires trainer class 1 FALKNER attributes")?
-            .ai_item_switch_flags
-    } else {
-        *ai_item_switch_flags
-    };
-
-    // CheckEnemyLockedIn returns from AI_SwitchOrTryItem entirely. Unlike
-    // the later DontSwitch branches, it suppresses trainer items as well as
-    // switching and proceeds directly to the retained move.
-    if battle.enemy_switch_locked {
-        let slot = battle
-            .commands
-            .enemy_move_slots
-            .first()
-            .copied()
-            .unwrap_or(0);
-        return Ok(BattleAction::Move { slot });
-    }
-
-    // Player CANT_RUN and enemy Wrap take the ASM DontSwitch path. Trainer
-    // items remain eligible there; only the switch branch is suppressed.
-    let switch_blocked = battle.player_cannot_escape || battle.enemy_wrapped;
-
-    let Some((party_index, switch_tier)) = (!switch_blocked)
-        .then(|| trainer_switch_candidate(snapshot, battle))
-        .transpose()?
-        .flatten()
-    else {
-        let item = selected_enemy_trainer_item(
-            snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
-        )?;
-        if let Some(item_id) = item {
-            return Ok(BattleAction::Item { item_id });
-        }
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
-        return Ok(BattleAction::Move { slot });
-    };
-
-    // TrainerClassAttributes encodes SWITCH_OFTEN, SWITCH_RARELY, and
-    // SWITCH_SOMETIMES in bits 0..2. Crystal only evaluates this path for a
-    // low-HP active mon; use the same 8-bit BattleRandom stream so a switch
-    // consumes the boundary sample before the turn is resolved.
-    let switch_mask = switch_flags & 0x07;
-    if switch_mask == 0 {
-        let item = selected_enemy_trainer_item(
-            snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
-        )?;
-        if let Some(item_id) = item {
-            return Ok(BattleAction::Item { item_id });
-        }
-        let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
-        return Ok(BattleAction::Move { slot });
-    }
-    // Trainer switch thresholds use BattleRandom (hRandomSub), not
-    // RandomRange's hRandomAdd register.  Using randrange(256) here shifts
-    // the AI's decision stream and changes both switch odds and every later
-    // battle RNG call.
-    let roll = u32::from(rng.battle_random_byte());
-    let should_switch = if switch_mask & 0x01 != 0 {
-        match switch_tier { 0x10 => roll < 128, 0x20 => roll < 200, _ => roll >= 10 }
-    } else if switch_mask & 0x02 != 0 {
-        match switch_tier { 0x10 => roll < 20, 0x20 => roll < 30, _ => roll >= 200 }
-    } else {
-        match switch_tier { 0x10 => roll < 50, 0x20 => roll < 128, _ => roll >= 50 }
-    };
-    if should_switch {
-        return Ok(BattleAction::Switch { party_index });
-    }
-    let item = selected_enemy_trainer_item(
-        snapshot, battle, trainer_id, &switch_flags, trainer_items_used, rng,
-    )?;
-    if let Some(item_id) = item {
-        return Ok(BattleAction::Item { item_id });
-    }
-    let slot = selected_enemy_battle_move_slot_with_rng(snapshot, battle, rng)?;
-    Ok(BattleAction::Move { slot })
-}
-
-fn wild_enemy_should_flee(
-    battle: &crate::RuntimeBattleSnapshot,
-    rng: &mut dyn BattleRandomSource,
-) -> bool {
-    const ALWAYS_FLEE: [&str; 2] = ["RAIKOU", "ENTEI"];
-    const OFTEN_FLEE: [&str; 8] = [
-        "CUBONE",
-        "ARTICUNO",
-        "ZAPDOS",
-        "MOLTRES",
-        "QUAGSIRE",
-        "DELIBIRD",
-        "PHANPY",
-        "TEDDIURSA",
-    ];
-    const SOMETIMES_FLEE: [&str; 13] = [
-        "MAGNEMITE",
-        "GRIMER",
-        "TANGELA",
-        "MR_MIME",
-        "EEVEE",
-        "PORYGON",
-        "DRATINI",
-        "DRAGONAIR",
-        "TOGETIC",
-        "UMBREON",
-        "UNOWN",
-        "SNUBBULL",
-        "HERACROSS",
-    ];
-
-    if battle.player_cannot_escape
-        || battle.enemy_wrapped
-        || matches!(battle.enemy_pokemon.status.as_deref(), Some("SLEEP" | "FREEZE"))
-    {
-        return false;
-    }
-    let species = battle.enemy_pokemon.species.id.as_str();
-    if ALWAYS_FLEE.contains(&species) {
-        return true;
-    }
-    let roll = rng.battle_random_byte();
-    if roll >= 128 {
-        return false;
-    }
-    if OFTEN_FLEE.contains(&species) {
-        return true;
-    }
-    roll < 26 && SOMETIMES_FLEE.contains(&species)
-}
-
-fn sync_persisted_trainer_item_usage(
-    battle: &crate::RuntimeBattleSnapshot,
-    trainer_items_used: &mut BTreeSet<String>,
-) {
-    trainer_items_used.extend(battle.trainer_items_used.iter().cloned());
-}
-
-fn trainer_switch_candidate(
-    snapshot: &RuntimeShellSnapshot,
-    battle: &crate::RuntimeBattleSnapshot,
-) -> Result<Option<(usize, u8)>> {
-    let active_enemy_index = battle
-        .active_enemy_party_index
-        .context("trainer switch scoring is missing the active enemy party index")?;
-    let active_enemy = battle
-        .enemy_party
-        .get(active_enemy_index)
-        .context("trainer active enemy index is outside its party")?;
-    let player = battle
-        .active_player_party_index
-        .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-        .map(|slot| &slot.pokemon)
-        .context("trainer switch scoring is missing the active player Pokemon")?;
-    let alive = battle
-        .enemy_party
-        .iter()
-        .enumerate()
-        .filter(|(index, pokemon)| {
-            *index != active_enemy_index
-                && pokemon.hp > 0
-                && !pokemon.is_egg
-                && pokemon.species.id != "EGG"
-        })
-        .map(|(index, pokemon)| (index, pokemon))
-        .collect::<Vec<_>>();
-    if alive.is_empty() {
-        return Ok(None);
-    }
-
-    let last_player_move = battle
-        .player_last_move
-        .as_deref()
-        .and_then(|move_id| snapshot.moves.iter().find(|data| {
-            data.move_id == move_id || data.name == move_id
-        }));
-    let candidate_is_healthy = |pokemon: &crate::core::models::Pokemon| {
-        pokemon.max_hp > 0 && u32::from(pokemon.hp) * 4 >= u32::from(pokemon.max_hp)
-    };
-    let resists_player = |pokemon: &crate::core::models::Pokemon| -> Result<bool> {
-        if let Some(move_data) = last_player_move.filter(|data| data.power > 0) {
-            return Ok(battle_ai_type_matchup(snapshot, &move_data.move_type, pokemon)? <= 0);
-        }
-        Ok(
-            battle_ai_type_matchup(snapshot, &player.species.type1, pokemon)? <= 0
-                && battle_ai_type_matchup(snapshot, &player.species.type2, pokemon)? <= 0,
-        )
-    };
-    let has_super_effective_move = |pokemon: &crate::core::models::Pokemon| -> Result<bool> {
-        for learned in &pokemon.moves {
-            let move_data = snapshot
-                .moves
-                .iter()
-                .find(|data| data.move_id == learned.name || data.name == learned.name)
-                .with_context(|| format!("trainer switch move {} is missing", learned.name))?;
-            if move_data.power > 0
-                && battle_ai_type_matchup(snapshot, &move_data.move_type, player)? > 0
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    };
-
-    if active_enemy.perish_song_turns == 1 {
-        for (index, pokemon) in &alive {
-            if candidate_is_healthy(pokemon)
-                && resists_player(pokemon)?
-                && has_super_effective_move(pokemon)?
-            {
-                return Ok(Some((*index, 0x30)));
-            }
-        }
-        return Ok(Some((alive[0].0, 0x30)));
-    }
-
-    let switch_score = |enemy: &crate::core::models::Pokemon,
-                        enemy_moves: &[crate::core::models::LearnedMove]|
-     -> Result<i8> {
-        let mut score = 10_i8;
-        if battle.player_used_moves.is_empty() {
-            for player_type in [&player.species.type1, &player.species.type2] {
-                if battle_ai_type_matchup(snapshot, player_type, enemy)? > 0 {
-                    score -= 1;
-                }
-                if player.species.type1 == player.species.type2 {
-                    break;
-                }
-            }
-        } else {
-            let mut best = 0_i8;
-            for move_id in &battle.player_used_moves {
-                let move_data = snapshot
-                    .moves
-                    .iter()
-                    .find(|data| data.move_id == *move_id || data.name == *move_id)
-                    .with_context(|| format!("used player move {move_id} is missing"))?;
-                if move_data.power == 0 {
-                    continue;
-                }
-                let matchup = battle_ai_type_matchup(snapshot, &move_data.move_type, enemy)?;
-                if matchup > 0 {
-                    score -= 1;
-                    best = 2;
-                    break;
-                }
-                if matchup == 0 {
-                    best = 2;
-                } else if matchup == -1 && best == 0 {
-                    best = 1;
-                }
-            }
-            if best != 2 {
-                score += 1;
-                if best == 0 {
-                    score += 1;
-                }
-            }
-        }
-
-        // The ASM accumulates one point per resisted damaging move, five per
-        // neutral move, and 100 for any super-effective move. This matters for
-        // sets with several resisted attacks; reducing it to a best-matchup
-        // comparison changes the switch threshold.
-        let mut enemy_matchup_score = 0_u16;
-        for learned in enemy_moves {
-            let move_data = snapshot
-                .moves
-                .iter()
-                .find(|data| data.move_id == learned.name || data.name == learned.name)
-                .with_context(|| format!("trainer switch move {} is missing", learned.name))?;
-            if move_data.power == 0 {
-                continue;
-            }
-            match battle_ai_type_matchup(snapshot, &move_data.move_type, player)? {
-                -2 => {}
-                -1 => enemy_matchup_score = enemy_matchup_score.saturating_add(1),
-                0 => enemy_matchup_score = enemy_matchup_score.saturating_add(5),
-                _ => enemy_matchup_score = 100,
-            }
-        }
-        if enemy_matchup_score == 0 {
-            score -= 2;
-        } else if enemy_matchup_score < 5 {
-            score -= 1;
-        } else if enemy_matchup_score >= 100 {
-            score += 1;
-        }
-        Ok(score)
-    };
-
-    // CheckAbleToSwitch returns immediately only at 11 or higher. A score of
-    // exactly 10 continues into candidate evaluation and is not itself enough
-    // to trigger a switch.
-    if switch_score(active_enemy, &battle.enemy_moves)? >= 11 {
-        return Ok(None);
-    }
-
-    // wLastPlayerCounterMove takes precedence: Crystal first narrows the
-    // party to Pokemon immune to that damaging move, then prefers one with a
-    // super-effective attack (falling back to a neutral attacker). The
-    // two-Pokemon case receives the stronger $20 tier when that candidate's
-    // own matchup score is favorable.
-    if let Some(last_move) = last_player_move.filter(|data| data.power > 0) {
-        let mut neutral_immune = None;
-        let mut super_immune = None;
-        for (index, pokemon) in &alive {
-            if battle_ai_type_matchup(snapshot, &last_move.move_type, pokemon)? != -2 {
-                continue;
-            }
-            let mut has_neutral = false;
-            for learned in &pokemon.moves {
-                let move_data = snapshot
-                    .moves
-                    .iter()
-                    .find(|data| data.move_id == learned.name || data.name == learned.name)
-                    .with_context(|| format!("trainer switch move {} is missing", learned.name))?;
-                if move_data.power == 0 {
-                    continue;
-                }
-                match battle_ai_type_matchup(snapshot, &move_data.move_type, player)? {
-                    matchup if matchup > 0 => {
-                        super_immune.get_or_insert((*index, pokemon));
-                        break;
-                    }
-                    matchup if matchup == 0 => has_neutral = true,
-                    _ => {}
-                }
-            }
-            if has_neutral {
-                neutral_immune.get_or_insert((*index, pokemon));
-            }
-        }
-        if let Some((index, pokemon)) = super_immune.or(neutral_immune) {
-            let candidate_score = switch_score(pokemon, &pokemon.moves)?;
-            if battle.enemy_party.len() == 2 {
-                return Ok(Some((index, if candidate_score < 10 { 0x20 } else { 0x10 })));
-            }
-            if candidate_score < 10 {
-                return Ok(Some((index, 0x10)));
-            }
-            return Ok(None);
-        }
-    }
-
-    for (index, pokemon) in alive {
-        if candidate_is_healthy(pokemon)
-            && resists_player(pokemon)?
-            && has_super_effective_move(pokemon)?
-            && switch_score(pokemon, &pokemon.moves)? < 10
-        {
-            return Ok(Some((index, 0x10)));
-        }
-    }
-    Ok(None)
-}
-
-fn battle_ai_type_matchup(
-    snapshot: &RuntimeShellSnapshot,
-    move_type: &str,
-    defender: &crate::core::models::Pokemon,
-) -> Result<i8> {
-    let defender_types = if defender.species.type1 == defender.species.type2 {
-        vec![defender.species.type1.clone()]
-    } else {
-        vec![defender.species.type1.clone(), defender.species.type2.clone()]
-    };
-    let multiplier = crate::core::battle::damage::calculate_type_effectiveness_multiplier(
-        &snapshot.battle_rules.type_effectiveness,
-        move_type,
-        &defender_types,
+    data.select_trainer_post_order_action(
+        combat,
+        trainer_id,
+        &battle.battle_type,
+        *ai_item_switch_flags,
+        trainer_items_used,
+        selected_move_slot,
+        rng,
     )
-    .map_err(|error| anyhow::anyhow!("trainer switch type matchup: {error:?}"))?;
-    if multiplier.numerator == 0 {
-        return Ok(-2);
-    }
-    Ok(match multiplier.numerator.cmp(&multiplier.denominator) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    })
 }
+
 
 fn persist_selected_enemy_trainer_item(
     runtime_shell: &mut BevyRuntimeShell,
     battle: &crate::RuntimeBattleSnapshot,
     action: &BattleAction,
+    trainer_items_used: &BTreeSet<String>,
 ) -> Result<()> {
-    let BattleAction::Item { item_id } = action else {
+    let (BattleAction::Item { item_id } | BattleAction::TrainerItem { item_id, .. }) = action
+    else {
         return Ok(());
     };
     let RuntimeBattleKind::Trainer { trainer_id, .. } = &battle.kind else {
         return Ok(());
     };
     let prefix = format!("{trainer_id}:{item_id}:");
-    let usage_keys = runtime_shell
-        .trainer_items_used
+    let usage_keys = trainer_items_used
         .iter()
         .filter(|key| key.starts_with(&prefix))
         .cloned()
@@ -3773,159 +3311,208 @@ fn persist_selected_enemy_trainer_item(
     Ok(())
 }
 
-fn selected_enemy_trainer_item(
-    snapshot: &RuntimeShellSnapshot,
-    battle: &crate::RuntimeBattleSnapshot,
-    trainer_id: &str,
-    ai_item_switch_flags: &u32,
-    trainer_items_used: &mut BTreeSet<String>,
-    rng: &mut dyn BattleRandomSource,
-) -> Result<Option<String>> {
-    if battle.battle_type == "BATTLETYPE_BATTLE_TOWER" {
-        return Ok(None);
-    }
-    let Some(trainer) = snapshot
-        .trainers
-        .iter()
-        .find(|trainer| trainer.trainer_id == trainer_id)
-    else {
-        return Ok(None);
-    };
-    let active_index = battle
-        .active_enemy_party_index
-        .context("trainer item AI is missing the active enemy party index")?;
-    let active = battle
-        .enemy_party
-        .get(active_index)
-        .context("trainer item AI active enemy index is outside its party")?;
-    if active.max_hp == 0 || active.hp == 0 {
-        return Ok(None);
-    }
-    // AI_TryItem is gated by IsHighestLevel in the original engine.  A
-    // trainer's consumables are reserved for its highest-level party member.
-    if battle
-        .enemy_party
-        .iter()
-        .any(|pokemon| pokemon.level > active.level)
-    {
-        return Ok(None);
-    }
-
-    // The ASM item table is ordered from strongest to weakest healing/status
-    // item.  Only offer an item when it can change the active monster, so a
-    // failed item attempt never consumes the trainer slot.
-    let has_status = active
-        .status
-        .as_deref()
-        .is_some_and(|status| !status.is_empty() && status != "NONE");
-    let below_half = active.hp.saturating_mul(2) <= active.max_hp;
-    let below_quarter = active.hp.saturating_mul(4) <= active.max_hp;
-    let context_use = ai_item_switch_flags & (1 << 6) != 0;
-    let always_use = ai_item_switch_flags & (1 << 4) != 0;
-    let unknown_use = ai_item_switch_flags & (1 << 5) != 0;
-    let heal_item_usable = |rng: &mut dyn BattleRandomSource| {
-        if context_use {
-            return below_quarter || (below_half && rng.battle_random_byte() < 50);
-        }
-        if unknown_use {
-            return below_quarter && rng.battle_random_byte() >= 50;
-        }
-        below_quarter || (below_half && rng.battle_random_byte() < 128)
-    };
-    const TRAINER_AI_ITEM_ORDER: [&str; 13] = [
-        "FULL_RESTORE", "MAX_POTION", "HYPER_POTION", "SUPER_POTION", "POTION",
-        "X_ACCURACY", "FULL_HEAL", "GUARD_SPEC", "DIRE_HIT", "X_ATTACK", "X_DEFEND",
-        "X_SPEED", "X_SPECIAL",
-    ];
-    for item_id in TRAINER_AI_ITEM_ORDER {
-        let Some(item_slot) = trainer.items.iter().enumerate().find_map(|(slot, owned)| {
-            (owned.as_deref() == Some(item_id)
-                && !trainer_items_used.contains(&format!("{trainer_id}:{item_id}:{slot}")))
-                .then_some(slot)
-        }) else {
-            continue;
-        };
-        let item_key = format!("{trainer_id}:{item_id}:{item_slot}");
-        let usable = match item_id {
-            "FULL_RESTORE" => heal_item_usable(rng)
-                || (context_use
-                    && (matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
-                        || (active.status.as_deref() == Some("BAD_POISON")
-                            && battle.enemy_toxic_turns >= 4
-                            && rng.battle_random_byte() < 128))),
-            "MAX_POTION" | "HYPER_POTION" | "SUPER_POTION" | "POTION" => {
-                heal_item_usable(rng)
-            }
-            "FULL_HEAL" if context_use => {
-                matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
-                    || (active.status.as_deref() == Some("BAD_POISON")
-                        && battle.enemy_toxic_turns >= 4
-                        && rng.battle_random_byte() < 128)
-            }
-            "FULL_HEAL" if always_use => has_status,
-            "FULL_HEAL" => has_status && rng.battle_random_byte() < 50,
-            "X_ACCURACY" | "GUARD_SPEC" | "DIRE_HIT" | "X_ATTACK" | "X_DEFEND"
-            | "X_SPEED" | "X_SPECIAL" => {
-                if battle.enemy_turns_taken == 0 {
-                    always_use
-                        || (rng.battle_random_byte() >= 128
-                            && (context_use || rng.battle_random_byte() >= 128))
-                } else {
-                    always_use && rng.battle_random_byte() < 50
-                }
-            }
-            _ => false,
-        };
-        if usable {
-            // The exact item effect is resolved by the core battle pipeline;
-            // eligibility has already consumed the same AI RNG samples.
-            trainer_items_used.insert(item_key);
-            return Ok(Some(item_id.to_string()));
-        }
-    }
-    Ok(None)
-}
 
 fn resolve_active_battle_turn_with_enemy_ai(
     runtime_shell: &mut BevyRuntimeShell,
-    snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
     player_action: BattleAction,
- ) -> Result<(BattleAction, crate::RuntimeBattleTurn)> {
-    let mut trainer_items_used = runtime_shell.trainer_items_used.clone();
+) -> Result<Option<(BattleAction, crate::RuntimeBattleTurn)>> {
+    if battle.battle_type == "BATTLETYPE_LINK" {
+        queue_visible_link_battle_action(runtime_shell, player_action)?;
+        return Ok(None);
+    }
+    let mut trainer_items_used = battle.trainer_items_used.clone();
+    let data = runtime_shell.runtime.data();
     let resolved = runtime_shell
         .shell
-        .resolve_active_battle_turn_with_enemy_selector(player_action, |rng| {
-            selected_enemy_battle_action(
-                snapshot,
-                battle,
-                &mut trainer_items_used,
-                rng,
-            )
-        })?;
-    runtime_shell.trainer_items_used = trainer_items_used;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &resolved.0)?;
+        .resolve_active_battle_turn_with_enemy_selectors(
+            player_action,
+            |combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => {
+                    selected_enemy_battle_move_slot_with_rng(data, battle, combat, rng)
+                }
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    selected_wild_enemy_move_slot(combat, rng)
+                }
+            },
+            |selected_move_slot, combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => selected_enemy_trainer_post_order_action(
+                    data,
+                    battle,
+                    &mut trainer_items_used,
+                    selected_move_slot,
+                    combat,
+                    rng,
+                )
+                .map_err(|error| {
+                    crystal_core::battle::turn::BattleTurnError::EnemyActionSelectionFailed {
+                        error: format!("{error:#}"),
+                    }
+                }),
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    Ok(BattleAction::Move {
+                        slot: selected_move_slot,
+                    })
+                }
+            },
+        )?;
+    persist_selected_enemy_trainer_item(
+        runtime_shell,
+        battle,
+        &resolved.0,
+        &trainer_items_used,
+    )?;
+    Ok(Some(resolved))
+}
+
+fn resolve_active_battle_item_turn_with_enemy_ai(
+    runtime_shell: &mut BevyRuntimeShell,
+    battle: &crate::RuntimeBattleSnapshot,
+    item_id: &str,
+) -> Result<crate::RuntimeBattleItemTurn> {
+    let mut trainer_items_used = battle.trainer_items_used.clone();
+    let data = runtime_shell.runtime.data();
+    let resolved = runtime_shell
+        .shell
+        .resolve_active_battle_item_turn_with_enemy_selectors(
+            item_id,
+            |combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => {
+                    selected_enemy_battle_move_slot_with_rng(data, battle, combat, rng)
+                }
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    selected_wild_enemy_move_slot(combat, rng)
+                }
+            },
+            |selected_move_slot, combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => selected_enemy_trainer_post_order_action(
+                    data,
+                    battle,
+                    &mut trainer_items_used,
+                    selected_move_slot,
+                    combat,
+                    rng,
+                )
+                .map_err(|error| {
+                    crystal_core::battle::turn::BattleTurnError::EnemyActionSelectionFailed {
+                        error: format!("{error:#}"),
+                    }
+                }),
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    Ok(BattleAction::Move {
+                        slot: selected_move_slot,
+                    })
+                }
+            },
+        )?;
+    persist_selected_enemy_trainer_item(
+        runtime_shell,
+        battle,
+        &resolved.enemy_action,
+        &trainer_items_used,
+    )?;
     Ok(resolved)
 }
 
-fn resolve_active_battle_enemy_action_with_ai(
+fn resolve_active_battle_party_item_turn_with_enemy_ai(
     runtime_shell: &mut BevyRuntimeShell,
-    snapshot: &RuntimeShellSnapshot,
     battle: &crate::RuntimeBattleSnapshot,
-) -> Result<(BattleAction, crate::RuntimeBattleTurn)> {
-    let mut trainer_items_used = runtime_shell.trainer_items_used.clone();
+    item_id: &str,
+    party_index: usize,
+    move_slot: Option<usize>,
+) -> Result<crate::RuntimeBattleItemTurn> {
+    let mut trainer_items_used = battle.trainer_items_used.clone();
+    let data = runtime_shell.runtime.data();
     let resolved = runtime_shell
         .shell
-        .resolve_active_battle_enemy_action_with_selector(|rng| {
-            selected_enemy_battle_action(
-                snapshot,
-                battle,
-                &mut trainer_items_used,
-                rng,
-            )
-        })?;
-    runtime_shell.trainer_items_used = trainer_items_used;
-    persist_selected_enemy_trainer_item(runtime_shell, battle, &resolved.0)?;
+        .resolve_active_battle_party_item_turn_with_enemy_selectors(
+            item_id,
+            party_index,
+            move_slot,
+            |combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => {
+                    selected_enemy_battle_move_slot_with_rng(data, battle, combat, rng)
+                }
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    selected_wild_enemy_move_slot(combat, rng)
+                }
+            },
+            |selected_move_slot, combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => selected_enemy_trainer_post_order_action(
+                    data,
+                    battle,
+                    &mut trainer_items_used,
+                    selected_move_slot,
+                    combat,
+                    rng,
+                )
+                .map_err(|error| {
+                    crystal_core::battle::turn::BattleTurnError::EnemyActionSelectionFailed {
+                        error: format!("{error:#}"),
+                    }
+                }),
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    Ok(BattleAction::Move {
+                        slot: selected_move_slot,
+                    })
+                }
+            },
+        )?;
+    persist_selected_enemy_trainer_item(
+        runtime_shell,
+        battle,
+        &resolved.enemy_action,
+        &trainer_items_used,
+    )?;
+    Ok(resolved)
+}
+
+fn resolve_active_battle_ball_turn_with_enemy_ai(
+    runtime_shell: &mut BevyRuntimeShell,
+    battle: &crate::RuntimeBattleSnapshot,
+    ball_id: &str,
+) -> Result<crate::RuntimeBattleBallTurn> {
+    let mut trainer_items_used = battle.trainer_items_used.clone();
+    let data = runtime_shell.runtime.data();
+    let resolved = runtime_shell
+        .shell
+        .resolve_active_battle_ball_turn_with_enemy_selectors(
+            ball_id,
+            |combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => {
+                    selected_enemy_battle_move_slot_with_rng(data, battle, combat, rng)
+                }
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    selected_wild_enemy_move_slot(combat, rng)
+                }
+            },
+            |selected_move_slot, combat, rng| match &battle.kind {
+                RuntimeBattleKind::Trainer { .. } => selected_enemy_trainer_post_order_action(
+                    data,
+                    battle,
+                    &mut trainer_items_used,
+                    selected_move_slot,
+                    combat,
+                    rng,
+                )
+                .map_err(|error| {
+                    crystal_core::battle::turn::BattleTurnError::EnemyActionSelectionFailed {
+                        error: format!("{error:#}"),
+                    }
+                }),
+                RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
+                    Ok(BattleAction::Move {
+                        slot: selected_move_slot,
+                    })
+                }
+            },
+        )?;
+    persist_selected_enemy_trainer_item(
+        runtime_shell,
+        battle,
+        &resolved.enemy_action,
+        &trainer_items_used,
+    )?;
     Ok(resolved)
 }
 
@@ -4102,9 +3689,9 @@ fn stage_visible_battle_item_use(
     let snapshot = runtime_shell.shell.snapshot()?;
     let player_name = snapshot.trainer.player_name.as_str();
     let display_name = item_display_name(&snapshot, item_id);
-    runtime_shell.battle_messages.push_back(format!(
-        "{player_name} used the {display_name}."
-    ));
+    runtime_shell
+        .battle_messages
+        .push_back(format!("{player_name} used the {display_name}."));
     runtime_shell.battle_message_scene = Some(Box::new(snapshot));
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -4147,9 +3734,7 @@ fn stage_visible_battle_item_effect(
             .items
             .iter()
             .find(|item| item.item_id == outcome.item_id)
-            .is_some_and(|item| {
-                item.confusion_heal == Some(true) && item.status_heals.is_empty()
-            });
+            .is_some_and(|item| item.confusion_heal == Some(true) && item.status_heals.is_empty());
         Some(if pure_confusion_heal {
             format!("{target_name}'s\nconfused no more!")
         } else {
@@ -4186,50 +3771,6 @@ fn stage_visible_battle_item_effect(
         mark_runtime_snapshot_dirty(runtime_shell);
     }
     Ok(())
-}
-
-fn resolve_visible_battle_enemy_response_after_player_item(
-    runtime_shell: &mut BevyRuntimeShell,
-    item_id: &str,
-) -> Result<()> {
-    let snapshot = runtime_shell.shell.snapshot()?;
-    let Some(ref battle) = snapshot.battle else {
-        return Ok(());
-    };
-    if visible_active_battle_player_fainted(&snapshot) || battle.enemy_pokemon.hp == 0 {
-        return settle_visible_battle_after_action(runtime_shell);
-    }
-    let battle_before_turn = battle.clone();
-    let (enemy_action, turn) =
-        resolve_active_battle_enemy_action_with_ai(runtime_shell, &snapshot, battle)?;
-    let enemy_slot = match &enemy_action {
-        BattleAction::Move { slot } => Some(*slot),
-        _ => None,
-    };
-    record_visible_runtime_action(
-        runtime_shell,
-        format!("battle:enemy_response:{item_id}:{enemy_action:?}"),
-    )?;
-    stage_visible_battle_messages(runtime_shell, &snapshot, &turn.outcome.events);
-    let events = format_battle_turn_events(&turn.outcome.events);
-    runtime_shell.last_audio_events.push(format!(
-        "battle item response item={} enemy_slot={} {} events={} checksum={:?}",
-        item_id,
-        enemy_slot.map_or_else(|| "switch".to_string(), |slot| slot.to_string()),
-        format_battle_turn_summary(&turn.outcome),
-        events,
-        turn.state_checksum
-    ));
-    trim_event_log(&mut runtime_shell.last_audio_events);
-    set_shell_action_status(
-        runtime_shell,
-        format!(
-            "ENEMY RESPONSE {} {}",
-            item_id,
-            format_battle_turn_summary(&turn.outcome)
-        ),
-    );
-    settle_visible_resolved_battle_turn(runtime_shell, &battle_before_turn)
 }
 
 fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) -> String {
@@ -4517,6 +4058,10 @@ fn format_battle_turn_events(events: &[crate::core::battle::turn::BattleEvent]) 
             crate::core::battle::turn::BattleEvent::EscapeTrapApplied { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_escape_trap_applied",
                 crate::core::battle::turn::BattleSide::Enemy => "enemy_escape_trap_applied",
+            },
+            crate::core::battle::turn::BattleEvent::EscapeTrapFailed { side, .. } => match side {
+                crate::core::battle::turn::BattleSide::Player => "player_escape_trap_failed",
+                crate::core::battle::turn::BattleSide::Enemy => "enemy_escape_trap_failed",
             },
             crate::core::battle::turn::BattleEvent::EscapeTrapEnded { side, .. } => match side {
                 crate::core::battle::turn::BattleSide::Player => "player_escape_trap_ended",

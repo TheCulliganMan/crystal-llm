@@ -1648,6 +1648,7 @@
                 serde_json::json!({
                     "Route29": [{
                         "sprite": "SPRITE_POKE_BALL",
+                        "sprite_has_facings": false,
                         "x": 3,
                         "y": 4,
                         "spritemovedata": "SPRITEMOVEDATA_STANDING_DOWN",
@@ -2413,6 +2414,7 @@
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.objects = vec![ObjectEvent {
             sprite: " SPRITE_MON".to_string(),
+            sprite_has_facings: true,
             x: 0,
             y: 0,
             spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN".to_string(),
@@ -3707,6 +3709,7 @@
         let mut module = test_map_module("Route29", "ROUTE_29", None);
         module.objects = vec![ObjectEvent {
             sprite: "SPRITE_YOUNGSTER".to_string(),
+            sprite_has_facings: true,
             x: 0,
             y: 0,
             spritemovedata: "SPRITEMOVEDATA_STANDING_DOWN".to_string(),

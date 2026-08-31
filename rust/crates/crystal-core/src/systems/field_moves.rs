@@ -2356,6 +2356,7 @@ mod tests {
     fn object(identifier: &str, x: u16, y: u16, movement: &str) -> ObjectEvent {
         ObjectEvent {
             sprite: "SPRITE_SUDOWOODO".to_string(),
+            sprite_has_facings: true,
             x,
             y,
             spritemovedata: movement.to_string(),

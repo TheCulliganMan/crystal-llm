@@ -1,0 +1,8 @@
+{
+  "path": "output/minneapolis-map/neighborhood.crystalpack",
+  "map_name": "GeneratedNeighborhood",
+  "map_constant": "GENERATED_NEIGHBORHOOD",
+  "spawn_identifier": 65000,
+  "runtime_tile_x": 65,
+  "runtime_tile_y": 65
+}

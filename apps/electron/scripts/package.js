@@ -63,7 +63,6 @@ const pruneStandaloneBundle = () => {
 
   const removablePaths = [
     path.join(STANDALONE_APP_DIR, "public", "downloads"),
-    path.join(STANDALONE_APP_DIR, "public", "ffmpeg"),
   ];
 
   for (const removablePath of removablePaths) {

@@ -2,6 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::battle::abilities::{
+    absorbs_move_type, effective_weather, guts_ignores_burn_penalty, has_ground_immunity,
+    has_thick_fat, has_wonder_guard, low_hp_boosted_type, physical_attack_multiplier,
+    physical_defense_multiplier,
+};
 use crate::battle::stats::{BattleStatMultiplierTables, apply_stage};
 use crate::models::{Move, Pokemon, PokemonType, Stat};
 
@@ -666,10 +671,18 @@ pub struct DamageContext {
     /// command. Triple Kick uses 1, 2, then 3 for its successive kicks.
     #[serde(default = "default_pre_stab_multiplier")]
     pub pre_stab_multiplier: u8,
+    /// Multiplier applied after STAB and type effectiveness but before damage
+    /// variation. Fury Cutter and Rollout mutate `wCurDamage` at this point.
+    #[serde(default = "default_post_type_damage_multiplier")]
+    pub post_type_damage_multiplier: u16,
     /// Crystal's separate Rage counter. Rage multiplies post-effectiveness
     /// damage by counter + 1 before damage variation.
     #[serde(default)]
     pub rage_counter: u8,
+    /// Apply the Attack penalty from a cached burned battle stat even if the
+    /// major status byte has since been cleared by the enemy item AI.
+    #[serde(default)]
+    pub attacker_burn_penalty: bool,
 }
 
 impl Default for DamageContext {
@@ -688,7 +701,9 @@ impl Default for DamageContext {
             link_colosseum: false,
             held_type_boost_percent: 0,
             pre_stab_multiplier: default_pre_stab_multiplier(),
+            post_type_damage_multiplier: default_post_type_damage_multiplier(),
             rage_counter: 0,
+            attacker_burn_penalty: false,
         }
     }
 }
@@ -943,7 +958,12 @@ pub fn calculate_damage(
             )?,
         )
     };
-    let attack_value = apply_burn_attack_penalty(attacker, physical, attack_value);
+    let attack_value = apply_burn_attack_penalty(
+        attacker,
+        physical,
+        attack_value,
+        context.attacker_burn_penalty,
+    );
     // HitSelfInConfusion loads the current battle Attack directly and skips
     // DamageStats, so Thick Club/Light Ball stat boosts are not applied. The
     // later DamageCalc type-item lookup still uses the selected move type.
@@ -951,6 +971,11 @@ pub fn calculate_damage(
         attack_value
     } else {
         apply_species_held_attack_boost(attacker, physical, attack_value)
+    };
+    let attack_value = if physical && !context.is_confusion_damage {
+        apply_stat_ratio(attack_value, physical_attack_multiplier(attacker))
+    } else {
+        attack_value
     };
     let mut defense_value = if critical_ignores_stages {
         clamp_stat(base_defense)
@@ -965,6 +990,9 @@ pub fn calculate_damage(
     };
     if context.defender_screen && !critical_ignores_stages {
         defense_value = defense_value.wrapping_mul(2);
+    }
+    if physical && !context.is_confusion_damage {
+        defense_value = apply_stat_ratio(defense_value, physical_defense_multiplier(defender));
     }
     let (mut attack_value, mut defense_value) =
         truncate_damage_stats(attack_value, defense_value, context.link_colosseum);
@@ -997,7 +1025,7 @@ pub fn calculate_damage(
 
     damage = apply_weather_type_modifier(
         damage,
-        context.weather,
+        effective_weather(context.weather, attacker, defender),
         &move_data.move_type,
         weather_modifiers,
     )?;
@@ -1013,8 +1041,22 @@ pub fn calculate_damage(
         damage = ((damage as u32 * 3) / 2) as u16;
     }
 
+    damage = apply_low_hp_type_ability(
+        damage,
+        attacker,
+        &move_data.move_type,
+        context.is_confusion_damage,
+    );
+
+    if !context.is_confusion_damage
+        && has_thick_fat(&defender.species.ability)
+        && matches!(move_data.move_type.as_str(), "FIRE" | "ICE")
+    {
+        damage /= 2;
+    }
+
     let defender_types = distinct_defender_types(defender);
-    let type_multiplier = if context.is_confusion_damage || move_data.name == "STRUGGLE" {
+    let mut type_multiplier = if context.is_confusion_damage || move_data.name == "STRUGGLE" {
         TypeMultiplier::one()
     } else {
         calculate_type_effectiveness_multiplier_with_foresight(
@@ -1024,6 +1066,15 @@ pub fn calculate_damage(
             context.defender_identified,
         )?
     };
+    if !context.is_confusion_damage
+        && move_data.name != "STRUGGLE"
+        && (absorbs_move_type(&defender.species.ability, &move_data.move_type)
+            || (move_data.move_type == "GROUND" && has_ground_immunity(&defender.species.ability))
+            || (has_wonder_guard(&defender.species.ability)
+                && type_multiplier.numerator <= type_multiplier.denominator))
+    {
+        type_multiplier = TypeMultiplier::zero();
+    }
     if type_multiplier.numerator == 0 {
         return Ok(DamageResult {
             damage: 0,
@@ -1031,6 +1082,10 @@ pub fn calculate_damage(
         });
     }
     damage = type_multiplier.apply_floor(damage);
+
+    damage = damage
+        .checked_mul(context.post_type_damage_multiplier.max(1))
+        .unwrap_or(u16::MAX);
 
     if move_data.effect == "RAGE" && context.rage_counter != 0 {
         damage = u16::try_from(
@@ -1050,7 +1105,42 @@ pub fn calculate_damage(
     })
 }
 
+fn apply_low_hp_type_ability(
+    damage: u16,
+    attacker: &Pokemon,
+    move_type: &str,
+    is_confusion_damage: bool,
+) -> u16 {
+    if is_confusion_damage
+        || attacker.max_hp == 0
+        || u32::from(attacker.hp) * 3 > u32::from(attacker.max_hp)
+    {
+        return damage;
+    }
+    let Some(boosted_type) = low_hp_boosted_type(&attacker.species.ability) else {
+        return damage;
+    };
+    if move_type != boosted_type {
+        return damage;
+    }
+    ((u32::from(damage) * 3) / 2).min(u32::from(u16::MAX)) as u16
+}
+
+fn apply_stat_ratio(value: u16, (numerator, denominator): (u16, u16)) -> u16 {
+    // An absent ability is an exact no-op. Sending the identity ratio through
+    // the host-side cap would rewrite Crystal's live 16-bit intermediate
+    // before TruncateHL_BC gets to expose its ordinary/link byte behavior.
+    if numerator == denominator {
+        return value;
+    }
+    ((u32::from(value) * u32::from(numerator)) / u32::from(denominator)).min(999) as u16
+}
+
 const fn default_pre_stab_multiplier() -> u8 {
+    1
+}
+
+const fn default_post_type_damage_multiplier() -> u16 {
     1
 }
 
@@ -1140,8 +1230,16 @@ fn clamp_stat(value: u16) -> u16 {
     value.clamp(1, 999)
 }
 
-fn apply_burn_attack_penalty(attacker: &Pokemon, physical: bool, attack_value: u16) -> u16 {
-    if physical && attacker.status.as_deref() == Some("BURN") {
+fn apply_burn_attack_penalty(
+    attacker: &Pokemon,
+    physical: bool,
+    attack_value: u16,
+    cached_penalty: bool,
+) -> u16 {
+    if physical
+        && !guts_ignores_burn_penalty(attacker)
+        && (attacker.status.as_deref() == Some("BURN") || cached_penalty)
+    {
         (attack_value / 2).max(1)
     } else {
         attack_value
@@ -1463,7 +1561,8 @@ mod tests {
                     "GRASS": { "numerator": 2, "denominator": 1 },
                     "FLYING": { "numerator": 2, "denominator": 1 }
                 },
-                "FIRE": { "GRASS": { "numerator": 2, "denominator": 1 } }
+                "FIRE": { "GRASS": { "numerator": 2, "denominator": 1 } },
+                "WATER": { "NORMAL": { "numerator": 1, "denominator": 1 } }
             },
             "foresight_matchups": {
                 "NORMAL": { "GHOST": { "numerator": 1, "denominator": 1 } },
@@ -1920,6 +2019,63 @@ mod tests {
             }
         );
         assert_eq!(result.damage, 90);
+    }
+
+    #[test]
+    fn torrent_boosts_water_damage_at_or_below_one_third_hp() {
+        let mut attacker = pokemon(
+            "ATTACKER",
+            pokemon_type("WATER"),
+            BaseStats::new(80, 84, 78, 100, 109, 85),
+            50,
+        );
+        let defender = pokemon(
+            "DEFENDER",
+            pokemon_type("NORMAL"),
+            BaseStats::new(80, 82, 83, 80, 100, 100),
+            50,
+        );
+        let water_move = tackle(pokemon_type("WATER"), 60);
+        let normal = calculate_damage(
+            &attacker,
+            &defender,
+            &water_move,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("ordinary damage");
+
+        attacker.species.ability = "TORRENT".to_string();
+        attacker.hp = attacker.max_hp / 3;
+        let torrent = calculate_damage(
+            &attacker,
+            &defender,
+            &water_move,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("Torrent damage");
+        attacker.hp = attacker.max_hp / 3 + 1;
+        let above_threshold = calculate_damage(
+            &attacker,
+            &defender,
+            &water_move,
+            &stat_multipliers(),
+            &type_categories(),
+            &type_effectiveness_table(),
+            &weather_modifiers(),
+            DamageContext::default(),
+        )
+        .expect("above-threshold damage");
+
+        assert_eq!(torrent.damage, (u32::from(normal.damage) * 3 / 2) as u16);
+        assert_eq!(above_threshold.damage, normal.damage);
     }
 
     #[test]

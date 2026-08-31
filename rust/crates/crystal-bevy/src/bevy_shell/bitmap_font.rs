@@ -103,7 +103,10 @@ fn load_window_frame_art(
     frame_id: u8,
     images: &mut Assets<Image>,
 ) -> Result<WindowFrameArt> {
-    anyhow::ensure!((1..=8).contains(&frame_id), "invalid textbox frame {frame_id}");
+    anyhow::ensure!(
+        (1..=8).contains(&frame_id),
+        "invalid textbox frame {frame_id}"
+    );
     let frame_path = asset_root
         .runtime_assets()
         .join(format!("gfx/frames/{frame_id}.png"));
@@ -673,10 +676,25 @@ fn load_common_tileset_animations(
 ) -> Result<HashMap<usize, TilesetAnimatedTile>> {
     const FLOWER_TILE: usize = 0x03;
     const WATER_TILE: usize = 0x14;
-    const FLOWER_TILESETS: [&str; 5] = ["johto", "johto_modern", "kanto", "park", "forest"];
-    const WATER_TILESETS: [&str; 9] = [
-        "johto", "johto_modern", "kanto", "park", "forest", "port", "cave",
-        "dark_cave", "ice_path",
+    const FLOWER_TILESETS: [&str; 6] = [
+        "johto",
+        "johto_modern",
+        "johto_modern_generated",
+        "kanto",
+        "park",
+        "forest",
+    ];
+    const WATER_TILESETS: [&str; 10] = [
+        "johto",
+        "johto_modern",
+        "johto_modern_generated",
+        "kanto",
+        "park",
+        "forest",
+        "port",
+        "cave",
+        "dark_cave",
+        "ice_path",
     ];
     let mut animated = HashMap::new();
     let root = asset_root.runtime_assets().join("gfx/tilesets");
@@ -695,21 +713,16 @@ fn load_common_tileset_animations(
     }
     if WATER_TILESETS.contains(&tileset_id) {
         let palette = tileset_animation_palette(WATER_TILE, palette_map, palette_bank);
-        let frames = load_2bpp_animation_frames(
-            &root.join("water/water.2bpp"),
-            4,
-            palette,
-            images,
-        )?;
+        let frames =
+            load_2bpp_animation_frames(&root.join("water/water.2bpp"), 4, palette, images)?;
         // ASM/TypeScript: ((wTileAnimationTimer / 11) >> 1) & 3.
         animated.insert(WATER_TILE, sequential_tileset_animation(frames, 22, 0));
     }
     if tileset_id == "park" {
         const FOUNTAIN_TILE: usize = 0x5f;
         let palette = tileset_animation_palette(FOUNTAIN_TILE, palette_map, palette_bank);
-        let source = load_numbered_2bpp_animation_frames(
-            &root.join("fountain"), 5, palette, images,
-        )?;
+        let source =
+            load_numbered_2bpp_animation_frames(&root.join("fountain"), 5, palette, images)?;
         let frames = [0_usize, 1, 2, 3, 2, 3, 4, 0]
             .into_iter()
             .map(|index| source[index].clone())
@@ -739,22 +752,19 @@ fn load_common_tileset_animations(
             LAVA_TILE_1,
             sequential_tileset_animation(offset_frames, 2, 0),
         );
-        animated.insert(
-            LAVA_TILE_2,
-            sequential_tileset_animation(source_2, 2, 0),
-        );
+        animated.insert(LAVA_TILE_2, sequential_tileset_animation(source_2, 2, 0));
     }
     if tileset_id == "tower" {
-        const DESTINATIONS: [usize; 10] = [
-            0x2d, 0x2f, 0x3d, 0x3f, 0x3c, 0x2c, 0x4d, 0x4f, 0x5d, 0x5f,
-        ];
-        const UPDATE_SEQUENCE: [usize; 10] = [
-            0x5d, 0x5f, 0x4d, 0x4f, 0x3c, 0x2c, 0x3d, 0x3f, 0x2d, 0x2f,
-        ];
+        const DESTINATIONS: [usize; 10] =
+            [0x2d, 0x2f, 0x3d, 0x3f, 0x3c, 0x2c, 0x4d, 0x4f, 0x5d, 0x5f];
+        const UPDATE_SEQUENCE: [usize; 10] =
+            [0x5d, 0x5f, 0x4d, 0x4f, 0x3c, 0x2c, 0x3d, 0x3f, 0x2d, 0x2f];
         const FRAME_ORDER: [usize; 8] = [0, 1, 2, 3, 4, 3, 2, 1];
         for (file_index, destination) in DESTINATIONS.into_iter().enumerate() {
             let source = load_2bpp_animation_frames(
-                &root.join("tower-pillar").join(format!("{}.2bpp", file_index + 1)),
+                &root
+                    .join("tower-pillar")
+                    .join(format!("{}.2bpp", file_index + 1)),
                 5,
                 tileset_animation_palette(destination, palette_map, palette_bank),
                 images,
@@ -829,9 +839,7 @@ fn load_common_tileset_animations(
         let mut composite_frames = Vec::with_capacity(32);
         for source in &water_sources {
             for shift in 0..8 {
-                composite_frames.push(shifted_tileset_tile_handle(
-                    source, shift, 0, images,
-                )?);
+                composite_frames.push(shifted_tileset_tile_handle(source, shift, 0, images)?);
             }
         }
         animated.insert(
@@ -941,8 +949,8 @@ fn shifted_tileset_tile_handle(
     for y in 0..SOURCE_TILE_SIZE {
         for x in 0..SOURCE_TILE_SIZE {
             let source_x = (x + left_pixels) % SOURCE_TILE_SIZE;
-            let source_y = (y + SOURCE_TILE_SIZE - (down_pixels % SOURCE_TILE_SIZE))
-                % SOURCE_TILE_SIZE;
+            let source_y =
+                (y + SOURCE_TILE_SIZE - (down_pixels % SOURCE_TILE_SIZE)) % SOURCE_TILE_SIZE;
             let source_offset = (source_y * SOURCE_TILE_SIZE + source_x) * 4;
             let target_offset = (y * SOURCE_TILE_SIZE + x) * 4;
             shifted[target_offset..target_offset + 4]
@@ -1003,7 +1011,10 @@ fn load_2bpp_animation_frames(
     if bytes.len() != expected {
         anyhow::bail!(
             "tileset animation {} must contain {} bytes ({} frames), found {}",
-            path.display(), expected, frame_count, bytes.len()
+            path.display(),
+            expected,
+            frame_count,
+            bytes.len()
         );
     }
     let mut frames = Vec::with_capacity(frame_count);
@@ -1015,8 +1026,7 @@ fn load_2bpp_animation_frames(
             let hi = frame[row * 2 + 1];
             for col in 0..SOURCE_TILE_SIZE {
                 let bit = 1 << (7 - col);
-                let color_index = (((hi & bit != 0) as usize) << 1)
-                    | (lo & bit != 0) as usize;
+                let color_index = (((hi & bit != 0) as usize) << 1) | (lo & bit != 0) as usize;
                 let color = palette
                     .map(|colors| colors[color_index])
                     .unwrap_or_else(|| {
@@ -1279,11 +1289,20 @@ fn intro_scene_frame_for_art(
         .runtime_assets()
         .join("data/sprite_anim_bundle.json");
     let sprite_anim_bundle = crate::read_runtime_asset_to_string(&path).ok()?;
+    let title_path = asset_root
+        .runtime_assets()
+        .join("data/content-packs/core-modular/runtime_title_screen/title.json");
+    let title: crystal_assets::RuntimeTitleScreen = serde_json::from_str(
+        &crate::read_runtime_asset_to_string(&title_path).ok()?,
+    )
+    .ok()?;
+    let mut render_intro = intro.clone();
+    apply_visible_intro_background_binding(&mut render_intro, &title.program).ok()?;
     intro_scene_frame_for_art_with_bundle(
         rendered_art,
         asset_root,
         &sprite_anim_bundle,
-        intro,
+        &render_intro,
         images,
     )
 }
@@ -1299,17 +1318,19 @@ fn load_intro_scene_frame(
     const INTRO_SURFACE_SIZE: usize = INTRO_SURFACE_TILES * SOURCE_TILE_SIZE;
     let mut data = vec![0_u8; INTRO_SURFACE_SIZE * INTRO_SURFACE_SIZE * 4];
     ensure_intro_effect_palette_banks(asset_root, rendered_art)?;
-    if let Some(map_name) = visible_intro_bg_tilemap_name(intro.jumptable_index) {
-        draw_intro_tilemap(
-            asset_root,
-            intro,
-            map_name,
-            intro.scroll_x,
-            intro.scroll_y,
-            rendered_art,
-            &mut data,
-        )?;
-    }
+    let background = intro
+        .background_binding
+        .as_ref()
+        .context("visible intro has no source-derived background binding")?;
+    draw_intro_tilemap(
+        asset_root,
+        intro,
+        background,
+        intro.scroll_x,
+        intro.scroll_y,
+        rendered_art,
+        &mut data,
+    )?;
     if intro.jumptable_index == 9 {
         draw_intro_grass_rustle(
             asset_root,
@@ -1382,24 +1403,10 @@ fn crop_intro_lcd_viewport(backing: &[u8]) -> Vec<u8> {
     viewport
 }
 
-fn visible_intro_bg_tilemap_name(scene_index: usize) -> Option<&'static str> {
-    match scene_index {
-        0 | 1 => Some("unown_a"),
-        2 | 3 | 6 | 7 | 8 | 9 | 12 | 13 => Some("background"),
-        4 | 5 => Some("unown_hi"),
-        10 | 11 => Some("unowns"),
-        14 | 15 => Some("suicune_jump"),
-        16 | 17 => Some("suicune_close"),
-        18 | 19 | 20 | 21 | 22 | 23 | 24 => Some("suicune_back"),
-        25 | 26 | 27 => Some("crystal_unowns"),
-        _ => None,
-    }
-}
-
 fn draw_intro_tilemap(
     asset_root: &AssetRoot,
     intro: &VisibleIntroScreen,
-    map_name: &str,
+    background: &VisibleIntroBackgroundBinding,
     scroll_x: u8,
     scroll_y: u8,
     rendered_art: &mut RenderedTilesetArt,
@@ -1407,21 +1414,36 @@ fn draw_intro_tilemap(
 ) -> Result<()> {
     const INTRO_SURFACE_TILES: usize = 32;
     let intro_root = asset_root.runtime_assets().join("gfx/intro");
-    let tilemap_path = intro_root.join(format!("{map_name}.tilemap"));
-    let attrmap_path = intro_root.join(format!("{map_name}.attrmap"));
-    let tilemap =
-        crate::read_runtime_asset(&tilemap_path).with_context(|| format!("read {}", tilemap_path.display()))?;
-    let attrmap =
-        crate::read_runtime_asset(&attrmap_path).with_context(|| format!("read {}", attrmap_path.display()))?;
-    let tile_count = tilemap
-        .len()
-        .min(attrmap.len())
-        .min(INTRO_SURFACE_TILES * INTRO_SURFACE_TILES);
+    let tilemap_path = visible_intro_resource_path(
+        &intro_root,
+        &background.tilemap_resource,
+        ".tilemap",
+    )?;
+    let attrmap_path = visible_intro_resource_path(
+        &intro_root,
+        &background.attrmap_resource,
+        ".attrmap",
+    )?;
+    let palette_name = visible_intro_resource_stem(&background.palette_resource, ".pal")?;
+    let tilemap = crate::read_runtime_asset(&tilemap_path)
+        .with_context(|| format!("read {}", tilemap_path.display()))?;
+    let attrmap = crate::read_runtime_asset(&attrmap_path)
+        .with_context(|| format!("read {}", attrmap_path.display()))?;
+    let expected_tile_count = INTRO_SURFACE_TILES * INTRO_SURFACE_TILES;
+    if tilemap.len() != expected_tile_count || attrmap.len() != expected_tile_count {
+        anyhow::bail!(
+            "intro map {} requires exactly {expected_tile_count} tile and attribute bytes; found {} and {}",
+            background.tilemap_resource,
+            tilemap.len(),
+            attrmap.len()
+        );
+    }
+    let tile_count = expected_tile_count;
     for tile_offset in 0..tile_count {
         let tile_x = tile_offset % INTRO_SURFACE_TILES;
         let tile_y = tile_offset / INTRO_SURFACE_TILES;
         let tile_id = tilemap[tile_offset];
-        let attr = if intro.jumptable_index == 9 && map_name == "background" {
+        let attr = if intro.jumptable_index == 9 {
             let row = tile_y;
             let palette = if row < 12 {
                 1
@@ -1434,25 +1456,32 @@ fn draw_intro_tilemap(
         } else {
             attrmap[tile_offset]
         };
-        let mut graphic_name = visible_intro_graphic_name(map_name);
-        let mut tile_shift = visible_intro_tile_shift(map_name);
-        let mut tile_mode = visible_intro_tile_index_mode(map_name);
-        let mut palette_name = visible_intro_palette_name(graphic_name);
-        if map_name == "suicune_back" && tile_id >= 0x80 {
-            graphic_name = "unowns";
-            tile_shift = 0x80;
-            tile_mode = IntroTileIndexMode::Offset;
-            palette_name = "suicune";
-        }
+        let bank = (attr >> 3) & 1;
+        let Some(binding) = background.tile_bindings.iter().find(|binding| {
+            binding.target_vram_bank == bank
+                && tile_id >= binding.tile_id_start
+                && tile_id <= binding.tile_id_end
+        }) else {
+            continue;
+        };
+        let resource_tile = binding.resource_tile_start
+            + u16::from(tile_id - binding.tile_id_start);
+        let resource_tile = u8::try_from(resource_tile).with_context(|| {
+            format!(
+                "intro background resource {} tile index {resource_tile} exceeds one byte",
+                binding.resource
+            )
+        })?;
+        let graphic_name = visible_intro_resource_stem(&binding.resource, ".2bpp")?;
         draw_intro_tile(
             &intro_root,
             intro,
-            graphic_name,
-            palette_name,
-            tile_id,
+            &graphic_name,
+            &palette_name,
+            resource_tile,
             attr,
-            tile_shift,
-            tile_mode,
+            0,
+            IntroTileIndexMode::Offset,
             false,
             rendered_art,
             ((tile_x * SOURCE_TILE_SIZE) as i16 - i16::from(scroll_x)).rem_euclid(256) as usize,
@@ -1461,6 +1490,34 @@ fn draw_intro_tilemap(
         )?;
     }
     Ok(())
+}
+
+fn visible_intro_resource_path(
+    intro_root: &Path,
+    resource: &str,
+    suffix: &str,
+) -> Result<PathBuf> {
+    let relative = resource
+        .strip_prefix("gfx/intro/")
+        .with_context(|| format!("intro resource {resource} is outside gfx/intro"))?;
+    let relative = relative.strip_suffix(".lz").unwrap_or(relative);
+    anyhow::ensure!(
+        relative.ends_with(suffix) && !relative.contains('/') && !relative.contains('\\'),
+        "intro resource {resource} is not one exact {suffix} file"
+    );
+    Ok(intro_root.join(relative))
+}
+
+fn visible_intro_resource_stem(resource: &str, suffix: &str) -> Result<String> {
+    let relative = resource
+        .strip_prefix("gfx/intro/")
+        .with_context(|| format!("intro resource {resource} is outside gfx/intro"))?;
+    let relative = relative.strip_suffix(".lz").unwrap_or(relative);
+    relative
+        .strip_suffix(suffix)
+        .filter(|stem| !stem.is_empty() && !stem.contains('/') && !stem.contains('\\'))
+        .map(str::to_string)
+        .with_context(|| format!("intro resource {resource} is not one exact {suffix} file"))
 }
 
 fn draw_intro_grass_rustle(
@@ -1517,43 +1574,19 @@ fn draw_visible_intro_sprites(
         if sprite.start_delay > 0 {
             continue;
         }
-        let Some(oam_set_name) = visible_intro_sprite_oam_set(sprite, &bundle) else {
+        let Some(oam_set_name) = visible_intro_sprite_oam_set(sprite, &bundle)? else {
             continue;
         };
-        let Some(oam_set) = bundle
-            .get("oam_sets")
-            .and_then(|sets| sets.get(oam_set_name.as_str()))
-        else {
-            anyhow::bail!(
-                "intro OAM set {} missing from sprite_anim_bundle",
-                oam_set_name
-            );
-        };
-        let tile_offset = oam_set
-            .get("tile_offset")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0) as i16;
-        let Some(pieces) = oam_set.get("pieces").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
+        let oam_set = bundle.oam_sets.get(&oam_set_name).with_context(|| {
+            format!("intro OAM set {oam_set_name} missing from sprite_anim_bundle")
+        })?;
+        let tile_offset = oam_set.tile_offset;
         let frame_flags = sprite.attr_flags & 0xe0;
-        for piece in pieces {
-            let piece_x = piece
-                .get("x")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0) as i16;
-            let piece_y = piece
-                .get("y")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0) as i16;
-            let piece_tile = piece
-                .get("tile")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0) as i16;
-            let piece_attr = piece
-                .get("attributes")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0) as u8;
+        for piece in &oam_set.pieces {
+            let piece_x = piece.x;
+            let piece_y = piece.y;
+            let piece_tile = piece.tile;
+            let piece_attr = piece.attributes;
             let base_attr = piece_attr | sprite.oam_attr;
             let flipped_attr = (base_attr ^ frame_flags) & 0xe0;
             let attr = (base_attr & !0xe0) | flipped_attr;
@@ -1562,7 +1595,9 @@ fn draw_visible_intro_sprites(
             let global_x = i16::from(intro.global_anim_x_offset as i8);
             let draw_x = sprite.x + sprite.x_offset + global_x + offset_x - 8;
             let draw_y = sprite.y + sprite.y_offset + offset_y - 16;
-            let tile_id = (piece_tile + tile_offset).rem_euclid(256) as u8;
+            let tile_id = sprite
+                .tile_id
+                .wrapping_add((piece_tile + tile_offset).rem_euclid(256) as u8);
             draw_intro_sprite_tile(
                 &intro_root,
                 intro,
@@ -1570,7 +1605,7 @@ fn draw_visible_intro_sprites(
                 visible_intro_palette_name(&sprite.gfx_name),
                 tile_id,
                 attr,
-                0,
+                sprite.gfx_tile_base,
                 IntroTileIndexMode::Offset,
                 true,
                 rendered_art,
@@ -1640,8 +1675,7 @@ fn draw_intro_sprite_tile(
     let palette_index = usize::from(attr & 0x07);
     let palette = palette_bank
         .get(palette_index)
-        .or_else(|| palette_bank.first())
-        .with_context(|| format!("intro palette {palette_name} is empty"))?;
+        .with_context(|| format!("intro palette {palette_name} has no bank {palette_index}"))?;
     let palette_override = visible_intro_effective_palette_cached(
         intro,
         rendered_art,
@@ -1651,7 +1685,7 @@ fn draw_intro_sprite_tile(
         true,
     )?;
     let source_tile_index =
-        resolve_intro_tile_index(tile_id, tile_shift, tile_mode, source_tile_count);
+        resolve_intro_tile_index(tile_id, tile_shift, tile_mode, source_tile_count)?;
     blit_intro_sprite_source_tile(
         source,
         width as usize,
@@ -1667,27 +1701,102 @@ fn draw_intro_sprite_tile(
     Ok(())
 }
 
-fn load_intro_sprite_anim_bundle(sprite_anim_bundle: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(sprite_anim_bundle).context("parse packed sprite animation bundle")
+fn load_intro_sprite_anim_bundle(sprite_anim_bundle: &str) -> Result<SpriteAnimRuntimeBundle> {
+    let bundle: SpriteAnimRuntimeBundle =
+        serde_json::from_str(sprite_anim_bundle).context("parse packed sprite animation bundle")?;
+    validate_sprite_anim_runtime_bundle(&bundle)?;
+    Ok(bundle)
 }
 
 fn visible_intro_sprite_oam_set(
     sprite: &VisibleIntroSprite,
-    bundle: &serde_json::Value,
-) -> Option<String> {
+    bundle: &SpriteAnimRuntimeBundle,
+) -> Result<Option<String>> {
     if let Some(oam_set) = &sprite.current_oam_set {
-        return Some(oam_set.clone());
+        return Ok(Some(oam_set.clone()));
     }
-    let frame_index = usize::try_from(sprite.frameset_step.max(0)).ok()?;
-    bundle
-        .get("framesets")
-        .and_then(|framesets| framesets.get(&sprite.frameset_name))
-        .and_then(|frameset| frameset.get("steps"))
-        .and_then(serde_json::Value::as_array)
-        .and_then(|steps| steps.get(frame_index))
-        .and_then(|step| step.get("oam_set"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+    let frame_index = match sprite.frameset_step {
+        -1 => 0,
+        step if step >= 0 => usize::try_from(step).expect("nonnegative i16 fits usize"),
+        step => anyhow::bail!(
+            "intro sprite {} has invalid pre-frame step {step}",
+            sprite.gfx_name
+        ),
+    };
+    let step = bundle
+        .framesets
+        .get(&sprite.frameset_name)
+        .with_context(|| format!("intro frameset {} is missing", sprite.frameset_name))?
+        .steps
+        .get(frame_index)
+        .with_context(|| {
+            format!(
+                "intro frameset {} has no step {frame_index}",
+                sprite.frameset_name
+            )
+        })?;
+    Ok(step.oam_set.clone())
+}
+
+fn validate_sprite_anim_runtime_bundle(bundle: &SpriteAnimRuntimeBundle) -> Result<()> {
+    if bundle.objects.is_empty() {
+        anyhow::bail!("sprite animation bundle has no object definitions");
+    }
+    for (name, oam_set) in &bundle.oam_sets {
+        if oam_set.name != *name {
+            anyhow::bail!(
+                "sprite animation OAM key {name} contains mismatched name {}",
+                oam_set.name
+            );
+        }
+        if oam_set.pieces.is_empty() {
+            anyhow::bail!("sprite animation OAM set {name} has no pieces");
+        }
+    }
+    for (name, frameset) in &bundle.framesets {
+        if frameset.name.is_empty() {
+            anyhow::bail!("sprite animation frameset {name} has an empty source label");
+        }
+        if frameset.steps.is_empty() {
+            anyhow::bail!("sprite animation frameset {name} has no steps");
+        }
+        for (index, step) in frameset.steps.iter().enumerate() {
+            if !matches!(
+                step.command.as_str(),
+                "frame" | "end" | "restart" | "wait" | "delete"
+            ) {
+                anyhow::bail!(
+                    "sprite animation frameset {name} step {index} has unknown command {}",
+                    step.command
+                );
+            }
+            if step.attr_flags & !0xe0 != 0 {
+                anyhow::bail!(
+                    "sprite animation frameset {name} step {index} has invalid attribute flags {:#04x}",
+                    step.attr_flags
+                );
+            }
+            match (&*step.command, &step.oam_set) {
+                ("frame", Some(oam_set)) if bundle.oam_sets.contains_key(oam_set) => {}
+                ("frame", Some(oam_set)) => anyhow::bail!(
+                    "sprite animation frameset {name} step {index} references missing OAM set {oam_set}"
+                ),
+                ("frame", None) => {
+                    anyhow::bail!("sprite animation frameset {name} step {index} has no OAM set")
+                }
+                (_, Some(oam_set)) => anyhow::bail!(
+                    "sprite animation frameset {name} non-frame step {index} unexpectedly references OAM set {oam_set}"
+                ),
+                (_, None) => {}
+            }
+            if step.command == "frame" && step.duration == 0 {
+                anyhow::bail!(
+                    "sprite animation frameset {name} frame step {index} has zero duration"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_visible_intro_frame_flip(offset: i16, flip: bool) -> i16 {
@@ -1698,18 +1807,6 @@ fn apply_visible_intro_frame_flip(offset: i16, flip: bool) -> i16 {
 enum IntroTileIndexMode {
     Offset,
     Signed,
-}
-
-fn visible_intro_graphic_name(map_name: &str) -> &str {
-    match map_name {
-        "unown_a" | "unown_hi" | "unowns" => "unowns",
-        "background" => "background",
-        "suicune_jump" => "suicune_jump",
-        "suicune_close" => "suicune_close",
-        "suicune_back" => "suicune_back",
-        "crystal_unowns" => "crystal_unowns",
-        other => other,
-    }
 }
 
 fn visible_intro_palette_name(graphic_name: &str) -> &str {
@@ -1731,20 +1828,6 @@ fn visible_intro_palette_name(graphic_name: &str) -> &str {
         "crystal_unowns"
     } else {
         graphic_name
-    }
-}
-
-fn visible_intro_tile_shift(map_name: &str) -> u8 {
-    match map_name {
-        "unowns" | "unown_a" | "unown_hi" | "crystal_unowns" | "suicune_close" => 0x80,
-        _ => 0,
-    }
-}
-
-fn visible_intro_tile_index_mode(map_name: &str) -> IntroTileIndexMode {
-    match map_name {
-        "suicune_close" => IntroTileIndexMode::Signed,
-        _ => IntroTileIndexMode::Offset,
     }
 }
 
@@ -1802,8 +1885,7 @@ fn draw_intro_tile(
     let palette_index = usize::from(attr & 0x07);
     let palette = palette_bank
         .get(palette_index)
-        .or_else(|| palette_bank.first())
-        .with_context(|| format!("intro palette {palette_name} is empty"))?;
+        .with_context(|| format!("intro palette {palette_name} has no bank {palette_index}"))?;
     let palette_override = visible_intro_effective_palette_cached(
         intro,
         rendered_art,
@@ -1812,8 +1894,13 @@ fn draw_intro_tile(
         palette,
         false,
     )?;
-    let source_tile_index =
-        resolve_intro_tile_index(tile_id, tile_shift, tile_mode, source_tile_count);
+    let source_tile_index = if graphic_name == "crystal_unowns" && tile_id == 0xff {
+        source_tile_count
+            .checked_sub(1)
+            .context("intro crystal_unowns sheet has no blank terminal tile")?
+    } else {
+        resolve_intro_tile_index(tile_id, tile_shift, tile_mode, source_tile_count)?
+    };
     let xflip = (attr & 0x20) != 0;
     let yflip = (attr & 0x40) != 0;
     blit_intro_source_tile(
@@ -1991,7 +2078,7 @@ fn resolve_intro_tile_index(
     tile_shift: u8,
     tile_mode: IntroTileIndexMode,
     source_tile_count: usize,
-) -> usize {
+) -> Result<usize> {
     let mut resolved = tile_id;
     if tile_shift != 0 {
         resolved = match tile_mode {
@@ -2002,11 +2089,13 @@ fn resolve_intro_tile_index(
             IntroTileIndexMode::Offset => resolved,
         };
     }
-    if source_tile_count == 0 {
-        0
-    } else {
-        usize::from(resolved) % source_tile_count
+    let resolved = usize::from(resolved);
+    if resolved >= source_tile_count {
+        anyhow::bail!(
+            "intro tile id {tile_id:#04x} resolves to {resolved}, outside {source_tile_count} source tiles"
+        );
     }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -2189,8 +2278,12 @@ fn load_title_frame(
     let palette_bank = load_title_palette_bank(asset_root)?;
     let palette = palette_bank
         .get(usize::from(palette_id))
-        .or_else(|| palette_bank.first())
-        .context("title palette bank is empty")?;
+        .with_context(|| {
+            format!(
+                "title asset {asset_id} references palette {palette_id}, but the title palette bank has {} entries",
+                palette_bank.len()
+            )
+        })?;
     let mut data = vec![0_u8; width as usize * height as usize * 4];
     copy_source_image_rgba(
         &source,
@@ -2312,7 +2405,25 @@ fn draw_native_title_background(
     } else {
         NativeTitleScroll::None
     };
-    let suicune_frame_start = [0x80_u8, 0x88, 0x00, 0x08][((title.frame / 8) as usize) % 4];
+    // AnimateTitleSuicune selects from the pre-increment value in
+    // wSuicuneFrame. `title.frame` counts completed host ticks, so frame 8
+    // still displays the source frame selected by counter 0; counter 8 is
+    // observed on the ninth tick.
+    let suicune_frame_index = native_title_suicune_frame_index(
+        title.frame,
+        title.suicune_selector_mask,
+        title.suicune_selector_shift_left,
+        title.suicune_selector_swap_nibbles,
+    );
+    let suicune_frame_start = *title
+        .suicune_frames
+        .get(suicune_frame_index)
+        .with_context(|| {
+            format!(
+                "title Suicune selector produced frame {suicune_frame_index} outside {} exported frames",
+                title.suicune_frames.len()
+            )
+        })?;
     for row in 0..6 {
         for col in 0..8 {
             let tile_id = suicune_frame_start.wrapping_add((row * 16 + col) as u8);
@@ -2358,6 +2469,20 @@ fn draw_native_title_background(
         }
     }
     Ok(())
+}
+
+fn native_title_suicune_frame_index(
+    completed_ticks: u32,
+    mask: u8,
+    shift_left: u8,
+    swap_nibbles: bool,
+) -> usize {
+    let source_counter = completed_ticks.saturating_sub(1) as u8;
+    let mut selector = (source_counter & mask).wrapping_shl(u32::from(shift_left));
+    if swap_nibbles {
+        selector = selector.rotate_left(4);
+    }
+    usize::from(selector)
 }
 
 fn title_logo_palette_index(tile_row: usize, tile_col: usize) -> usize {
@@ -2414,13 +2539,16 @@ fn draw_native_title_crystal_sprites(
     let palette = palette_bank
         .get(8)
         .context("title palette bank missing OBJ palette 0")?;
-    let base_y = match title.phase {
-        VisibleTitlePhase::Entrance => {
-            let advanced = ((title.frame.min(122) as i16) * 2).min(244);
-            -50 + advanced
-        }
-        _ => 6,
-    };
+    let oam_y = u8::try_from(
+        title
+            .presentation_machine
+            .memory
+            .get(&title.crystal_oam_target)
+            .copied()
+            .context("title crystal OAM Y was not initialized")?,
+    )
+    .context("title crystal OAM Y exceeds one byte")?;
+    let base_y = i16::from(i8::from_ne_bytes([oam_y])) - 16;
     blit_native_title_image_with_priority(
         crystal,
         palette,
@@ -2553,15 +2681,7 @@ fn pokemon_frame_for_art(
     shiny: bool,
     images: &mut Assets<Image>,
 ) -> Option<SpriteFrame> {
-    pokemon_animation_frame_for_art(
-        rendered_art,
-        asset_root,
-        species_id,
-        side,
-        shiny,
-        0,
-        images,
-    )
+    pokemon_animation_frame_for_art(rendered_art, asset_root, species_id, side, shiny, 0, images)
 }
 
 fn pokemon_animation_frame_for_art(
@@ -2580,14 +2700,8 @@ fn pokemon_animation_frame_for_art(
         frame,
     };
     if !rendered_art.pokemon_cache.contains_key(&key) {
-        match load_pokemon_animation_frame(
-            asset_root,
-            &key.species_id,
-            side,
-            shiny,
-            frame,
-            images,
-        ) {
+        match load_pokemon_animation_frame(asset_root, &key.species_id, side, shiny, frame, images)
+        {
             Ok(frame) => {
                 rendered_art.pokemon_errors.remove(&key);
                 rendered_art.pokemon_cache.insert(key.clone(), frame);
@@ -2696,8 +2810,8 @@ fn load_oak_intro_frame(
     asset_id: &str,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
-    let battle_sprite = asset_id.starts_with("battle-trainer:")
-        || asset_id.starts_with("battle-player:");
+    let battle_sprite =
+        asset_id.starts_with("battle-trainer:") || asset_id.starts_with("battle-player:");
     let (image_path, palette_path, player_palette) = oak_intro_asset_paths(asset_root, asset_id)?;
     let source = crate::open_runtime_image(&image_path)
         .with_context(|| format!("decode Oak intro PNG {}", image_path.display()))?
@@ -2921,9 +3035,10 @@ fn load_pokemon_palette(
             .join(species_id)
             .join("shiny.pal");
         if crate::runtime_asset_exists(&palette_path) {
-            let content = crate::read_runtime_asset_to_string(&palette_path).with_context(|| {
-                format!("read shiny Pokemon palette {}", palette_path.display())
-            })?;
+            let content =
+                crate::read_runtime_asset_to_string(&palette_path).with_context(|| {
+                    format!("read shiny Pokemon palette {}", palette_path.display())
+                })?;
             if let Some(palette) = parse_palette_file(&content, None)?.into_iter().next() {
                 return Ok(palette);
             }
@@ -2946,8 +3061,8 @@ fn load_pokemon_gbcpal(path: &Path) -> Result<Palette> {
 }
 
 fn load_gbcpal_palette(path: &Path) -> Result<Palette> {
-    let bytes =
-        crate::read_runtime_asset(path).with_context(|| format!("read GBC palette {}", path.display()))?;
+    let bytes = crate::read_runtime_asset(path)
+        .with_context(|| format!("read GBC palette {}", path.display()))?;
     if bytes.len() < 8 {
         anyhow::bail!(
             "GBC palette {} has {} bytes; expected at least 8",
@@ -3130,9 +3245,16 @@ fn town_map_frame_for_art(
     standalone: bool,
     images: &mut Assets<Image>,
 ) -> Option<SpriteFrame> {
-    let region = if region.eq_ignore_ascii_case("KANTO") { "kanto" } else { "johto" };
+    let region = if region.eq_ignore_ascii_case("KANTO") {
+        "kanto"
+    } else {
+        "johto"
+    };
     let key = (
-        format!("{}:{region}", if standalone { "standalone" } else { "pokegear" }),
+        format!(
+            "{}:{region}",
+            if standalone { "standalone" } else { "pokegear" }
+        ),
         player_gender,
     );
     if !rendered_art.town_map_cache.contains_key(&key)
@@ -3151,7 +3273,9 @@ fn town_map_frame_for_art(
                 rendered_art.town_map_cache.insert(key.clone(), frame);
             }
             Err(error) => {
-                rendered_art.town_map_errors.insert(key.clone(), format!("{error:#}"));
+                rendered_art
+                    .town_map_errors
+                    .insert(key.clone(), format!("{error:#}"));
             }
         }
     }
@@ -3222,7 +3346,10 @@ fn load_town_map_frame(
     let mut data = vec![0_u8; width * height * 4];
     for (map_index, tile_id) in tilemap.into_iter().enumerate() {
         let tile = usize::from(tile_id);
-        anyhow::ensure!(tile < 48, "Town Map tile id {tile} is outside the 48-tile atlas");
+        anyhow::ensure!(
+            tile < 48,
+            "Town Map tile id {tile} is outside the 48-tile atlas"
+        );
         let palette_index = match tile_palettes[tile].as_str() {
             "BORDER" => 0,
             "EARTH" => 1,
@@ -3422,8 +3549,14 @@ fn load_pokegear_card_frame(
         PokegearPage::Radio => "radio",
         PokegearPage::Map => anyhow::bail!("Town Map uses its regional tilemap renderer"),
     };
-    anyhow::ensure!(town_tile_palettes.len() >= 48, "Town Map palette map is incomplete");
-    anyhow::ensure!(pokegear_tile_palettes.len() >= 48, "Pokégear palette map is incomplete");
+    anyhow::ensure!(
+        town_tile_palettes.len() >= 48,
+        "Town Map palette map is incomplete"
+    );
+    anyhow::ensure!(
+        pokegear_tile_palettes.len() >= 48,
+        "Pokégear palette map is incomplete"
+    );
     let root = asset_root.runtime_assets().join("gfx/pokegear");
     let town = crate::open_runtime_image(root.join("town_map.png"))
         .context("decode Town Map tile bank for Pokégear")?
@@ -3431,8 +3564,14 @@ fn load_pokegear_card_frame(
     let pokegear = crate::open_runtime_image(root.join("pokegear.png"))
         .context("decode Pokégear tile bank")?
         .to_rgba8();
-    anyhow::ensure!(town.width() == 128 && town.height() == 24, "Town Map tile bank dimensions changed");
-    anyhow::ensure!(pokegear.width() == 128 && pokegear.height() == 24, "Pokégear tile bank dimensions changed");
+    anyhow::ensure!(
+        town.width() == 128 && town.height() == 24,
+        "Town Map tile bank dimensions changed"
+    );
+    anyhow::ensure!(
+        pokegear.width() == 128 && pokegear.height() == 24,
+        "Pokégear tile bank dimensions changed"
+    );
     let palette_path = root.join(if player_gender == 0 {
         "pokegear.pal"
     } else {
@@ -3489,7 +3628,11 @@ fn load_pokegear_card_frame(
             continue;
         }
         let (source, tile, token) = if tile_id < 0x30 {
-            (&town, usize::from(tile_id), &town_tile_palettes[usize::from(tile_id)])
+            (
+                &town,
+                usize::from(tile_id),
+                &town_tile_palettes[usize::from(tile_id)],
+            )
         } else if tile_id < 0x60 {
             let tile = usize::from(tile_id - 0x30);
             (&pokegear, tile, &pokegear_tile_palettes[tile])
@@ -3500,9 +3643,10 @@ fn load_pokegear_card_frame(
         pokegear_blit_paletted_tile(source, tile, palette, target_x, target_y, width, &mut data)?;
     }
 
-    let frame_source = crate::open_runtime_image(asset_root.runtime_assets().join("gfx/frames/1.png"))
-        .context("decode Pokégear textbox frame")?
-        .to_rgba8();
+    let frame_source =
+        crate::open_runtime_image(asset_root.runtime_assets().join("gfx/frames/1.png"))
+            .context("decode Pokégear textbox frame")?
+            .to_rgba8();
     draw_pokegear_textbox(&frame_source, &palettes[0], width, &mut data)?;
 
     // The active-card indicator is the black triangle immediately below its
@@ -3572,7 +3716,10 @@ fn pokegear_blit_paletted_tile(
     let columns = source.width() as usize / TILE_PIXELS;
     let source_x = tile % columns * TILE_PIXELS;
     let source_y = tile / columns * TILE_PIXELS;
-    anyhow::ensure!(source_y + TILE_PIXELS <= source.height() as usize, "Pokégear tile {tile} is outside its source sheet");
+    anyhow::ensure!(
+        source_y + TILE_PIXELS <= source.height() as usize,
+        "Pokégear tile {tile} is outside its source sheet"
+    );
     for row in 0..TILE_PIXELS {
         for col in 0..TILE_PIXELS {
             let pixel = source.get_pixel((source_x + col) as u32, (source_y + row) as u32);
@@ -3591,13 +3738,36 @@ fn draw_pokegear_textbox(
     target_width: usize,
     target: &mut [u8],
 ) -> Result<()> {
-    anyhow::ensure!(source.width() == 24 && source.height() == 16, "Pokégear textbox frame must be 24x16");
+    anyhow::ensure!(
+        source.width() == 24 && source.height() == 16,
+        "Pokégear textbox frame must be 24x16"
+    );
     let top = 12;
-    pokegear_fill_rect(target, target_width, 8, (top + 1) * 8, 18 * 8, 4 * 8, palette[0]);
+    pokegear_fill_rect(
+        target,
+        target_width,
+        8,
+        (top + 1) * 8,
+        18 * 8,
+        4 * 8,
+        palette[0],
+    );
     for x in 0..20 {
-        let tile = if x == 0 { 0 } else if x == 19 { 2 } else { 1 };
+        let tile = if x == 0 {
+            0
+        } else if x == 19 {
+            2
+        } else {
+            1
+        };
         pokegear_blit_paletted_tile(source, tile, palette, x * 8, top * 8, target_width, target)?;
-        let tile = if x == 0 { 4 } else if x == 19 { 5 } else { 1 };
+        let tile = if x == 0 {
+            4
+        } else if x == 19 {
+            5
+        } else {
+            1
+        };
         pokegear_blit_paletted_tile(source, tile, palette, x * 8, 17 * 8, target_width, target)?;
     }
     for y in 13..17 {

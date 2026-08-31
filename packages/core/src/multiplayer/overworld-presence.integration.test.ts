@@ -6,6 +6,7 @@ import {
   OverworldPresenceManager,
   type MultiplayerInteractionRequest,
   type MultiplayerInteractionResponse,
+  type MultiplayerChatMessage,
 } from './overworld-presence';
 
 type PresencePayload = Record<string, unknown>;
@@ -131,7 +132,7 @@ describe('OverworldPresenceManager multi-session integration', () => {
     resetMultiplayerClientFactory();
   });
 
-  test('synchronizes two sessions and supports battle/trade request lifecycle', async () => {
+  test('synchronizes two sessions and supports talk/battle/trade interactions', async () => {
     const hub = new PresenceHub();
 
     const makeSupabaseClient = (userId: string) => ({
@@ -156,6 +157,7 @@ describe('OverworldPresenceManager multi-session integration', () => {
     let remoteSeenByB: unknown[] = [];
     const incomingB: MultiplayerInteractionRequest[] = [];
     const responsesA: MultiplayerInteractionResponse[] = [];
+    const chatSeenByB: MultiplayerChatMessage[] = [];
 
     managerA.onRemotePlayersChange((players) => {
       remoteSeenByA = players;
@@ -165,6 +167,7 @@ describe('OverworldPresenceManager multi-session integration', () => {
     });
     managerB.onInteractionRequest((request) => incomingB.push(request));
     managerA.onInteractionResponse((response) => responsesA.push(response));
+    managerB.onChatMessage((message) => chatSeenByB.push(message));
 
     await managerA.connect({
       playerName: 'Alice',
@@ -186,6 +189,27 @@ describe('OverworldPresenceManager multi-session integration', () => {
 
     expect((remoteSeenByA as any[]).some((p) => p.userId === 'u2')).toBe(true);
     expect((remoteSeenByB as any[]).some((p) => p.userId === 'u1')).toBe(true);
+
+    const localMessage = await managerA.sendChatMessage('local', '  Want to battle?  ');
+    expect(localMessage.text).toBe('Want to battle?');
+    expect(chatSeenByB).toEqual([
+      expect.objectContaining({
+        messageId: localMessage.messageId,
+        fromUserId: 'u1',
+        fromPlayerName: 'Alice',
+        toUserId: null,
+        channel: 'local',
+        text: 'Want to battle?',
+      }),
+    ]);
+
+    await managerA.sendChatMessage('trade', 'Trading Cyndaquil');
+    await managerA.sendChatMessage('whisper', 'Secret plan', 'u2');
+    expect(chatSeenByB.map((message) => message.channel)).toEqual(['local', 'trade', 'whisper']);
+
+    managerB.setBlockedUserIds(['u1']);
+    await managerA.sendChatMessage('local', 'This should be ignored');
+    expect(chatSeenByB).toHaveLength(3);
 
     const requestId = await managerA.sendInteractionRequest('u2', 'battle');
     expect(requestId.length).toBeGreaterThan(4);

@@ -1025,22 +1025,40 @@ fn live_runtime_hotkeys_start_new_game_from_title_and_accept_name() {
         );
 
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         assert!(runtime_shell.title_menu.is_none());
         assert!(
             runtime_shell.pending_gender_selection.is_some(),
-            "Enter on New Game should open gender before Oak intro and name input"
+            "A on New Game should open gender before Oak intro and name input"
         );
         assert!(runtime_shell.pending_time_set.is_none());
         assert!(runtime_shell.pending_oak_intro.is_none());
         assert!(runtime_shell.pending_name_input.is_none());
+        assert!(
+            !runtime_shell.shell.session().state().game_timer_counting,
+            "ResetWRAM must leave GAME_TIMER_COUNTING_F clear until FinishContinueFunction"
+        );
+        assert_eq!(
+            runtime_shell.shell.session().state().time.game_time_frames,
+            0,
+            "gender/Oak setup must not count as play time"
+        );
         assert_eq!(runtime_shell.last_error, None);
     }
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     complete_time_set_for_test(&mut app);
     complete_oak_intro_for_test(&mut app);
+    {
+        let runtime_shell = app.world().resource::<BevyRuntimeShell>();
+        assert!(!runtime_shell.shell.session().state().game_timer_counting);
+        assert_eq!(
+            runtime_shell.shell.session().state().time.game_time_frames,
+            0,
+            "all pre-overworld VBlanks must leave ResetGameTime untouched"
+        );
+    }
 
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
@@ -1075,6 +1093,11 @@ fn live_runtime_hotkeys_start_new_game_from_title_and_accept_name() {
     assert_eq!(snapshot.overworld.map_name, "PlayersHouse2F");
     assert!(runtime_shell.shell.session().state().game_timer_counting);
     assert!(!runtime_shell.shell.session().state().game_logic_paused);
+    assert_eq!(
+        runtime_shell.shell.session().state().time.game_time_frames,
+        1,
+        "the first counted frame belongs to FinishContinueFunction's overworld loop"
+    );
 }
 
 #[test]
@@ -1108,7 +1131,7 @@ fn title_new_game_opens_gender_then_oak_clock_intro_before_name_input() {
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         let gender = runtime_shell
@@ -1136,8 +1159,16 @@ fn title_new_game_opens_gender_then_oak_clock_intro_before_name_input() {
         assert_eq!(visible_gender_entries(gender), vec!["  BOY", "> GIRL"]);
     }
 
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
-    for _ in 0..=usize::from(VISIBLE_GENDER_CONFIRM_DELAY_FRAMES) + 1 {
+    let confirm_delay_frames = app
+        .world()
+        .resource::<BevyRuntimeShell>()
+        .pending_gender_selection
+        .as_ref()
+        .expect("gender selection before confirm")
+        .definition
+        .confirm_delay_frames;
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
+    for _ in 0..=usize::from(confirm_delay_frames) + 1 {
         app.update();
         if app
             .world()
@@ -1199,6 +1230,41 @@ fn title_new_game_opens_gender_then_oak_clock_intro_before_name_input() {
 }
 
 #[test]
+fn gender_vertical_menu_ignores_left_right_and_start() {
+    let mut runtime_shell = core_modular_title_shell_for_test();
+    runtime_shell.intro_screen = None;
+    runtime_shell.title_menu = None;
+    open_visible_gender_selection(&mut runtime_shell).expect("open gender screen");
+
+    move_visible_primary_cursor_left(&mut runtime_shell).expect("press Left");
+    assert_eq!(
+        runtime_shell
+            .pending_gender_selection
+            .as_ref()
+            .expect("gender selection after Left")
+            .selected_index,
+        0
+    );
+    move_visible_primary_cursor_right(&mut runtime_shell).expect("press Right");
+    assert_eq!(
+        runtime_shell
+            .pending_gender_selection
+            .as_ref()
+            .expect("gender selection after Right")
+            .selected_index,
+        0
+    );
+    press_visible_start_button(&mut runtime_shell).expect("press Start");
+
+    let gender = runtime_shell
+        .pending_gender_selection
+        .as_ref()
+        .expect("gender selection must remain open");
+    assert_eq!(gender.selected_index, 0);
+    assert!(!gender.confirmed);
+}
+
+#[test]
 fn gender_background_decodes_the_asm_tile_with_its_own_palette() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -1248,7 +1314,7 @@ fn gender_selection_renders_real_boot_window_palette_and_options() {
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     complete_time_set_for_test(&mut app);
     app.update();
 
@@ -1288,8 +1354,8 @@ fn gender_selection_renders_real_boot_window_palette_and_options() {
         &BOOT_UI_WHITE,
         "gender screen field must use the same white as its menu and textbox interiors"
     );
-    let menu_interior = ((GENDER_BOX_Y + 1) * SOURCE_TILE_SIZE * 160
-        + (GENDER_BOX_X + GENDER_BOX_WIDTH - 2) * SOURCE_TILE_SIZE)
+    let menu_interior = ((gender.definition.top + 1) * SOURCE_TILE_SIZE * 160
+        + (gender.definition.right - 1) * SOURCE_TILE_SIZE)
         * 4;
     let textbox_interior = ((TIME_SET_TEXTBOX_Y + 1) * SOURCE_TILE_SIZE * 160
         + 2 * SOURCE_TILE_SIZE)

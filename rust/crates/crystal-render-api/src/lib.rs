@@ -84,6 +84,7 @@ pub struct VisualTile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VisualActorId {
     Player,
+    RemotePlayer(u64),
     Object(u32),
     /// Presentation-only card emitted by the faithful world renderer. These
     /// IDs never enter gameplay state or object-slot identity.

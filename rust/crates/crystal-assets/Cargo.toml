@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 ciborium.workspace = true
 crystal-core = { path = "../crystal-core" }
 flate2 = "1.1"

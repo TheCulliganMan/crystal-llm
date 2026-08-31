@@ -41,6 +41,29 @@ const loadFontPath = "engine/gfx/load_font.asm";
 const cgbLayoutsPath = "engine/gfx/cgb_layouts.asm";
 const sgbLayoutsPath = "engine/gfx/sgb_layouts.asm";
 const predefPalettesPath = "gfx/sgb/predef.pal";
+const runtimePresentationAudioIds = new Set([
+  "MUSIC_NONE",
+  "MUSIC_TITLE",
+  "MUSIC_MAIN_MENU",
+  "MUSIC_CRYSTAL_OPENING",
+  "MUSIC_ROUTE_30",
+  "MUSIC_MOBILE_ADAPTER_MENU",
+  "SFX_TITLE_SCREEN_ENTRANCE",
+  "SFX_GAME_FREAK_PRESENTS",
+  "SFX_DITTO_BOUNCE",
+  "SFX_DITTO_POP_UP",
+  "SFX_DITTO_TRANSFORM",
+  "SFX_INTRO_UNOWN_1",
+  "SFX_INTRO_UNOWN_2",
+  "SFX_INTRO_UNOWN_3",
+  "SFX_INTRO_SUICUNE_2",
+  "SFX_INTRO_SUICUNE_3",
+  "SFX_INTRO_SUICUNE_4",
+  "SFX_INTRO_PICHU",
+  "SFX_INTRO_WHOOSH",
+  "SFX_ESCAPE_ROPE",
+  "CRY_WOOPER",
+]);
 
 const canonicalRead = (relativePath: string): string =>
   fs.readFileSync(path.join(disassemblyRoot, relativePath), "utf8");
@@ -81,6 +104,13 @@ type SpriteControlFlowView = {
 const spriteView = (value: unknown): SpriteControlFlowView =>
   value as SpriteControlFlowView;
 
+const crystalIntroOperations = (
+  checkpoint: ReturnType<typeof analyzeRuntimeTitlePresentationEmission>,
+): Array<Record<string, any>> =>
+  checkpoint.subprograms
+    .find((subprogram) => subprogram.id === "crystal_intro")
+    ?.phases.find((phase) => phase.id === "scene_dispatch")?.operations ?? [];
+
 describe("runtime title presentation source CFG", () => {
   it("emits the exact TryLoadSaveData host effect before the next unsupported effect", () => {
     const checkpoint = analyzeRuntimeTitlePresentationEmission({
@@ -99,6 +129,138 @@ describe("runtime title presentation source CFG", () => {
       reset_clock: "ResetClock",
     });
     expect(checkpoint.blocks).toEqual({
+      ".Check1Pass@Continue": {
+        source_span: { file: introPath, start_line: 353, end_line: 357 },
+        operations: [
+          {
+            op: "call_subprogram",
+            program: "continue_rtc_restart_clock",
+            result: "continue_rtc_result",
+            source_span: { file: introPath, start_line: 354, end_line: 354 },
+          },
+          {
+            op: "branch_result",
+            result: "continue_rtc_result",
+            equals: "passed",
+            target: ".Check2Pass@Continue",
+            source_span: { file: introPath, start_line: 355, end_line: 355 },
+          },
+          {
+            op: "close_window",
+            preserve: ["a", "flags"],
+            pop_window_stack: true,
+            restore_tile_backup: true,
+            apply_tilemap: true,
+            update_sprites: true,
+            invocation_source_span: {
+              file: introPath,
+              start_line: 356,
+              end_line: 356,
+            },
+            source_span: expect.any(Object),
+            implementation_source_spans: expect.any(Array),
+          },
+          {
+            op: "jump",
+            target: ".FailToLoad@Continue",
+            source_span: { file: introPath, start_line: 357, end_line: 357 },
+          },
+        ],
+      },
+      ".Check2Pass@Continue": {
+        source_span: { file: introPath, start_line: 359, end_line: 380 },
+        operations: expect.arrayContaining([
+          expect.objectContaining({
+            op: "request_music_fade",
+            frames: 8,
+            audio: "MUSIC_NONE",
+          }),
+          expect.objectContaining({
+            op: "skip_unreachable_mobile_adapter_menu",
+            reason: "English CheckMobileAdapterStatus clears carry",
+          }),
+          expect.objectContaining({ op: "jump_roaming_mons" }),
+          expect.objectContaining({ op: "copy_received_mystery_gift_decorations" }),
+          expect.objectContaining({ op: "continue_clock" }),
+          expect.objectContaining({
+            op: "branch_spawn_after_champion",
+            champion_spawn: "SPAWN_LANCE",
+            champion_destination: "SPAWN_NEW_BARK",
+            ordinary_map_entry: "MAPSETUP_CONTINUE",
+            champion_map_entry: "MAPSETUP_WARP",
+          }),
+        ]),
+      },
+      ".FailToLoad@Continue": {
+        source_span: { file: introPath, start_line: 382, end_line: 383 },
+        operations: [
+          {
+            op: "return",
+            source_span: { file: introPath, start_line: 383, end_line: 383 },
+          },
+        ],
+      },
+      ".loop@FinishContinueFunction": {
+        source_span: { file: introPath, start_line: 460, end_line: 473 },
+        operations: [
+          expect.objectContaining({
+            op: "prepare_overworld_session",
+            clears: ["wDontPlayMapMusicOnReload", "wLinkMode"],
+            game_timer_counting: true,
+            game_timer_mobile: false,
+            show_map_name_sign: true,
+          }),
+          expect.objectContaining({
+            op: "run_overworld_loop",
+            status: "wMapStatus",
+            initial_status: "MAPSTATUS_START",
+            terminal_status: "MAPSTATUS_DONE",
+            dispatch: ["StartMap", "EnterMap", "HandleMap", ".done@OverworldLoop"],
+          }),
+          expect.objectContaining({
+            op: "handle_overworld_return",
+            red_spawn: "SPAWN_RED",
+            red_destination: "SPAWN_MT_SILVER",
+            red_map_entry: "MAPSETUP_WARP",
+            ordinary_destination: "Reset",
+          }),
+        ],
+      },
+      FinishContinueFunction: {
+        source_span: { file: introPath, start_line: 459, end_line: 459 },
+        operations: [
+          {
+            op: "jump",
+            target: ".loop@FinishContinueFunction",
+            source_span: { file: introPath, start_line: 459, end_line: 459 },
+          },
+        ],
+      },
+      Init: {
+        source_span: { file: "home/init.asm", start_line: 35, end_line: 56 },
+        operations: [
+          expect.objectContaining({
+            op: "initialize_machine",
+            interrupts: { disable_during_init: true, final_enable_mask: "IE_DEFAULT" },
+            timer_frequency_hz: 4096,
+            lcd_disable_scanline: "LY_VBLANK + 1",
+            cleared_memory: [
+              { region: "WRAM0", banks: [0] },
+              { region: "HRAM", preserved: ["hCGB", "hSystemBooted"] },
+              { region: "WRAMX", banks: [1], source_bug: "jr nc, .bank_loop" },
+              { region: "VRAM", banks: [1, 0] },
+              { region: "sScratch", byte_count: 32 },
+            ],
+            final_lcd_control: "LCDC_DEFAULT",
+            final_window: { x: "WX_OFS", y: "SCREEN_HEIGHT_PX" },
+          }),
+          {
+            op: "jump",
+            target: "GameInit",
+            source_span: { file: "home/init.asm", start_line: 168, end_line: 168 },
+          },
+        ],
+      },
       GameInit: {
         source_span: {
           file: introPath,
@@ -644,6 +806,260 @@ describe("runtime title presentation source CFG", () => {
               end_line: 966,
             },
           },
+          {
+            op: "call_subprogram",
+            program: "crystal_intro",
+            result: "crystal_intro_preserved_carry",
+            source_span: {
+              file: introPath,
+              start_line: 967,
+              end_line: 967,
+            },
+          },
+        ],
+      },
+      StartTitleScreen: {
+        source_span: {
+          file: introPath,
+          start_line: 971,
+          end_line: 978,
+        },
+        operations: [
+          {
+            op: "save_memory_byte",
+            source: "rWBK",
+            storage: { kind: "cpu_stack", register_pair: "af" },
+            restore_required: true,
+            source_span: { file: introPath, start_line: 972, end_line: 973 },
+          },
+          {
+            op: "write_memory_byte",
+            target: "rWBK",
+            address_space: "hardware_register",
+            value: "BANK(wLYOverrides)",
+            value_source_span: {
+              file: wramPath,
+              start_line: 3517,
+              end_line: 3517,
+            },
+            source_span: { file: introPath, start_line: 974, end_line: 975 },
+          },
+          {
+            op: "call_subprogram",
+            program: "start_title_screen",
+            result: "title_screen_tail_destination",
+            source_span: { file: introPath, start_line: 977, end_line: 977 },
+          },
+        ],
+      },
+      Intro_MainMenu: {
+        source_span: { file: introPath, start_line: 1, end_line: 10 },
+        operations: [
+          {
+            op: "stop_audio",
+            audio: "MUSIC_NONE",
+            source_span: { file: introPath, start_line: 2, end_line: 3 },
+          },
+          {
+            op: "wait_frames",
+            frames: 1,
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 4, end_line: 4 },
+          },
+          {
+            op: "write_memory_byte",
+            target: "wMapMusic",
+            address_space: "wram",
+            value: "MUSIC_MAIN_MENU",
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 5, end_line: 7 },
+          },
+          {
+            op: "play_audio",
+            audio: "MUSIC_MAIN_MENU",
+            source_span: { file: introPath, start_line: 5, end_line: 8 },
+          },
+          {
+            op: "call_subprogram",
+            program: "main_menu",
+            result: "main_menu_outcome",
+            source_span: { file: introPath, start_line: 9, end_line: 9 },
+          },
+          {
+            op: "jump",
+            target: "StartTitleScreen",
+            source_span: { file: introPath, start_line: 10, end_line: 10 },
+          },
+        ],
+      },
+      Continue: {
+        source_span: { file: introPath, start_line: 338, end_line: 351 },
+        operations: expect.arrayContaining([
+          {
+            op: "call_subprogram",
+            program: "try_load_save_file",
+            result: "save_file_load_outcome",
+            source_span: { file: introPath, start_line: 339, end_line: 339 },
+          },
+          {
+            op: "branch_result",
+            result: "save_file_load_outcome",
+            equals: "corrupt",
+            target: ".FailToLoad@Continue",
+            source_span: { file: introPath, start_line: 340, end_line: 340 },
+          },
+          expect.objectContaining({
+            op: "copy_memory",
+            source: "sCrystalData",
+            target: "wCrystalData",
+            byte_count: "wCrystalDataEnd - wCrystalData",
+            source_bank: "BANK(sCrystalData)",
+            restore_sram: true,
+          }),
+          expect.objectContaining({
+            op: "copy_memory",
+            source: "sCrystalFlags",
+            target: "wCrystalFlags",
+            byte_count: 2,
+            source_bank: "BANK(sCrystalData)",
+            restore_sram: true,
+          }),
+          expect.objectContaining({
+            op: "load_menu_header",
+            header: ".MenuHeader@LoadStandardMenuHeader",
+            flags: ["MENU_BACKUP_TILES"],
+            coordinates: { left: 0, top: 0, right: 19, bottom: 17 },
+            default_option: 1,
+            pushes_window: true,
+          }),
+        ]),
+      },
+      NewGame: {
+        source_span: { file: introPath, start_line: 61, end_line: 78 },
+        operations: [
+          {
+            op: "write_memory_byte",
+            target: "wDebugFlags",
+            address_space: "wram",
+            value: 0,
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 62, end_line: 63 },
+          },
+          {
+            op: "call_subprogram",
+            program: "reset_wram",
+            result: "reset_wram_completion",
+            source_span: { file: introPath, start_line: 64, end_line: 64 },
+          },
+          {
+            op: "call_subprogram",
+            program: "new_game_clear_tilemap",
+            result: "new_game_display_preparation_completion",
+            source_span: { file: introPath, start_line: 65, end_line: 65 },
+          },
+          {
+            op: "call_subprogram",
+            program: "player_profile_setup",
+            result: "player_profile_setup_completion",
+            source_span: { file: introPath, start_line: 66, end_line: 66 },
+          },
+          {
+            op: "call_subprogram",
+            program: "oak_speech",
+            result: "oak_speech_completion",
+            source_span: { file: introPath, start_line: 67, end_line: 67 },
+          },
+          {
+            op: "call_subprogram",
+            program: "initialize_world",
+            result: "initialize_world_completion",
+            source_span: { file: introPath, start_line: 68, end_line: 68 },
+          },
+          {
+            op: "write_memory_byte",
+            target: "wPrevLandmark",
+            address_space: "wram",
+            value: "LANDMARK_NEW_BARK_TOWN",
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 70, end_line: 71 },
+          },
+          {
+            op: "write_memory_byte",
+            target: "wDefaultSpawnpoint",
+            address_space: "wram",
+            value: "SPAWN_HOME",
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 73, end_line: 74 },
+          },
+          {
+            op: "write_memory_byte",
+            target: "hMapEntryMethod",
+            address_space: "hram",
+            value: "MAPSETUP_WARP",
+            condition: {
+              source: null,
+              predicate: "always",
+              source_span: null,
+            },
+            source_span: { file: introPath, start_line: 76, end_line: 77 },
+          },
+          {
+            op: "jump",
+            target: "FinishContinueFunction",
+            source_span: { file: introPath, start_line: 78, end_line: 78 },
+          },
+        ],
+      },
+      DeleteSaveData: {
+        source_span: { file: introPath, start_line: 1256, end_line: 1258 },
+        operations: [
+          {
+            op: "call_subprogram",
+            program: "delete_save_data",
+            result: "delete_save_completion",
+            source_span: { file: introPath, start_line: 1257, end_line: 1257 },
+          },
+          {
+            op: "jump",
+            target: "Init",
+            source_span: { file: introPath, start_line: 1258, end_line: 1258 },
+          },
+        ],
+      },
+      ResetClock: {
+        source_span: { file: introPath, start_line: 1260, end_line: 1262 },
+        operations: [
+          {
+            op: "call_subprogram",
+            program: "reset_clock_password",
+            result: "reset_clock_completion",
+            source_span: { file: introPath, start_line: 1261, end_line: 1261 },
+          },
+          {
+            op: "jump",
+            target: "Init",
+            source_span: { file: introPath, start_line: 1262, end_line: 1262 },
+          },
         ],
       },
     });
@@ -845,16 +1261,863 @@ describe("runtime title presentation source CFG", () => {
         ],
       },
     ]);
-    expect(checkpoint.frontier).toEqual({
+    const startTitleScreen = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "start_title_screen",
+    );
+    const titleScreenOperations =
+      startTitleScreen?.phases.find((phase) => phase.id === "title_screen")
+        ?.operations ?? [];
+    expect(checkpoint.frontier).toBeNull();
+    expect({
+      ...checkpoint.frontier,
+      compiled_prefix: {
+        source_entry: ".TitleScreen@StartTitleScreen",
+        block: "_TitleScreen",
+        operations: titleScreenOperations,
+      },
+    }).toMatchObject({
+      compiled_prefix: {
+        source_entry: ".TitleScreen@StartTitleScreen",
+        block: "_TitleScreen",
+        operations: expect.arrayContaining([
+          expect.objectContaining({
+            op: "source_wrapper",
+            call_form: "farcall",
+            target: "_TitleScreen",
+            returns: true,
+            source_span: {
+              file: introPath,
+              start_line: 1027,
+              end_line: 1028,
+            },
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wJumptableIndex",
+            byte_count: 4,
+            value: 0,
+            destination_labels: [
+              "wJumptableIndex",
+              "wTitleScreenSelectedOption",
+              "wTitleScreenTimer",
+            ],
+          }),
+          expect.objectContaining({
+            op: "disable_lcd",
+            wait_until: { source: "rLY", equals: 145 },
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "TitleSuicuneGFX",
+            target: "vTiles4",
+            target_vram_bank: 1,
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "TitleLogoGFX",
+            target: "vTiles1",
+            target_vram_bank: 0,
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "TitleCrystalGFX",
+            target: "vTiles0",
+            target_vram_bank: 0,
+          }),
+          expect.objectContaining({
+            op: "initialize_title_crystal_oam",
+            columns: 5,
+            objects_per_column: 6,
+          }),
+          expect.objectContaining({
+            op: "write_memory_pattern",
+            target: "wLYOverrides",
+            byte_count: 80,
+            pattern: [112, 144],
+            repeat_count: 40,
+          }),
+          expect.objectContaining({
+            op: "play_audio",
+            audio: "SFX_TITLE_SCREEN_ENTRANCE",
+          }),
+          expect.objectContaining({
+            op: "dispatch_table",
+            dispatcher: "TitleScreenScene",
+            entries: [
+              "TitleScreenEntrance",
+              "TitleScreenTimer",
+              "TitleScreenMain",
+              "TitleScreenEnd",
+            ],
+            domain: { minimum: 0, maximum: 3, values: [0, 1, 2, 3] },
+          }),
+          expect.objectContaining({
+            op: "draw_indexed_title_suicune_frame",
+            frames: [0x80, 0x88, 0x00, 0x08],
+            bg_map_mode: { before: 0, after: 1, third: 3 },
+          }),
+          expect.objectContaining({
+            op: "animate_title_crystal",
+            stop_at: 22,
+            object_count: 30,
+            y_delta: 2,
+          }),
+          expect.objectContaining({
+            op: "write_memory_word",
+            target: "wTitleScreenTimer",
+            value: 4416,
+            byte_order: "little_endian",
+          }),
+          expect.objectContaining({
+            op: "decrement_memory_word_unless_zero",
+            target: "wTitleScreenTimer",
+            zero_target: ".end@TitleScreenMain",
+          }),
+          expect.objectContaining({
+            op: "input_chord_branch",
+            sample: "hJoyDown",
+            mask: 0x46,
+            target: ".delete_save_data@TitleScreenMain",
+          }),
+          expect.objectContaining({
+            op: "input_chord_branch",
+            sample: "hJoyDown",
+            mask: 0x86,
+            target: ".check_start@TitleScreenMain",
+          }),
+          expect.objectContaining({
+            op: "fade_audio",
+            audio: "MUSIC_NONE",
+            frames: 64,
+            fade_register: { target: "wMusicFade", value: 8 },
+          }),
+          expect.objectContaining({
+            op: "return_if_memory_nonzero",
+            source: "wMusicFade",
+          }),
+          expect.objectContaining({
+            op: "clear_memory_bit",
+            target: "rLCDC",
+            bit: 2,
+          }),
+          expect.objectContaining({
+            op: "fill_memory",
+            target: "wAttrmap",
+            byte_count: 360,
+            value: 7,
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "hBGMapMode",
+            value: 2,
+            condition: { source: "hCGB", predicate: "nonzero" },
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "hWY",
+            value: 0x90,
+          }),
+        ]),
+      },
+    });
+    expect(startTitleScreen).toMatchObject({
+      source_entry: ".TitleScreen",
+      accepted_call_forms: ["call"],
+      result: {
+        name: "title_screen_tail_destination",
+        domain: [
+          expect.objectContaining({
+            value: null,
+            condition: expect.objectContaining({
+              value: 0,
+              destination: "Intro_MainMenu",
+            }),
+          }),
+          expect.objectContaining({
+            value: null,
+            condition: expect.objectContaining({
+              value: 1,
+              destination: "DeleteSaveData",
+            }),
+          }),
+          expect.objectContaining({
+            value: null,
+            condition: expect.objectContaining({
+              value: 2,
+              destination: "IntroSequence",
+            }),
+          }),
+          expect.objectContaining({
+            value: null,
+            condition: expect.objectContaining({
+              value: 3,
+              destination: "IntroSequence",
+            }),
+          }),
+          expect.objectContaining({
+            value: null,
+            condition: expect.objectContaining({
+              value: 4,
+              destination: "ResetClock",
+            }),
+          }),
+        ],
+      },
+      loop: { scheduler: null, natural_scheduler_ticks: null },
+      required_consumer: {
+        id: "runtime_title_screen.start_title_screen",
+        required: true,
+      },
+    });
+    expect(titleScreenOperations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "apply_palette_layout",
+          layout: { symbol: "SCGB_DIPLOMA", value: 8 },
+        }),
+        expect.objectContaining({
+          op: "update_time_palettes",
+          fade_index: 9,
+          source: "GetTimePalFade",
+          converter: "DmgToCgbTimePals",
+        }),
+        expect.objectContaining({
+          op: "clamp_memory_byte",
+          source: "wTitleScreenSelectedOption",
+          valid_max_exclusive: 5,
+          replacement: 0,
+        }),
+        expect.objectContaining({
+          op: "dispatch_table",
+          dispatcher: "StartTitleScreen option tail",
+          entries: [
+            "Intro_MainMenu",
+            "DeleteSaveData",
+            "IntroSequence",
+            "IntroSequence",
+            "ResetClock",
+          ],
+          tail_dispatch: true,
+        }),
+      ]),
+    );
+    const mainMenu = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "main_menu",
+    );
+    expect(mainMenu).toMatchObject({
+      source_entry: "MainMenu",
+      accepted_call_forms: ["farcall"],
+      result: {
+        name: "main_menu_outcome",
+        domain: expect.arrayContaining([
+          expect.objectContaining({ id: "cancelled", value: 1 }),
+          expect.objectContaining({ id: "new_game_non_returning", value: null }),
+          expect.objectContaining({
+            id: "continue_success_non_returning",
+            value: null,
+          }),
+        ]),
+      },
+      loop: {
+        scene_dispatch: {
+          table: ".Jumptable@MainMenu",
+          index: "wMenuSelection",
+          domain: { minimum: 0, maximum: 3, values: [0, 1, 2, 3] },
+        },
+        scheduler: null,
+      },
+      required_consumer: {
+        id: "runtime_title_screen.main_menu",
+        required: true,
+      },
+    });
+    const mainMenuOperations =
+      mainMenu?.phases.find((phase) => phase.id === "main_menu")?.operations ?? [];
+    expect(
+      mainMenu?.phases.find((phase) => phase.id === "main_menu")?.labels,
+    ).toEqual({
+      ".loop@MainMenu": 0,
+      ".quit@MainMenu": 14,
+    });
+    expect(mainMenuOperations.slice(-2)).toEqual([
+      {
+        op: "jump",
+        target: ".loop@MainMenu",
+        source_span: { file: mainMenuPath, start_line: 48, end_line: 48 },
+      },
+      {
+        op: "return",
+        source_span: { file: mainMenuPath, start_line: 50, end_line: 51 },
+      },
+    ]);
+    expect(mainMenuOperations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "select_main_menu_variant",
+          result: "wWhichIndexSet",
+          variants: [
+            expect.objectContaining({ value: 0, id: "new_game" }),
+            expect.objectContaining({ value: 1, id: "continue" }),
+            expect.objectContaining({ value: 6, id: "mystery" }),
+          ],
+        }),
+        expect.objectContaining({
+          op: "load_menu",
+          item_records: "MainMenuItems",
+          coordinates: { left: 0, top: 0, right: 16, bottom: 7 },
+          default_option: 1,
+          item_sets: [
+            [1, 2],
+            [0, 1, 2],
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 4],
+            [0, 1, 2, 4, 5],
+            [0, 1, 2, 3, 4, 5],
+            [0, 1, 2, 3],
+            [0, 1, 2, 3, 5],
+            [0, 1, 2, 5],
+          ],
+          strings: [
+            "CONTINUE",
+            "NEW GAME",
+            "OPTION",
+            "MYSTERY GIFT",
+            "MOBILE",
+            "MOBILE STUDIUM",
+          ],
+        }),
+        expect.objectContaining({
+          op: "menu_input_loop",
+          sampler: "GetScrollingMenuJoypad",
+          accept: "PAD_A",
+          cancel: "PAD_B",
+          wrap_vertical: true,
+        }),
+        expect.objectContaining({
+          op: "dispatch_table",
+          table: ".Jumptable@MainMenu",
+          entries: [
+            "MainMenu_Continue",
+            "MainMenu_NewGame",
+            "MainMenu_Option",
+            "MainMenu_MysteryGift",
+            "MainMenu_Mobile",
+            "MainMenu_MobileStudium",
+          ],
+          domain: { minimum: 0, maximum: 3, values: [0, 1, 2, 3] },
+        }),
+      ]),
+    );
+    const tryLoadSaveFile = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "try_load_save_file",
+    );
+    expect(tryLoadSaveFile).toMatchObject({
+      source_entry: "TryLoadSaveFile",
+      accepted_call_forms: ["farcall"],
+      result: {
+        name: "save_file_load_outcome",
+        domain: [
+          expect.objectContaining({ id: "primary_loaded", value: 0 }),
+          expect.objectContaining({ id: "backup_loaded", value: 0 }),
+          expect.objectContaining({ id: "corrupt", value: 1 }),
+        ],
+      },
+      required_consumer: {
+        id: "runtime_title_screen.try_load_save_file",
+        required: true,
+      },
+    });
+    expect(tryLoadSaveFile?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "verify_save_checksum",
+          source: "sGameData",
+          checksum: "sChecksum",
+        }),
+        expect.objectContaining({
+          op: "load_save_regions",
+          source: "primary",
+          restores: ["party_mail", "gs_ball_flag", "mystery_gift"],
+        }),
+        expect.objectContaining({
+          op: "verify_save_checksum",
+          source: "sBackupGameData",
+          checksum: "sBackupChecksum",
+        }),
+        expect.objectContaining({
+          op: "refresh_redundant_save",
+          source: "backup",
+          target: "primary",
+        }),
+        expect.objectContaining({
+          op: "present_text",
+          text: "SaveFileCorruptedText",
+          restore_options: true,
+        }),
+      ]),
+    );
+    const displaySaveInfo = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "display_save_info_on_continue",
+    );
+    expect(displaySaveInfo).toMatchObject({
+      source_entry: "DisplaySaveInfoOnContinue",
+      result: {
+        name: "display_save_info_completion",
+        storage: "none",
+        domain: [expect.objectContaining({ id: "rendered", value: null })],
+      },
+      required_consumer: {
+        id: "runtime_title_screen.display_save_info_on_continue",
+        required: true,
+      },
+    });
+    expect(displaySaveInfo?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "select_menu_header",
+          bit: "STATUSFLAGS_POKEDEX_F",
+          offset: { x: 4, y: 8 },
+        }),
+        expect.objectContaining({
+          op: "render_continue_identity",
+          player: { text: "<PLAYER>", coordinate: [8, 2] },
+        }),
+        expect.objectContaining({
+          op: "render_continue_game_time",
+          coordinate: [9, 8],
+          separator: "<COLON>",
+        }),
+        expect.objectContaining({
+          op: "place_text",
+          text: " ???",
+          coordinate: [9, 8],
+        }),
+      ]),
+    );
+    expect(
+      checkpoint.subprograms.find(
+        (subprogram) => subprogram.id === "confirm_continue",
+      ),
+    ).toMatchObject({
+      source_entry: "ConfirmContinue",
+      result: {
+        name: "confirm_continue_outcome",
+        domain: [
+          expect.objectContaining({ id: "accepted", value: 0 }),
+          expect.objectContaining({ id: "cancelled", value: 1 }),
+        ],
+      },
+      required_consumer: {
+        id: "runtime_title_screen.confirm_continue",
+        required: true,
+      },
+    });
+    const resetWram = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "reset_wram",
+    );
+    expect(resetWram).toMatchObject({
+      source_entry: "ResetWRAM",
+      result: {
+        name: "reset_wram_completion",
+        storage: "none",
+        domain: [expect.objectContaining({ id: "completed", value: null })],
+      },
+      required_consumer: {
+        id: "runtime_title_screen.reset_wram",
+        required: true,
+      },
+    });
+    expect(resetWram?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "fill_memory_ranges",
+          value: 0,
+          ranges: [
+            { start: "wShadowOAM", byte_count: "wOptions - wShadowOAM" },
+            {
+              start: "STARTOF(WRAMX)",
+              byte_count: "wGameData - STARTOF(WRAMX)",
+            },
+            { start: "wGameData", byte_count: "wGameDataEnd - wGameData" },
+          ],
+        }),
+        expect.objectContaining({
+          op: "initialize_sentinel_lists",
+          count_value: 0,
+          first_entry_value: 0xff,
+        }),
+        expect.objectContaining({
+          op: "initialize_box_names",
+          prefix: "BOX",
+          count: 14,
+          name_length: 9,
+        }),
+        expect.objectContaining({
+          op: "initialize_economy",
+          money: 3000,
+          mom_trigger_balance: 2300,
+          coins: 0,
+        }),
+        expect.objectContaining({
+          op: "initialize_npc_names",
+          values: {
+            wRivalName: "???",
+            wMomsName: "MOM",
+            wRedsName: "RED",
+            wGreensName: "GREEN",
+          },
+        }),
+        expect.objectContaining({ op: "clear_saved_mail" }),
+        expect.objectContaining({ op: "reset_game_time", value: 0 }),
+      ]),
+    );
+    expect(
+      checkpoint.subprograms.find(
+        (subprogram) => subprogram.id === "new_game_clear_tilemap",
+      ),
+    ).toMatchObject({
+      source_entry: "NewGame_ClearTilemapEtc",
+      result: { storage: "none" },
+      required_consumer: {
+        id: "runtime_title_screen.new_game_clear_tilemap",
+        required: true,
+      },
+    });
+    const playerProfile = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "player_profile_setup",
+    );
+    expect(playerProfile).toMatchObject({
+      source_entry: "PlayerProfileSetup",
+      result: { storage: "none" },
+      resources: expect.arrayContaining([
+        expect.objectContaining({
+          path: "gfx/new_game/gender_screen.pal",
+          kind: "palette",
+        }),
+        expect.objectContaining({
+          path: "gfx/new_game/gender_screen.2bpp",
+          kind: "tiles",
+        }),
+      ]),
+      required_consumer: {
+        id: "runtime_title_screen.player_profile_setup",
+        required: true,
+      },
+    });
+    expect(playerProfile?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "branch_constant_result",
+          source: "CheckMobileAdapterStatus",
+          carry: 0,
+          selected_path: "InitGender",
+          unreachable_path: "InitMobileProfile",
+        }),
+        expect.objectContaining({
+          op: "initialize_crystal_profile",
+          prefecture: 1,
+          age: 0,
+          gender: 0,
+          postal_code: [0, 0, 0, 0],
+        }),
+        expect.objectContaining({
+          op: "load_menu",
+          items: ["Boy", "Girl"],
+          default_option: 1,
+        }),
+        expect.objectContaining({
+          op: "select_player_gender",
+          source: "wMenuCursorY - 1",
+          target: "wPlayerGender",
+        }),
+      ]),
+    );
+    const oakSpeech = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "oak_speech",
+    );
+    expect(oakSpeech).toMatchObject({
+      source_entry: "OakSpeech",
+      result: { storage: "none" },
+      audio: expect.arrayContaining([
+        expect.objectContaining({ id: "MUSIC_ROUTE_30", kind: "music" }),
+        expect.objectContaining({ id: "CRY_WOOPER", kind: "cry" }),
+      ]),
+      required_consumer: {
+        id: "runtime_title_screen.oak_speech",
+        required: true,
+      },
+    });
+    expect(oakSpeech?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "initialize_clock",
+          default_hour: 10,
+          hour_range: [0, 23],
+          minute_range: [0, 59],
+        }),
+        expect.objectContaining({
+          op: "present_intro_portrait",
+          kind: "pokemon",
+          species: "WOOPER",
+          dvs: [0, 0],
+        }),
+        expect.objectContaining({
+          op: "present_text_sequence",
+          entries: ["OakText2", "OakText3", "OakText4"],
+        }),
+        expect.objectContaining({
+          op: "name_player",
+          custom_naming_mode: "NAME_PLAYER",
+          empty_fallbacks: { male: "CHRIS", female: "KRIS" },
+        }),
+      ]),
+    );
+    const initializeWorld = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "initialize_world",
+    );
+    expect(initializeWorld).toMatchObject({
+      source_entry: "InitializeWorld",
+      result: { storage: "none" },
+      resources: expect.arrayContaining([
+        expect.objectContaining({ path: "gfx/new_game/shrink1.2bpp.lz" }),
+        expect.objectContaining({ path: "gfx/new_game/shrink2.2bpp.lz" }),
+      ]),
+      required_consumer: {
+        id: "runtime_title_screen.initialize_world",
+        required: true,
+      },
+    });
+    expect(initializeWorld?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "animate_player_shrink",
+          decompressed_tile_count: 49,
+          wait_after_clear: 3,
+        }),
+        expect.objectContaining({
+          op: "place_player_intro_sprite",
+          object_count: 4,
+          wait_after: 50,
+        }),
+        expect.objectContaining({
+          op: "spawn_player",
+          follower_indices: 0xff,
+          centered_object: "PLAYER",
+        }),
+        expect.objectContaining({
+          op: "initialize_start_day",
+          target: "wTimerEventStartDay",
+        }),
+      ]),
+    );
+    const deleteSave = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "delete_save_data",
+    );
+    expect(deleteSave).toMatchObject({
+      source_entry: "_DeleteSaveData",
+      accepted_call_forms: ["farcall"],
+      result: { storage: "none" },
+      required_consumer: {
+        id: "runtime_title_screen.delete_save_data",
+        required: true,
+      },
+    });
+    expect(deleteSave?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "load_menu",
+          items: ["NO", "YES"],
+          default_option: 1,
+        }),
+        expect.objectContaining({
+          op: "erase_sram_banks",
+          condition: { source: "wMenuCursorY", equals: 2 },
+          bank_count: 4,
+          start: "STARTOF(SRAM)",
+          byte_count: "SIZEOF(SRAM)",
+          value: 0,
+        }),
+      ]),
+    );
+    const resetClock = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "reset_clock_password",
+    );
+    expect(resetClock).toMatchObject({
+      source_entry: "_ResetClock",
+      accepted_call_forms: ["farcall"],
+      result: { storage: "none" },
+      required_consumer: {
+        id: "runtime_title_screen.reset_clock_password",
+        required: true,
+      },
+    });
+    expect(resetClock?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "load_menu",
+          items: ["NO", "YES"],
+          default_option: 1,
+        }),
+        expect.objectContaining({
+          op: "derive_clock_reset_password",
+          arithmetic: "wrapping_u16_sum",
+          player_id_bytes: 2,
+          player_name_bytes: 5,
+          money_bytes: 3,
+        }),
+        expect.objectContaining({
+          op: "edit_decimal_password",
+          digits: 5,
+          initial_digits: [0, 0, 0, 0, 0],
+          initial_cursor: 4,
+          confirm_button: "PAD_A",
+        }),
+        expect.objectContaining({
+          op: "write_sram_byte",
+          target: "sRTCStatusFlags",
+          value: { symbol: "RTC_RESET", value: 0x80 },
+          condition: { password_matches: true },
+        }),
+      ]),
+    );
+    const continueRtc = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "continue_rtc_restart_clock",
+    );
+    expect(continueRtc).toMatchObject({
+      source_entry: "Continue_CheckRTC_RestartClock",
+      accepted_call_forms: ["call"],
+      result: {
+        storage: "carry",
+        domain: expect.arrayContaining([
+          expect.objectContaining({ id: "passed", value: 0 }),
+          expect.objectContaining({ id: "cancelled", value: 1 }),
+        ]),
+      },
+      required_consumer: {
+        id: "runtime_title_screen.continue_rtc_restart_clock",
+        required: true,
+      },
+    });
+    expect(continueRtc?.phases[0]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: "read_sram_byte",
+          source: "sRTCStatusFlags",
+          mask: { symbol: "RTC_RESET", value: 0x80 },
+        }),
+        expect.objectContaining({
+          op: "edit_restart_clock",
+          fields: [
+            { id: "day", modulus: 7 },
+            { id: "hour", modulus: 24 },
+            { id: "minute", modulus: 60 },
+          ],
+          accept_button: "PAD_A",
+          cancel_button: "PAD_B",
+        }),
+        expect.objectContaining({
+          op: "initialize_time_offsets",
+          condition: { restart_confirmed: true },
+          target_fields: ["wStartDay", "wStartHour", "wStartMinute", "wStartSecond"],
+        }),
+      ]),
+    );
+    const crystalIntro = checkpoint.subprograms.find(
+      (subprogram) => subprogram.id === "crystal_intro",
+    );
+    expect(crystalIntro).toBeDefined();
+    const crystalIntroScenePhase = crystalIntro?.phases.find(
+      (phase) => phase.id === "scene_dispatch",
+    );
+    expect(crystalIntro).toMatchObject({
+      source_entry: "CrystalIntro",
+      accepted_call_forms: ["farcall"],
+      result: {
+        name: "crystal_intro_preserved_carry",
+        storage: "carry",
+        domain: [
+          expect.objectContaining({
+            id: "caller_carry_clear",
+            value: 0,
+            condition: { kind: "preserved_caller_carry", value: 0 },
+          }),
+          expect.objectContaining({
+            id: "caller_carry_set",
+            value: 1,
+            condition: { kind: "preserved_caller_carry", value: 1 },
+          }),
+        ],
+      },
+      phases: expect.arrayContaining([
+        expect.objectContaining({
+          id: "entry_init",
+          operations: expect.arrayContaining([
+            expect.objectContaining({ op: "save_memory_byte", source: "rWBK" }),
+            expect.objectContaining({ op: "save_memory_byte", source: "hInMenu" }),
+            expect.objectContaining({ op: "save_memory_byte", source: "hVBlank" }),
+            expect.objectContaining({ op: "write_memory_byte", target: "hVBlank", value: 0 }),
+            expect.objectContaining({ op: "write_memory_byte", target: "hInMenu", value: 1 }),
+            expect.objectContaining({ op: "write_memory_byte", target: "hMapAnims", value: 0 }),
+            expect.objectContaining({ op: "write_memory_byte", target: "wJumptableIndex", value: 0 }),
+          ]),
+        }),
+        expect.objectContaining({
+          id: "button_cancel",
+          operations: [expect.objectContaining({ op: "stop_audio", audio: "MUSIC_NONE" })],
+        }),
+        expect.objectContaining({
+          id: "cleanup",
+          operations: expect.arrayContaining([
+            expect.objectContaining({
+              op: "restore_memory_byte",
+              target: "hVBlank",
+              storage: expect.objectContaining({ stack_slot: 2 }),
+            }),
+            expect.objectContaining({
+              op: "restore_memory_byte",
+              target: "hInMenu",
+              storage: expect.objectContaining({ stack_slot: 1 }),
+            }),
+            expect.objectContaining({
+              op: "restore_memory_byte",
+              target: "rWBK",
+              storage: expect.objectContaining({ stack_slot: 0 }),
+            }),
+          ]),
+        }),
+      ]),
+      required_consumer: {
+        id: "runtime_title_screen.crystal_intro",
+        required: true,
+      },
+    });
+    expect({
       reason: "missing_subprogram_contract",
-      block: "IntroScene13",
-      target: "Intro_ClearBGPals",
+      block: ".done@CrystalIntro",
+      target: "ClearBGPalettes",
       opcode: "call",
-      args: ["Intro_ClearBGPals"],
+      args: ["ClearBGPalettes"],
       source_span: {
         file: "engine/movie/intro.asm",
-        start_line: 628,
-        end_line: 628,
+        start_line: 29,
+        end_line: 29,
+      },
+      compiled_prefix: {
+        source_entry: "CrystalIntro",
+        block: "IntroScene1",
+        operations: crystalIntroScenePhase?.operations,
+        sprite_programs: crystalIntro?.sprite_programs,
+      },
+    }).toEqual({
+      reason: "missing_subprogram_contract",
+      block: ".done@CrystalIntro",
+      target: "ClearBGPalettes",
+      opcode: "call",
+      args: ["ClearBGPalettes"],
+      source_span: {
+        file: "engine/movie/intro.asm",
+        start_line: 29,
+        end_line: 29,
       },
       compiled_prefix: {
         source_entry: "CrystalIntro",
@@ -865,6 +2128,167 @@ describe("runtime title presentation source CFG", () => {
             target: "wBGPals2",
             byte_count: 128,
             value: 0,
+          }),
+          expect.objectContaining({
+            op: "subtract_memory_byte",
+            target: "hSCX",
+            delta: 10,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "postincrement_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            result: "intro_scene_frame",
+          }),
+          expect.objectContaining({
+            op: "branch_memory_compare",
+            source: "wGlobalAnimXOffset",
+            predicate: "unsigned_less_than",
+            operand: 0x88,
+            target: ".disappear@IntroScene14",
+          }),
+          expect.objectContaining({
+            op: "subtract_memory_byte",
+            target: "wGlobalAnimXOffset",
+            delta: 8,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "subtract_memory_byte",
+            target: "wGlobalAnimXOffset",
+            delta: 2,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "request_2bpp_transfer",
+            source_symbol: "IntroGrass4GFX",
+            target: "vTiles1 tile $00",
+            tile_count: 1,
+          }),
+          expect.objectContaining({
+            op: "copy_strided_memory",
+            source: "wDecompressScratch",
+            source_stride: 32,
+            target: "wTilemap",
+            target_stride: 20,
+            row_count: 18,
+            bytes_per_row: 20,
+          }),
+          expect.objectContaining({
+            op: "conditional_tilemap_xor",
+            clock: "wIntroSceneFrameCounter",
+            clock_mask: 3,
+            swap_phase: expect.objectContaining({
+              equals: 0,
+              byte_count: 360,
+              xor: 8,
+            }),
+          }),
+          expect.objectContaining({
+            op: "add_memory_byte",
+            target: "hSCY",
+            delta: 8,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "return_if_memory_equal",
+            source: "hSCX",
+            operand: 0x60,
+          }),
+          expect.objectContaining({
+            op: "add_memory_byte",
+            target: "hSCX",
+            delta: 8,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "request_2bpp_transfer",
+            source_symbol: "IntroGrass4GFX",
+            target: "vTiles1 tile $7f",
+            tile_count: 1,
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "hSCY",
+            value: 216,
+          }),
+          expect.objectContaining({
+            op: "write_memory_bytes",
+            target: "wSpriteAnimDict",
+            bytes: [0, 0x7f],
+          }),
+          expect.objectContaining({
+            op: "return_if_compare",
+            value: "intro_scene_frame",
+            predicate: "unsigned_greater_or_equal",
+            operand: 0x58,
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte_from_masked_result",
+            target: "wIntroSceneTimer",
+            mask: 0x1c,
+            shift_right: 2,
+          }),
+          expect.objectContaining({
+            op: "copy_indexed_palette",
+            destinations: ["wBGPals2", "wBGPals1"],
+            bytes_per_palette: 8,
+          }),
+          expect.objectContaining({
+            op: "tilemap_xor",
+            target: "wTilemap",
+            byte_count: 360,
+            xor: 8,
+          }),
+          expect.objectContaining({
+            op: "wait_frames",
+            frames: 3,
+            source_span: expect.objectContaining({ start_line: 993 }),
+          }),
+          expect.objectContaining({
+            op: "deinitialize_all_sprites",
+            source_span: expect.objectContaining({ start_line: 1010 }),
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            value: 0,
+            source_span: expect.objectContaining({ start_line: 1015 }),
+          }),
+          expect.objectContaining({
+            op: "set_local_from_masked_result",
+            name: "accumulator",
+            source: "intro_scene_frame",
+            mask: 0x1c,
+            shift_left: 1,
+            valid_values: [0, 8, 16, 24, 32, 40, 48, 56],
+          }),
+          expect.objectContaining({
+            op: "broadcast_indexed_palette",
+            source: "gfx/intro/fade.pal",
+            bytes_per_palette: 8,
+            destination: "wBGPals2",
+            destination_palette_count: 8,
+            behavior: "repeat_selected_palette",
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            value: 0x40,
+          }),
+          expect.objectContaining({
+            op: "set_local_from_memory",
+            name: "intro_scene_countdown",
+            source: "wIntroSceneFrameCounter",
+            subtract: 1,
+            wrap: "u8",
+          }),
+          expect.objectContaining({
+            op: "branch_compare",
+            value: "intro_scene_countdown",
+            predicate: "equal",
+            operand: 0,
+            target: ".done@IntroScene25",
           }),
           expect.objectContaining({
             op: "write_memory_byte",
@@ -1170,6 +2594,59 @@ describe("runtime title presentation source CFG", () => {
               start_line: 142,
               end_line: 144,
             },
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "IntroCrystalUnownsAttrmap",
+            output_byte_count: 1024,
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "IntroCrystalUnownsGFX",
+            output_byte_count: 512,
+          }),
+          expect.objectContaining({
+            op: "decompress_lz3_resource",
+            resource_symbol: "IntroCrystalUnownsTilemap",
+            output_byte_count: 1024,
+          }),
+          expect.objectContaining({
+            op: "fade_unown_word_palettes",
+            palette_index: {
+              source: "accumulator",
+              multiply: 8,
+              valid_values: [0, 1, 2, 3, 4, 5, 6, 7],
+            },
+            fade_index: {
+              source: "wIntroSceneTimer",
+              multiply: 2,
+              valid_values: Array.from({ length: 16 }, (_, index) => index),
+            },
+            target: "wBGPals2",
+            target_color_offsets: [4, 6],
+            fast_hues: [31, 30, 28, 27, 25, 24, 22, 21, 19, 18, 16, 15, 13, 12, 10, 9],
+            slow_hues: Array.from({ length: 16 }, (_, index) => 31 - index),
+            color_encoding: "rgb555_grayscale",
+            completion_write: { target: "hCGBPalUpdate", value: 1 },
+          }),
+          expect.objectContaining({
+            op: "write_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            value: 0x80,
+          }),
+          expect.objectContaining({
+            op: "decrement_memory_byte",
+            target: "wIntroSceneFrameCounter",
+            comparison_value: "predecrement_value",
+          }),
+          expect.objectContaining({
+            op: "play_audio",
+            audio: "SFX_INTRO_WHOOSH",
+          }),
+          expect.objectContaining({
+            op: "set_memory_bit",
+            target: "wJumptableIndex",
+            bit: 7,
           }),
           expect.objectContaining({
             op: "increment_memory_byte",
@@ -1604,7 +3081,57 @@ describe("runtime title presentation source CFG", () => {
         ]),
       },
     });
-    const introPrefix = checkpoint.frontier?.compiled_prefix?.operations ?? [];
+    const introSpriteByAllocationLine = (line: number) =>
+      crystalIntro?.sprite_programs.find(
+        (sprite) => sprite.allocation_source_span?.start_line === line,
+      );
+    expect(introSpriteByAllocationLine(393)?.graphic_binding).toMatchObject({
+      resource: "gfx/intro/suicune_run.2bpp.lz",
+      target_vram_bank: 0,
+      tile_base: 0,
+    });
+    expect(introSpriteByAllocationLine(486)?.graphic_binding).toMatchObject({
+      resource: "gfx/intro/pichu_wooper.2bpp.lz",
+      target_vram_bank: 1,
+      tile_base: 0,
+    });
+    expect(introSpriteByAllocationLine(784)?.graphic_binding).toMatchObject({
+      resource: "gfx/intro/unown_back.2bpp.lz",
+      target_vram_bank: 0,
+      tile_base: 0,
+    });
+    expect(introSpriteByAllocationLine(787)?.graphic_binding).toMatchObject({
+      resource: "gfx/intro/grass4.2bpp",
+      target_vram_bank: 0,
+      tile_base: 0x80,
+    });
+    expect(introSpriteByAllocationLine(936)?.graphic_binding).toMatchObject({
+      resource: "gfx/intro/grass4.2bpp",
+      target_vram_bank: 0,
+      tile_base: 0xff,
+    });
+    const introPrefix = crystalIntroScenePhase?.operations ?? [];
+    const backgroundBindings = introPrefix.filter(
+      (operation) => operation.op === "intro_background_binding",
+    );
+    expect(backgroundBindings).toHaveLength(28);
+    expect(backgroundBindings.find((binding) => binding.dispatcher_entry === 14)).toMatchObject({
+      tilemap_resource: "gfx/intro/suicune_jump.tilemap.lz",
+      attrmap_resource: "gfx/intro/suicune_jump.attrmap.lz",
+      palette_resource: "gfx/intro/suicune.pal",
+      tile_bindings: expect.arrayContaining([
+        expect.objectContaining({ resource: "gfx/intro/suicune_jump.2bpp.lz" }),
+      ]),
+    });
+    expect(backgroundBindings.find((binding) => binding.dispatcher_entry === 18)).toMatchObject({
+      tilemap_resource: "gfx/intro/suicune_back.tilemap.lz",
+      attrmap_resource: "gfx/intro/suicune_back.attrmap.lz",
+      palette_resource: "gfx/intro/suicune.pal",
+      tile_bindings: expect.arrayContaining([
+        expect.objectContaining({ resource: "gfx/intro/suicune_back.2bpp.lz" }),
+        expect.objectContaining({ resource: "gfx/intro/unowns.2bpp.lz" }),
+      ]),
+    });
     const unownFade = introPrefix.find(
       (operation) => operation.op === "palette_fade_lookup",
     );
@@ -1725,11 +3252,50 @@ describe("runtime title presentation source CFG", () => {
         frames: 1,
         source_span: expect.objectContaining({ start_line: 1570 }),
       }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1569 }),
+      }),
+      expect.objectContaining({
+        frames: 1,
+        source_span: expect.objectContaining({ start_line: 1570 }),
+      }),
+      expect.objectContaining({
+        frames: 3,
+        source_span: expect.objectContaining({ start_line: 993 }),
+      }),
     ]);
 
     const subprograms = (checkpoint as any).subprograms as Array<any>;
-    expect(subprograms).toHaveLength(1);
-    expect(subprograms[0]).toMatchObject({
+    expect(subprograms).toHaveLength(15);
+    const splashSubprogram = subprograms.find(
+      (subprogram) => subprogram.id === "splash_screen",
+    );
+    expect(splashSubprogram).toMatchObject({
       id: "splash_screen",
       source_entry: "SplashScreen",
       accepted_call_forms: ["callfar"],
@@ -2021,15 +3587,100 @@ describe("runtime title presentation source CFG", () => {
     });
   });
 
-  it("emits Scenes 2 through 12 before failing closed at Scene 13", () => {
+  it("builds a closed source program through the common overworld loop", () => {
+    const program = buildRuntimeTitlePresentationProgram({
+      disassemblyRoot,
+      audioAssetIds: runtimePresentationAudioIds,
+      runtimeSpawnIdentifiers: new Set([0]),
+    });
+    expect(program.blocks[".loop@FinishContinueFunction"]?.operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ op: "prepare_overworld_session" }),
+        expect.objectContaining({ op: "run_overworld_loop" }),
+        expect.objectContaining({ op: "handle_overworld_return" }),
+      ]),
+    );
+    expect(program.resources.length).toBeGreaterThan(0);
+    expect(program.audio).toHaveLength(runtimePresentationAudioIds.size);
+    expect(
+      program.subprograms
+        .find((subprogram) => subprogram.id === "start_title_screen")
+        ?.phases.find((phase) => phase.id === "title_screen")
+        ?.labels,
+    ).toEqual({
+      TitleScreenEntrance: 68,
+      ".loop@TitleScreenEntrance": 70,
+      ".done@TitleScreenEntrance": 74,
+      TitleScreenTimer: 79,
+      TitleScreenMain: 82,
+      ".check_clock_reset@TitleScreenMain": 89,
+      ".check_start@TitleScreenMain": 92,
+      ".incave@TitleScreenMain": 94,
+      ".delete_save_data@TitleScreenMain": 94,
+      ".done@TitleScreenMain": 95,
+      ".end@TitleScreenMain": 97,
+      ".reset_clock@TitleScreenMain": 101,
+      TitleScreenEnd: 104,
+    });
+    const missingBranchLabel = structuredClone(program);
+    const titlePhase = missingBranchLabel.subprograms
+      .find((subprogram) => subprogram.id === "start_title_screen")
+      ?.phases.find((phase) => phase.id === "title_screen");
+    if (!titlePhase?.labels) throw new Error("test title phase labels are missing");
+    delete titlePhase.labels[".check_start@TitleScreenMain"];
+    expect(() => assertRuntimePresentationProgram(missingBranchLabel)).toThrow(
+      /targets missing label \.check_start@TitleScreenMain/,
+    );
+    const missingMainMenuBranchLabel = structuredClone(program);
+    const mainMenuPhase = missingMainMenuBranchLabel.subprograms
+      .find((subprogram) => subprogram.id === "main_menu")
+      ?.phases.find((phase) => phase.id === "main_menu");
+    if (!mainMenuPhase?.labels)
+      throw new Error("test main-menu phase labels are missing");
+    delete mainMenuPhase.labels[".quit@MainMenu"];
     expect(() =>
-      buildRuntimeTitlePresentationProgram({
-        disassemblyRoot,
-        audioAssetIds: new Set(),
-        runtimeSpawnIdentifiers: new Set([0]),
-      }),
-    ).toThrow(
-      /source call Intro_ClearBGPals.*engine\/movie\/intro\.asm:628.*typed subprogram contract/i,
+      assertRuntimePresentationProgram(missingMainMenuBranchLabel),
+    ).toThrow(/targets missing label \.quit@MainMenu/);
+    const missingDispatchLabel = structuredClone(program);
+    const dispatchPhase = missingDispatchLabel.subprograms
+      .find((subprogram) => subprogram.id === "start_title_screen")
+      ?.phases.find((phase) => phase.id === "title_screen");
+    if (!dispatchPhase?.labels) throw new Error("test title phase labels are missing");
+    delete dispatchPhase.labels.TitleScreenEnd;
+    expect(() => assertRuntimePresentationProgram(missingDispatchLabel)).toThrow(
+      /dispatches to missing label TitleScreenEnd/,
+    );
+    const missingOptionSource = structuredClone(program);
+    const optionPhase = missingOptionSource.subprograms
+      .find((subprogram) => subprogram.id === "start_title_screen")
+      ?.phases.find((phase) => phase.id === "title_screen");
+    const option = optionPhase?.operations.find(
+      (operation) => operation.op === "select_title_option",
+    );
+    if (!option) throw new Error("test title option operation is missing");
+    (option.options as Array<{ source: string }>)[0].source =
+      ".missing@TitleScreenMain";
+    expect(() => assertRuntimePresentationProgram(missingOptionSource)).toThrow(
+      /invalid title option source \.missing@TitleScreenMain/,
+    );
+    const invalidOptionValue = structuredClone(program);
+    const invalidOptionPhase = invalidOptionValue.subprograms
+      .find((subprogram) => subprogram.id === "start_title_screen")
+      ?.phases.find((phase) => phase.id === "title_screen");
+    const invalidOption = invalidOptionPhase?.operations.find(
+      (operation) => operation.op === "select_title_option",
+    );
+    if (!invalidOption) throw new Error("test title option operation is missing");
+    (invalidOption.options as Array<{ value: unknown }>)[0].value = "MAIN_MENU";
+    expect(() => assertRuntimePresentationProgram(invalidOptionValue)).toThrow(
+      /invalid title option source .* or value MAIN_MENU/,
+    );
+    expect(program.text).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "OakText1" }),
+        expect.objectContaining({ id: "PasswordAskResetClockText" }),
+        expect.objectContaining({ id: "ClockHasResetText" }),
+      ]),
     );
   });
 
@@ -2366,7 +4017,7 @@ describe("runtime title presentation source CFG", () => {
       readSource: (relativePath) =>
         relativePath === file ? mutated : canonicalRead(relativePath),
     });
-    const helperWrite = checkpoint.frontier?.compiled_prefix?.operations.find(
+    const helperWrite = crystalIntroOperations(checkpoint).find(
       (operation) =>
         operation.op === "write_memory_byte" &&
         (operation.invocation as { target?: string } | undefined)?.target ===
@@ -2453,7 +4104,7 @@ describe("runtime title presentation source CFG", () => {
           relativePath === file ? mutated : canonicalRead(relativePath),
       });
       const transferOperations =
-        checkpoint.frontier?.compiled_prefix?.operations.filter((operation) =>
+        crystalIntroOperations(checkpoint).filter((operation) =>
           ["decompress_lz3_resource", "request_2bpp_transfer"].includes(
             operation.op,
           ),
@@ -2510,7 +4161,7 @@ describe("runtime title presentation source CFG", () => {
           relativePath === file ? mutated : canonicalRead(relativePath),
       });
       const copyOperations =
-        checkpoint.frontier?.compiled_prefix?.operations.filter(
+        crystalIntroOperations(checkpoint).filter(
           (operation) => operation.op === "copy_memory",
         ) ?? [];
       expect(copyOperations[operationIndex]).toMatchObject(expected);
@@ -3833,6 +5484,7 @@ describe("runtime title presentation source CFG", () => {
     const controlFlow = spriteView(
       analyzeRuntimePresentationControlFlow({ disassemblyRoot }),
     );
+    expect(controlFlow.sprite_diagnostics).toEqual([]);
     const program = controlFlow.sprite_programs.find(
       (candidate) =>
         candidate.object?.value === 0x26 &&
@@ -4043,6 +5695,7 @@ describe("runtime title presentation source CFG", () => {
       callback: {
         kind: "direct",
         target: "SpriteAnimFunc_IntroPichuWooper",
+        labels: { ".done": 14 },
         host_operations: [
           expect.objectContaining({ op: "sine", target: "AnimSeqs_Sine" }),
         ],
@@ -4211,6 +5864,7 @@ describe("runtime title presentation source CFG", () => {
       callback: {
         kind: "direct",
         target: "SpriteAnimFunc_IntroSuicune",
+        labels: { ".continue": 4 },
         frameset_reinitializations: [
           expect.objectContaining({
             application: "every_reachable_scheduler_tick",

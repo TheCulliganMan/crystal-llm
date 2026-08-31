@@ -9,8 +9,11 @@ rust-version.workspace = true
 [dependencies]
 bincode.workspace = true
 crystal-core = { path = "../crystal-core" }
+ewebsock = { version = "0.8", features = ["tls"] }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+uuid = { version = "1", features = ["js", "serde", "v4"] }
 
 [dev-dependencies]
 crystal-core = { path = "../crystal-core", features = ["test-fixtures"] }

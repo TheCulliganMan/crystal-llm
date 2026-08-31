@@ -64,7 +64,7 @@ fn export_core_pack(repository_root: &Path) -> Result<()> {
     let browser_pack = repository_root.join(BROWSER_PACK_RELATIVE_PATH);
     compiled
         .write_browser_game_pack(&browser_pack)
-        .context("write browser pack with on-demand PCM sidecars")?;
+        .context("write browser pack with on-demand audio synthesis")?;
     write_provenance(repository_root, &tracked_pack)?;
     println!("exported {}", tracked_pack.display());
     println!("exported {}", browser_pack.display());

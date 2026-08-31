@@ -1,6 +1,4 @@
 export const SAMPLE_RATE = 44_100;
-export const MP3_EXPORT_SAMPLE_RATE = 22_050;
-export const MP3_EXPORT_BITRATE = "64k";
 export const GB_FRAME_RATE_NUMERATOR = 4_194_304;
 export const GB_FRAME_RATE_DENOMINATOR = 70_224;
 export const NOISE_CLOCK_HZ = 524_288;
@@ -67,8 +65,3 @@ export const GB_DUTY_PATTERNS: Record<number, number[]> = {
   2: [1, 0, 0, 0, 0, 1, 1, 1],
   3: [0, 1, 1, 1, 1, 1, 1, 0],
 };
-
-export const MIDI_CONTROLLER_PAN = 10;
-export const MIDI_CONTROLLER_VOLUME = 7;
-export const MIDI_PROGRAM_PULSE = 80;
-export const MIDI_PROGRAM_WAVE = 38;

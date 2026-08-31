@@ -41,6 +41,40 @@ cargo run -p crystal-bevy -- \
   --save-path /tmp/pokecrystal.crystalsave
 ```
 
+### Native multiplayer
+
+Native builds can host or join an exact pack-bound multiplayer session. Each
+player must use the same compiled pack and session id, a distinct nonzero
+player id, and a valid display name. Start the host first:
+
+```sh
+cargo run -p crystal-bevy -- \
+  --pack /path/to/core-modular.crystalpack \
+  --load-save /path/to/host.crystalsave \
+  --save-path /path/to/host.crystalsave \
+  --multiplayer-host 0.0.0.0:3737 \
+  --multiplayer-session friends \
+  --multiplayer-player-id 1 \
+  --multiplayer-player-name CHRIS
+```
+
+Then join from the other game process, using the host's reachable address:
+
+```sh
+cargo run -p crystal-bevy -- \
+  --pack /path/to/core-modular.crystalpack \
+  --load-save /path/to/peer.crystalsave \
+  --save-path /path/to/peer.crystalsave \
+  --multiplayer-join 192.0.2.10:3737 \
+  --multiplayer-session friends \
+  --multiplayer-player-id 2 \
+  --multiplayer-player-name KRIS
+```
+
+The connection fails closed when protocol, session, modpack, or compiled-pack
+identity differs. Host acceptance and all socket reads are nonblocking, so
+waiting for or communicating with a peer does not stall the game loop.
+
 When `--pack` is omitted, `core-modular.crystalpack` must be beside the
 executable. When `--save-path` is omitted, saves are written under `saves/`
 beside the pack. The release executable exposes no spawn, smoke, script,
@@ -51,28 +85,40 @@ Start, and Right Shift for Select.
 
 ### Browser build
 
-Build the WASM game with the optional 2.5D renderer, generate its JavaScript
-bindings, and serve `rust/web-dist` with the Rust server:
+Build the 2D WASM game, generate its JavaScript bindings, and serve
+`rust/web-dist` with the Rust server:
 
 ```sh
+npm run build:browser-audio-runtime
 cd rust
 rustup target add wasm32-unknown-unknown
-cargo build -p crystal-bevy --target wasm32-unknown-unknown --release --features voxel-view
+cargo build -p crystal-bevy --target wasm32-unknown-unknown --profile web-release
 wasm-bindgen --target web --out-dir web-dist --out-name crystal-bevy \
-  target/wasm32-unknown-unknown/release/crystal-bevy.wasm
+  target/wasm32-unknown-unknown/web-release/crystal-bevy.wasm
+cp web-client/index.html web-dist/
+cp -R web-client/audio-runtime web-dist/
 cp ../content-packs/core-modular.browser.crystalpack web-dist/
-cp -R ../content-packs/audio web-dist/
+gzip -9 -k web-dist/crystal-bevy_bg.wasm
+gzip -9 -k web-dist/core-modular.browser.crystalpack
 cargo run -p crystal-web-server -- --dir web-dist --port 8080
 ```
 
-Open `http://127.0.0.1:8080`, click the game canvas, and press `F3` to switch
-between the classic 2D renderer and the optional 2.5D renderer. Click or press
-a key in the game before expecting sound because browsers require a user gesture
-to unlock audio playback. Browser playback sends the pack's canonical PCM
-samples directly to WebAudio. The browser fetches and verifies the compact
-browser pack at startup, then fetches each gzip-compressed PCM sidecar only when
-that sound is first requested. Browser saves are disabled until persistent web
-storage is wired.
+Open `http://127.0.0.1:8080` to launch the game in the classic 2D renderer.
+The original 640×576 LCD surfaces scale as one complete unit so text and tiles
+stay readable at any aspect ratio. Click or press a key in the game before
+expecting sound because browsers require a user gesture to unlock audio
+playback. The browser pack contains compact MIDI files using the
+`pokecrystal-midi-v1` sequencer profile. The bundled TypeScript synthesizer
+compiles MIDI to canonical PCM in memory only when a sound is first requested,
+verifies it against the pack manifest, and sends it to WebAudio. Browser saves
+persist in local storage under a slot scoped to the
+stable multiplayer player ID. Reloading or restarting the browser restores
+that same slot and exposes Continue once the save passes normal modpack
+validation.
+
+The production image contains no PCM audio catalog or audio volume. The server
+serves precompressed `.wasm.gz` and `.crystalpack.gz` siblings when the browser
+accepts gzip.
 
 ### Optional 2.5D overworld mod
 
@@ -90,8 +136,8 @@ The mod consumes a read-only render snapshot. It does not change movement,
 collision, scripts, random state, battles, saves, or replay checksums. Menus,
 dialog, fades, and battles continue to use the faithful 2D compositor. Its
 clean-room shape profile is keyed by stable tileset/metatile artwork identity,
-never gameplay collision. The startup setting and `F3` are the only ways to
-change between 2D and 2.5D. Unsupported maps, incomplete frames, terrain
+never gameplay collision. Presentation settings are the only way to change
+between 2D and 2.5D. Unsupported maps, incomplete frames, terrain
 builds, and renderer errors report 2.5D as inactive without exposing the 2D
 overworld.
 

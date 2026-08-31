@@ -1,4 +1,5 @@
 pub mod battle_escape;
+#[cfg(any(test, feature = "test-fixtures"))]
 pub mod battle_flow;
 pub mod battle_items;
 pub mod battle_rewards;
@@ -12,6 +13,7 @@ pub mod gift_pokemon;
 pub mod item_use;
 pub mod learnsets;
 pub mod map_context;
+pub mod map_name_sign;
 pub mod phone;
 pub mod roaming;
 pub mod runtime_pack;

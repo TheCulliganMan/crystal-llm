@@ -56,6 +56,12 @@ const directionForEvent = (event: NameEntryEvent): string | null => {
   if (typeof event.direction === "string") {
     return event.direction;
   }
+  // Browser keyboard events include both the literal key and its resolved Game
+  // Boy button. KeyA is an A-button binding, so do not reinterpret its `a` key
+  // value as the CLI movement shortcut for left.
+  if (typeof event.button === "string") {
+    return null;
+  }
   const rawKey = event.key ?? event.code ?? null;
   if (typeof rawKey === "string") {
     const lowered = rawKey.toLowerCase();

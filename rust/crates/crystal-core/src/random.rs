@@ -14,12 +14,14 @@ pub trait DividerSource {
 }
 
 /// Random operations used by the battle engine. Production battle execution
-/// supplies [`ExactBattleRandom`]; the seed-packed implementation remains
-/// available only while callers outside the migrated runtime boundary are
-/// being removed.
+/// supplies [`ExactBattleRandom`]; fixture implementations may supply a
+/// deterministic byte stream without becoming part of cartridge state.
 pub trait BattleRandomSource {
     fn battle_random_byte(&mut self) -> u8;
-    fn legacy_seed(&self) -> u32;
+    fn crystal_random_byte(&mut self, carry_in: bool) -> u8 {
+        let _ = carry_in;
+        self.battle_random_byte()
+    }
 }
 
 impl<S> DividerSource for &mut S
@@ -233,7 +235,6 @@ where
 {
     rng: CrystalRandom<&'a mut S>,
     divider_error: Option<String>,
-    legacy_seed: u32,
 }
 
 impl<'a, S> ExactBattleRandom<'a, S>
@@ -241,11 +242,10 @@ where
     S: DividerSource + ?Sized,
     S::Error: std::fmt::Display,
 {
-    pub fn new(state: CrystalRandomState, legacy_seed: u32, source: &'a mut S) -> Self {
+    pub fn new(state: CrystalRandomState, source: &'a mut S) -> Self {
         Self {
             rng: CrystalRandom::new(state, source),
             divider_error: None,
-            legacy_seed,
         }
     }
 
@@ -283,8 +283,12 @@ where
         self.remember(result).unwrap_or(u8::MAX)
     }
 
-    fn legacy_seed(&self) -> u32 {
-        self.legacy_seed
+    fn crystal_random_byte(&mut self, carry_in: bool) -> u8 {
+        if self.divider_error.is_some() {
+            return u8::MAX;
+        }
+        let result = self.rng.random(carry_in).map(|output| output.value);
+        self.remember(result).unwrap_or(u8::MAX)
     }
 }
 
@@ -498,15 +502,17 @@ impl LinkBattleRandom {
     }
 }
 
-/// Deterministic LCG retained only for legacy test fixtures.
+/// Deterministic LCG retained only for isolated test fixtures.
 /// Production code uses [`CrystalRandom`] and [`LinkBattleRandom`].
+#[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Random {
     seed: u32,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl Random {
-    /// Construct the deterministic LCG used by legacy test fixtures.
+    /// Construct the deterministic LCG used by isolated test fixtures.
     ///
     /// The constructor is deliberately absent from production builds so a
     /// missing divider source cannot silently fall back to the LCG.
@@ -550,13 +556,10 @@ impl Random {
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl BattleRandomSource for Random {
     fn battle_random_byte(&mut self) -> u8 {
         Random::battle_random_byte(self)
-    }
-
-    fn legacy_seed(&self) -> u32 {
-        self.seed()
     }
 }
 
@@ -569,14 +572,13 @@ mod tests {
     };
 
     #[test]
-    fn exact_battle_random_reads_the_divider_and_preserves_legacy_seed() {
+    fn exact_battle_random_reads_the_divider_and_updates_cartridge_state() {
         let mut divider = ReplayDivider::new([0x20, 0x10]);
         let mut rng = ExactBattleRandom::new(
             CrystalRandomState {
                 add: 0x10,
                 sub: 0x80,
             },
-            0x1234_5678,
             &mut divider,
         );
 
@@ -588,7 +590,6 @@ mod tests {
                 sub: 0x70
             }
         );
-        assert_eq!(rng.legacy_seed(), 0x1234_5678);
         assert_eq!(rng.divider_error(), None);
         drop(rng);
         assert_eq!(divider.consumed(), 2);
@@ -597,7 +598,7 @@ mod tests {
     #[test]
     fn exact_battle_random_latches_exhaustion_without_reading_again() {
         let mut divider = ReplayDivider::new([0x20]);
-        let mut rng = ExactBattleRandom::new(CrystalRandomState::default(), 7, &mut divider);
+        let mut rng = ExactBattleRandom::new(CrystalRandomState::default(), &mut divider);
 
         assert_eq!(rng.battle_random_byte(), u8::MAX);
         assert_eq!(rng.battle_random_byte(), u8::MAX);

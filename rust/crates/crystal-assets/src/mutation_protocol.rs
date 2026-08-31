@@ -40,6 +40,685 @@ pub fn load_verified_compiled_game_pack_bytes(
     Ok(LoadedCompiledGamePack { path, bytes, pack })
 }
 
+/// A complete, already-materialized runtime map addition for an existing
+/// compiled pack. This is the production boundary for generators and other
+/// tools that add maps without teaching the faithful runtime how they were
+/// produced.
+#[derive(Debug, Clone)]
+pub struct CompiledMapExtension {
+    pub manifest_id: String,
+    pub map_name: String,
+    pub map_constant: String,
+    pub module: MapModule,
+    pub metadata: RuntimeMapMetadata,
+    pub spawn_key: String,
+    pub spawn: RuntimeSpawnPoint,
+    pub wild_encounters: Option<WildEncounterData>,
+    pub start_new_game_here: bool,
+}
+
+/// A complete tileset addition for an existing compiled pack.
+///
+/// Tileset behavior lives in `definition`; the exact renderer inputs remain
+/// embedded runtime files. Keeping both sides in one typed mutation prevents a
+/// generated map from naming collision data whose metatile or pixel art was
+/// never shipped in the playable pack.
+#[derive(Debug, Clone)]
+pub struct CompiledTilesetExtension {
+    pub manifest_id: String,
+    pub tileset_id: String,
+    /// Existing tileset whose block-replacement behavior this derived tileset
+    /// inherits (Cut/Whirlpool). Art and collision remain independently owned.
+    pub behavior_source_tileset_id: Option<String>,
+    pub definition: TilesetDefinition,
+    pub metatiles: Vec<u8>,
+    pub tile_graphics_2bpp: Vec<u8>,
+    pub tile_graphics_png: Vec<u8>,
+}
+
+impl CompiledGamePack {
+    /// Adds one complete tileset and recalculates the definitive pack identity.
+    /// Existing tilesets and runtime files remain byte-for-byte unchanged.
+    pub fn with_tileset_extension(&self, extension: CompiledTilesetExtension) -> Result<Self> {
+        verify_compiled_game_pack_for_runtime(self)?;
+        validate_compiled_tileset_extension(&extension)?;
+        let mut pack = self.clone();
+        insert_compiled_tileset_extension(&mut pack, extension)?;
+        pack.identity = derive_compiled_game_pack_identity_from_manifest(
+            pack.format_version,
+            &pack.data,
+            &pack.audio_manifest,
+            &pack.runtime_files,
+            &pack.report,
+        )?;
+        verify_compiled_game_pack_for_runtime(&pack)?;
+        Ok(pack)
+    }
+
+    /// Adds one standalone map and recalculates the definitive pack identity.
+    /// Existing maps and catalogs remain byte-for-byte unchanged.
+    pub fn with_map_extension(&self, extension: CompiledMapExtension) -> Result<Self> {
+        self.with_map_extensions([extension])
+    }
+
+    /// Adds a mutually-referencing set of complete maps atomically.
+    ///
+    /// This is required for honest generated buildings with interiors: the
+    /// outdoor door and the indoor return warp must both exist before runtime
+    /// verification resolves either target. Each map is still validated at
+    /// the same production boundary, and the pack identity is derived once
+    /// from the complete verified result.
+    pub fn with_map_extensions(
+        &self,
+        extensions: impl IntoIterator<Item = CompiledMapExtension>,
+    ) -> Result<Self> {
+        verify_compiled_game_pack_for_runtime(self)?;
+        let extensions = extensions.into_iter().collect::<Vec<_>>();
+        if extensions.is_empty() {
+            anyhow::bail!("compiled map extension set cannot be empty");
+        }
+        for extension in &extensions {
+            validate_compiled_map_extension(extension)?;
+        }
+        let mut pack = self.clone();
+        for extension in extensions {
+            insert_compiled_map_extension(&mut pack, extension)?;
+        }
+        pack.report.maps = pack.data.maps.len();
+        pack.report.reachable_maps.sort();
+        pack.report.solvable_maps.sort();
+        pack.identity = derive_compiled_game_pack_identity_from_manifest(
+            pack.format_version,
+            &pack.data,
+            &pack.audio_manifest,
+            &pack.runtime_files,
+            &pack.report,
+        )?;
+        verify_compiled_game_pack_for_runtime(&pack)?;
+        Ok(pack)
+    }
+
+    /// Writes a verified pack without changing its existing embedded/sidecar
+    /// audio storage mode. This is required when extending an already compiled
+    /// pack because its PCM payloads may already be compressed.
+    pub fn write_preserving_storage(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        validate_compiled_game_pack_path(path)?;
+        verify_compiled_game_pack_for_runtime(self)?;
+        write_serialized_compiled_game_pack(path, self)
+    }
+}
+
+fn insert_compiled_tileset_extension(
+    pack: &mut CompiledGamePack,
+    extension: CompiledTilesetExtension,
+) -> Result<()> {
+    if pack.data.tilesets.contains_key(&extension.tileset_id) {
+        anyhow::bail!(
+            "compiled pack already contains tileset '{}'",
+            extension.tileset_id
+        );
+    }
+    if let Some(source) = extension.behavior_source_tileset_id.as_deref() {
+        if !pack.data.tilesets.contains_key(source) {
+            anyhow::bail!("compiled pack has no behavior-source tileset '{source}'");
+        }
+        clone_block_replacement_behavior(
+            &mut pack.data.field_moves.cut.replacements,
+            source,
+            &extension.tileset_id,
+        )?;
+        clone_block_replacement_behavior(
+            &mut pack.data.field_moves.whirlpool.replacements,
+            source,
+            &extension.tileset_id,
+        )?;
+    }
+
+    let metatile_path = format!("data/tilesets/{}_metatiles.bin", extension.tileset_id);
+    let collision_path = format!("data/tilesets/{}.json", extension.tileset_id);
+    let palette_path = format!("data/tilesets/{}_palette_map.json", extension.tileset_id);
+    let graphics_2bpp_path = format!("gfx/tilesets/{}.2bpp", extension.tileset_id);
+    let graphics_png_path = format!("gfx/tilesets/{}.png", extension.tileset_id);
+    for path in [
+        &metatile_path,
+        &collision_path,
+        &palette_path,
+        &graphics_2bpp_path,
+        &graphics_png_path,
+    ] {
+        if pack.runtime_files.contains_key(path) {
+            anyhow::bail!("compiled pack already contains runtime file '{path}'");
+        }
+    }
+
+    let collision_json = serde_json::to_vec(&extension.definition.collision)
+        .context("encode compiled tileset collision JSON")?;
+    let palette_json = serde_json::to_vec(&extension.definition.palette_map)
+        .context("encode compiled tileset palette-map JSON")?;
+    insert_keyed_tileset_definition(
+        &mut pack.data.tilesets,
+        extension.tileset_id,
+        extension.definition,
+    )?;
+    pack.runtime_files
+        .insert(metatile_path, extension.metatiles);
+    pack.runtime_files.insert(collision_path, collision_json);
+    pack.runtime_files.insert(palette_path, palette_json);
+    pack.runtime_files
+        .insert(graphics_2bpp_path, extension.tile_graphics_2bpp);
+    pack.runtime_files
+        .insert(graphics_png_path, extension.tile_graphics_png);
+    pack.report.manifests.push(extension.manifest_id);
+    Ok(())
+}
+
+fn validate_compiled_tileset_extension(extension: &CompiledTilesetExtension) -> Result<()> {
+    const METATILE_BYTES: usize = 16;
+    const TILE_BYTES_2BPP: usize = 16;
+    const MAX_METATILES: usize = 256;
+    const MAX_TILES: usize = 256;
+
+    if !is_exact_manifest_id_token(&extension.manifest_id) {
+        anyhow::bail!("compiled tileset extension manifest id is invalid");
+    }
+    if !is_exact_tileset_id(&extension.tileset_id) {
+        anyhow::bail!(
+            "compiled tileset extension id '{}' must be an exact asset id",
+            extension.tileset_id
+        );
+    }
+    if let Some(source) = extension.behavior_source_tileset_id.as_deref() {
+        if !is_exact_tileset_id(source) || source == extension.tileset_id {
+            anyhow::bail!(
+                "compiled tileset extension behavior source '{source}' must be a distinct exact asset id"
+            );
+        }
+    }
+    if extension.metatiles.is_empty() || !extension.metatiles.len().is_multiple_of(METATILE_BYTES) {
+        anyhow::bail!(
+            "compiled tileset extension '{}' metatile data must be nonempty and divisible by {METATILE_BYTES}",
+            extension.tileset_id
+        );
+    }
+    let metatile_count = extension.metatiles.len() / METATILE_BYTES;
+    if metatile_count > MAX_METATILES {
+        anyhow::bail!(
+            "compiled tileset extension '{}' has {metatile_count} metatiles but Crystal block ids are bytes",
+            extension.tileset_id
+        );
+    }
+    let collisions =
+        tileset_collision_from_definition(&extension.tileset_id, &extension.definition)
+            .with_context(|| {
+                format!(
+                    "validate compiled tileset extension '{}' collision data",
+                    extension.tileset_id
+                )
+            })?;
+    if collisions.metatiles.len() != metatile_count {
+        anyhow::bail!(
+            "compiled tileset extension '{}' has {metatile_count} art metatiles but {} collision metatiles",
+            extension.tileset_id,
+            collisions.metatiles.len()
+        );
+    }
+
+    if extension.tile_graphics_2bpp.is_empty()
+        || !extension
+            .tile_graphics_2bpp
+            .len()
+            .is_multiple_of(TILE_BYTES_2BPP)
+    {
+        anyhow::bail!(
+            "compiled tileset extension '{}' 2bpp data must be nonempty and divisible by {TILE_BYTES_2BPP}",
+            extension.tileset_id
+        );
+    }
+    let source_tile_count = extension.tile_graphics_2bpp.len() / TILE_BYTES_2BPP;
+    if source_tile_count > MAX_TILES || !source_tile_count.is_multiple_of(2) {
+        anyhow::bail!(
+            "compiled tileset extension '{}' must contain an even number of at most {MAX_TILES} packed VRAM tiles, found {source_tile_count}",
+            extension.tileset_id
+        );
+    }
+    let (png_width, png_height) =
+        png_dimensions(&extension.tile_graphics_png).with_context(|| {
+            format!(
+                "validate compiled tileset extension '{}' PNG",
+                extension.tileset_id
+            )
+        })?;
+    if png_width % 8 != 0 || png_height % 8 != 0 {
+        anyhow::bail!(
+            "compiled tileset extension '{}' PNG dimensions {png_width}x{png_height} are not aligned to 8x8 tiles",
+            extension.tileset_id
+        );
+    }
+    let png_tile_count = usize::try_from(png_width / 8)? * usize::try_from(png_height / 8)?;
+    if png_tile_count != source_tile_count {
+        anyhow::bail!(
+            "compiled tileset extension '{}' PNG has {png_tile_count} tiles but its 2bpp data has {source_tile_count}",
+            extension.tileset_id
+        );
+    }
+
+    let tiles_per_bank = source_tile_count / 2;
+    for &tile_id in &extension.metatiles {
+        let palette_value = extension
+            .definition
+            .palette_map
+            .get(usize::from(tile_id))
+            .copied()
+            .with_context(|| {
+                format!(
+                    "compiled tileset extension '{}' metatile art references tile {tile_id:#04x} beyond its palette map",
+                    extension.tileset_id
+                )
+            })?;
+        if palette_value > 0x0f {
+            anyhow::bail!(
+                "compiled tileset extension '{}' referenced tile {tile_id:#04x} has invalid palette/bank value {palette_value:#04x}",
+                extension.tileset_id
+            );
+        }
+        let bank = usize::from((palette_value >> 3) & 1);
+        let tile_in_bank = usize::from(tile_id & 0x7f);
+        if tile_in_bank >= tiles_per_bank {
+            anyhow::bail!(
+                "compiled tileset extension '{}' referenced tile {tile_id:#04x} addresses missing VRAM bank {bank} tile {tile_in_bank:#04x}",
+                extension.tileset_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn clone_block_replacement_behavior<T: Clone>(
+    replacements: &mut BTreeMap<String, T>,
+    source: &str,
+    target: &str,
+) -> Result<()> {
+    let Some(source_rules) = replacements.get(source).cloned() else {
+        return Ok(());
+    };
+    if replacements.insert(target.to_string(), source_rules).is_some() {
+        anyhow::bail!("field-move behavior already exists for tileset '{target}'");
+    }
+    Ok(())
+}
+
+fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+        anyhow::bail!("tile graphics are not a PNG with a leading IHDR chunk");
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into()?);
+    if width == 0 || height == 0 {
+        anyhow::bail!("tile graphics PNG dimensions must be nonzero");
+    }
+    Ok((width, height))
+}
+
+#[cfg(test)]
+mod compiled_tileset_extension_tests {
+    use super::*;
+
+    fn canonical_pack() -> CompiledGamePack {
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let asset_root = AssetRoot::new(repository_root);
+        let data = asset_root
+            .load_base_game_data()
+            .expect("load canonical game data");
+        let runtime_files = compile_runtime_files(&asset_root).expect("compile runtime files");
+        let report = canonical_test_compile_report(&data, "tileset-extension-base");
+        CompiledGamePack::new_unchecked_for_tests(data, report)
+            .with_runtime_files_for_tests(runtime_files)
+    }
+
+    fn clone_johto_extension(pack: &CompiledGamePack) -> CompiledTilesetExtension {
+        let files = pack.runtime_files();
+        CompiledTilesetExtension {
+            manifest_id: "tileset-extension-test".to_string(),
+            tileset_id: "johto_generated_test".to_string(),
+            behavior_source_tileset_id: Some("johto_modern".to_string()),
+            definition: pack.data().tilesets["johto_modern"].clone(),
+            metatiles: files["data/tilesets/johto_modern_metatiles.bin"].clone(),
+            tile_graphics_2bpp: files["gfx/tilesets/johto_modern.2bpp"].clone(),
+            tile_graphics_png: files["gfx/tilesets/johto_modern.png"].clone(),
+        }
+    }
+
+    #[test]
+    fn compiled_tileset_extension_adds_catalog_and_renderer_files_atomically() {
+        let base = canonical_pack();
+        let original_identity = base.identity().expect("base identity");
+        let extension = clone_johto_extension(&base);
+
+        let extended = base
+            .with_tileset_extension(extension)
+            .expect("extend compiled tileset");
+
+        assert!(!base.data().tilesets.contains_key("johto_generated_test"));
+        assert!(
+            extended
+                .data()
+                .tilesets
+                .contains_key("johto_generated_test")
+        );
+        for path in [
+            "data/tilesets/johto_generated_test_metatiles.bin",
+            "data/tilesets/johto_generated_test.json",
+            "data/tilesets/johto_generated_test_palette_map.json",
+            "gfx/tilesets/johto_generated_test.2bpp",
+            "gfx/tilesets/johto_generated_test.png",
+        ] {
+            assert!(
+                extended.runtime_files().contains_key(path),
+                "missing {path}"
+            );
+            assert!(!base.runtime_files().contains_key(path));
+        }
+        assert_eq!(
+            serde_json::from_slice::<BTreeMap<String, Vec<String>>>(
+                &extended.runtime_files()["data/tilesets/johto_generated_test.json"]
+            )
+            .expect("collision JSON"),
+            extended.data().tilesets["johto_generated_test"].collision
+        );
+        assert_eq!(
+            extended.data().field_moves.cut.replacements["johto_generated_test"],
+            extended.data().field_moves.cut.replacements["johto_modern"]
+        );
+        assert_ne!(
+            extended.identity().expect("extended identity"),
+            original_identity
+        );
+        verify_compiled_game_pack_for_runtime(&extended).expect("verified extended pack");
+    }
+
+    #[test]
+    fn compiled_tileset_extension_rejects_art_collision_count_drift() {
+        let base = canonical_pack();
+        let mut extension = clone_johto_extension(&base);
+        extension.metatiles.pop();
+
+        let error = base
+            .with_tileset_extension(extension)
+            .expect_err("misaligned metatile art must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("metatile data must be nonempty and divisible"),
+            "{error:#}"
+        );
+    }
+}
+
+fn insert_compiled_map_extension(
+    pack: &mut CompiledGamePack,
+    extension: CompiledMapExtension,
+) -> Result<()> {
+    if pack.data.maps.contains_key(&extension.map_name) {
+        anyhow::bail!(
+            "compiled pack already contains map '{}'",
+            extension.map_name
+        );
+    }
+    if pack
+        .data
+        .runtime_map_metadata
+        .contains_key(&extension.map_constant)
+    {
+        anyhow::bail!(
+            "compiled pack already contains map constant '{}'",
+            extension.map_constant
+        );
+    }
+    if pack
+        .data
+        .runtime_spawn_points
+        .contains_key(&extension.spawn_key)
+    {
+        anyhow::bail!(
+            "compiled pack already contains spawn key '{}'",
+            extension.spawn_key
+        );
+    }
+
+    let blocks_label = extension
+        .module
+        .attributes
+        .blocks_label
+        .as_deref()
+        .context("compiled map extension requires blocks_label")?
+        .to_string();
+    let scripts_label = extension
+        .module
+        .attributes
+        .map_scripts_label
+        .as_deref()
+        .context("compiled map extension requires map_scripts_label")?
+        .to_string();
+    let events_label = extension
+        .module
+        .attributes
+        .map_events_label
+        .as_deref()
+        .context("compiled map extension requires map_events_label")?
+        .to_string();
+    if pack.data.map_blocks.contains_key(&blocks_label) {
+        anyhow::bail!("compiled pack already contains block label '{blocks_label}'");
+    }
+    for label in extension
+        .module
+        .scripts
+        .keys()
+        .chain(extension.module.script_text_bodies.keys())
+        .chain([&scripts_label, &events_label])
+    {
+        if pack.data.map_scripts.contains_key(label) {
+            anyhow::bail!("compiled pack already contains map script label '{label}'");
+        }
+    }
+    if pack.data.npcs.contains_key(&extension.map_name) {
+        anyhow::bail!(
+            "compiled pack already contains NPC payload for map '{}'",
+            extension.map_name
+        );
+    }
+    let block_bytes = extension
+        .module
+        .blocks
+        .iter()
+        .map(|&block| {
+            u8::try_from(block).with_context(|| {
+                format!("compiled map extension block id {block} exceeds Crystal byte range")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pack.data
+        .map_blocks
+        .insert(blocks_label, encode_base64_bytes(&block_bytes));
+    pack.data.map_dimensions.insert(
+        extension.map_constant.clone(),
+        serde_json::json!({
+            "width": extension.module.attributes.width,
+            "height": extension.module.attributes.height,
+        }),
+    );
+    pack.data.map_attributes.insert(
+        extension.map_name.clone(),
+        extension.module.attributes.clone(),
+    );
+    insert_compiled_map_split_payloads(
+        &mut pack.data.map_scripts,
+        &mut pack.data.npcs,
+        &extension.map_name,
+        &scripts_label,
+        &events_label,
+        &extension.module,
+    )?;
+    pack.data
+        .runtime_map_metadata
+        .insert(extension.map_constant.clone(), extension.metadata);
+    pack.data
+        .runtime_spawn_points
+        .insert(extension.spawn_key, extension.spawn.clone());
+    pack.data
+        .maps
+        .insert(extension.map_name.clone(), extension.module);
+    if let Some(encounters) = extension.wild_encounters.clone() {
+        insert_wild_encounter_data(&mut pack.data.wild_encounters, encounters)?;
+    }
+    if extension.start_new_game_here {
+        pack.data.story_event_script_constants.global.insert(
+            "SPAWN_HOME".to_string(),
+            i64::from(extension.spawn.identifier),
+        );
+    }
+
+    pack.report.manifests.push(extension.manifest_id);
+    if !pack.report.reachable_maps.contains(&extension.map_name) {
+        pack.report.reachable_maps.push(extension.map_name.clone());
+    }
+    if !pack.report.solvable_maps.contains(&extension.map_name) {
+        pack.report.solvable_maps.push(extension.map_name);
+    }
+    Ok(())
+}
+
+fn insert_compiled_map_split_payloads(
+    map_scripts: &mut BTreeMap<String, Value>,
+    npcs: &mut BTreeMap<String, Value>,
+    map_name: &str,
+    scripts_label: &str,
+    events_label: &str,
+    module: &MapModule,
+) -> Result<()> {
+    for (label, payload) in &module.scripts {
+        map_scripts.insert(label.clone(), payload.clone());
+    }
+    // Some generated text is constructed directly as typed bodies instead of
+    // beginning life as raw ASM-shaped JSON. Materialize those labels too so
+    // a split-payload reload retains every sign and resident line.
+    for (label, body) in &module.script_text_bodies {
+        map_scripts.entry(label.clone()).or_insert_with(|| {
+            Value::Array(
+                body.commands
+                    .iter()
+                    .map(|command| {
+                        serde_json::json!({
+                            "command": command.command,
+                            "args": command.args,
+                        })
+                    })
+                    .collect(),
+            )
+        });
+    }
+    let script_section = module
+        .map_script_section_commands
+        .iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": command.command,
+                "args": command.args,
+            })
+        })
+        .collect();
+    let event_section = module
+        .map_event_section_commands
+        .iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": command.command,
+                "args": command.args,
+            })
+        })
+        .collect();
+    map_scripts.insert(scripts_label.to_string(), Value::Array(script_section));
+    map_scripts.insert(events_label.to_string(), Value::Array(event_section));
+    npcs.insert(
+        map_name.to_string(),
+        serde_json::to_value(&module.objects).context("encode compiled map NPC payload")?,
+    );
+    Ok(())
+}
+
+fn validate_compiled_map_extension(extension: &CompiledMapExtension) -> Result<()> {
+    if !is_exact_manifest_id_token(&extension.manifest_id) {
+        anyhow::bail!("compiled map extension manifest id is invalid");
+    }
+    if extension.module.id != extension.map_name {
+        anyhow::bail!(
+            "compiled map extension module id '{}' must match map name '{}'",
+            extension.module.id,
+            extension.map_name
+        );
+    }
+    if extension.metadata.name != extension.map_name
+        || extension.metadata.constant != extension.map_constant
+    {
+        anyhow::bail!("compiled map extension metadata must match its map name and constant");
+    }
+    if extension.spawn.map_name != extension.map_name
+        || extension.spawn.map_constant != extension.map_constant
+    {
+        anyhow::bail!("compiled map extension spawn must target the added map");
+    }
+    if let Some(encounters) = &extension.wild_encounters {
+        if encounters.map_name != extension.map_name {
+            anyhow::bail!(
+                "compiled map extension wild encounters target '{}' instead of '{}'",
+                encounters.map_name,
+                extension.map_name
+            );
+        }
+        validate_wild_encounter_species_tokens(&extension.map_name, encounters)?;
+    }
+    if extension.spawn_key != extension.spawn.identifier.to_string() {
+        anyhow::bail!("compiled map extension spawn key must equal its numeric identifier");
+    }
+    let expected =
+        extension.module.attributes.width as usize * extension.module.attributes.height as usize;
+    if extension.module.blocks.len() != expected {
+        anyhow::bail!(
+            "compiled map extension has {} blocks but dimensions require {expected}",
+            extension.module.blocks.len()
+        );
+    }
+    extension
+        .module
+        .attributes
+        .validate()
+        .map_err(anyhow::Error::msg)
+}
+
+fn encode_base64_bytes(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(ALPHABET[usize::from(first >> 2)] as char);
+        encoded.push(ALPHABET[usize::from((first & 0x03) << 4 | second >> 4)] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[usize::from((second & 0x0f) << 2 | third >> 6)] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[usize::from(third & 0x3f)] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 pub fn verify_compiled_game_pack_for_runtime(pack: &CompiledGamePack) -> Result<()> {
     if pack.format_version != COMPILED_GAME_PACK_FORMAT_VERSION {
         anyhow::bail!(
@@ -91,7 +770,7 @@ fn validate_compiled_game_pack_identity(pack: &CompiledGamePack) -> Result<()> {
     validate_compiled_runtime_files(&pack.runtime_files)?;
     let derived = if matches!(
         pack.audio_compression.as_deref(),
-        Some(PACK_AUDIO_COMPRESSION_GZIP | PACK_AUDIO_COMPRESSION_GZIP_SIDECAR)
+        Some(PACK_AUDIO_COMPRESSION_GZIP | PACK_AUDIO_COMPRESSION_MIDI)
     ) {
         derive_compiled_game_pack_identity_from_manifest(
             pack.format_version,
@@ -217,23 +896,23 @@ fn validate_compiled_report_data_counts(
 fn validate_compiled_audio_payloads(pack: &CompiledGamePack) -> Result<()> {
     if let Some(compression) = pack.audio_compression.as_deref()
         && compression != PACK_AUDIO_COMPRESSION_GZIP
-        && compression != PACK_AUDIO_COMPRESSION_GZIP_SIDECAR
+        && compression != PACK_AUDIO_COMPRESSION_MIDI
     {
         anyhow::bail!("unsupported compiled audio storage mode '{compression}'");
     }
-    if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR) {
+    if pack.audio_compression.as_deref() == Some(PACK_AUDIO_COMPRESSION_MIDI) {
         if !pack.compiled_audio.is_empty() {
-            anyhow::bail!("PCM sidecar pack must not embed audio payloads");
+            anyhow::bail!("MIDI audio pack must not embed PCM payloads");
         }
         let expected_manifest =
             ModpackAudioManifest::from_assets(&pack.data.audio, &BTreeMap::new())?;
         if pack.audio_manifest != expected_manifest {
-            anyhow::bail!("PCM sidecar manifest does not match definitive audio metadata");
+            anyhow::bail!("MIDI audio manifest does not match definitive audio metadata");
         }
         for asset in &pack.data.audio {
-            if !matches!(asset.source, ModpackAudioSource::Pcm) {
+            if !matches!(asset.source, ModpackAudioSource::Midi) {
                 anyhow::bail!(
-                    "PCM sidecar pack contains non-PCM audio asset '{}'",
+                    "MIDI audio pack contains non-MIDI audio asset '{}'",
                     asset.id
                 );
             }
@@ -244,8 +923,13 @@ fn validate_compiled_audio_payloads(pack: &CompiledGamePack) -> Result<()> {
                 }
                 ModpackAudioKind::Cry => pack.audio_manifest.cries.get(&asset.id),
             }
-            .with_context(|| format!("PCM sidecar pack is missing manifest '{}'", asset.id))?;
+            .with_context(|| format!("MIDI audio pack is missing manifest '{}'", asset.id))?;
             entry.validate()?;
+            asset
+                .midi_program
+                .as_ref()
+                .with_context(|| format!("MIDI audio pack is missing program '{}'", asset.id))?
+                .validate(&asset.id)?;
         }
         return Ok(());
     }
@@ -571,11 +1255,7 @@ fn decode_compiled_game_pack(bytes: &[u8], path: &Path) -> Result<CompiledGamePa
 }
 
 pub const PACK_AUDIO_COMPRESSION_GZIP: &str = "gzip";
-pub const PACK_AUDIO_COMPRESSION_GZIP_SIDECAR: &str = "gzip_sidecar";
-
-pub fn pcm_gzip_sidecar_path(audio_id: &str, payload_hash: &str) -> String {
-    format!("audio/{audio_id}.{payload_hash}.pcm.gz")
-}
+pub const PACK_AUDIO_COMPRESSION_MIDI: &str = "midi_synth_v1";
 
 fn compress_pack_audio(pack: &mut CompiledGamePack) -> Result<()> {
     let mut compressed = BTreeMap::new();
@@ -587,7 +1267,7 @@ fn compress_pack_audio(pack: &mut CompiledGamePack) -> Result<()> {
             compressed.insert(id.clone(), bytes.clone());
             continue;
         }
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
         std::io::Write::write_all(&mut encoder, bytes)
             .with_context(|| format!("compress compiled audio payload {id}"))?;
         compressed.insert(
@@ -602,7 +1282,7 @@ fn compress_pack_audio(pack: &mut CompiledGamePack) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn write_compiled_game_pack_with_pcm_sidecars(
+pub(crate) fn write_compiled_game_pack_with_midi_audio(
     path: impl AsRef<Path>,
     pack: &CompiledGamePack,
 ) -> Result<()> {
@@ -610,37 +1290,23 @@ pub(crate) fn write_compiled_game_pack_with_pcm_sidecars(
     validate_compiled_game_pack_path(path)?;
     validate_compiled_game_pack_identity(pack)
         .with_context(|| format!("validate browser game pack identity {}", path.display()))?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
     let mut serialized_pack = pack.clone();
-    let mut sidecars = Vec::new();
-    for (id, bytes) in &pack.compiled_audio {
-        let asset = pack
-            .data
-            .audio
-            .iter()
-            .find(|asset| asset.id == *id)
-            .with_context(|| format!("compiled audio payload {id} has no declared asset"))?;
-        if !matches!(asset.source, ModpackAudioSource::Pcm) {
-            anyhow::bail!("browser sidecar pack requires canonical PCM audio, found {id}");
-        }
-        let entry = pack
-            .audio_manifest
-            .music
-            .get(id)
-            .or_else(|| pack.audio_manifest.sound_effects.get(id))
-            .or_else(|| pack.audio_manifest.cries.get(id))
-            .with_context(|| format!("audio manifest missing {id}"))?;
-        let relative = pcm_gzip_sidecar_path(id, &entry.payload_hash);
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        std::io::Write::write_all(&mut encoder, bytes)
-            .with_context(|| format!("compress PCM sidecar {id}"))?;
-        let compressed = encoder
-            .finish()
-            .with_context(|| format!("finish PCM sidecar {id}"))?;
-        sidecars.push((relative, compressed));
+    for asset in &mut serialized_pack.data.audio {
+        asset
+            .midi_program
+            .as_ref()
+            .with_context(|| format!("browser audio asset '{}' has no MIDI program", asset.id))?
+            .validate(&asset.id)?;
+        asset.source = ModpackAudioSource::Midi;
+        asset.path = asset.path.strip_suffix(".pcm").with_context(|| {
+            format!("browser audio asset '{}' does not use a .pcm source path", asset.id)
+        })?.to_string() + ".mid";
+        asset.validate()?;
     }
     serialized_pack.compiled_audio.clear();
-    serialized_pack.audio_compression = Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR.to_string());
+    serialized_pack.audio_manifest =
+        ModpackAudioManifest::from_assets(&serialized_pack.data.audio, &BTreeMap::new())?;
+    serialized_pack.audio_compression = Some(PACK_AUDIO_COMPRESSION_MIDI.to_string());
     serialized_pack.identity = derive_compiled_game_pack_identity_from_manifest(
         serialized_pack.format_version,
         &serialized_pack.data,
@@ -648,16 +1314,33 @@ pub(crate) fn write_compiled_game_pack_with_pcm_sidecars(
         &serialized_pack.runtime_files,
         &serialized_pack.report,
     )?;
-    let parent = parent.context("browser game pack path has no parent directory")?;
-    for (relative, bytes) in sidecars {
-        let sidecar = parent.join(relative);
-        std::fs::create_dir_all(sidecar.parent().context("PCM sidecar has no parent")?)
-            .with_context(|| format!("create PCM sidecar directory for {}", sidecar.display()))?;
-        std::fs::write(&sidecar, bytes)
-            .with_context(|| format!("write PCM sidecar {}", sidecar.display()))?;
+    let audio_directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("browser game pack path has no parent directory")?
+        .join("audio");
+    if audio_directory.is_dir() {
+        for entry in std::fs::read_dir(&audio_directory)
+            .with_context(|| format!("read PCM sidecar directory {}", audio_directory.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("read PCM sidecar entry in {}", audio_directory.display())
+            })?;
+            let stale_sidecar = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".pcm.gz"))
+                && entry
+                    .file_type()
+                    .with_context(|| format!("inspect PCM sidecar {}", entry.path().display()))?
+                    .is_file();
+            if stale_sidecar {
+                std::fs::remove_file(entry.path()).with_context(|| {
+                    format!("remove obsolete PCM sidecar {}", entry.path().display())
+                })?;
+            }
+        }
     }
-    // Publish the manifest-bearing pack only after every referenced sidecar
-    // exists, so a failed export cannot leave a newly written dangling pack.
     write_serialized_compiled_game_pack(path, &serialized_pack)?;
     Ok(())
 }

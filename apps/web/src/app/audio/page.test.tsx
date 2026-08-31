@@ -6,8 +6,8 @@ jest.mock("next/navigation", () => ({
 }));
 
 describe("AudioPage", () => {
-  it("redirects audio route to game corner audio sub-tab", () => {
+  it("redirects audio route to the canonical PCM catalog", () => {
     AudioPage();
-    expect(redirect).toHaveBeenCalledWith("/game-corner?tab=audio-generation");
+    expect(redirect).toHaveBeenCalledWith("/audio-test");
   });
 });

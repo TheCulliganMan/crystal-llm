@@ -469,6 +469,7 @@ export interface Database {
           id: string;
           user_id: string;
           mode: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id: string;
           rating: number;
           party_preview: Json | null;
           preferences: Json;
@@ -479,6 +480,7 @@ export interface Database {
           id?: string;
           user_id: string;
           mode: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id?: string;
           rating?: number;
           party_preview?: Json | null;
           preferences?: Json;
@@ -489,6 +491,7 @@ export interface Database {
           id?: string;
           user_id?: string;
           mode?: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id?: string;
           rating?: number;
           party_preview?: Json | null;
           preferences?: Json;
@@ -512,6 +515,8 @@ export interface Database {
           player1_id: string;
           player2_id: string;
           mode: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id: string;
+          ranked: boolean;
           status: Database["public"]["Enums"]["match_status"];
           channel_name: string;
           result: Json | null;
@@ -524,6 +529,8 @@ export interface Database {
           player1_id: string;
           player2_id: string;
           mode: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id?: string;
+          ranked?: boolean;
           status?: Database["public"]["Enums"]["match_status"];
           channel_name: string;
           result?: Json | null;
@@ -536,6 +543,8 @@ export interface Database {
           player1_id?: string;
           player2_id?: string;
           mode?: Database["public"]["Enums"]["matchmaking_mode"];
+          modpack_id?: string;
+          ranked?: boolean;
           status?: Database["public"]["Enums"]["match_status"];
           channel_name?: string;
           result?: Json | null;
@@ -647,7 +656,20 @@ export interface Database {
         Relationships: [];
       };
     };
-    Functions: Record<string, never>;
+    Functions: {
+      report_multiplayer_match: {
+        Args: {
+          report_channel_name: string;
+          report_user_id: string;
+          report_peer_user_id: string;
+          report_mode: Database["public"]["Enums"]["matchmaking_mode"];
+          report_modpack_id: string;
+          report_outcome: string;
+          report_metadata?: Json;
+        };
+        Returns: Json;
+      };
+    };
     Enums: {
       matchmaking_mode: "battle" | "trade" | "time_capsule";
       match_status: "waiting" | "active" | "completed" | "cancelled";

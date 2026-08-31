@@ -1,4 +1,5 @@
 import fs from "fs";
+import path from "path";
 import { readJsonAssetSync } from "@pokecrystal/core/core/asset-reader";
 import { getDataDir } from "@pokecrystal/core/core/paths";
 import { joinPath } from "@pokecrystal/core/core/path-utils";
@@ -36,6 +37,18 @@ import type { ExportedStepEventRules } from "./export-step-event-rules";
 import type { ExportedCaptureRules } from "./export-capture-rules";
 import type { ExportedFruitTreeCatalog } from "./export-fruit-trees";
 import type { CurrencyConstantsPayload } from "./export-currency-constants";
+import {
+  buildRuntimeTitlePresentationProgram,
+  type RuntimePresentationProgram,
+} from "./export-runtime-title-screen";
+
+const repositoryRoot = path.resolve(__dirname, "../../../..");
+const canonicalAsmRoot = path.join(repositoryRoot, "vendor/pokecrystal");
+const canonicalReadFileSync = fs.readFileSync.bind(fs);
+const readCanonicalAsmSource = (relativePath: string): string =>
+  canonicalReadFileSync(path.join(canonicalAsmRoot, relativePath), "utf8");
+const readCanonicalAsmBinary = (relativePath: string): Buffer =>
+  canonicalReadFileSync(path.join(canonicalAsmRoot, relativePath));
 import type {
   BugContestConfig,
   NpcTradeDefinition,
@@ -151,7 +164,8 @@ type CompiledContentPack = {
 };
 
 type ExportedRuntimeTitleScreen = {
-  title_music: string | null;
+  title_music: string;
+  program: RuntimePresentationProgram;
 };
 
 type StoryEventScriptConstantsPayload = {
@@ -173,7 +187,6 @@ export type CoreExportPayload = {
   fieldMoves?: ExportedFieldMoveCatalog;
   fieldBoxItems?: Record<string, ExportedFieldBoxItemRule>;
   decorations?: ExportedDecorationCatalog;
-  runtimeTitleScreen?: ExportedRuntimeTitleScreen;
   flyDestinations?: ExportedFlyDestinationTable;
   fruitTrees?: ExportedFruitTreeCatalog;
   runtimeSpawnPoints?: unknown;
@@ -392,13 +405,36 @@ export const alignRuntimeSpawnPoints = (
 };
 
 const buildCoreRuntimeTitleScreen = (
-  audioAssets?: Record<string, ExportedAudioAsset>,
+  payload: CoreExportPayload,
 ): ExportedRuntimeTitleScreen => {
-  const title = audioAssets?.MUSIC_TITLE;
+  const title = payload.audioAssets?.MUSIC_TITLE;
   if (!title || title.id !== "MUSIC_TITLE" || title.kind !== "music") {
     throw new Error("Core title screen requires exact MUSIC_TITLE music asset");
   }
-  return { title_music: title.id };
+  const runtimeSpawnIdentifiers = new Set(
+    Object.keys(
+      (payload.runtimeSpawnPoints ?? {}) as Record<string, unknown>,
+    ).map((value) => Number(value)),
+  );
+  if (
+    [...runtimeSpawnIdentifiers].some(
+      (value) => !Number.isInteger(value) || value < 0,
+    )
+  ) {
+    throw new Error(
+      "Core runtime spawn-point keys must be nonnegative integers",
+    );
+  }
+  return {
+    title_music: title.id,
+    program: buildRuntimeTitlePresentationProgram({
+      disassemblyRoot: canonicalAsmRoot,
+      audioAssetIds: new Set(Object.keys(payload.audioAssets ?? {})),
+      runtimeSpawnIdentifiers,
+      readSource: readCanonicalAsmSource,
+      readBinary: readCanonicalAsmBinary,
+    }),
+  };
 };
 
 const assertExactFileStem = (value: string): void => {
@@ -704,12 +740,25 @@ const writeAudioAssetFile = (
   }
   const pcmFormat = asset.pcm_format;
   if (
+    (asset.kind === "sound_effect" &&
+      (!Number.isInteger(asset.sfx_priority) ||
+        asset.sfx_priority! < 0 ||
+        asset.sfx_priority! > 0xff)) ||
+    (asset.kind !== "sound_effect" && asset.sfx_priority !== undefined)
+  ) {
+    throw new Error(
+      `Audio asset ${asset.id} must declare an exact one-byte sfx_priority if and only if it is a sound effect`,
+    );
+  }
+  if (
     !pcmFormat ||
-    pcmFormat.sample_rate_hz <= 0 ||
+    pcmFormat.sample_rate_hz !== 22_050 ||
     pcmFormat.channels !== 2 ||
     pcmFormat.bits_per_sample !== 16
   ) {
-    throw new Error(`Audio asset ${asset.id} must declare exact stereo 16-bit PCM format`);
+    throw new Error(
+      `Audio asset ${asset.id} must declare exact 22050 Hz stereo 16-bit PCM format`,
+    );
   }
   const absolutePath = joinPath(getDataDir(), asset.path);
   if (!fs.existsSync(absolutePath)) {
@@ -1410,7 +1459,9 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
       payload.fruitTrees,
     );
   }
-  for (const [audioId, audioAsset] of Object.entries(payload.audioAssets ?? {})) {
+  for (const [audioId, audioAsset] of Object.entries(
+    payload.audioAssets ?? {},
+  )) {
     writeAudioAssetFile(files.audio, audioId, audioAsset, writtenPayloads);
   }
   const mapAttributePathByName = new Map<string, string>();
@@ -1700,8 +1751,7 @@ export function exportCoreContentPack(payload: CoreExportPayload): void {
     files.runtime_title_screen,
     "runtime_title_screen",
     "title",
-    payload.runtimeTitleScreen ??
-      buildCoreRuntimeTitleScreen(payload.audioAssets),
+    buildCoreRuntimeTitleScreen(payload),
   );
   files.story_events.push(...collectJsonFiles("story_events"));
   files.phone_scripts.push(...collectJsonFiles("phone_scripts"));

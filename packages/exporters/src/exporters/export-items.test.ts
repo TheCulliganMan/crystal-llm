@@ -439,6 +439,17 @@ describe("exportItems", () => {
     expect(() => exportItems()).toThrow("missing authored item effect for item slot 0");
   });
 
+  it("does not export the attribute table's wraparound item-zero row", () => {
+    writeFile(
+      path.join(mockDisassemblyRoot, "data", "items", "attributes.asm"),
+      completeAttributeTable(),
+    );
+    const items = exportItems();
+
+    expect(items).toHaveLength(255);
+    expect(items.map((item) => item.script_name)).not.toContain("ITEM_FF");
+  });
+
   it("exports Town Map as field usable from the exact authored item effect", () => {
     writeFile(
       path.join(mockDisassemblyRoot, "data", "items", "attributes.asm"),

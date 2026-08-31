@@ -27,6 +27,7 @@
     "build:packages": "npm run build --workspace @pokecrystal/core && npm run build --workspace @pokecrystal/assets && npm run build --workspace @pokecrystal/exporters && npm run build --workspace @pokecrystal/cli && npm run build --workspace @pokecrystal/agents",
     "build:cli": "npm run build --workspace @pokecrystal/cli && npm run build --workspace @pokecrystal/agents",
     "build:web": "npm run build --workspace @pokecrystal/web",
+    "build:browser-audio-runtime": "node scripts/generate-browser-audio-runtime.mjs",
     "build:agents": "npm run build --workspace @pokecrystal/agents",
     "start:tui": "npm run build:cli && node packages/cli/dist/bin/pokecrystal-cli.js play",
     "tui": "npm run start:tui",

@@ -289,6 +289,25 @@ describe("NameEntryScreen", () => {
     expect(screen.finished).toBe(true);
   });
 
+  it("prioritizes an explicit A button over the keyboard a movement alias", () => {
+    const ui = new NameEntryUiStub();
+    const screen = new NameEntryScreen(ui, "YOUR NAME?");
+    screen.fillName("TOTODILE");
+    screen.cursorPos = [8, NameEntryScreen.BOTTOM_ROW_INDEX];
+
+    screen.handleInput(
+      new gameEngine.event.Event("keydown", {
+        key: "a",
+        code: "KeyA",
+        button: GameButton.A,
+        direction: null,
+        is_press: true,
+      })
+    );
+
+    expect(screen.finished).toBe(true);
+  });
+
   it("applies CLI typed-letter movement shortcuts across the real naming screen", () => {
     const ui = new NameEntryUiStub();
     const screen = new NameEntryScreen(ui, "YOUR NAME?");

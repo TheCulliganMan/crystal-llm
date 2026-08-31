@@ -230,7 +230,8 @@ export class TradeManager {
         throw new Error(`TradeManager: move id out of range for ${move.name}`);
       }
       moveIds.push(moveId);
-      pp.push(TradeManager.clampByte(move.current_pp));
+      // Gen II stores PP Ups in the high two bits of the move's PP byte.
+      pp.push(((move.pp_ups & 0x03) << 6) | (TradeManager.clampByte(move.current_pp) & 0x3f));
     }
 
     const out = new Uint8Array(POKEMON_STRUCT_BYTES);
@@ -331,9 +332,13 @@ export class TradeManager {
         if (!moveName) {
           throw new Error(`TradeManager: unknown move id ${id}`);
         }
-        return { name: moveName, current_pp: pp[idx] };
+        return {
+          name: moveName,
+          current_pp: pp[idx] & 0x3f,
+          pp_ups: (pp[idx] >> 6) & 0x03,
+        };
       })
-      .filter(Boolean) as Array<{ name: MoveName; current_pp: number }>;
+      .filter(Boolean) as Array<{ name: MoveName; current_pp: number; pp_ups: number }>;
 
     const dvs = {
       attack: (dv1 >> 4) & 0xf,

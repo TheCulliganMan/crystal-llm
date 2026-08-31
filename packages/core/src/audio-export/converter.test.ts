@@ -1,7 +1,7 @@
-import { WavConverter } from "@pokecrystal/core/audio-export/converter";
+import { PcmConverter } from "@pokecrystal/core/audio-export/converter";
 import type { ParsedMusicData } from "@pokecrystal/core/audio-export/parsers";
 
-describe("WavConverter", () => {
+describe("PcmConverter", () => {
   const baseMusicData: ParsedMusicData = {
     channel_count: 1,
     channels: {
@@ -20,10 +20,26 @@ describe("WavConverter", () => {
   };
 
   it("renders PCM output", () => {
-    const converter = new WavConverter(baseMusicData, {}, { 0: new Array(32).fill(0) });
+    const converter = new PcmConverter(baseMusicData, {}, { 0: new Array(32).fill(0) });
     const result = converter.convert("pcm");
     expect(result.stereo.length).toBeGreaterThan(0);
     expect(result.sampleRate).toBe(44_100);
+  });
+
+  it("defaults canonical rendering to accurate cartridge output", () => {
+    const waveSamples = { 0: new Array(32).fill(0) };
+    const canonical = new PcmConverter(baseMusicData, {}, waveSamples).convert("pcm").stereo;
+    const accurate = new PcmConverter(baseMusicData, {}, waveSamples, {
+      qualityMode: "accurate",
+    }).convert("pcm").stereo;
+    const enhanced = new PcmConverter(baseMusicData, {}, waveSamples, {
+      qualityMode: "enhanced",
+    }).convert("pcm").stereo;
+
+    const bytes = (pcm: Int16Array): Buffer =>
+      Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+    expect(bytes(canonical).equals(bytes(accurate))).toBe(true);
+    expect(bytes(canonical).equals(bytes(enhanced))).toBe(false);
   });
 
   it("applies cartridge cry pitch and length parameters to every tonal channel", () => {
@@ -47,24 +63,17 @@ describe("WavConverter", () => {
       subroutines: {},
     };
 
-    const base = new WavConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
+    const base = new PcmConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
       cryPitch: 0,
       cryLength: 0x100,
     }).convert("pcm");
-    const altered = new WavConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
+    const altered = new PcmConverter(cryData, {}, { 0: new Array(32).fill(0) }, {
       cryPitch: 0x80,
       cryLength: 0x200,
     }).convert("pcm");
 
     expect(altered.stereo.length / base.stereo.length).toBeCloseTo(2, 2);
     expect(Array.from(altered.stereo.slice(0, 512))).not.toEqual(Array.from(base.stereo.slice(0, 512)));
-  });
-
-  it("renders MIDI bytes", () => {
-    const converter = new WavConverter(baseMusicData, {}, { 0: new Array(32).fill(0) });
-    const result = converter.convert("midi");
-    expect(result.midiBytes).toBeDefined();
-    expect(result.midiBytes?.length).toBeGreaterThan(10);
   });
 
   it("throws on unsupported command", () => {
@@ -77,7 +86,7 @@ describe("WavConverter", () => {
         },
       },
     };
-    const converter = new WavConverter(data, {}, { 0: new Array(32).fill(0) });
+    const converter = new PcmConverter(data, {}, { 0: new Array(32).fill(0) });
     expect(() => converter.convert("pcm")).toThrow("Unsupported ASM audio command");
   });
 
@@ -96,7 +105,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const converter = new WavConverter(data, {}, { 0: new Array(32).fill(0) });
+    const converter = new PcmConverter(data, {}, { 0: new Array(32).fill(0) });
     const stereo = converter.convert("pcm").stereo;
     let leftPeak = 0;
     let rightPeak = 0;
@@ -122,7 +131,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const converter = new WavConverter(data, {}, { 0: new Array(32).fill(15) });
+    const converter = new PcmConverter(data, {}, { 0: new Array(32).fill(15) });
     const stereo = converter.convert("pcm").stereo;
     const frameCount = stereo.length / 2;
     const quarter = Math.max(1, Math.floor(frameCount / 4));
@@ -168,8 +177,8 @@ describe("WavConverter", () => {
       subroutines: {},
     };
 
-    const muted = new WavConverter(mutedData, drumkits, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
-    const audible = new WavConverter(audibleData, drumkits, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const muted = new PcmConverter(mutedData, drumkits, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const audible = new PcmConverter(audibleData, drumkits, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
     expect(maxAbs(muted)).toBe(0);
     expect(maxAbs(audible)).toBeGreaterThan(0);
   });
@@ -189,7 +198,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const converter = new WavConverter(data, {}, { 4: waveSample });
+    const converter = new PcmConverter(data, {}, { 4: waveSample });
     const stereo = converter.convert("pcm").stereo;
     expect(maxAbs(stereo)).toBe(0);
   });
@@ -210,7 +219,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const stereo = new WavConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const stereo = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
     expect(maxAbs(stereo)).toBeGreaterThan(0);
   });
 
@@ -231,7 +240,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const stereo = new WavConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const stereo = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
     expect(maxAbs(stereo)).toBeGreaterThan(0);
   });
 
@@ -253,7 +262,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const stereo = new WavConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const stereo = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
     expect(maxAbs(stereo)).toBeGreaterThan(0);
   });
 
@@ -273,7 +282,7 @@ describe("WavConverter", () => {
       },
       subroutines: {},
     };
-    const stereo = new WavConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
+    const stereo = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm").stereo;
     const frames = stereo.length / 2;
     const half = Math.max(1, Math.floor(frames / 2));
     const firstHalf = averageAbs(stereo, 0, half);
@@ -307,7 +316,7 @@ describe("WavConverter", () => {
       subroutines: {},
     };
 
-    const result = new WavConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm");
+    const result = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }).convert("pcm");
 
     expect(result.metadata.durationSeconds).toBeCloseTo(0.066961, 3);
   });
@@ -338,8 +347,8 @@ describe("WavConverter", () => {
       subroutines: {},
     };
 
-    const full = new WavConverter(data, {}, { 0: new Array(32).fill(0) }, { loopedMusicExportSeconds: null }).convert();
-    const solo = new WavConverter(data, {}, { 0: new Array(32).fill(0) }, {
+    const full = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }, { loopedMusicExportSeconds: null }).convert();
+    const solo = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }, {
       loopedMusicExportSeconds: null,
       soloChannel: 2,
     }).convert();
@@ -373,7 +382,7 @@ describe("WavConverter", () => {
       },
     };
 
-    const result = new WavConverter(data, {}, { 0: new Array(32).fill(0) }, { loopedMusicExportSeconds: null }).convert();
+    const result = new PcmConverter(data, {}, { 0: new Array(32).fill(0) }, { loopedMusicExportSeconds: null }).convert();
 
     expect(result.metadata.durationSeconds).toBeCloseTo(0.536, 3);
   });

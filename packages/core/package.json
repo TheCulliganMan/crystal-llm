@@ -39,10 +39,7 @@
     "test": "node ../../apps/web/scripts/run-with-bundled-node.js ../../node_modules/jest/bin/jest.js --config jest.config.js"
   },
   "dependencies": {
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/util": "^0.12.2",
     "@pokecrystal/assets": "^1.0.0",
-    "@tonejs/midi": "^2.0.28",
     "fraction.js": "^5.3.4",
     "pngjs": "^7.0.0",
     "simple-peer": "^9.11.1",

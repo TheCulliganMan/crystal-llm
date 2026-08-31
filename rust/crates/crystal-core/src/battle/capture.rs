@@ -4,10 +4,14 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
 use crate::battle::start::deactivate_battle_after_win;
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::models::Bag;
 use crate::models::{
-    Bag, CaptureStorageLocation, Item, MAX_BOX_MONS, PokedexState, Pokemon, PokemonStorage,
+    CaptureStorageLocation, Item, MAX_BOX_MONS, PokedexState, Pokemon, PokemonStorage,
 };
-use crate::random::{CrystalRandom, DividerSource, Random};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::random::Random;
+use crate::random::{BattleRandomSource, CrystalRandom, DividerSource};
 use crate::state::{BattleMemory, GameState};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -383,6 +387,7 @@ impl<E: std::fmt::Display> std::fmt::Display for ExactCaptureError<E> {
 
 impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for ExactCaptureError<E> {}
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn resolve_capture_attempt(
     player: &Pokemon,
     enemy: &Pokemon,
@@ -537,6 +542,85 @@ where
     })
 }
 
+/// Resolve `PokeBallEffect` inside the battle engine's shared exact RNG
+/// stream. Unlike the standalone divider API, this preserves the carry flag
+/// required by Crystal's first capture roll after enemy AI selection.
+pub fn resolve_capture_attempt_with_battle_rng(
+    player: &Pokemon,
+    enemy: &Pokemon,
+    player_held_item: Option<&Item>,
+    context: &CaptureAttemptContext,
+    rules: &CaptureRules,
+    wobble_probabilities: &[CaptureWobbleProbability],
+    rng: &mut dyn BattleRandomSource,
+) -> Result<CaptureOutcome, CaptureError> {
+    validate_capture_attempt_context(context)?;
+    require_capture_runtime_rules(rules, wobble_probabilities)?;
+    if context.trainer_battle {
+        return Ok(CaptureOutcome {
+            caught: false,
+            blocked: true,
+            storage_full: false,
+            wobble_count: 0,
+            animation_shakes: 0,
+            final_catch_rate: 0,
+            ball_id: None,
+        });
+    }
+    if rules.guaranteed_capture_balls.contains(&context.ball_id) {
+        return Ok(CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 4,
+            final_catch_rate: 255,
+            ball_id: None,
+        });
+    }
+
+    let final_catch_rate = compute_final_catch_rate(player, enemy, context, rules)?;
+    let first_random_carry = capture_first_random_carry(
+        player,
+        enemy,
+        player_held_item,
+        context,
+        rules,
+        final_catch_rate,
+    )?;
+    let roll = rng.crystal_random_byte(first_random_carry);
+    if roll <= final_catch_rate {
+        return Ok(CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 4,
+            final_catch_rate,
+            ball_id: None,
+        });
+    }
+
+    let wobble_chance = wobble_chance_for_rate(final_catch_rate, wobble_probabilities)?;
+    let mut wobble_count = 0;
+    for _ in 0..3 {
+        if rng.crystal_random_byte(false) < wobble_chance {
+            wobble_count += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(CaptureOutcome {
+        caught: false,
+        blocked: false,
+        storage_full: false,
+        wobble_count,
+        animation_shakes: wobble_count,
+        final_catch_rate,
+        ball_id: None,
+    })
+}
+
 fn capture_first_random_carry(
     player: &Pokemon,
     enemy: &Pokemon,
@@ -613,6 +697,7 @@ fn capture_first_random_carry(
     }
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub fn throw_ball_from_bag(
     bag: &mut Bag,
     ball: &Item,
@@ -911,12 +996,25 @@ pub fn complete_active_wild_capture_result(
     state: &mut GameState,
     outcome: &CaptureOutcome,
 ) -> Result<CaptureCompletion, String> {
+    complete_active_wild_capture_result_with_transformed_replacement(state, outcome, None)
+}
+
+pub fn complete_active_wild_capture_result_with_transformed_replacement(
+    state: &mut GameState,
+    outcome: &CaptureOutcome,
+    transformed_replacement: Option<Pokemon>,
+) -> Result<CaptureCompletion, String> {
     if !outcome.caught {
         return Err("cannot complete capture from an uncaught capture outcome".to_string());
     }
     if outcome.blocked {
         return Err("cannot complete capture from a blocked capture outcome".to_string());
     }
+    let enemy_was_transformed = state
+        .script_runtime
+        .active_battle_combat
+        .as_ref()
+        .is_some_and(|combat| combat.enemy_transform.is_some());
     let (mut enemy_pokemon, battle_type) = match &state.battle {
         BattleMemory::Wild {
             enemy_pokemon,
@@ -935,6 +1033,31 @@ pub fn complete_active_wild_capture_result(
             return Err("cannot complete capture without an active wild battle".to_string());
         }
     };
+    if enemy_was_transformed {
+        let mut replacement = transformed_replacement.ok_or_else(|| {
+            "capturing a transformed enemy requires the exact materialized DITTO replacement"
+                .to_string()
+        })?;
+        if replacement.species.id != "DITTO" {
+            return Err(format!(
+                "transformed capture replacement must be DITTO, found {}",
+                replacement.species.id
+            ));
+        }
+        if replacement.level != enemy_pokemon.level || replacement.dvs != enemy_pokemon.dvs {
+            return Err(
+                "transformed DITTO replacement must preserve the enemy level and original DVs"
+                    .to_string(),
+            );
+        }
+        replacement.hp = enemy_pokemon.hp;
+        replacement.status = enemy_pokemon.status.clone();
+        replacement.sleep_turns = enemy_pokemon.sleep_turns;
+        replacement.item = enemy_pokemon.item.clone();
+        enemy_pokemon = replacement;
+    } else if transformed_replacement.is_some() {
+        return Err("untransformed capture cannot carry a DITTO replacement".to_string());
+    }
     if outcome.ball_id.is_some() {
         enemy_pokemon.caught_data = Some(crate::models::pokemon::CaughtData {
             level: enemy_pokemon.level & 0x3f,
@@ -963,8 +1086,6 @@ pub fn complete_active_wild_capture_result(
                 command_index: 0,
             });
         } else {
-            state.bug_contest.caught_species = Some(contest_pokemon.species.id.clone());
-            state.bug_contest.caught_level = Some(contest_pokemon.level);
             state.bug_contest.caught_mon = Some(contest_pokemon.clone());
         }
         state.battle_result = 0;
@@ -1184,7 +1305,7 @@ fn clamp_catch_rate(value: i32, min: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{BaseStats, Dv, PARTY_SIZE, PcBox, PokemonSpecies, pokemon_type};
+    use crate::models::{BaseStats, Dv, PARTY_SIZE, PokemonSpecies, pokemon_type};
 
     fn wobble_probabilities() -> Vec<CaptureWobbleProbability> {
         vec![
@@ -1330,7 +1451,6 @@ mod tests {
             }
         }
         if current_box_count != 0 {
-            state.storage.pc_boxes.push(PcBox::new(0));
             for index in 0..current_box_count {
                 assert!(state.storage.pc_boxes[0].add_pokemon(pokemon(
                     &format!("BOX_{index}"),
@@ -2018,6 +2138,23 @@ mod tests {
         assert!(!no_item_failure.caught);
         assert_eq!(no_item_failure.wobble_count, 0);
         assert_eq!(inherited_carry_trace.consumed(), 4);
+
+        let mut shared_trace = crate::random::ReplayDivider::new([0, 0, 0, 0]);
+        let mut shared_rng =
+            crate::random::ExactBattleRandom::new(initial_state, &mut shared_trace);
+        let shared_failure = resolve_capture_attempt_with_battle_rng(
+            &player,
+            &enemy,
+            None,
+            &CaptureAttemptContext::wild("POKE_BALL"),
+            &capture_rules(),
+            &wobble_probabilities(),
+            &mut shared_rng,
+        )
+        .expect("shared battle RNG preserves capture carry");
+        assert_eq!(shared_failure, no_item_failure);
+        drop(shared_rng);
+        assert_eq!(shared_trace.consumed(), 4);
     }
 
     #[test]
@@ -2293,11 +2430,6 @@ mod tests {
             )));
         }
         state.current_pc_box = 1;
-        state.storage.pc_boxes.push(PcBox::new(0));
-        state
-            .storage
-            .pc_boxes
-            .push(PcBox::new(state.current_pc_box));
         state.sync_party_from_storage();
         state.battle = BattleMemory::Wild {
             battle_type: "BATTLETYPE_NORMAL".to_string(),
@@ -2383,7 +2515,14 @@ mod tests {
             .expect("contest capture should be retained");
         assert_eq!(caught.original_trainer_name, "CHRIS");
         assert_eq!(caught.original_trainer_id, 0x1234);
-        assert_eq!(state.bug_contest.caught_species.as_deref(), Some("SCYTHER"));
+        assert_eq!(
+            state
+                .bug_contest
+                .caught_mon
+                .as_ref()
+                .map(|pokemon| pokemon.species.id.as_str()),
+            Some("SCYTHER")
+        );
         assert!(state.pokedex.has_caught("SCYTHER"));
         assert_eq!(state.battle_result, 0);
         assert_eq!(state.battle, BattleMemory::Inactive);

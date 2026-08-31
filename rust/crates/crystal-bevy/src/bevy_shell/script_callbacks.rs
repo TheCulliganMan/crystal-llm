@@ -18,11 +18,37 @@ fn take_visible_pending_music_fade(runtime_shell: &mut BevyRuntimeShell) -> Resu
     let RuntimePendingScriptRequest::MusicFade(fade) = &request else {
         anyhow::bail!("pending music fade request returned non-music-fade payload");
     };
-    reset_visible_music_state(runtime_shell);
-    runtime_shell.faded_music = Some(fade.audio_id.clone());
+    begin_visible_music_fade(runtime_shell, &fade.audio_id, fade.fade_frames)?;
     runtime_shell
         .last_audio_events
         .push(format!("took pending music fade {:?}", request));
+    Ok(())
+}
+
+fn begin_visible_music_fade(
+    runtime_shell: &mut BevyRuntimeShell,
+    target_music: &str,
+    fade_frames: u16,
+) -> Result<()> {
+    let raw_rate = u8::try_from(fade_frames)
+        .context("musicfadeout source rate does not fit its one-byte ASM operand")?;
+    let rate = raw_rate & 0x3f;
+    if let Some(fade) = runtime_shell.music_fade.as_mut() {
+        // Writing wMusicFade/wMusicFadeID leaves wMusicFadeCount and wVolume
+        // untouched. Script_musicfadeout clears MUSIC_FADE_IN_F, so an
+        // overlapping request changes the target/rate and resumes fading out.
+        fade.target_music = target_music.to_string();
+        fade.rate = rate;
+        fade.fading_in = false;
+    } else {
+        runtime_shell.music_fade = Some(VisibleMusicFade {
+            target_music: target_music.to_string(),
+            rate,
+            count: 0,
+            fading_in: false,
+        });
+    }
+    runtime_shell.faded_music = Some(target_music.to_string());
     Ok(())
 }
 
@@ -51,10 +77,7 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
     {
         if frames_remaining > 0 {
             let elapsed_frames = if let Some(fade) = runtime_shell.screen_fade.as_mut() {
-                take_visible_sequence_frames(
-                    &mut fade.accumulated_seconds,
-                    time.delta_seconds(),
-                )
+                take_visible_sequence_frames(&mut fade.accumulated_seconds, time.delta_seconds())
             } else {
                 1
             };
@@ -96,17 +119,7 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
                 // MAPSETUP_DOOR resets the destination presentation, but the
                 // physical D-pad remains sampled across the fade. Retain its
                 // ordering so a continuous hold resumes without a new edge.
-                reset_visible_navigation_state_preserving_held_directions(
-                    &mut runtime_shell,
-                );
-                if let Err(error) =
-                    suppress_visible_map_name_sign_for_current_map(&mut runtime_shell)
-                {
-                    record_visible_runtime_system_error(&mut runtime_shell, error);
-                    runtime_shell.visible_walk_warp_phase = None;
-                    runtime_shell.screen_fade = None;
-                    return;
-                }
+                reset_visible_navigation_state_preserving_held_directions(&mut runtime_shell);
                 if let Err(error) = queue_visible_current_music(&mut runtime_shell) {
                     record_visible_runtime_system_error(&mut runtime_shell, error);
                     runtime_shell.visible_walk_warp_phase = None;
@@ -188,8 +201,7 @@ fn tick_visible_screen_fade(time: Res<Time>, mut runtime_shell: ResMut<BevyRunti
             if blackout_phase == Some(VisibleBlackoutPhase::FadeIn) {
                 runtime_shell.visible_blackout_phase = None;
                 runtime_shell.screen_fade = None;
-                if let Err(error) =
-                    settle_visible_overworld_arrival(&mut runtime_shell, "blackout")
+                if let Err(error) = settle_visible_overworld_arrival(&mut runtime_shell, "blackout")
                 {
                     record_visible_runtime_system_error(&mut runtime_shell, error);
                     return;
@@ -219,50 +231,54 @@ fn sync_visible_player_sprite(
     mut rendered: ResMut<RenderedViewport>,
     mut players: Query<(&mut Handle<Image>, &mut Sprite, &PlayerSpriteFrames), With<PlayerMarker>>,
 ) {
-    let scripted_standing = runtime_shell
-        .visible_script_movement
-        .as_ref()
-        .is_some_and(|movement| {
-            movement.object_id == "PLAYER" && movement.active_uses_standing_frame
-        });
-    let scripted_tree_shake = runtime_shell
-        .visible_script_movement
-        .as_ref()
-        .is_some_and(|movement| {
-            movement.object_id == "PLAYER" && movement.active_tree_shake_duration.is_some()
-        });
-    let scripted_skyfall_action_phase = runtime_shell
-        .visible_script_movement
-        .as_ref()
-        .and_then(|movement| {
-            if movement.object_id != "PLAYER" {
-                return None;
-            }
-            let elapsed = movement.active_stationary_duration.saturating_sub(
-                movement
-                    .hold_frames_remaining
-                    .min(movement.active_stationary_duration),
-            );
-            match movement.active_stationary_effect {
-                Some(VisibleStationaryMovementEffect::SkyfallTop) => {
-                    Some(((elapsed + 1) / 2 % 4) as u8)
+    let scripted_standing =
+        runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| {
+                movement.object_id == "PLAYER" && movement.active_uses_standing_frame
+            });
+    let scripted_tree_shake =
+        runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| {
+                movement.object_id == "PLAYER" && movement.active_tree_shake_duration.is_some()
+            });
+    let scripted_skyfall_action_phase =
+        runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .and_then(|movement| {
+                if movement.object_id != "PLAYER" {
+                    return None;
                 }
-                Some(VisibleStationaryMovementEffect::SkyfallFall) => {
-                    Some((elapsed / 4 % 4) as u8)
+                let elapsed = movement.active_stationary_duration.saturating_sub(
+                    movement
+                        .hold_frames_remaining
+                        .min(movement.active_stationary_duration),
+                );
+                match movement.active_stationary_effect {
+                    Some(VisibleStationaryMovementEffect::SkyfallTop) => {
+                        Some(((elapsed + 1) / 2 % 4) as u8)
+                    }
+                    Some(VisibleStationaryMovementEffect::SkyfallFall) => {
+                        Some((elapsed / 4 % 4) as u8)
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        });
+            });
     let scripted_skyfall_action = scripted_skyfall_action_phase.is_some_and(|phase| phase & 1 == 1);
-    let scripted_rock_smash_action = runtime_shell
-        .visible_script_movement
-        .as_ref()
-        .is_some_and(|movement| {
-            movement.object_id == "PLAYER"
-                && movement.active_stationary_effect
-                    == Some(VisibleStationaryMovementEffect::RockSmash)
-                && movement.hold_frames_remaining % 2 == 0
-        });
+    let scripted_rock_smash_action =
+        runtime_shell
+            .visible_script_movement
+            .as_ref()
+            .is_some_and(|movement| {
+                movement.object_id == "PLAYER"
+                    && movement.active_stationary_effect
+                        == Some(VisibleStationaryMovementEffect::RockSmash)
+                    && movement.hold_frames_remaining % 2 == 0
+            });
     let walking = scripted_tree_shake
         || scripted_skyfall_action
         || scripted_rock_smash_action
@@ -328,8 +344,7 @@ fn sync_visible_ledge_jump(
     let camera_offset = visible_overworld_camera_offset(&rendered, &runtime_shell, 0.0);
     transform.translation.x = sprite_x + camera_offset.x;
     transform.translation.y =
-        sprite_y + camera_offset.y
-            - f32::from(OFFSETS[usize::from(jump.frame)]) * BATTLE_HUD_SCALE;
+        sprite_y + camera_offset.y - f32::from(OFFSETS[usize::from(jump.frame)]) * BATTLE_HUD_SCALE;
     if let Ok(mut shadow) = shadows.get_single_mut() {
         shadow.translation.x = sprite_x + camera_offset.x;
         shadow.translation.y = sprite_y + camera_offset.y - size.y * 0.5;
@@ -347,9 +362,8 @@ fn sync_visible_script_jump(
     let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
         return;
     };
-    let jump_offset = |total: u8, remaining: u8| {
-        visible_script_jump_y_offset(&OFFSETS, total, remaining)
-    };
+    let jump_offset =
+        |total: u8, remaining: u8| visible_script_jump_y_offset(&OFFSETS, total, remaining);
     if let Some(total) = movement.active_jump_duration {
         let remaining = if movement.object_id == "PLAYER" {
             runtime_shell.player_walk_frame_ticks
@@ -385,9 +399,10 @@ fn sync_visible_script_jump(
             if let Ok(mut transform) = players.get_single_mut() {
                 transform.translation.y += y_offset;
             }
-        } else if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
-            object.object_identifier.as_deref() == Some(follower_id)
-        }) {
+        } else if let Some((_, mut transform)) = objects
+            .iter_mut()
+            .find(|(object, _)| object.object_identifier.as_deref() == Some(follower_id))
+        {
             transform.translation.y += y_offset;
         }
     }
@@ -416,8 +431,7 @@ fn sync_visible_script_tree_shake(
     };
     let elapsed = total.saturating_sub(movement.hold_frames_remaining.min(total));
     let frame = elapsed.saturating_sub(1);
-    let x_offset = f32::from(OFFSETS[usize::from(frame % OFFSETS.len() as u16)])
-        * BATTLE_HUD_SCALE;
+    let x_offset = f32::from(OFFSETS[usize::from(frame % OFFSETS.len() as u16)]) * BATTLE_HUD_SCALE;
     if movement.object_id == "PLAYER" {
         if let Ok(mut transform) = players.get_single_mut() {
             transform.translation.x += x_offset;
@@ -451,8 +465,7 @@ fn sync_visible_stationary_movement_effect(
     if let Some((_, mut transform)) = objects.iter_mut().find(|(object, _)| {
         object.object_identifier.as_deref() == Some(movement.object_id.as_str())
     }) {
-        transform.translation.y +=
-            -f32::from(movement.stationary_y_offset) * BATTLE_HUD_SCALE;
+        transform.translation.y += -f32::from(movement.stationary_y_offset) * BATTLE_HUD_SCALE;
     }
 }
 
@@ -504,27 +517,32 @@ fn sync_visible_object_sprites(
                             && movement.object_id == *object_id
                     })
         });
-        let scripted_standing = runtime_shell
-            .visible_script_movement
-            .as_ref()
-            .is_some_and(|movement| {
-                (movement.active_uses_standing_frame
-                    && frames.object_identifier.as_deref() == Some(movement.object_id.as_str()))
-                    || (movement.follower_active_uses_standing_frame
-                        && frames.object_identifier.as_deref()
-                            == movement.follower_object_id.as_deref())
-            });
+        let scripted_standing =
+            runtime_shell
+                .visible_script_movement
+                .as_ref()
+                .is_some_and(|movement| {
+                    (movement.active_uses_standing_frame
+                        && frames.object_identifier.as_deref() == Some(movement.object_id.as_str()))
+                        || (movement.follower_active_uses_standing_frame
+                            && frames.object_identifier.as_deref()
+                                == movement.follower_object_id.as_deref())
+                });
         let autonomous_phase = frames.object_identifier.as_ref().and_then(|object_id| {
             (runtime_shell.object_walk_from.contains_key(object_id)
                 || runtime_shell
                     .trainer_walk_from
                     .as_ref()
                     .is_some_and(|(walking_id, _)| walking_id == object_id))
-                .then(|| runtime_shell.object_walk_phases.get(object_id).copied().unwrap_or(1))
+            .then(|| {
+                runtime_shell
+                    .object_walk_phases
+                    .get(object_id)
+                    .copied()
+                    .unwrap_or(1)
+            })
         });
-        let scripted_action = walking_phase
-            && object_is_moving
-            && autonomous_phase.is_none();
+        let scripted_action = walking_phase && object_is_moving && autonomous_phase.is_none();
         let action_frame = !scripted_standing
             && autonomous_phase.map_or(scripted_action, object_walk_uses_action_frame);
         let next = if action_frame {
@@ -534,8 +552,10 @@ fn sync_visible_object_sprites(
         };
         sprite.flip_x = action_frame
             && frames.mirror_walking
-            && autonomous_phase
-                .map_or(!runtime_shell.object_walk_stride, object_walk_uses_mirrored_action_frame);
+            && autonomous_phase.map_or(
+                !runtime_shell.object_walk_stride,
+                object_walk_uses_mirrored_action_frame,
+            );
         if texture.id() != next.id() {
             *texture = next.clone();
         }
@@ -835,11 +855,11 @@ fn drain_visible_earthquakes(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     if runtime_shell.visible_earthquake.is_none() {
         let snapshot = runtime_shell.shell.snapshot()?;
         if let Some(earthquake) = snapshot.script_events.pending_earthquakes.first() {
-            runtime_shell.visible_earthquake = Some(VisibleEarthquake {
-                intensity: 1_u16 << ((earthquake.parameter >> 6) & 0x3),
-                frames_remaining: earthquake.sleep_frames,
-                phase: 0,
-            });
+            runtime_shell.visible_earthquake = Some(VisibleEarthquake::from_script(
+                earthquake.parameter,
+                earthquake.shake_frames,
+                earthquake.sleep_frames,
+            ));
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
@@ -941,8 +961,6 @@ fn consume_visible_runtime_flag(runtime_shell: &mut BevyRuntimeShell) -> Result<
         RuntimeScriptRuntimeFlag::ResetRequested
     } else if scripts.menu_2d_requested {
         RuntimeScriptRuntimeFlag::Menu2dRequested
-    } else if scripts.version_check_requested {
-        RuntimeScriptRuntimeFlag::VersionCheckRequested
     } else {
         return handle_visible_no_runtime_flag(runtime_shell, "consume");
     };
@@ -951,9 +969,7 @@ fn consume_visible_runtime_flag(runtime_shell: &mut BevyRuntimeShell) -> Result<
 
 fn visible_auto_runtime_flag(snapshot: &RuntimeShellSnapshot) -> Option<RuntimeScriptRuntimeFlag> {
     let scripts = &snapshot.script_events;
-    if scripts.map_music_restart_disabled {
-        Some(RuntimeScriptRuntimeFlag::MapMusicRestartDisabled)
-    } else if scripts.map_music_requested {
+    if scripts.map_music_requested {
         Some(RuntimeScriptRuntimeFlag::MapMusicRequested)
     } else if scripts.waiting_for_sound_effect {
         Some(RuntimeScriptRuntimeFlag::WaitingForSoundEffect)
@@ -980,8 +996,6 @@ fn visible_auto_runtime_flag(snapshot: &RuntimeShellSnapshot) -> Option<RuntimeS
         })
     {
         Some(RuntimeScriptRuntimeFlag::Menu2dRequested)
-    } else if scripts.version_check_requested {
-        Some(RuntimeScriptRuntimeFlag::VersionCheckRequested)
     } else {
         None
     }
@@ -995,10 +1009,6 @@ fn consume_visible_runtime_flag_kind(
     if matches!(consumed, RuntimeScriptRuntimeFlagValue::MapMusicRequested) {
         reset_visible_music_state(runtime_shell);
         queue_visible_current_music(runtime_shell)?;
-    }
-    if matches!(consumed, RuntimeScriptRuntimeFlagValue::VersionCheckRequested) {
-        trim_event_log(&mut runtime_shell.last_audio_events);
-        return continue_visible_script_after_prompt(runtime_shell);
     }
     if matches!(consumed, RuntimeScriptRuntimeFlagValue::ResetRequested) {
         let asset_root = runtime_shell.asset_root.clone();
@@ -1110,7 +1120,6 @@ fn runtime_flag_boundary_display(
         RuntimeScriptRuntimeFlagValue::MapMusicRestartDisabled
         | RuntimeScriptRuntimeFlagValue::MapMusicRequested
         | RuntimeScriptRuntimeFlagValue::WaitingForSoundEffect
-        | RuntimeScriptRuntimeFlagValue::VersionCheckRequested
         | RuntimeScriptRuntimeFlagValue::ItemNotifyQueued
         | RuntimeScriptRuntimeFlagValue::WarpSoundQueued
         | RuntimeScriptRuntimeFlagValue::TeleportFromQueued
@@ -1121,13 +1130,6 @@ fn runtime_flag_boundary_display(
 
 fn take_visible_script_value(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     take_visible_runtime_memory_value(runtime_shell, RuntimeScriptRuntimeMemoryValue::ScriptValue)
-}
-
-fn take_visible_last_special_routine(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    take_visible_runtime_memory_value(
-        runtime_shell,
-        RuntimeScriptRuntimeMemoryValue::LastSpecialRoutine,
-    )
 }
 
 fn take_visible_last_talked_object(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -1543,10 +1545,7 @@ fn apply_selected_script_flag_mutation(runtime_shell: &mut BevyRuntimeShell) -> 
                 key.map_name == current_map
                     && matches!(
                         key.command.as_str(),
-                        "setevent"
-                            | "clearevent"
-                            | "setflag"
-                            | "clearflag"
+                        "setevent" | "clearevent" | "setflag" | "clearflag"
                     )
             })
             .collect(),
@@ -1581,10 +1580,7 @@ fn check_selected_script_flag(runtime_shell: &mut BevyRuntimeShell) -> Result<()
             .into_iter()
             .filter(|key| {
                 key.map_name == current_map
-                    && matches!(
-                        key.command.as_str(),
-                        "checkevent" | "checkflag"
-                    )
+                    && matches!(key.command.as_str(), "checkevent" | "checkflag")
             })
             .collect(),
     )?;
@@ -1963,11 +1959,7 @@ fn apply_selected_runtime_command_named(
         // `startbattle`: the preceding `loadwildmon` has already supplied the
         // species and level.  Opening a host acknowledgement here stranded the
         // Route 29 script without ever starting Dude's demonstration.
-        start_visible_catch_tutorial(
-            runtime_shell,
-            &command.source_script,
-            command.command_index,
-        )?;
+        start_visible_catch_tutorial(runtime_shell, &command.source_script, command.command_index)?;
         return Ok(());
     }
     if let RuntimeMutationResult::ScriptRuntimeApplied(command, _) = &applied.result {
@@ -2102,10 +2094,7 @@ fn use_visible_bug_contest(
     runtime_shell: &mut BevyRuntimeShell,
     action: RuntimeBugContestAction,
 ) -> Result<()> {
-    record_visible_runtime_action(
-        runtime_shell,
-        format!("special:bug_contest:{action:?}"),
-    )?;
+    record_visible_runtime_action(runtime_shell, format!("special:bug_contest:{action:?}"))?;
     let used = runtime_shell.shell.use_bug_contest(action)?;
     runtime_shell.last_audio_events.push(format!(
         "bug contest action={:?} outcome={:?} checksum={:?}",
@@ -2286,9 +2275,9 @@ fn show_visible_magikarp_house_sign(runtime_shell: &mut BevyRuntimeShell) -> Res
 
 fn apply_visible_battle_tower_reset(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     record_visible_runtime_action(runtime_shell, "special:battle_tower:reset")?;
-    let used = runtime_shell.shell.apply_battle_tower_action(
-        "BATTLETOWERACTION_RESETDATA".to_string(),
-    )?;
+    let used = runtime_shell
+        .shell
+        .apply_battle_tower_action("BATTLETOWERACTION_RESETDATA".to_string())?;
     runtime_shell.last_audio_events.push(format!(
         "battle tower reset outcome={:?} checksum={:?}",
         used.outcome.effect, used.state_checksum
@@ -2459,7 +2448,10 @@ fn finish_visible_gift_pokemon_nickname(
             ),
         )?;
         anyhow::ensure!(
-            matches!(renamed.result, RuntimeMutationResult::StoredPokemonRenamed(_)),
+            matches!(
+                renamed.result,
+                RuntimeMutationResult::StoredPokemonRenamed(_)
+            ),
             "runtime mutation returned non-stored-Pokemon nickname result"
         );
     }
@@ -2651,12 +2643,9 @@ fn selected_battle_ball_id(runtime_shell: &mut BevyRuntimeShell) -> Result<(usiz
     if ball_ids.is_empty() {
         anyhow::bail!("bag has no carried ball");
     }
-    let index = strict_readonly_cursor_index(
-        &runtime_shell.ball_cursor,
-        "bag:balls",
-        ball_ids.len(),
-    )
-    .context("battle Ball cursor is invalid")?;
+    let index =
+        strict_readonly_cursor_index(&runtime_shell.ball_cursor, "bag:balls", ball_ids.len())
+            .context("battle Ball cursor is invalid")?;
     Ok((index, ball_ids[index].clone()))
 }
 
@@ -2672,12 +2661,9 @@ fn selected_ball_item_id(runtime_shell: &mut BevyRuntimeShell) -> Result<String>
     if ball_ids.is_empty() {
         anyhow::bail!("bag has no carried ball");
     }
-    let index = strict_readonly_cursor_index(
-        &runtime_shell.ball_cursor,
-        "bag:balls",
-        ball_ids.len(),
-    )
-    .context("Pack Ball cursor is invalid")?;
+    let index =
+        strict_readonly_cursor_index(&runtime_shell.ball_cursor, "bag:balls", ball_ids.len())
+            .context("Pack Ball cursor is invalid")?;
     Ok(ball_ids[index].clone())
 }
 
@@ -2725,12 +2711,9 @@ fn selected_bag_item_id(runtime_shell: &mut BevyRuntimeShell) -> Result<String> 
     if item_ids.is_empty() {
         anyhow::bail!("bag item pocket has no carried item");
     }
-    let index = strict_readonly_cursor_index(
-        &runtime_shell.bag_cursor,
-        "bag:items",
-        item_ids.len(),
-    )
-    .context("Pack item cursor is invalid")?;
+    let index =
+        strict_readonly_cursor_index(&runtime_shell.bag_cursor, "bag:items", item_ids.len())
+            .context("Pack item cursor is invalid")?;
     Ok(item_ids[index].clone())
 }
 
@@ -2767,12 +2750,9 @@ fn selected_pc_item_id(runtime_shell: &mut BevyRuntimeShell) -> Result<String> {
     if item_ids.is_empty() {
         anyhow::bail!("PC item storage has no item");
     }
-    let index = strict_readonly_cursor_index(
-        &runtime_shell.pc_item_cursor,
-        "pc:items",
-        item_ids.len(),
-    )
-    .context("PC item cursor is invalid")?;
+    let index =
+        strict_readonly_cursor_index(&runtime_shell.pc_item_cursor, "pc:items", item_ids.len())
+            .context("PC item cursor is invalid")?;
     Ok(item_ids[index].clone())
 }
 
@@ -2854,9 +2834,9 @@ fn selected_field_pack_cancel_row(
         ),
         FieldPackPocket::Custom(pocket_id) => {
             let items = snapshot
-            .bag
-            .custom_pockets
-            .get(pocket_id)
+                .bag
+                .custom_pockets
+                .get(pocket_id)
                 .with_context(|| format!("bag custom pocket {pocket_id} is not present"))?;
             (
                 &runtime_shell.custom_item_cursor,
@@ -2865,12 +2845,9 @@ fn selected_field_pack_cancel_row(
             )
         }
     };
-    let selected = strict_readonly_cursor_index(
-        cursor,
-        &surface_id,
-        field_pack_selectable_count(item_count),
-    )
-    .with_context(|| format!("Pack cursor {surface_id} is invalid"))?;
+    let selected =
+        strict_readonly_cursor_index(cursor, &surface_id, field_pack_selectable_count(item_count))
+            .with_context(|| format!("Pack cursor {surface_id} is invalid"))?;
     Ok(selected == item_count)
 }
 
@@ -2885,12 +2862,8 @@ fn selected_tmhm(runtime_shell: &mut BevyRuntimeShell) -> Result<(String, Option
     if tmhms.is_empty() {
         anyhow::bail!("bag has no carried TM/HM");
     }
-    let index = strict_readonly_cursor_index(
-        &runtime_shell.tmhm_cursor,
-        "bag:tmhm",
-        tmhms.len(),
-    )
-    .context("Pack TM/HM cursor is invalid")?;
+    let index = strict_readonly_cursor_index(&runtime_shell.tmhm_cursor, "bag:tmhm", tmhms.len())
+        .context("Pack TM/HM cursor is invalid")?;
     Ok(tmhms[index].clone())
 }
 
@@ -2974,7 +2947,10 @@ fn use_selected_party_item_on(
     {
         format!("{pokemon_name} was cured!")
     } else if used.item_effect.level_after > used.item_effect.level_before {
-        format!("{pokemon_name} grew to level {}!", used.item_effect.level_after)
+        format!(
+            "{pokemon_name} grew to level {}!",
+            used.item_effect.level_after
+        )
     } else {
         format!("{pokemon_name}'s stats rose!")
     };
@@ -3033,9 +3009,7 @@ fn use_selected_pp_item_on(runtime_shell: &mut BevyRuntimeShell, party_index: us
         .find(|slot| slot.index == party_index)
         .and_then(|slot| slot.pokemon.moves.get(move_slot))
         .map(|learned| battle_move_display_name(&snapshot, &learned.name))
-        .with_context(|| {
-            format!("party index {party_index} has no move in slot {move_slot}")
-        })?;
+        .with_context(|| format!("party index {party_index} has no move in slot {move_slot}"))?;
     let item_id = selected_carried_normal_item_matching(
         runtime_shell,
         |item| item.pp_restore_points.is_some() || item.pp_up_stages.is_some(),
@@ -3114,14 +3088,18 @@ fn use_selected_rare_candy(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         .find(|slot| slot.index == party_index)
         .map(|slot| slot.pokemon.nickname.clone())
         .context("Rare Candy target disappeared from the pre-use party snapshot")?;
-    let evolution_result = used.item_effect.evolution_target.as_ref().map(|target_species| {
-        let evolving_message = format!("What? {source_name} is evolving!");
-        let evolved_message = format!(
-            "Congratulations! {source_name} evolved into {}!",
-            crate::core::models::pokemon_species_display_name(target_species)
-        );
-        (target_species.clone(), evolving_message, evolved_message)
-    });
+    let evolution_result = used
+        .item_effect
+        .evolution_target
+        .as_ref()
+        .map(|target_species| {
+            let evolving_message = format!("What? {source_name} is evolving!");
+            let evolved_message = format!(
+                "Congratulations! {source_name} evolved into {}!",
+                crate::core::models::pokemon_species_display_name(target_species)
+            );
+            (target_species.clone(), evolving_message, evolved_message)
+        });
     set_shell_action_status(
         runtime_shell,
         if used.item_effect.pending_move_learns.is_empty() {
@@ -3147,8 +3125,7 @@ fn use_selected_rare_candy(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     close_visible_field_pack_without_log(runtime_shell);
     runtime_shell.field_notice = Some(format!(
         "{} grew to level {}!",
-        source_name,
-        used.item_effect.level_after
+        source_name, used.item_effect.level_after
     ));
     if let Some((target_species, evolving_message, evolved_message)) = evolution_result {
         runtime_shell
@@ -3221,19 +3198,24 @@ fn use_selected_evolution_item(runtime_shell: &mut BevyRuntimeShell) -> Result<(
             .push(format!("evolution item learned move {learned}"));
     }
     for learned in &used.item_effect.pending_move_learns {
-        runtime_shell
-            .last_audio_events
-            .push(format!("evolution item pending move learn {}", learned.name));
+        runtime_shell.last_audio_events.push(format!(
+            "evolution item pending move learn {}",
+            learned.name
+        ));
     }
-    let evolution_result = used.item_effect.evolution_target.as_ref().map(|target_species| {
-        (
-            target_species.clone(),
-            format!(
-                "Congratulations! {source_name} evolved into {}!",
-                crate::core::models::pokemon_species_display_name(target_species)
-            ),
-        )
-    });
+    let evolution_result = used
+        .item_effect
+        .evolution_target
+        .as_ref()
+        .map(|target_species| {
+            (
+                target_species.clone(),
+                format!(
+                    "Congratulations! {source_name} evolved into {}!",
+                    crate::core::models::pokemon_species_display_name(target_species)
+                ),
+            )
+        });
     set_shell_action_status(
         runtime_shell,
         if let Some(target_species) = used.item_effect.evolution_target.as_ref() {
@@ -3345,9 +3327,7 @@ fn give_selected_held_item_with_swap_confirmation(
         .find(|slot| slot.index == party_index)
         .with_context(|| format!("selected party index {party_index} is not in the party"))?;
     let pokemon_name = target.pokemon.nickname.clone();
-    if target.pokemon.is_egg
-        || target.pokemon.species.id == "EGG"
-    {
+    if target.pokemon.is_egg || target.pokemon.species.id == "EGG" {
         runtime_shell.field_notice = Some("Eggs cannot hold or receive items.".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);
         set_shell_action_status(runtime_shell, "EGGS CAN'T HOLD ITEMS");
@@ -3402,9 +3382,8 @@ fn give_selected_held_item_with_swap_confirmation(
     {
         Ok(transfer) => transfer,
         Err(error) if held_item_transfer_error_is_play_refusal(&error) => {
-            runtime_shell.field_notice = Some(
-                "The old held item can't be returned because the PACK is full.".to_string(),
-            );
+            runtime_shell.field_notice =
+                Some("The old held item can't be returned because the PACK is full.".to_string());
             mark_runtime_snapshot_dirty(runtime_shell);
             runtime_shell
                 .last_audio_events
@@ -3435,9 +3414,9 @@ fn give_selected_held_item_with_swap_confirmation(
     close_visible_field_pack_without_log(runtime_shell);
     runtime_shell.battle_pack_target_mode = None;
     runtime_shell.field_notice = Some(match old_item_name {
-        Some(old_item_name) => format!(
-            "Took {pokemon_name}'s {old_item_name} and made it hold {new_item_name}."
-        ),
+        Some(old_item_name) => {
+            format!("Took {pokemon_name}'s {old_item_name} and made it hold {new_item_name}.")
+        }
         None => format!("Made {pokemon_name} hold {new_item_name}."),
     });
     mark_runtime_snapshot_dirty(runtime_shell);

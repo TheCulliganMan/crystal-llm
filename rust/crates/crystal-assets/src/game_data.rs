@@ -9,6 +9,40 @@ fn require_consumed_divider_trace(context: &str, divider: &ReplayDivider) -> Res
     Ok(())
 }
 
+fn apply_normal_vblank_divider_trace(
+    state: &mut GameState,
+    vblanks: u32,
+    trace: &RuntimeDividerTrace,
+) -> Result<()> {
+    if trace.samples.len() % 2 != 0 {
+        anyhow::bail!(
+            "VBlank_Normal divider trace has odd sample count {}",
+            trace.samples.len()
+        );
+    }
+    let normal_vblanks = u32::try_from(trace.samples.len() / 2)
+        .context("VBlank_Normal divider trace length exceeds u32")?;
+    if normal_vblanks > vblanks {
+        anyhow::bail!(
+            "VBlank_Normal divider trace has {normal_vblanks} samples for only {vblanks} elapsed VBlanks"
+        );
+    }
+    let mut divider = ReplayDivider::new(trace.samples.iter().copied());
+    let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+    for _ in 0..normal_vblanks {
+        rng.random(false)
+            .map_err(|error| anyhow::anyhow!("replay VBlank_Normal Random: {error}"))?;
+    }
+    state.random_state = rng.state();
+    state.vblank_counter = state.vblank_counter.wrapping_add(normal_vblanks as u8);
+    drop(rng);
+    require_consumed_divider_trace("VBlank_Normal", &divider)
+}
+
+fn can_encounter_on_any_non_ice_land(environment: &str) -> bool {
+    matches!(environment, "CAVE" | "DUNGEON")
+}
+
 fn decoration_display_name(decoration: &str) -> Result<&'static str> {
     let name = match decoration {
         "DECO_FAMICOM" => "NES",
@@ -263,7 +297,10 @@ impl GameDataSet {
             state
                 .flags
                 .is_event_flag_set(&decoration.event_flag)
-                .with_context(|| format!("check decoration ownership flag {}", decoration.event_flag))?,
+                .with_context(|| format!(
+                    "check decoration ownership flag {}",
+                    decoration.event_flag
+                ))?,
             "decoration {decoration_id} is not owned"
         );
 
@@ -408,6 +445,7 @@ impl GameDataSet {
         &self,
         state: &mut GameState,
         map_name: &str,
+        movement_mode: MovementMode,
         rng: &mut CrystalRandom<S>,
     ) -> Result<StepEventResult>
     where
@@ -425,15 +463,25 @@ impl GameDataSet {
                     .find(|landmark| landmark.constant == *constant)
             })
             .map(|landmark| landmark.id);
+        let metadata = self.runtime_map_metadata_for_name(map_name)?;
+        let mut next = state.clone();
+        let egg_before = next.day_care.egg.clone();
         let result = core_process_overworld_step(
-            state,
+            &mut next,
             &self.step_event_rules,
             &self.growth_rates,
             caught_location,
+            crystal_core::systems::step_events::OverworldStepContext {
+                movement_mode,
+                map_phone_service: metadata.phone_service,
+            },
             rng,
         )
         .context("process Day Care and party step events from compiled rules")?;
-        self.normalize_day_care_egg_species(state);
+        if next.day_care.egg != egg_before {
+            self.normalize_day_care_egg_species(&mut next)?;
+        }
+        *state = next;
         Ok(result)
     }
 
@@ -615,7 +663,7 @@ impl GameDataSet {
             .variables
             .insert("VAR_CALLERID".to_string(), dispatch.contact_id.clone());
         state.script_runtime.memory.insert(
-            "wPhoneCallerScript".to_string(),
+            "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK".to_string(),
             dispatch.caller_script.clone(),
         );
         if dispatch.delay_frames > 0 {
@@ -697,10 +745,10 @@ impl GameDataSet {
                 )
             })?
         };
-        state.script_runtime.memory.insert(
-            "wPhoneCallerScript".to_string(),
-            callee_script.clone(),
-        );
+        state
+            .script_runtime
+            .memory
+            .insert("wPhoneScriptBank".to_string(), callee_script.clone());
         Ok(RuntimePokegearPhoneCallOutcome {
             contact_id: command.contact_id,
             callback_script: "LoadPhoneScriptBank".to_string(),
@@ -871,11 +919,8 @@ impl GameDataSet {
             &interaction.script,
             "conditional",
         )?;
-        dispatch.script = resolve_background_event_script_target(
-            &module.scripts,
-            &interaction.script,
-            target,
-        )?;
+        dispatch.script =
+            resolve_background_event_script_target(&module.scripts, &interaction.script, target)?;
         Ok(Some(dispatch))
     }
 
@@ -928,15 +973,16 @@ impl GameDataSet {
     /// from the currently evolved daycare species.  The core step hook does
     /// not own the compiled evolution/learnset catalogs, so normalize the
     /// concrete egg here at the pack boundary.
-    fn normalize_day_care_egg_species(&self, state: &mut GameState) {
+    fn normalize_day_care_egg_species(&self, state: &mut GameState) -> Result<()> {
         let Some(existing) = state.day_care.egg.clone() else {
-            return;
+            return Ok(());
         };
         if !existing.is_egg {
-            return;
+            anyhow::bail!("Day Care wEggMon lost its egg identity");
         }
         let mut species_id = existing.species.id.clone();
-        for _ in 0..8 {
+        // `DayCare_InitBreeding` calls GetPreEvolution exactly twice.
+        for _ in 0..2 {
             let Some(previous) = self.evolutions.0.iter().find_map(|(source, entries)| {
                 entries
                     .iter()
@@ -947,40 +993,93 @@ impl GameDataSet {
             };
             species_id = previous.to_string();
         }
-        let Some(species) = self.pokemon.get(&species_id) else {
-            return;
-        };
-        let Ok(mut egg) = create_pokemon_from_known_dvs(
+        let species = self.pokemon.get(&species_id).with_context(|| {
+            format!("Day Care egg species {species_id} is absent from the compiled catalog")
+        })?;
+        let mut egg = create_pokemon_from_known_dvs(
             species,
             existing.level,
             existing.dvs,
             &self.learnsets,
             &self.moves,
             &self.growth_rates,
-        ) else {
-            return;
+        )
+        .with_context(|| format!("build Day Care egg species {species_id}"))?;
+        // FillMoves runs before InitEggMoves. Crystal then scans the selected
+        // donor's four moves in slot order. A move is heritable when it is an
+        // explicit Egg Move, a level-up move known by both parents, or a
+        // compatible TM/HM. LoadEggMove shifts the oldest slot when full.
+        let egg_move_values = self
+            .egg_moves
+            .get(&species_id)
+            .with_context(|| format!("missing Day Care egg-move table for {species_id}"))?
+            .as_array()
+            .with_context(|| format!("Day Care egg-move table for {species_id} is not an array"))?;
+        let explicit_egg_moves = egg_move_values
+            .iter()
+            .map(|value| {
+                value.as_str().with_context(|| {
+                    format!("Day Care egg-move entry for {species_id} is not a move id")
+                })
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let level_up_moves = level_up_moves_for_species(&self.learnsets, &species_id)
+            .with_context(|| format!("load Day Care level-up moves for {species_id}"))?;
+        let man = state
+            .day_care
+            .man
+            .pokemon
+            .as_ref()
+            .context("Day Care egg normalization requires the man resident")?;
+        let lady = state
+            .day_care
+            .lady
+            .pokemon
+            .as_ref()
+            .context("Day Care egg normalization requires the lady resident")?;
+        let is_female = |pokemon: &Pokemon| match pokemon.species.gender_ratio {
+            254 => true,
+            0 | 255 => false,
+            ratio => pokemon.dvs.attack.saturating_mul(17) < ratio,
         };
-        // FillMoves runs before InitEggMoves in Crystal.  The core step hook
-        // preserves the non-maternal parent's moves as candidates; only
-        // candidates present in this species' canonical egg-move table are
-        // copied into the four move slots here.
-        if let Some(egg_move_names) = self.egg_moves.get(&species_id).and_then(Value::as_array) {
-            for move_id in egg_move_names.iter().filter_map(Value::as_str) {
-                if egg.moves.len() >= 4
-                    || egg.moves.iter().any(|learned| learned.name == move_id)
-                    || !existing.moves.iter().any(|learned| learned.name == move_id)
-                {
-                    continue;
-                }
-                let Some(move_data) = self.moves.get(move_id) else {
-                    continue;
-                };
-                egg.moves.push(LearnedMove {
-                    name: move_id.to_string(),
-                    current_pp: move_data.pp,
-                    pp_ups: 0,
-                });
+        // `GetBreedmonMovePointer` is distinct from `GetHeritableMoves`: it
+        // points at Ditto when present, otherwise at the mother.
+        let breedmon_move_pointer = if man.species.id == "DITTO" {
+            &man.moves
+        } else if lady.species.id == "DITTO" || !is_female(man) {
+            &lady.moves
+        } else {
+            &man.moves
+        };
+        for candidate in &existing.moves {
+            let move_id = candidate.name.as_str();
+            if egg.moves.iter().any(|learned| learned.name == move_id) {
+                continue;
             }
+            let shared_level_up_move = breedmon_move_pointer
+                .iter()
+                .any(|learned| learned.name == move_id)
+                && level_up_moves
+                    .iter()
+                    .any(|LearnsetEntry(_, learned)| learned == move_id);
+            let tmhm_compatible = species
+                .tmhm_learnset
+                .iter()
+                .any(|learned| learned == move_id);
+            if !explicit_egg_moves.contains(move_id) && !shared_level_up_move && !tmhm_compatible {
+                continue;
+            }
+            let move_data = self.moves.get(move_id).with_context(|| {
+                format!("Day Care inherited move {move_id} is absent from the move catalog")
+            })?;
+            if egg.moves.len() == 4 {
+                egg.moves.remove(0);
+            }
+            egg.moves.push(LearnedMove {
+                name: move_id.to_string(),
+                current_pp: move_data.pp,
+                pp_ups: 0,
+            });
         }
         egg.nickname = existing.nickname.clone();
         egg.item = existing.item.clone();
@@ -993,6 +1092,7 @@ impl GameDataSet {
         egg.original_trainer_id = existing.original_trainer_id;
         egg.happiness = existing.happiness;
         state.day_care.egg = Some(egg);
+        Ok(())
     }
 
     pub fn update_clock_from_datetime<S>(
@@ -1202,11 +1302,7 @@ impl GameDataSet {
         Ok(labels)
     }
 
-    pub fn script_text_body_for_map(
-        &self,
-        map_name: &str,
-        label: &str,
-    ) -> Result<&ScriptTextBody> {
+    pub fn script_text_body_for_map(&self, map_name: &str, label: &str) -> Result<&ScriptTextBody> {
         if let Some(body) = self.map_module(map_name)?.script_text_bodies.get(label) {
             return Ok(body);
         }
@@ -1320,11 +1416,8 @@ impl GameDataSet {
         source_script: &str,
         startbattle_command_index: usize,
     ) -> Result<()> {
-        let request = self.scripted_wild_battle_request(
-            map_name,
-            source_script,
-            startbattle_command_index,
-        )?;
+        let request =
+            self.scripted_wild_battle_request(map_name, source_script, startbattle_command_index)?;
         let level = request.level.to_string();
         for (symbol, expected) in [
             ("wBattleScriptFlags", "128"),
@@ -1486,6 +1579,7 @@ impl GameDataSet {
         } else {
             self.wild_battle_music_for_map_time(map_name, state.time.time_of_day)?
         };
+        let catch_tutorial = request.battle_type == "BATTLETYPE_TUTORIAL";
         let start = if dynamic_sweet_scent && request.battle_type == "BATTLETYPE_ROAMING" {
             let metadata = self.runtime_map_metadata_for_name(map_name)?;
             let current_map = (
@@ -1559,6 +1653,12 @@ impl GameDataSet {
                 "activate scripted wild battle at {map_name}/{source_script}:{startbattle_command_index}: {error:?}"
             )
         })?;
+        crate::nuzlocke::register_wild_encounter(
+            self.nuzlocke_rules,
+            state,
+            map_name,
+            &start.battle_type,
+        );
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
@@ -1567,6 +1667,14 @@ impl GameDataSet {
         state.battle_pay_day_money = 0;
         set_script_battle_result_accumulator(state);
         state.random_state = start.random_state_after;
+        if catch_tutorial {
+            // CatchTutorial uses wMomsName as the NAME_LENGTH backup for the
+            // player's name and does not restore the original "MOM" bytes.
+            state
+                .script_runtime
+                .variables
+                .insert("_moms_name".to_string(), state.player_name.clone());
+        }
         Ok(start)
     }
 
@@ -1710,6 +1818,22 @@ impl GameDataSet {
                     "0"
                 } else {
                     request.loss_text.as_str()
+                },
+            ),
+            (
+                "wSeenTextPointer",
+                if request.seen_text.is_empty() {
+                    "0"
+                } else {
+                    request.seen_text.as_str()
+                },
+            ),
+            (
+                "wScriptAfterPointer",
+                if request.callback.is_empty() {
+                    "0"
+                } else {
+                    request.callback.as_str()
                 },
             ),
         ] {
@@ -2006,10 +2130,7 @@ impl GameDataSet {
         nickname: Option<String>,
     ) -> Result<GiftPokemonRequest> {
         let gift = self.gift_pokemon_script(map_name, source_script, command_index)?;
-        let custom_identity = match (
-            gift.nickname_label.as_deref(),
-            gift.ot_label.as_deref(),
-        ) {
+        let custom_identity = match (gift.nickname_label.as_deref(), gift.ot_label.as_deref()) {
             (Some(nickname_label), Some(ot_label)) => Some((
                 self.resolve_gift_name_label(map_name, source_script, nickname_label)?,
                 self.resolve_gift_ot_label(map_name, source_script, ot_label)?,
@@ -2065,9 +2186,10 @@ impl GameDataSet {
             })
         } else {
             let caught_map = if map_name == "Pokecenter2F" {
-                state.backup_warp_map_name.as_deref().with_context(|| {
-                    "givepoke on Pokecenter2F requires the source backup map"
-                })?
+                state
+                    .backup_warp_map_name
+                    .as_deref()
+                    .with_context(|| "givepoke on Pokecenter2F requires the source backup map")?
             } else {
                 map_name
             };
@@ -2173,7 +2295,9 @@ impl GameDataSet {
             let command = entry
                 .get("command")
                 .and_then(serde_json::Value::as_str)
-                .with_context(|| format!("custom gift name label {resolved_label} has a malformed command"))?;
+                .with_context(|| {
+                    format!("custom gift name label {resolved_label} has a malformed command")
+                })?;
             if command != "db" {
                 anyhow::bail!(
                     "custom gift name label {resolved_label} contains non-db command {command}"
@@ -2182,7 +2306,9 @@ impl GameDataSet {
             let args = entry
                 .get("args")
                 .and_then(serde_json::Value::as_array)
-                .with_context(|| format!("custom gift name label {resolved_label} db has no args"))?;
+                .with_context(|| {
+                    format!("custom gift name label {resolved_label} db has no args")
+                })?;
             for arg in args {
                 let token = arg.as_str().with_context(|| {
                     format!("custom gift name label {resolved_label} db argument is not a string")
@@ -2347,13 +2473,16 @@ impl GameDataSet {
                 .map_err(|error| anyhow::anyhow!(error))?;
         if boxed_custom_ot {
             request.original_trainer_id = generate_scripted_box_gift_ot_id(state, divider)
-                .map_err(|error| anyhow::anyhow!("generate boxed custom gift Pokemon OT ID: {error}"))?;
+                .map_err(|error| {
+                    anyhow::anyhow!("generate boxed custom gift Pokemon OT ID: {error}")
+                })?;
         }
-        self.grant_gift_pokemon_to_state(state, request).map_err(|error| {
-            anyhow::anyhow!(
-                "grant gift Pokemon at {map_name}/{source_script}:{command_index}: {error:?}"
-            )
-        })
+        self.grant_gift_pokemon_to_state(state, request)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "grant gift Pokemon at {map_name}/{source_script}:{command_index}: {error:?}"
+                )
+            })
     }
 
     pub fn script_item_grant(
@@ -2989,7 +3118,7 @@ impl GameDataSet {
             command,
         )
         .map_err(|error| anyhow::anyhow!("apply script scene command: {error:?}"))?;
-        if outcome.command == "checkscene" {
+        if matches!(outcome.command.as_str(), "checkscene" | "checkmapscene") {
             state.script_runtime.script_value = Some(outcome.scene_index.to_string());
         }
         Ok(outcome)
@@ -3220,9 +3349,7 @@ impl GameDataSet {
             .command
             == "reloadmapafterbattle"
         {
-            anyhow::bail!(
-                "apply script reloadmapafterbattle requires a recorded divider boundary"
-            );
+            anyhow::bail!("apply script reloadmapafterbattle requires a recorded divider boundary");
         }
         let mut divider = ReplayDivider::new([]);
         self.apply_script_map_command_with_divider_in_session(
@@ -3276,11 +3403,8 @@ impl GameDataSet {
                 return Ok(action);
             }
             if battle_script_flags & 0x80 != 0 {
-                let has_phone_service = self
-                    .runtime_map_metadata_for_name(map_name)?
-                    .phone_service
-                    >> 4
-                    == 0;
+                let has_phone_service =
+                    self.runtime_map_metadata_for_name(map_name)?.phone_service >> 4 == 0;
                 if staged_state.script_runtime.map_reentry_script.is_none() && has_phone_service {
                     if let Some(selection) = core_select_mom_purchase(
                         &mut staged_state,
@@ -3291,16 +3415,16 @@ impl GameDataSet {
                     {
                         let delivered = match selection.rule.kind {
                             MomPurchaseKind::Item => {
-                                let item = self.items.get(&selection.rule.target).with_context(|| {
-                                    format!(
-                                        "Mom purchase references missing item {}",
-                                        selection.rule.target
-                                    )
-                                })?;
-                                staged_state
-                                    .bag
-                                    .add_pc_item(item, 1)
-                                    .map_err(|error| anyhow::anyhow!("deliver Mom PC item: {error}"))?
+                                let item =
+                                    self.items.get(&selection.rule.target).with_context(|| {
+                                        format!(
+                                            "Mom purchase references missing item {}",
+                                            selection.rule.target
+                                        )
+                                    })?;
+                                staged_state.bag.add_pc_item(item, 1).map_err(|error| {
+                                    anyhow::anyhow!("deliver Mom PC item: {error}")
+                                })?
                             }
                             MomPurchaseKind::Doll => {
                                 let flag = selection.rule.decoration_flag.as_deref().with_context(
@@ -3328,15 +3452,14 @@ impl GameDataSet {
                                 origin_map_name: map_name.to_string(),
                                 script: result_script.to_string(),
                             });
-                            staged_state.pending_mom_purchase = Some(
-                                crystal_core::state::PendingMomPurchase {
+                            staged_state.pending_mom_purchase =
+                                Some(crystal_core::state::PendingMomPurchase {
                                     progression: selection.progression,
                                     selected_index: selection.selected_index,
                                     cost: selection.rule.cost,
                                     target: selection.rule.target,
                                     decoration_flag: selection.rule.decoration_flag,
-                                },
-                            );
+                                });
                         }
                     }
                 }
@@ -3344,17 +3467,13 @@ impl GameDataSet {
                 && staged_state.script_runtime.map_reentry_script.is_none()
             {
                 staged_state.script_runtime.map_reentry_script = Some(ScriptLocation {
-                        origin_map_name: map_name.to_string(),
-                        script: "Script_SpecialBillCall".to_string(),
-                    });
+                    origin_map_name: map_name.to_string(),
+                    script: "Script_SpecialBillCall".to_string(),
+                });
             }
         }
-        let action = core_apply_script_map_command(
-            &mut staged_state,
-            command,
-            &self.map_ids(),
-        )
-        .map_err(|error| anyhow::anyhow!("apply script map command: {error:?}"))?;
+        let action = core_apply_script_map_command(&mut staged_state, command, &self.map_ids())
+            .map_err(|error| anyhow::anyhow!("apply script map command: {error:?}"))?;
         if let ScriptMapAction::WarpCheck {
             source_script,
             command_index,
@@ -4073,12 +4192,17 @@ impl GameDataSet {
             })?;
         let event_flag = object.event_flag.clone();
         if event_flag == "-1" {
+            session.clear_loaded_roster_visibility_override(&outcome.object_id);
             if hidden {
+                session.shown_object_identifiers.remove(&outcome.object_id);
                 session
                     .hidden_object_identifiers
                     .insert(outcome.object_id.clone());
             } else {
                 session.hidden_object_identifiers.remove(&outcome.object_id);
+                session
+                    .shown_object_identifiers
+                    .insert(outcome.object_id.clone());
             }
             return Ok(());
         }
@@ -4100,6 +4224,7 @@ impl GameDataSet {
                 )
             })?;
         session.sync_event_flag_memory(&state.flags);
+        session.clear_loaded_roster_visibility_override(&outcome.object_id);
         Ok(())
     }
 
@@ -4222,9 +4347,7 @@ impl GameDataSet {
         &self,
         command: &RuntimeScriptCommandRef,
     ) -> Result<bool> {
-        if command.source_script != ".SweetScent@SweetScentFromMenu"
-            || command.command_index != 5
-        {
+        if command.source_script != ".SweetScent@SweetScentFromMenu" || command.command_index != 5 {
             return Ok(false);
         }
         let runtime_command = self.script_runtime_command(
@@ -4377,8 +4500,7 @@ impl GameDataSet {
         &self,
         command: &RuntimeScriptCommandRef,
     ) -> Result<bool> {
-        if command.source_script != ".SweetScent@SweetScentFromMenu"
-            || command.command_index != 10
+        if command.source_script != ".SweetScent@SweetScentFromMenu" || command.command_index != 10
         {
             return Ok(false);
         }
@@ -4517,12 +4639,119 @@ impl GameDataSet {
                 .memory
                 .insert("wNamedObjectIndex".to_string(), item_id);
         }
-        inputs.resolved_named_buffer_value =
+        let pack_resolved_name =
             self.resolve_script_runtime_name_buffer_value(&next_state, map_name, &command)?;
+        if command.command == "getname" {
+            // `getname` spans several ROM name tables, including intentionally
+            // broken/WRAM-backed entries. Preserve the exact value supplied by
+            // the typed caller when the pack has no static catalog resolution.
+            // Other name opcodes remain pack-owned and overwrite caller data.
+            if pack_resolved_name.is_some() {
+                inputs.resolved_named_buffer_value = pack_resolved_name;
+            }
+        } else {
+            inputs.resolved_named_buffer_value = pack_resolved_name;
+        }
         inputs.resolved_stone_table_entries =
             self.resolve_script_runtime_stone_table_queue(map_name, &command)?;
         inputs.resolved_decoration =
             self.resolve_script_runtime_decoration(&next_state, &command)?;
+        if command.command == "specialsound" {
+            let item_id = next_state
+                .script_runtime
+                .memory
+                .get("wCurItem")
+                .with_context(|| "specialsound requires wCurItem")?;
+            let item = self
+                .items
+                .get(item_id)
+                .with_context(|| format!("specialsound references unknown wCurItem {item_id}"))?;
+            let audio_id = if item.pocket == ITEM_POCKET_TM_HM {
+                "SFX_GET_TM"
+            } else {
+                "SFX_ITEM"
+            };
+            anyhow::ensure!(
+                self.audio.iter().any(|asset| asset.id == audio_id),
+                "specialsound selected missing audio asset {audio_id}"
+            );
+            inputs.resolved_special_sound_effect = Some(audio_id.to_string());
+        }
+        if command.command == "pocketisfull" {
+            let item_id = next_state
+                .script_runtime
+                .memory
+                .get("wCurItem")
+                .with_context(|| "pocketisfull requires wCurItem")?;
+            let item = self
+                .items
+                .get(item_id)
+                .with_context(|| format!("pocketisfull references unknown wCurItem {item_id}"))?;
+            let pocket_name = match item.pocket.as_str() {
+                ITEM_POCKET_ITEM => "ITEM POCKET",
+                ITEM_POCKET_KEY_ITEM => "KEY POCKET",
+                ITEM_POCKET_BALL => "BALL POCKET",
+                ITEM_POCKET_TM_HM => "TM POCKET",
+                pocket => anyhow::bail!("pocketisfull item {item_id} uses non-ASM pocket {pocket}"),
+            };
+            inputs.resolved_current_pocket_name = Some(pocket_name.to_string());
+            inputs.resolved_current_item_name = Some(item.name.clone());
+        }
+        if command.command == "warpmod" {
+            let map_constant = command.args.get(1).with_context(|| {
+                format!(
+                    "warpmod command {}:{} missing target map argument",
+                    command.source_script, command.command_index
+                )
+            })?;
+            inputs.resolved_warpmod_map_name = Some(self.map_name_for_constant(map_constant)?);
+        }
+        if matches!(
+            command.command.as_str(),
+            "memcall" | "memjump" | "memcallasm"
+        ) {
+            let pointer = if command.command == "memcall" {
+                anyhow::ensure!(
+                    !command.args.is_empty(),
+                    "memcall command {}:{} is missing its pointer operand",
+                    command.source_script,
+                    command.command_index
+                );
+                command.args.join(" ")
+            } else {
+                command
+                    .args
+                    .first()
+                    .with_context(|| {
+                        format!(
+                            "{} command {}:{} is missing its pointer operand",
+                            command.command, command.source_script, command.command_index
+                        )
+                    })?
+                    .clone()
+            };
+            let target = next_state
+                .script_runtime
+                .memory
+                .get(&pointer)
+                .with_context(|| format!("{} pointer {pointer} is unset", command.command))?
+                .clone();
+            let definitions =
+                if let Some(module) = self.global_script_module_for(&command.source_script) {
+                    &module.definitions
+                } else {
+                    &self.map_module(map_name)?.scripts
+                };
+            let resolved =
+                resolve_script_target_label(definitions, &command.source_script, &target)
+                    .with_context(|| {
+                        format!(
+                            "{} pointer {pointer} target {target} cannot resolve from {}",
+                            command.command, command.source_script
+                        )
+                    })?;
+            next_state.script_runtime.memory.insert(pointer, resolved);
+        }
         let selected_party_index = inputs.selected_party_index;
         let queued_command_count = next_state.script_runtime.command_queue.len();
         let mut outcome = core_apply_script_runtime_command(
@@ -4533,6 +4762,30 @@ impl GameDataSet {
             &self.story_event_script_constants,
         )
         .map_err(|error| anyhow::anyhow!("apply script runtime command: {error:?}"))?;
+        if command.command == "warpsound" {
+            let collision = sample_collision(
+                &next_overworld.map,
+                &next_overworld.tileset,
+                next_overworld.player.tile,
+            )
+            .context("sample exact wPlayerTileCollision for GetWarpSFX")?;
+            let audio_id = warp_sound_effect_for_collision(collision.permission);
+            anyhow::ensure!(
+                self.audio.iter().any(|asset| asset.id == audio_id),
+                "GetWarpSFX selected missing audio asset {audio_id}"
+            );
+            next_state
+                .script_runtime
+                .audio_events
+                .push(ScriptAudioRuntimeEvent {
+                    command: command.command.clone(),
+                    kind: ScriptAudioRuntimeKind::SoundEffect,
+                    audio_id: Some(audio_id.to_string()),
+                    fade_frames: None,
+                    source_script: command.source_script.clone(),
+                    command_index: command.command_index,
+                });
+        }
         if command.command == "verbosegiveitemvar" {
             let item_id = command.args.first().with_context(|| {
                 format!(
@@ -4607,11 +4860,12 @@ impl GameDataSet {
                 command_index: command.command_index,
             };
         }
-        if command.command == "callasm" {
+        if matches!(command.command.as_str(), "callasm" | "memcallasm") {
             let queued_count_after = next_state.script_runtime.command_queue.len();
             if queued_count_after != queued_command_count + 1 {
                 anyhow::bail!(
-                    "callasm {}:{} enqueued {} commands instead of exactly one",
+                    "{} {}:{} enqueued {} commands instead of exactly one",
+                    command.command,
                     command.source_script,
                     command.command_index,
                     queued_count_after.saturating_sub(queued_command_count)
@@ -4622,32 +4876,58 @@ impl GameDataSet {
                 .command_queue
                 .get(queued_command_count)
                 .expect("validated appended callasm queue entry");
-            let target = command.args.first().with_context(|| {
-                format!(
-                    "callasm command {}:{} is missing its routine target",
-                    command.source_script, command.command_index
-                )
-            })?;
-            if queued.command != "callasm"
-                || queued.target != *target
+            let expected_target = if command.command == "memcallasm" {
+                let pointer = command.args.first().with_context(|| {
+                    format!(
+                        "memcallasm command {}:{} is missing its pointer operand",
+                        command.source_script, command.command_index
+                    )
+                })?;
+                next_state
+                    .script_runtime
+                    .memory
+                    .get(pointer)
+                    .with_context(|| format!("memcallasm pointer {pointer} is unset"))?
+            } else {
+                command.args.first().with_context(|| {
+                    format!(
+                        "callasm command {}:{} is missing its routine target",
+                        command.source_script, command.command_index
+                    )
+                })?
+            };
+            if queued.command != command.command
+                || queued.target != *expected_target
                 || queued.source_script != command.source_script
                 || queued.command_index != command.command_index
             {
                 anyhow::bail!(
-                    "callasm {}:{} enqueued mismatched routine command {:?}",
+                    "{} {}:{} enqueued mismatched routine command {:?}",
+                    command.command,
                     command.source_script,
                     command.command_index,
                     queued
                 );
             }
-            if let Some(execution) =
-                self.execute_script_callasm_accumulator(
-                    &mut next_state,
-                    &mut next_overworld,
-                    map_name,
-                    &command,
-                )?
-            {
+            let queued_target = queued.target.clone();
+            let mut effective_command = command.clone();
+            effective_command.args = vec![queued_target.clone()];
+            let execution = self.execute_script_callasm_accumulator(
+                &mut next_state,
+                &mut next_overworld,
+                map_name,
+                &effective_command,
+            )?;
+            if execution.is_none() {
+                anyhow::bail!(
+                    "{} {}:{} target {} cannot execute synchronously",
+                    command.command,
+                    command.source_script,
+                    command.command_index,
+                    queued_target
+                );
+            }
+            if let Some(execution) = execution {
                 next_state
                     .script_runtime
                     .command_queue
@@ -4676,6 +4956,36 @@ impl GameDataSet {
                 selected_party_index,
             )?;
         }
+        if matches!(command.command.as_str(), "givepokemail" | "checkpokemail") {
+            let queued_count_after = next_state.script_runtime.command_queue.len();
+            if queued_count_after != queued_command_count + 1 {
+                anyhow::bail!(
+                    "{} {}:{} enqueued {} commands instead of exactly one",
+                    command.command,
+                    command.source_script,
+                    command.command_index,
+                    queued_count_after.saturating_sub(queued_command_count)
+                );
+            }
+            let queued = &next_state.script_runtime.command_queue[queued_command_count];
+            if queued.command != command.command
+                || queued.target != command.args[0]
+                || queued.source_script != command.source_script
+                || queued.command_index != command.command_index
+            {
+                anyhow::bail!(
+                    "{} {}:{} enqueued mismatched synchronous command {:?}",
+                    command.command,
+                    command.source_script,
+                    command.command_index,
+                    queued
+                );
+            }
+            next_state
+                .script_runtime
+                .command_queue
+                .remove(queued_command_count);
+        }
         if command.command == "givepokemail" {
             self.apply_compiled_mail_definition(&mut next_state, &command.args[0])?;
         } else if command.command == "checkpokemail" {
@@ -4695,6 +5005,54 @@ impl GameDataSet {
             let spawn = self.runtime_spawn_point_for_map_constant(map_constant)?;
             next_state.last_spawn_identifier = Some(spawn.identifier);
         }
+        if command.command == "changemapblocks" {
+            let blocks_label = command.args.first().with_context(|| {
+                format!(
+                    "changemapblocks command {}:{} missing block-data pointer",
+                    command.source_script, command.command_index
+                )
+            })?;
+            let encoded = self.map_blocks.get(blocks_label).with_context(|| {
+                format!("changemapblocks references missing block data {blocks_label}")
+            })?;
+            let replacement = decode_base64_bytes(encoded)
+                .with_context(|| format!("decode changemapblocks payload {blocks_label}"))?
+                .into_iter()
+                .map(u16::from)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                replacement.len() == next_overworld.map.metatile_ids.len(),
+                "changemapblocks payload {blocks_label} has {} blocks for {} map blocks",
+                replacement.len(),
+                next_overworld.map.metatile_ids.len()
+            );
+            next_overworld.map.metatile_ids = replacement.clone();
+            let base = &self.map_module(map_name)?.blocks;
+            anyhow::ensure!(
+                base.len() == replacement.len(),
+                "compiled base map {map_name} changed size during changemapblocks"
+            );
+            let mut overrides = BTreeMap::new();
+            let width = usize::from(next_overworld.map.width);
+            for (index, (&block_id, &base_id)) in replacement.iter().zip(base).enumerate() {
+                if block_id != base_id {
+                    overrides.insert(
+                        (
+                            u16::try_from(index % width).context("map block x overflow")?,
+                            u16::try_from(index / width).context("map block y overflow")?,
+                        ),
+                        block_id,
+                    );
+                }
+            }
+            if overrides.is_empty() {
+                next_state.map_block_overrides.remove(map_name);
+            } else {
+                next_state
+                    .map_block_overrides
+                    .insert(map_name.to_string(), overrides);
+            }
+        }
         if command.command == "writevar"
             && command.args.first().map(String::as_str) == Some("VAR_MOVEMENT")
         {
@@ -4711,7 +5069,11 @@ impl GameDataSet {
             );
         }
         if command.command == "setlasttalked" {
-            next_overworld.last_talked_object_identifier = command.args.first().cloned();
+            next_overworld.last_talked_object_identifier = command
+                .args
+                .first()
+                .filter(|object_id| object_id.as_str() != "-1")
+                .cloned();
             sync_state_object_overrides(&mut next_state, &next_overworld)
                 .context("sync setlasttalked object overrides")?;
         }
@@ -4826,16 +5188,15 @@ impl GameDataSet {
 
         if let Some(effect) = exact_overworld_visual_callasm_effect(definitions, &resolved_target)
             .map_err(|failure| {
-                anyhow::anyhow!(
-                    "exact overworld visual callasm {} failed at {}:{} '{}': {}",
-                    resolved_target,
-                    failure.target_script,
-                    failure.command_index,
-                    failure.command,
-                    failure.reason,
-                )
-            })?
-        {
+            anyhow::anyhow!(
+                "exact overworld visual callasm {} failed at {}:{} '{}': {}",
+                resolved_target,
+                failure.target_script,
+                failure.command_index,
+                failure.command,
+                failure.reason,
+            )
+        })? {
             match effect {
                 ExactOverworldVisualCallasmEffect::SkipUpdateMapSprites => {
                     state.script_runtime.memory.insert(
@@ -4860,9 +5221,12 @@ impl GameDataSet {
                         !state.flags.is_engine_flag_set("STATUSFLAGS_FLASH")?,
                         "BlindingFlash source callasm found FLASH already active"
                     );
-                    state.flags.set_engine_flag("STATUSFLAGS_FLASH", true).map_err(
-                        |error| anyhow::anyhow!("set FLASH status from callasm: {error}"),
-                    )?;
+                    state
+                        .flags
+                        .set_engine_flag("STATUSFLAGS_FLASH", true)
+                        .map_err(|error| {
+                            anyhow::anyhow!("set FLASH status from callasm: {error}")
+                        })?;
                     state.script_runtime.pending_flash_field_move = None;
                 }
                 ExactOverworldVisualCallasmEffect::CutBlockRefresh => {
@@ -5057,10 +5421,10 @@ impl GameDataSet {
             ExactPhoneCallasmEffect::HangUp => {}
             ExactPhoneCallasmEffect::InitReceiveDelay => {
                 restart_receive_call_delay(state, true);
-                state.script_runtime.memory.insert(
-                    "wTimeCyclesSinceLastCall".to_string(),
-                    "0".to_string(),
-                );
+                state
+                    .script_runtime
+                    .memory
+                    .insert("wTimeCyclesSinceLastCall".to_string(), "0".to_string());
             }
             ExactPhoneCallasmEffect::LoadCaller(contact_id) => {
                 let contact = self.phone_contacts.0.get(contact_id).with_context(|| {
@@ -5082,7 +5446,7 @@ impl GameDataSet {
                     .memory
                     .insert("wCallerContact".to_string(), contact_id.to_string());
                 state.script_runtime.memory.insert(
-                    "wPhoneCallerScript".to_string(),
+                    "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK".to_string(),
                     caller_script.clone(),
                 );
             }
@@ -5312,19 +5676,16 @@ impl GameDataSet {
                     .find_map(|(party_index, pokemon)| {
                         pokemon.as_ref().and_then(|pokemon| {
                             (!pokemon.is_egg
-                                && pokemon.species.id != "EGG"
                                 && pokemon.moves.iter().any(|learned| learned.name == *move_id))
-                                .then_some(party_index)
+                            .then_some(party_index)
                         })
                     });
                 cpu.registers.insert(
                     "a".to_string(),
                     if selected.is_some() { "0" } else { "255" }.to_string(),
                 );
-                cpu.registers.insert(
-                    "e".to_string(),
-                    selected.unwrap_or(party_count).to_string(),
-                );
+                cpu.registers
+                    .insert("e".to_string(), selected.unwrap_or(party_count).to_string());
                 cpu.flags.zero = Some(true);
                 cpu.flags.carry = Some(selected.is_none());
                 cpu.selected_party_index = selected;
@@ -5435,9 +5796,8 @@ impl GameDataSet {
                 let value = u8::try_from(value).with_context(|| {
                     format!("CheckWaterfallTile accumulator {value} is outside byte range")
                 })?;
-                cpu.flags.zero = Some(
-                    [permissions::WATERFALL, permissions::CURRENT_DOWN].contains(&value),
-                );
+                cpu.flags.zero =
+                    Some([permissions::WATERFALL, permissions::CURRENT_DOWN].contains(&value));
                 Ok(true)
             }
             BranchingCallasmHostService::StubbedTrainerRankingsWaterfall => Ok(true),
@@ -5561,7 +5921,7 @@ impl GameDataSet {
         self.item(&item_id).with_context(|| {
             format!("mail definition '{label}' references unknown item '{item_id}'")
         })?;
-        let message = compiled_mail_message(entries)?;
+        let message = compiled_mail_message(entries, true)?;
         let Some(index) = state
             .storage
             .party
@@ -5599,7 +5959,7 @@ impl GameDataSet {
         let entries = body
             .as_array()
             .with_context(|| format!("mail check definition '{label}' is not an array"))?;
-        let expected = compiled_mail_message(entries)?;
+        let expected = compiled_mail_message(entries, false)?;
         let Some(index) = selected_party_index else {
             set_compiled_mail_check_result(state, 2);
             return Ok(());
@@ -5866,8 +6226,8 @@ impl GameDataSet {
                 };
                 let decoration = memory_value(key);
                 ScriptRuntimeDecorationResolution {
-                    target_script:
-                        ".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole".to_string(),
+                    target_script: ".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole"
+                        .to_string(),
                     string_buffer_3: Some(decoration_display_name(decoration)?.to_string()),
                 }
             }
@@ -5888,29 +6248,26 @@ impl GameDataSet {
         if command.command != "writecmdqueue" {
             return Ok(None);
         }
-        let definitions = if let Some(module) = self.global_script_module_for(&command.source_script)
-        {
-            &module.definitions
-        } else {
-            &self.map_module(map_name)?.scripts
-        };
+        let definitions =
+            if let Some(module) = self.global_script_module_for(&command.source_script) {
+                &module.definitions
+            } else {
+                &self.map_module(map_name)?.scripts
+            };
         let queue_target = command.args.first().with_context(|| {
             format!(
                 "writecmdqueue command {}:{} has no data pointer",
                 command.source_script, command.command_index
             )
         })?;
-        let queue_label = resolve_script_target_label(
-            definitions,
-            &command.source_script,
-            queue_target,
-        )
-        .with_context(|| {
-            format!(
-                "writecmdqueue command {}:{} cannot resolve queue data {}",
-                command.source_script, command.command_index, queue_target
-            )
-        })?;
+        let queue_label =
+            resolve_script_target_label(definitions, &command.source_script, queue_target)
+                .with_context(|| {
+                    format!(
+                        "writecmdqueue command {}:{} cannot resolve queue data {}",
+                        command.source_script, command.command_index, queue_target
+                    )
+                })?;
         let queue_body = definitions
             .get(&queue_label)
             .and_then(Value::as_array)
@@ -5948,12 +6305,13 @@ impl GameDataSet {
         let mut entries = Vec::new();
         let mut terminated = false;
         for (command_index, entry) in table_body.iter().enumerate() {
-            let entry_command = entry
-                .get("command")
-                .and_then(Value::as_str)
-                .with_context(|| {
-                    format!("stone table {table_label} command {command_index} has no command")
-                })?;
+            let entry_command =
+                entry
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!("stone table {table_label} command {command_index} has no command")
+                    })?;
             let args = script_command_args(map_name, &table_label, entry_command, entry)?;
             if entry_command == "db" && args == ["-1"] {
                 anyhow::ensure!(
@@ -5982,6 +6340,8 @@ impl GameDataSet {
                     )
                 })?;
             entries.push(ScriptRuntimeStoneTableEntry {
+                // The core assigns the first free wCmdQueue slot atomically.
+                queue_slot: 0,
                 warp,
                 object_event: args[1].to_string(),
                 script,
@@ -5990,7 +6350,10 @@ impl GameDataSet {
             });
         }
         anyhow::ensure!(terminated, "stone table {table_label} has no -1 terminator");
-        anyhow::ensure!(!entries.is_empty(), "stone table {table_label} has no entries");
+        anyhow::ensure!(
+            !entries.is_empty(),
+            "stone table {table_label} has no entries"
+        );
         Ok(Some(entries))
     }
 
@@ -6107,6 +6470,9 @@ impl GameDataSet {
             .args
             .first()
             .with_context(|| "setlasttalked command missing object id")?;
+        if object_id == "-1" {
+            return Ok(None);
+        }
         Ok(Some(object_id.clone()))
     }
 
@@ -6515,6 +6881,7 @@ impl GameDataSet {
         state: &mut GameState,
         _session: &mut OverworldSession,
         vblanks: u32,
+        normal_divider_trace: &RuntimeDividerTrace,
         _music_ids: &BTreeSet<String>,
         _sound_effect_ids: &BTreeSet<String>,
         _cry_ids: &BTreeSet<String>,
@@ -6522,6 +6889,7 @@ impl GameDataSet {
         if vblanks == 0 {
             anyhow::bail!("game timer advance requires a nonzero VBlank count");
         }
+        apply_normal_vblank_divider_trace(state, vblanks, normal_divider_trace)?;
         let frames_before = state.time.game_time_frames;
         let seconds_before = state.time.game_time_seconds;
         let minutes_before = state.time.game_time_minutes;
@@ -6809,14 +7177,15 @@ impl GameDataSet {
             RuntimeMutationCommand::ApplyRandomScriptRuntime(command) => {
                 let mut next_state = state.clone();
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
-                let (script_command, outcome) = self.apply_random_script_runtime_command_in_session(
-                    &mut next_state,
-                    session,
-                    &command.command.map_name,
-                    &command.command.source_script,
-                    command.command.command_index,
-                    &mut divider,
-                )?;
+                let (script_command, outcome) = self
+                    .apply_random_script_runtime_command_in_session(
+                        &mut next_state,
+                        session,
+                        &command.command.map_name,
+                        &command.command.source_script,
+                        command.command.command_index,
+                        &mut divider,
+                    )?;
                 require_consumed_divider_trace("apply script random command", &divider)?;
                 *state = next_state;
                 RuntimeMutationResult::ScriptRuntimeApplied(script_command, outcome)
@@ -6891,11 +7260,10 @@ impl GameDataSet {
                         ))
                     }
                     RuntimeScriptRuntimeQueue::MapReentryScript => {
-                        let script = state
-                            .script_runtime
-                            .map_reentry_script
-                            .take()
-                            .context("cannot take map reentry script because none is pending")?;
+                        let script =
+                            state.script_runtime.map_reentry_script.take().context(
+                                "cannot take map reentry script because none is pending",
+                            )?;
                         if let Some(purchase) = state.pending_mom_purchase.as_ref() {
                             let expected = if purchase.decoration_flag.is_some() {
                                 ".DollScript@Mom_GetScriptPointer"
@@ -6965,7 +7333,8 @@ impl GameDataSet {
                             )
                         }
                         RuntimePendingScriptRequestKind::MapLoad => {
-                            let load = state.script_runtime.pending_map_load.take().context(
+                            let load =
+                                state.script_runtime.pending_map_load.take().context(
                                     "cannot take pending map load because none is pending",
                                 )?;
                             RuntimePendingScriptRequest::MapLoad(load)
@@ -7062,9 +7431,13 @@ impl GameDataSet {
                                 "cannot consume map music requested flag because it is not set"
                             );
                         }
-                        let map_music = self.checked_map_music(&session.map.name, music_ids)?;
+                        self.sync_current_map_music(
+                            state,
+                            &session.map.name,
+                            session.player.mode,
+                            music_ids,
+                        )?;
                         state.script_runtime.map_music_requested = false;
-                        apply_map_music_context(state, map_music);
                         RuntimeScriptRuntimeFlagValue::MapMusicRequested
                     }
                     RuntimeScriptRuntimeFlag::WaitingForSoundEffect => {
@@ -7139,15 +7512,6 @@ impl GameDataSet {
                         state.script_runtime.menu_2d_requested = false;
                         RuntimeScriptRuntimeFlagValue::Menu2dRequested
                     }
-                    RuntimeScriptRuntimeFlag::VersionCheckRequested => {
-                        if !state.script_runtime.version_check_requested {
-                            anyhow::bail!(
-                                "cannot consume version-check requested flag because it is not set"
-                            );
-                        }
-                        state.script_runtime.version_check_requested = false;
-                        RuntimeScriptRuntimeFlagValue::VersionCheckRequested
-                    }
                 };
                 RuntimeMutationResult::ScriptRuntimeFlagConsumed(consumed)
             }
@@ -7161,13 +7525,6 @@ impl GameDataSet {
                                     .script_value
                                     .take()
                                     .context("cannot take script value because none is set")?,
-                            )
-                        }
-                        RuntimeScriptRuntimeMemoryValue::LastSpecialRoutine => {
-                            RuntimeScriptRuntimeMemoryValueTaken::LastSpecialRoutine(
-                                state.script_runtime.last_special_routine.take().context(
-                                    "cannot take last special routine because none is set",
-                                )?,
                             )
                         }
                         RuntimeScriptRuntimeMemoryValue::LastTalkedObject => {
@@ -7963,27 +8320,283 @@ impl GameDataSet {
             }
             RuntimeMutationCommand::ResolveActiveBattleTurn(command) => {
                 let mut next_state = state.clone();
-                consume_enemy_ai_divider_trace(
-                    &mut next_state,
-                    &command.enemy_ai_divider_trace,
-                )?;
+                if let Some(item_id) = command.player_bag_item_id.as_deref() {
+                    anyhow::ensure!(
+                        matches!(
+                            &command.player_action,
+                            BattleAction::Item { item_id: action_item_id }
+                                | BattleAction::PartyItem {
+                                    item_id: action_item_id,
+                                    ..
+                                }
+                                if action_item_id == item_id
+                        ),
+                        "recorded player Bag item {item_id} does not match the battle action",
+                    );
+                    self.use_bag_item(&mut next_state, item_id, ItemUseContext::Battle)?;
+                }
+                consume_enemy_ai_divider_trace(&mut next_state, &command.enemy_ai_divider_trace)?;
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
-                let outcome = self.resolve_active_battle_turn_with_divider(
-                    &mut next_state,
-                    command.player_action,
-                    command.enemy_action,
-                    &mut divider,
-                )?;
+                let outcome = if let Some(selected_move_slot) = command.enemy_ai_selected_move_slot
+                {
+                    let enemy_action = command.enemy_action;
+                    let recorded_enemy_action = enemy_action.clone();
+                    let move_random_calls = command.enemy_move_ai_random_calls;
+                    let post_order_random_calls = command.enemy_post_order_ai_random_calls;
+                    let replaying_wild_ai = matches!(
+                        next_state.battle,
+                        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. }
+                    );
+                    let trainer_ai_move_flags = match &next_state.battle {
+                        BattleMemory::Trainer { ai_move_flags, .. } => Some(*ai_move_flags),
+                        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => None,
+                        BattleMemory::Inactive => {
+                            unreachable!("an AI-selected move requires an active battle")
+                        }
+                    };
+                    let trainer_post_context = match &next_state.battle {
+                        BattleMemory::Trainer {
+                            trainer_id,
+                            battle_type,
+                            ai_item_switch_flags,
+                            ..
+                        } => Some((
+                            trainer_id.clone(),
+                            battle_type.clone(),
+                            *ai_item_switch_flags,
+                        )),
+                        BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => None,
+                        BattleMemory::Inactive => {
+                            unreachable!("an AI-selected move requires an active battle")
+                        }
+                    };
+                    let trainer_items_used = std::rc::Rc::new(std::cell::RefCell::new(
+                        next_state
+                            .script_runtime
+                            .active_battle_combat
+                            .as_ref()
+                            .map(|combat| combat.trainer_items_used.clone())
+                            .unwrap_or_default(),
+                    ));
+                    let move_calls_observed = std::rc::Rc::new(std::cell::Cell::new(0_u16));
+                    let move_calls_for_selector = std::rc::Rc::clone(&move_calls_observed);
+                    let mut select_enemy_move = move |combat: &BattleCombatState,
+                                                      rng: &mut dyn BattleRandomSource|
+                          -> std::result::Result<
+                        usize,
+                        BattleTurnError,
+                    > {
+                        struct CountingRandom<'a> {
+                            inner: &'a mut dyn BattleRandomSource,
+                            calls: &'a std::cell::Cell<u16>,
+                            recorded_limit: u16,
+                        }
+                        impl BattleRandomSource for CountingRandom<'_> {
+                            fn battle_random_byte(&mut self) -> u8 {
+                                let call = self.calls.get();
+                                self.calls.set(call.saturating_add(1));
+                                if call >= self.recorded_limit {
+                                    // A forged or stale call count must fail atomically instead of
+                                    // letting an ASM-faithful rejection loop sample forever after
+                                    // the finite replay trace is exhausted. Cycling the four slot
+                                    // residues guarantees the selector terminates; the observed
+                                    // count mismatch below then rejects the command.
+                                    return call.wrapping_sub(self.recorded_limit) as u8 & 3;
+                                }
+                                self.inner.battle_random_byte()
+                            }
+                        }
+                        let mut counting = CountingRandom {
+                            inner: rng,
+                            calls: &move_calls_for_selector,
+                            recorded_limit: move_random_calls,
+                        };
+                        let actual = if let Some(ai_move_flags) = trainer_ai_move_flags {
+                            self.select_trainer_enemy_move_slot(
+                                combat,
+                                ai_move_flags,
+                                &mut counting,
+                            )
+                            .map_err(|error| {
+                                BattleTurnError::EnemyActionSelectionFailed {
+                                    error: format!("recompute trainer enemy move: {error:#}"),
+                                }
+                            })?
+                        } else {
+                            core_select_wild_enemy_move_slot(combat, &mut counting)
+                        };
+                        if actual != selected_move_slot {
+                            let battle_kind = if replaying_wild_ai { "wild" } else { "trainer" };
+                            return Err(BattleTurnError::EnemyActionSelectionFailed {
+                                error: format!(
+                                    "recorded {battle_kind} enemy move slot {selected_move_slot} does not match recomputed slot {actual}"
+                                ),
+                            });
+                        }
+                        Ok(actual)
+                    };
+                    let post_calls_observed = std::rc::Rc::new(std::cell::Cell::new(0_u16));
+                    let post_calls_for_selector = std::rc::Rc::clone(&post_calls_observed);
+                    let used_for_selector = std::rc::Rc::clone(&trainer_items_used);
+                    let mut select_enemy_action = move |combat: &BattleCombatState,
+                                                        rng: &mut dyn BattleRandomSource|
+                          -> std::result::Result<
+                        BattleAction,
+                        BattleTurnError,
+                    > {
+                        if replaying_wild_ai {
+                            let expected = BattleAction::Move {
+                                slot: selected_move_slot,
+                            };
+                            if enemy_action != expected {
+                                return Err(BattleTurnError::EnemyActionSelectionFailed {
+                                    error: format!(
+                                        "recorded wild enemy action {enemy_action:?} does not match recomputed action {expected:?}"
+                                    ),
+                                });
+                            }
+                            Ok(expected)
+                        } else {
+                            struct CountingRandom<'a> {
+                                inner: &'a mut dyn BattleRandomSource,
+                                calls: &'a std::cell::Cell<u16>,
+                                recorded_limit: u16,
+                            }
+                            impl BattleRandomSource for CountingRandom<'_> {
+                                fn battle_random_byte(&mut self) -> u8 {
+                                    let call = self.calls.get();
+                                    self.calls.set(call.saturating_add(1));
+                                    if call >= self.recorded_limit {
+                                        return call.wrapping_sub(self.recorded_limit) as u8 & 3;
+                                    }
+                                    self.inner.battle_random_byte()
+                                }
+                            }
+                            let (trainer_id, battle_type, flags) = trainer_post_context
+                                .as_ref()
+                                .expect("trainer post-order context");
+                            let mut counting = CountingRandom {
+                                inner: rng,
+                                calls: &post_calls_for_selector,
+                                recorded_limit: post_order_random_calls,
+                            };
+                            let actual = self
+                                .select_trainer_post_order_action(
+                                    combat,
+                                    trainer_id,
+                                    battle_type,
+                                    *flags,
+                                    &mut used_for_selector.borrow_mut(),
+                                    selected_move_slot,
+                                    &mut counting,
+                                )
+                                .map_err(|error| BattleTurnError::EnemyActionSelectionFailed {
+                                    error: format!(
+                                        "recompute trainer post-order action: {error:#}"
+                                    ),
+                                })?;
+                            if enemy_action != actual {
+                                return Err(BattleTurnError::EnemyActionSelectionFailed {
+                                    error: format!(
+                                        "recorded trainer enemy action {enemy_action:?} does not match recomputed action {actual:?}"
+                                    ),
+                                });
+                            }
+                            Ok(actual)
+                        }
+                    };
+                    let outcome = if let BattleAction::Ball { item_id } = &command.player_action {
+                        self.resolve_active_battle_ball_turn_with_enemy_ai_actions_with_divider(
+                            &mut next_state,
+                            item_id,
+                            recorded_enemy_action,
+                            &mut divider,
+                            Some((&mut select_enemy_move, &mut select_enemy_action)),
+                        )?
+                        .1
+                    } else {
+                        self.resolve_active_battle_turn_with_enemy_ai_actions_with_divider(
+                            &mut next_state,
+                            command.player_action,
+                            &mut divider,
+                            &mut select_enemy_move,
+                            &mut select_enemy_action,
+                        )?
+                    };
+                    anyhow::ensure!(
+                        move_calls_observed.get() == move_random_calls,
+                        "recorded enemy move AI call count {} does not match recomputed count {}",
+                        move_random_calls,
+                        move_calls_observed.get(),
+                    );
+                    if replaying_wild_ai {
+                        anyhow::ensure!(
+                            post_order_random_calls == 0,
+                            "recorded wild enemy post-order AI call count {} must be zero",
+                            post_order_random_calls,
+                        );
+                    } else {
+                        anyhow::ensure!(
+                            post_calls_observed.get() == post_order_random_calls,
+                            "recorded trainer post-order AI call count {} does not match recomputed count {}",
+                            post_order_random_calls,
+                            post_calls_observed.get(),
+                        );
+                        if let Some(combat) =
+                            next_state.script_runtime.active_battle_combat.as_mut()
+                        {
+                            combat
+                                .trainer_items_used
+                                .extend(trainer_items_used.borrow().iter().cloned());
+                        }
+                    }
+                    outcome
+                } else {
+                    anyhow::ensure!(
+                        command.enemy_move_ai_random_calls == 0,
+                        "enemy action recorded {} move-AI random calls without an AI-selected move",
+                        command.enemy_move_ai_random_calls,
+                    );
+                    anyhow::ensure!(
+                        command.enemy_post_order_ai_random_calls == 0,
+                        "enemy action recorded {} post-order AI random calls without an AI-selected move",
+                        command.enemy_post_order_ai_random_calls,
+                    );
+                    if let BattleAction::Ball { item_id } = &command.player_action {
+                        self.resolve_active_battle_ball_turn_with_enemy_ai_actions_with_divider(
+                            &mut next_state,
+                            item_id,
+                            command.enemy_action,
+                            &mut divider,
+                            None,
+                        )?
+                        .1
+                    } else {
+                        self.resolve_active_battle_turn_with_divider(
+                            &mut next_state,
+                            command.player_action,
+                            command.enemy_action,
+                            &mut divider,
+                        )?
+                    }
+                };
                 require_consumed_divider_trace("resolve active battle turn", &divider)?;
                 *state = next_state;
                 RuntimeMutationResult::ActiveBattleTurnResolved(outcome)
             }
             RuntimeMutationCommand::ResolveActiveBattleCommand(command) => {
                 let mut next_state = state.clone();
-                consume_enemy_ai_divider_trace(
-                    &mut next_state,
-                    &command.enemy_ai_divider_trace,
-                )?;
+                anyhow::ensure!(
+                    command.player_bag_item_id.is_none(),
+                    "battle command cannot consume a player Bag item",
+                );
+                anyhow::ensure!(
+                    command.enemy_ai_selected_move_slot.is_none()
+                        && command.enemy_move_ai_random_calls == 0
+                        && command.enemy_post_order_ai_random_calls == 0,
+                    "battle command cannot carry turn-only enemy AI selection state",
+                );
+                consume_enemy_ai_divider_trace(&mut next_state, &command.enemy_ai_divider_trace)?;
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
                 let outcome = self.resolve_active_battle_command_with_divider(
                     &mut next_state,
@@ -7997,10 +8610,7 @@ impl GameDataSet {
             }
             RuntimeMutationCommand::ResolveActiveBattleEnemyAction(command) => {
                 let mut next_state = state.clone();
-                consume_enemy_ai_divider_trace(
-                    &mut next_state,
-                    &command.enemy_ai_divider_trace,
-                )?;
+                consume_enemy_ai_divider_trace(&mut next_state, &command.enemy_ai_divider_trace)?;
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
                 let outcome = self.resolve_active_battle_enemy_action_with_divider(
                     &mut next_state,
@@ -8014,18 +8624,15 @@ impl GameDataSet {
             RuntimeMutationCommand::AttemptEscapeActiveWildBattle(command) => {
                 let mut next_state = state.clone();
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
-                let outcome = self.resolve_active_wild_battle_run_with_divider(
-                    &mut next_state,
-                    &mut divider,
-                )?;
+                let outcome = self
+                    .resolve_active_wild_battle_run_with_divider(&mut next_state, &mut divider)?;
                 require_consumed_divider_trace("attempt active wild battle escape", &divider)?;
                 *state = next_state;
                 RuntimeMutationResult::ActiveWildBattleEscapeAttempted(outcome)
             }
             RuntimeMutationCommand::UseBagItemToEscapeActiveWildBattle(command) => {
                 let mut next_state = state.clone();
-                let mut divider =
-                    ReplayDivider::new(command.divider_trace.samples.iter().copied());
+                let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
                 let outcome = self.use_bag_item_to_escape_active_wild_battle_with_divider(
                     &mut next_state,
                     &command.item_id,
@@ -8089,6 +8696,11 @@ impl GameDataSet {
                 if command.vblanks == 0 {
                     anyhow::bail!("game timer advance requires a nonzero VBlank count");
                 }
+                apply_normal_vblank_divider_trace(
+                    state,
+                    command.vblanks,
+                    &command.normal_divider_trace,
+                )?;
                 let frames_before = state.time.game_time_frames;
                 let seconds_before = state.time.game_time_seconds;
                 let minutes_before = state.time.game_time_minutes;
@@ -8202,26 +8814,10 @@ impl GameDataSet {
                     RuntimeDayCareCaretaker::Man => "DayCareMan",
                     RuntimeDayCareCaretaker::Lady => "DayCareLady",
                 };
-                let action = runtime_day_care_action_name(command.action);
-                let party_slot = runtime_day_care_party_slot(&command)?;
+                let input = runtime_day_care_input(&command)?;
                 let mut next_state = state.clone();
-                next_state
-                    .script_runtime
-                    .variables
-                    .insert("_day_care_action".to_string(), action.to_string());
-                match party_slot {
-                    Some(party_slot) => {
-                        next_state
-                            .script_runtime
-                            .variables
-                            .insert("_party_slot".to_string(), party_slot.to_string());
-                    }
-                    None => {
-                        next_state.script_runtime.variables.remove("_party_slot");
-                    }
-                }
-                let mut divider =
-                    ReplayDivider::new(command.divider_trace.samples.iter().copied());
+                next_state.script_runtime.pending_day_care_input = Some(input);
+                let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
                 let outcome = self.apply_random_special_routine(
                     &mut next_state,
                     routine,
@@ -8358,33 +8954,33 @@ impl GameDataSet {
                 let mut next_state = state.clone();
                 let outcome = match command {
                     RuntimeShuckieCommand::Give { divider_trace } => {
-                    let mut divider = ReplayDivider::new(divider_trace.samples.iter().copied());
-                    let outcome = self.apply_random_special_routine(
-                        &mut next_state,
+                        let mut divider = ReplayDivider::new(divider_trace.samples.iter().copied());
+                        let outcome = self.apply_random_special_routine(
+                            &mut next_state,
                             "GiveShuckle",
-                        music_ids,
-                        &mut divider,
-                    )?;
-                    require_consumed_divider_trace("use Shuckie give", &divider)?;
-                    outcome
+                            music_ids,
+                            &mut divider,
+                        )?;
+                        require_consumed_divider_trace("use Shuckie give", &divider)?;
+                        outcome
                     }
                     RuntimeShuckieCommand::Return { party_index } => {
                         match party_index {
                             Some(party_index) => {
-                                next_state.script_runtime.variables.insert(
-                                    "_selection_cancelled".to_string(),
-                                    "0".to_string(),
-                                );
+                                next_state
+                                    .script_runtime
+                                    .variables
+                                    .insert("_selection_cancelled".to_string(), "0".to_string());
                                 next_state.script_runtime.variables.insert(
                                     "_selected_party_index".to_string(),
                                     party_index.to_string(),
                                 );
                             }
                             None => {
-                                next_state.script_runtime.variables.insert(
-                                    "_selection_cancelled".to_string(),
-                                    "1".to_string(),
-                                );
+                                next_state
+                                    .script_runtime
+                                    .variables
+                                    .insert("_selection_cancelled".to_string(), "1".to_string());
                                 next_state
                                     .script_runtime
                                     .variables
@@ -9049,10 +9645,6 @@ impl GameDataSet {
                         |next_state| {
                             next_state.link_session.serial_connection_status =
                                 command.serial_connection_status;
-                            next_state.script_runtime.variables.insert(
-                                "_link_friend_ready".to_string(),
-                                u8::from(command.ready).to_string(),
-                            );
                             Ok(())
                         },
                     )?,
@@ -9067,10 +9659,6 @@ impl GameDataSet {
                         |next_state| {
                             next_state.link_session.serial_connection_status =
                                 command.serial_connection_status;
-                            next_state.script_runtime.variables.insert(
-                                "_link_timeout".to_string(),
-                                u8::from(command.timeout).to_string(),
-                            );
                             next_state.script_runtime.variables.insert(
                                 "_other_player_link_mode".to_string(),
                                 command.other_player_link_mode.to_string(),
@@ -9225,7 +9813,12 @@ impl GameDataSet {
                     .with_context(|| {
                         format!("party index {} has no Pokemon", command.party_index)
                     })?;
-                if state.storage.party.pokemon.iter().flatten().count() <= 1 {
+                let nuzlocke_dead =
+                    crate::nuzlocke::allows_party_storage_without_usable_replacement(
+                        self.nuzlocke_rules,
+                        pokemon,
+                    );
+                if state.storage.party.pokemon.iter().flatten().count() <= 1 && !nuzlocke_dead {
                     anyhow::bail!("cannot deposit the last party Pokemon");
                 }
                 if pokemon
@@ -9235,7 +9828,8 @@ impl GameDataSet {
                 {
                     anyhow::bail!("cannot deposit a Pokemon holding mail");
                 }
-                if !state
+                if !nuzlocke_dead
+                    && !state
                     .storage
                     .party
                     .pokemon
@@ -9306,7 +9900,7 @@ impl GameDataSet {
                     .with_context(|| {
                         format!("box slot {} has no Pokemon to release", command.box_slot)
                     })?;
-                if pokemon.is_egg || pokemon.species.id.trim().eq_ignore_ascii_case("EGG") {
+                if pokemon.is_egg {
                     anyhow::bail!("cannot release an Egg");
                 }
                 if pokemon
@@ -9341,11 +9935,17 @@ impl GameDataSet {
                             .is_some_and(crystal_core::models::item::is_mail_item_id)
                         {
                             anyhow::bail!("cannot move a party Pokemon holding mail");
-                    }
-                        if staged.storage.party.filled_slots() <= 1 {
+                        }
+                        let nuzlocke_dead =
+                            crate::nuzlocke::allows_party_storage_without_usable_replacement(
+                                self.nuzlocke_rules,
+                                selected,
+                            );
+                        if staged.storage.party.filled_slots() <= 1 && !nuzlocke_dead {
                             anyhow::bail!("cannot move the last party Pokemon");
-                }
-                        if !staged.storage.party.pokemon.iter().enumerate().any(
+                        }
+                        if !nuzlocke_dead
+                            && !staged.storage.party.pokemon.iter().enumerate().any(
                             |(index, candidate)| {
                                 index != slot
                                     && candidate
@@ -9354,15 +9954,15 @@ impl GameDataSet {
                             },
                         ) {
                             anyhow::bail!("cannot move the last usable party Pokemon");
-                }
+                        }
                         take_party_pokemon_compact(&mut staged, slot)
                             .context("remove party Pokemon for PC move")?
-                }
+                    }
                     RuntimePokemonStorageLocation::Box { box_index, slot } => {
                         staged.storage.pc_boxes[box_index]
                             .remove_pokemon(slot)
                             .map_err(anyhow::Error::msg)?
-                }
+                    }
                 };
 
                 let adjusted_target = adjust_pc_move_target_after_removal(&command.source, target);
@@ -9370,7 +9970,7 @@ impl GameDataSet {
                     RuntimePokemonStorageLocation::Party { slot } => {
                         insert_party_pokemon(&mut staged.storage.party, slot, pokemon)?;
                         staged.sync_party_from_storage();
-                }
+                    }
                     RuntimePokemonStorageLocation::Box { box_index, slot } => {
                         restore_deposited_pokemon_pp(&self.moves, &mut pokemon)?;
                         staged.storage.pc_boxes[box_index]
@@ -9583,9 +10183,7 @@ impl GameDataSet {
                         .chars()
                         .any(|character| character.is_control() && character != '\n')
                 {
-                    anyhow::bail!(
-                        "Mail message must contain at most two 16-character lines"
-                    );
+                    anyhow::bail!("Mail message must contain at most two 16-character lines");
                 }
                 let target = staged_state
                     .storage
@@ -9599,7 +10197,7 @@ impl GameDataSet {
                     .with_context(|| {
                         format!("party index {} has no Pokemon", command.party_index)
                     })?;
-                if target.is_egg || target.species.id == "EGG" {
+                if target.is_egg {
                     anyhow::bail!("Mail cannot be attached to an Egg");
                 }
                 if target.mail.is_some() {
@@ -10029,12 +10627,10 @@ impl GameDataSet {
                 }
                 let before = state.radio_tuning_knob;
                 state.radio_tuning_knob = command.tuning_knob;
-                RuntimeMutationResult::PokegearRadioTuningSet(
-                    RuntimePokegearRadioTuningOutcome {
-                        tuning_knob_before: before,
-                        tuning_knob_after: state.radio_tuning_knob,
-                    },
-                )
+                RuntimeMutationResult::PokegearRadioTuningSet(RuntimePokegearRadioTuningOutcome {
+                    tuning_knob_before: before,
+                    tuning_knob_after: state.radio_tuning_knob,
+                })
             }
             RuntimeMutationCommand::SetTrainerIdentity(command) => {
                 let before_name = state.player_name.clone();
@@ -10096,23 +10692,32 @@ impl GameDataSet {
                             .get_mut(*slot)
                             .with_context(|| format!("party index {slot} is outside party"))?
                             .as_mut()
-                            .with_context(|| format!("party index {slot} has no Pokemon to rename"))?;
+                            .with_context(|| {
+                                format!("party index {slot} has no Pokemon to rename")
+                            })?;
                         let before = pokemon.nickname.clone();
                         pokemon.nickname = command.nickname;
                         (pokemon.species.id.clone(), before, pokemon.nickname.clone())
                     }
                     crystal_core::models::CaptureStorageLocation::Pc { box_index, slot } => {
-                        let pc_box = state
-                            .storage
-                            .pc_boxes
-                            .get_mut(*box_index)
-                            .with_context(|| format!("PC box index {box_index} is outside storage"))?;
+                        let pc_box =
+                            state
+                                .storage
+                                .pc_boxes
+                                .get_mut(*box_index)
+                                .with_context(|| {
+                                    format!("PC box index {box_index} is outside storage")
+                                })?;
                         let mut pokemon = pc_box
                             .pokemon
                             .get(*slot)
-                            .with_context(|| format!("PC box {box_index} slot {slot} is outside box"))?
+                            .with_context(|| {
+                                format!("PC box {box_index} slot {slot} is outside box")
+                            })?
                             .clone()
-                            .with_context(|| format!("PC box {box_index} slot {slot} has no Pokemon to rename"))?;
+                            .with_context(|| {
+                                format!("PC box {box_index} slot {slot} has no Pokemon to rename")
+                            })?;
                         let before = pokemon.nickname.clone();
                         pokemon.nickname = command.nickname;
                         let species_id = pokemon.species.id.clone();
@@ -10155,6 +10760,9 @@ impl GameDataSet {
                 let status_before = pokemon.status.clone();
                 let first_move = pokemon.moves.first().map(|learned| learned.name.clone());
                 let first_move_pp_before = pokemon.moves.first().map(|learned| learned.current_pp);
+                if self.nuzlocke_rules.permadeath && pokemon.hp == 0 && command.hp > 0 {
+                    anyhow::bail!("Nuzlocke permadeath prevents restoring a fainted Pokemon");
+                }
                 pokemon.hp = command.hp.min(pokemon.max_hp);
                 pokemon.status = command.status;
                 if let (Some(learned), Some(pp)) =
@@ -10225,8 +10833,8 @@ impl GameDataSet {
                             .context("party HP transfer target slot is empty")?,
                     )
                 };
-                let source_is_egg = source.is_egg || source.species.id == "EGG";
-                let target_is_egg = target.is_egg || target.species.id == "EGG";
+                let source_is_egg = source.is_egg;
+                let target_is_egg = target.is_egg;
                 if source_is_egg || target_is_egg {
                     anyhow::bail!("party HP transfer cannot use an Egg");
                 }
@@ -10381,7 +10989,12 @@ impl GameDataSet {
                 }
             }
             RuntimeMutationCommand::FullHealPartyPokemon(command) => {
-                let recovered = full_heal_party_slot(state, &self.moves, command.party_index)?;
+                let recovered = full_heal_party_slot(
+                    state,
+                    &self.moves,
+                    command.party_index,
+                    self.nuzlocke_rules,
+                )?;
                 RuntimeMutationResult::PartyPokemonFullHealed(recovered)
             }
             RuntimeMutationCommand::FullHealWholeParty => {
@@ -10389,18 +11002,27 @@ impl GameDataSet {
                 for party_index in 0..state.storage.party.pokemon.len() {
                     if state.storage.party.pokemon[party_index]
                         .as_ref()
-                        .is_some_and(|pokemon| !pokemon.is_egg && pokemon.species.id != "EGG")
+                        .is_some_and(|pokemon| !pokemon.is_egg)
                     {
-                        recovered.push(full_heal_party_slot(state, &self.moves, party_index)?);
+                        recovered.push(full_heal_party_slot(
+                            state,
+                            &self.moves,
+                            party_index,
+                            self.nuzlocke_rules,
+                        )?);
                     }
                 }
                 RuntimeMutationResult::WholePartyFullHealed(recovered)
             }
             RuntimeMutationCommand::ResolveBlackoutToLastSpawn => {
                 anyhow::ensure!(
-                    !state.storage.party.pokemon.iter().flatten().any(|pokemon| {
-                        !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0
-                    }),
+                    !state
+                        .storage
+                        .party
+                        .pokemon
+                        .iter()
+                        .flatten()
+                        .any(|pokemon| { !pokemon.is_egg && pokemon.hp > 0 }),
                     "blackout requires every usable party Pokemon to be fainted"
                 );
                 anyhow::ensure!(
@@ -10413,22 +11035,27 @@ impl GameDataSet {
                     state.battle_result
                 );
                 if let Some(pending) = state.pending_static_wild_terminal.as_ref() {
-                        anyhow::ensure!(
-                            pending.battle_result & 0x3f == 1,
-                            "blackout cannot consume static-wild terminal result {:#04x}",
-                            pending.battle_result
-                        );
+                    anyhow::ensure!(
+                        pending.battle_result & 0x3f == 1,
+                        "blackout cannot consume static-wild terminal result {:#04x}",
+                        pending.battle_result
+                    );
                 }
                 let heal_indexes = (0..state.storage.party.pokemon.len())
                     .filter(|party_index| {
                         state.storage.party.pokemon[*party_index]
                             .as_ref()
-                            .is_some_and(|pokemon| !pokemon.is_egg && pokemon.species.id != "EGG")
+                            .is_some_and(|pokemon| !pokemon.is_egg)
                     })
                     .collect::<Vec<_>>();
                 let mut healed = Vec::new();
                 for party_index in heal_indexes {
-                    healed.push(full_heal_party_slot(state, &self.moves, party_index)?);
+                    healed.push(full_heal_party_slot(
+                        state,
+                        &self.moves,
+                        party_index,
+                        self.nuzlocke_rules,
+                    )?);
                 }
                 let bug_contest_active = state
                     .flags
@@ -10619,9 +11246,21 @@ impl GameDataSet {
         mode: MovementMode,
         music_ids: &BTreeSet<String>,
     ) -> Result<()> {
+        let bug_contest_ranking = matches!(mode, MovementMode::Normal | MovementMode::Skate)
+            && matches!(
+                map_name,
+                "Route35NationalParkGate" | "Route36NationalParkGate"
+            )
+            && state
+                .flags
+                .is_engine_flag_set("ENGINE_BUG_CONTEST_TIMER")
+                .map_err(|error| anyhow::anyhow!("read Bug Contest timer flag: {error}"))?;
         let music = match mode {
             MovementMode::Bike => Some("MUSIC_BICYCLE".to_string()),
             MovementMode::Surf | MovementMode::SurfPika => Some("MUSIC_SURF".to_string()),
+            MovementMode::Normal | MovementMode::Skate if bug_contest_ranking => {
+                Some("MUSIC_BUG_CATCHING_CONTEST_RANKING".to_string())
+            }
             MovementMode::Normal | MovementMode::Skate => {
                 self.checked_map_music(map_name, music_ids)?
             }
@@ -10749,6 +11388,13 @@ impl GameDataSet {
         apply_state_block_overrides(session, state).context("sync map block callback overrides")?;
         sync_state_object_overrides(state, session)
             .context("sync map object callback overrides")?;
+        // MAPSETUP_RELOADMAP ends in ForceMapMusic, whose TryRestartMapMusic
+        // branch consumes wDontPlayMapMusicOnReload by stopping music and
+        // clearing wMapMusic instead of restarting it.
+        if map_setup == "MAPSETUP_RELOADMAP" && state.script_runtime.map_music_restart_disabled {
+            state.script_runtime.current_music = None;
+            state.script_runtime.map_music_restart_disabled = false;
+        }
         Ok(())
     }
 
@@ -10848,7 +11494,7 @@ impl GameDataSet {
                         Some(if outcome.held { "1" } else { "0" }.to_string());
                     command_index += 1;
                 }
-                "checkscene" | "setscene" => {
+                "checkscene" | "checkmapscene" | "setscene" => {
                     self.apply_script_scene_command_in_session(
                         state,
                         session,
@@ -10933,7 +11579,7 @@ impl GameDataSet {
                     command_index += 1;
                 }
                 "appear" | "disappear" | "moveobject" | "turnobject" | "faceobject"
-                | "faceplayer" | "follow" | "stopfollow" | "showemote" => {
+                | "faceplayer" | "follow" | "follownotexact" | "stopfollow" | "showemote" => {
                     let object = self
                         .script_object_command(map_name, source, command_index)?
                         .clone();
@@ -10943,7 +11589,7 @@ impl GameDataSet {
                     command_index += 1;
                 }
                 "iftrue" | "iffalse" | "ifequal" | "ifnotequal" | "ifgreater" | "ifless"
-                | "sjump" | "jumpstd" | "scall" | "sdefer" | "endcallback" | "end" => {
+                | "sjump" | "jumpstd" | "callstd" | "scall" | "sdefer" | "endcallback" | "end" => {
                     let action = self.apply_script_control_command_in_session(
                         state,
                         session,
@@ -11188,6 +11834,7 @@ impl GameDataSet {
         session.player.mode = mode;
         self.sync_current_map_music(state, destination_map, mode, music_ids)?;
         self.sync_current_map_scene(state, destination_map)?;
+        self.init_map_name_sign(state, destination_map)?;
         self.apply_map_setup_callbacks(state, session, destination_map, map_setup)?;
         let callback_mode = self.map_entry_movement_mode(state, session, session.player.mode)?;
         if callback_mode != session.player.mode {
@@ -11203,19 +11850,25 @@ impl GameDataSet {
         spawn: &RuntimeSpawnPoint,
         music_ids: &BTreeSet<String>,
     ) -> Result<(GameState, OverworldSession)> {
+        self.start_overworld_session_from_new_game_state(
+            spawn,
+            GameState::reset_wram_for_new_game(),
+            music_ids,
+        )
+    }
+
+    /// Completes the asset-derived portion of NewGame after core has executed
+    /// ResetWRAM against the title session's retained hardware RNG and SRAM
+    /// values.
+    pub fn start_overworld_session_from_new_game_state(
+        &self,
+        spawn: &RuntimeSpawnPoint,
+        mut state: GameState,
+        music_ids: &BTreeSet<String>,
+    ) -> Result<(GameState, OverworldSession)> {
         let spawn_tile = runtime_spawn_expected_tile(spawn);
         let mut overworld = self.overworld_session(&spawn.map_name, spawn_tile, 0)?;
-        let mut state = GameState::reset_wram_for_new_game();
-        self.initialize_new_game_money(&mut state)?;
-        state.roaming_pokemon = crystal_core::systems::roaming::initialize_world_roaming_slots(
-            &self.roaming_pokemon,
-            &state.roaming_pokemon,
-        )
-        .map_err(|error| anyhow::anyhow!("initialize new-game roaming state: {error}"))?;
-        state.wild_encounter_cooldown = 5;
-        state.bag.tm_hm = initial_tmhm_flags(&self.items);
-        apply_initialize_events(&mut state, &self.initialize_events)
-            .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        self.initialize_new_game_state(&mut state)?;
         initialize_loaded_object_roster(&mut overworld, &state);
         self.commit_overworld_snapshot(
             &mut state,
@@ -11227,12 +11880,8 @@ impl GameDataSet {
             self.map_entry_movement_mode(&state, &overworld, overworld.player.mode)?;
         self.sync_current_map_music(&mut state, &map_name, overworld.player.mode, music_ids)?;
         self.sync_current_map_scene(&mut state, &map_name)?;
-        self.apply_map_setup_callbacks(
-            &mut state,
-            &mut overworld,
-            &map_name,
-            "MAPSETUP_WARP",
-        )?;
+        self.init_map_name_sign(&mut state, &map_name)?;
+        self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_WARP")?;
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
@@ -11251,15 +11900,7 @@ impl GameDataSet {
     ) -> Result<(GameState, OverworldSession)> {
         let mut overworld = self.overworld_session(map_name, tile, 0)?;
         let mut state = GameState::reset_wram_for_new_game();
-        self.initialize_new_game_money(&mut state)?;
-        state.roaming_pokemon = crystal_core::systems::roaming::initialize_world_roaming_slots(
-            &self.roaming_pokemon,
-            &state.roaming_pokemon,
-        )
-        .map_err(|error| anyhow::anyhow!("initialize test roaming state: {error}"))?;
-        state.bag.tm_hm = initial_tmhm_flags(&self.items);
-        apply_initialize_events(&mut state, &self.initialize_events)
-            .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
+        self.initialize_new_game_state(&mut state)?;
         initialize_loaded_object_roster(&mut overworld, &state);
         // The location tester may enter any map before ordinary story scripts
         // have first written that map's WRAM bytes. A real new game reaches
@@ -11283,12 +11924,8 @@ impl GameDataSet {
             self.map_entry_movement_mode(&state, &overworld, overworld.player.mode)?;
         self.sync_current_map_music(&mut state, &map_name, overworld.player.mode, music_ids)?;
         self.sync_current_map_scene(&mut state, &map_name)?;
-        self.apply_map_setup_callbacks(
-            &mut state,
-            &mut overworld,
-            &map_name,
-            "MAPSETUP_WARP",
-        )?;
+        self.init_map_name_sign(&mut state, &map_name)?;
+        self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_WARP")?;
         self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
         overworld.set_time_of_day(state.time.time_of_day);
         Ok((state, overworld))
@@ -11305,6 +11942,38 @@ impl GameDataSet {
             .0
             .get("MOM_MONEY")
             .context("compiled currency constants missing MOM_MONEY")?;
+        Ok(())
+    }
+
+    fn initialize_new_game_state(&self, state: &mut GameState) -> Result<()> {
+        self.initialize_new_game_money(state)?;
+        state.map_name_sign.previous_landmark = self.landmark_byte("LANDMARK_NEW_BARK_TOWN")?;
+        crystal_core::systems::map_name_sign::force_hide_next_map_name_sign(
+            &mut state.map_name_sign,
+        );
+        state.roaming_pokemon = crystal_core::systems::roaming::initialize_world_roaming_slots(
+            &self.roaming_pokemon,
+            &state.roaming_pokemon,
+        )
+        .map_err(|error| anyhow::anyhow!("initialize new-game roaming state: {error}"))?;
+        state.wild_encounter_cooldown = 5;
+        state.bag.tm_hm = initial_tmhm_flags(&self.items);
+        // InitializeNPCNames copies four fixed NAME_LENGTH strings before
+        // InitializeWorld. Keep all four WRAM names authoritative even where
+        // only the rival currently has a later naming screen.
+        for (variable, name) in [
+            ("_rival_name", "???"),
+            ("_moms_name", "MOM"),
+            ("_reds_name", "RED"),
+            ("_greens_name", "GREEN"),
+        ] {
+            state
+                .script_runtime
+                .variables
+                .insert(variable.to_string(), name.to_string());
+        }
+        apply_initialize_events(state, &self.initialize_events)
+            .map_err(|error| anyhow::anyhow!("apply initialize events: {error}"))?;
         Ok(())
     }
 
@@ -11327,17 +11996,16 @@ impl GameDataSet {
         overworld.player.facing = facing;
         overworld.player.mode = mode;
         initialize_loaded_object_roster(&mut overworld, &state);
+        crystal_core::systems::map_name_sign::force_hide_next_map_name_sign(
+            &mut state.map_name_sign,
+        );
         self.apply_saved_overworld_overrides(&mut overworld, &state)?;
         let mode = self.map_entry_movement_mode(&state, &overworld, mode)?;
         overworld.player.mode = mode;
         self.sync_current_map_music(&mut state, &map_name, mode, music_ids)?;
         self.sync_current_map_scene(&mut state, &map_name)?;
-        self.apply_map_setup_callbacks(
-            &mut state,
-            &mut overworld,
-            &map_name,
-            "MAPSETUP_CONTINUE",
-        )?;
+        self.init_map_name_sign(&mut state, &map_name)?;
+        self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_CONTINUE")?;
         self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
         overworld.set_time_of_day(state.time.time_of_day);
         if let Some(music) = state.script_runtime.current_music.as_deref() {
@@ -11369,6 +12037,7 @@ impl GameDataSet {
         let input_candidate = JoypadState::compute_mask(buttons);
         let mut staged_state = state.clone();
         let mut staged_session = session.clone();
+        crystal_core::systems::map_name_sign::place_map_name_sign(&mut staged_state.map_name_sign);
         let mut rng = CrystalRandom::new(staged_state.random_state, &mut *divider);
         // This transactional path intentionally stages full state/session
         // clones so every divider failure is atomic. A later VBlank/object
@@ -11868,13 +12537,12 @@ impl GameDataSet {
                                 &staged_session.map.name,
                             )?;
                             if phone_call.is_none() {
-                                step_events = Some(
-                                    self.process_overworld_step(
-                                        &mut staged_state,
-                                        &staged_session.map.name,
-                                        &mut rng,
-                                    )?,
-                                );
+                                step_events = Some(self.process_overworld_step(
+                                    &mut staged_state,
+                                    &staged_session.map.name,
+                                    staged_session.player.mode,
+                                    &mut rng,
+                                )?);
                                 let count_step_completed =
                                     step_events.as_ref().is_some_and(|events| {
                                         events.repel_expired.is_none()
@@ -11971,12 +12639,6 @@ impl GameDataSet {
             if has_autonomous_object {
                 staged_session
                     .advance_autonomous_objects_exact(&mut rng)
-                    .map_err(|error| {
-                        anyhow::anyhow!("advance autonomous overworld objects: {error}")
-                    })?;
-            } else {
-                staged_session
-                    .advance_autonomous_objects()
                     .map_err(|error| {
                         anyhow::anyhow!("advance autonomous overworld objects: {error}")
                     })?;
@@ -12149,24 +12811,40 @@ impl GameDataSet {
         &self,
         state: &mut GameState,
         routine: &str,
-        music_ids: &BTreeSet<String>,
+        _music_ids: &BTreeSet<String>,
     ) -> Result<SpecialRoutineOutcome> {
         self.require_special_routine(routine)?;
-        if routine == "FadeOutMusic" {
-            core_validate_saved_audio_reference(
-                "special_routines.FadeOutMusic",
-                "MUSIC_NONE",
-                ModpackAudioKind::Music.save_name(),
-                music_ids
-                    .contains("MUSIC_NONE")
-                    .then_some(ModpackAudioKind::Music.save_name()),
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        }
+        let fainted_slots = (self.nuzlocke_rules.permadeath
+            && matches!(routine, "HealParty" | "BattleTowerBattle"))
+            .then(|| {
+                state
+                    .storage
+                    .party
+                    .pokemon
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, pokemon)| {
+                        pokemon.as_ref().is_some_and(|pokemon| pokemon.hp == 0).then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let cry_by_species = self.cry_by_species();
         let context = self.special_routine_context(&cry_by_species);
-        apply_special_routine_with_context(state, context, routine)
-            .map_err(|error| anyhow::anyhow!("apply special routine {routine}: {error}"))
+        let mut outcome = apply_special_routine_with_context(state, context, routine)
+            .map_err(|error| anyhow::anyhow!("apply special routine {routine}: {error}"))?;
+        if !fainted_slots.is_empty() {
+            for party_index in &fainted_slots {
+                if let Some(Some(pokemon)) = state.storage.party.pokemon.get_mut(*party_index) {
+                    pokemon.hp = 0;
+                }
+            }
+            if let SpecialRoutineEffect::HealParty { healed_slots } = &mut outcome.effect {
+                healed_slots.retain(|index| !fainted_slots.contains(index));
+            }
+            state.sync_party_from_storage();
+        }
+        Ok(outcome)
     }
 
     pub fn apply_random_special_routine<S>(
@@ -12181,13 +12859,40 @@ impl GameDataSet {
         S::Error: std::fmt::Display,
     {
         self.require_special_routine(routine)?;
+        if self.nuzlocke_rules.permadeath
+            && matches!(routine, "DayCareMan" | "DayCareLady")
+            && let Some(DayCareInput::Deposit { party_slot }) =
+                state.script_runtime.pending_day_care_input.as_ref()
+        {
+            let pokemon = state
+                .storage
+                .party
+                .pokemon
+                .get(*party_slot)
+                .and_then(Option::as_ref)
+                .with_context(|| {
+                    format!("Nuzlocke Day Care deposit party slot {party_slot} is empty")
+                })?;
+            crate::nuzlocke::ensure_can_restore_hp(self.nuzlocke_rules, pokemon)
+                .context("Nuzlocke permadeath forbids depositing a fainted Pokemon")?;
+        }
         if !runtime_special_routine_requires_divider_trace(routine) {
             anyhow::bail!("special routine {routine} does not use the exact divider boundary");
         }
         let cry_by_species = self.cry_by_species();
         let context = self.special_routine_context(&cry_by_species);
-        apply_random_special_routine_with_context(state, context, routine, divider)
-            .map_err(|error| anyhow::anyhow!("apply random special routine {routine}: {error}"))
+        let mut next = state.clone();
+        let egg_before = next.day_care.egg.clone();
+        let outcome =
+            apply_random_special_routine_with_context(&mut next, context, routine, divider)
+                .map_err(|error| {
+                    anyhow::anyhow!("apply random special routine {routine}: {error}")
+                })?;
+        if next.day_care.egg != egg_before {
+            self.normalize_day_care_egg_species(&mut next)?;
+        }
+        *state = next;
+        Ok(outcome)
     }
 
     pub fn apply_internal_special_routine(
@@ -12248,10 +12953,7 @@ impl GameDataSet {
                 i32::from(rules.challenge_streak_length),
             );
             if let Ok(required_party_count) = i32::try_from(rules.required_party_count) {
-                constants.insert(
-                    "BATTLETOWER_PARTY_LENGTH".to_string(),
-                    required_party_count,
-                );
+                constants.insert("BATTLETOWER_PARTY_LENGTH".to_string(), required_party_count);
             }
             constants.extend(
                 rules
@@ -12297,12 +12999,8 @@ impl GameDataSet {
             ITEM_POCKET_ITEM,
         )
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-        validate_saved_pc_item_references(
-            &self.items,
-            "bag.pc_items",
-            &bag.pc_items,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        validate_saved_pc_item_references(&self.items, "bag.pc_items", &bag.pc_items)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         validate_saved_bag_pocket_references(
             &self.items,
             "bag.balls",
@@ -12352,8 +13050,7 @@ impl GameDataSet {
                     .as_ref()
                     .is_some_and(|script| matches!(
                         script.script.as_str(),
-                        ".ItemScript@Mom_GetScriptPointer"
-                            | ".DollScript@Mom_GetScriptPointer"
+                        ".ItemScript@Mom_GetScriptPointer" | ".DollScript@Mom_GetScriptPointer"
                     )),
                 "saved Mom result map reentry script requires a pending Mom purchase"
             );
@@ -12410,7 +13107,10 @@ impl GameDataSet {
         match rule.kind {
             MomPurchaseKind::Item => {
                 let item = self.items.get(&rule.target).with_context(|| {
-                    format!("saved pending Mom item {} is missing from compiled pack", rule.target)
+                    format!(
+                        "saved pending Mom item {} is missing from compiled pack",
+                        rule.target
+                    )
                 })?;
                 anyhow::ensure!(
                     state.bag.pc_item_quantity(item) > 0,
@@ -12420,12 +13120,16 @@ impl GameDataSet {
             }
             MomPurchaseKind::Doll => {
                 let flag = rule.decoration_flag.as_deref().with_context(|| {
-                    format!("saved pending Mom doll {} lacks a decoration flag", rule.target)
+                    format!(
+                        "saved pending Mom doll {} lacks a decoration flag",
+                        rule.target
+                    )
                 })?;
                 anyhow::ensure!(
-                    state.flags.is_event_flag_set(flag).with_context(|| format!(
-                        "read saved pending Mom doll flag {flag}"
-                    ))?,
+                    state
+                        .flags
+                        .is_event_flag_set(flag)
+                        .with_context(|| format!("read saved pending Mom doll flag {flag}"))?,
                     "saved pending Mom doll flag {flag} is not set"
                 );
             }
@@ -12517,14 +13221,10 @@ impl GameDataSet {
     }
 
     pub fn validate_saved_day_care_references(&self, day_care: &DayCareState) -> Result<()> {
-        core_validate_saved_day_care_references(
-            day_care,
-            |path, pokemon| {
-                self.validate_saved_pokemon_reference(path, pokemon)
-                    .map_err(|error| error.to_string())
-            },
-            |species| self.saved_species_exists(species),
-        )
+        core_validate_saved_day_care_references(day_care, |path, pokemon| {
+            self.validate_saved_pokemon_reference(path, pokemon)
+                .map_err(|error| error.to_string())
+        })
         .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
@@ -12635,20 +13335,7 @@ impl GameDataSet {
                 )?;
             }
         }
-        if let Some(sprite_id) = &tower.last_sprite_constant {
-            self.validate_saved_sprite_reference("battle_tower.last_sprite_constant", sprite_id)?;
-        }
         Ok(())
-    }
-
-    pub fn validate_saved_link_session_references(
-        &self,
-        link_session: &LinkSessionState,
-    ) -> Result<()> {
-        core_validate_saved_link_session_references(link_session, |room| {
-            self.saved_special_routine_exists(room)
-        })
-        .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
     pub fn validate_saved_fishing_references(&self, fishing: &FishingMemory) -> Result<()> {
@@ -12805,6 +13492,11 @@ impl GameDataSet {
         audio_id: &str,
         expected_kind: ModpackAudioKind,
     ) -> Result<()> {
+        if expected_kind == ModpackAudioKind::Music
+            && audio_id == crystal_core::systems::script_audio::MUSIC_NONE_ID
+        {
+            return Ok(());
+        }
         let asset = self
             .audio
             .iter()
@@ -12986,13 +13678,8 @@ impl GameDataSet {
         expected_command: &str,
     ) -> Result<bool> {
         let body = self.saved_compiled_script_body(path, script_label)?;
-        validate_saved_compiled_script_command_reference(
-            body,
-            path,
-            script_label,
-            command_index,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        validate_saved_compiled_script_command_reference(body, path, script_label, command_index)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(body
             .as_array()
             .and_then(|commands| commands.get(command_index))
@@ -13097,9 +13784,10 @@ impl GameDataSet {
         let destination = if trigger.warp.target_warp_id > 0 {
             self.resolve_warp_transition(&trigger)?.destination
         } else {
-            let destination_map = state.backup_warp_map_name.as_deref().with_context(|| {
-                format!("saved {path} dynamic warpcheck has no backup map")
-            })?;
+            let destination_map = state
+                .backup_warp_map_name
+                .as_deref()
+                .with_context(|| format!("saved {path} dynamic warpcheck has no backup map"))?;
             let destination_warp_id = Self::required_dynamic_backup_warp_index(
                 state,
                 trigger.warp.index,
@@ -13742,7 +14430,7 @@ impl GameDataSet {
                     .and_then(|args| (args.len() == 1).then(|| args[0].as_str()).flatten())
                     .with_context(|| {
                         format!("compiled StdScripts pointer {index} has no exact script label")
-                })?;
+                    })?;
                 standard_pointer_labels.push(label.to_string());
             }
             let global_roots = standard_catalog
@@ -13758,7 +14446,10 @@ impl GameDataSet {
                         "compiled StandardScripts global root {index} is not an exact script label"
                     )
                 })?;
-                if standard_global_roots.iter().any(|existing| existing == label) {
+                if standard_global_roots
+                    .iter()
+                    .any(|existing| existing == label)
+                {
                     anyhow::bail!("compiled StandardScripts global roots repeat {label}");
                 }
                 standard_global_roots.push(label.to_string());
@@ -13780,9 +14471,7 @@ impl GameDataSet {
             let pointer_table = overworld_catalog
                 .get("PlayerEventScriptPointers")
                 .and_then(Value::as_array)
-                .context(
-                    "compiled OverworldEvents catalog is missing PlayerEventScriptPointers",
-                )?;
+                .context("compiled OverworldEvents catalog is missing PlayerEventScriptPointers")?;
             overworld_roots = exact_player_event_pointer_labels(pointer_table)?;
             for (label, body) in overworld_catalog {
                 if definitions.insert(label.clone(), body).is_some() {
@@ -13809,10 +14498,7 @@ impl GameDataSet {
         }
         let interpreted_overworld_roots = overworld_roots
             .iter()
-            .map(|label| {
-                player_event_execution_path(label, &definitions)
-                    .map(|path| (label, path))
-            })
+            .map(|label| player_event_execution_path(label, &definitions).map(|path| (label, path)))
             .collect::<Result<Vec<_>>>()?;
         let overworld_scripts = runtime_module_script_subset(
             &definitions,
@@ -13851,7 +14537,9 @@ impl GameDataSet {
         }
         for label in &standard_global_roots {
             let actual = scripts.get(label).with_context(|| {
-                format!("compiled StandardScripts global root {label} is absent from global scripts")
+                format!(
+                    "compiled StandardScripts global root {label} is absent from global scripts"
+                )
             })?;
             let expected = definitions
                 .get(label)
@@ -14430,8 +15118,7 @@ impl GameDataSet {
             staged_state.script_runtime.pending_field_travel.is_none(),
             "cannot prepare Escape Rope while another field travel is pending"
         );
-        let outcome =
-            self.use_bag_escape_rope_in_field(&mut staged_state, overworld, item_id)?;
+        let outcome = self.use_bag_escape_rope_in_field(&mut staged_state, overworld, item_id)?;
         staged_state.script_runtime.pending_field_travel = Some(PendingFieldTravel {
             move_id: item_id.to_string(),
             actor_party_index: None,
@@ -14537,10 +15224,10 @@ impl GameDataSet {
             metatile_x,
             metatile_y,
         )?;
-        state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         state.script_runtime.pending_block_field_move = Some(outcome.clone());
         Ok(outcome)
     }
@@ -14606,10 +15293,10 @@ impl GameDataSet {
             metatile_x,
             metatile_y,
         )?;
-        state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         state.script_runtime.pending_block_field_move = Some(outcome.clone());
         Ok(outcome)
     }
@@ -14653,7 +15340,10 @@ impl GameDataSet {
                 actor.species.id
             );
             anyhow::ensure!(
-                actor.moves.iter().any(|known| known.name == pending.move_id),
+                actor
+                    .moves
+                    .iter()
+                    .any(|known| known.name == pending.move_id),
                 "saved pending FLASH actor no longer knows the move"
             );
             anyhow::ensure!(
@@ -14682,7 +15372,10 @@ impl GameDataSet {
                 })?;
             anyhow::ensure!(
                 actor.species.id == pending.actor_species
-                    && actor.moves.iter().any(|known| known.name == pending.move_id),
+                    && actor
+                        .moves
+                        .iter()
+                        .any(|known| known.name == pending.move_id),
                 "saved pending SURF actor no longer matches the prepared move"
             );
             let (map_name, tile, _, mode) = state
@@ -14720,7 +15413,10 @@ impl GameDataSet {
                 })?;
             anyhow::ensure!(
                 actor.species.id == pending.actor_species
-                    && actor.moves.iter().any(|known| known.name == pending.move_id),
+                    && actor
+                        .moves
+                        .iter()
+                        .any(|known| known.name == pending.move_id),
                 "saved pending WATERFALL actor no longer matches the prepared move"
             );
             let (map_name, tile, facing, mode) = state
@@ -14773,7 +15469,10 @@ impl GameDataSet {
                     })?;
                 anyhow::ensure!(
                     actor.species.id == actor_species
-                        && actor.moves.iter().any(|known| known.name == pending.move_id),
+                        && actor
+                            .moves
+                            .iter()
+                            .any(|known| known.name == pending.move_id),
                     "saved pending {} actor no longer matches the prepared move",
                     pending.move_id
                 );
@@ -14846,7 +15545,10 @@ impl GameDataSet {
             actor.species.id
         );
         anyhow::ensure!(
-            actor.moves.iter().any(|known| known.name == pending.move_id),
+            actor
+                .moves
+                .iter()
+                .any(|known| known.name == pending.move_id),
             "saved pending {} actor no longer knows the move",
             pending.move_id
         );
@@ -14977,10 +15679,10 @@ impl GameDataSet {
             !outcome.was_set && outcome.is_set,
             "cannot prepare FLASH because its source status bit is already active"
         );
-        state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         state.script_runtime.pending_flash_field_move = Some(outcome.clone());
         Ok(outcome)
     }
@@ -15017,7 +15719,10 @@ impl GameDataSet {
         let mut staged_overworld = overworld.clone();
         self.require_no_active_battle(&staged_state, "SURF field move")?;
         anyhow::ensure!(
-            staged_state.script_runtime.pending_surf_field_move.is_none(),
+            staged_state
+                .script_runtime
+                .pending_surf_field_move
+                .is_none(),
             "cannot prepare SURF while another SURF source transition is pending"
         );
         let target = Self::checked_runtime_field_move_target(
@@ -15049,10 +15754,10 @@ impl GameDataSet {
             &mut staged_overworld.player,
             party_index,
         )?;
-        staged_state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        staged_state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         staged_state.script_runtime.memory.insert(
             "wSurfingPlayerState".to_string(),
             match outcome.mode {
@@ -15115,10 +15820,10 @@ impl GameDataSet {
             &mut staged_overworld.player,
             party_index,
         )?;
-        staged_state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        staged_state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         staged_state.script_runtime.pending_waterfall_field_move = Some(outcome.clone());
         *state = staged_state;
         Ok(outcome)
@@ -15190,10 +15895,10 @@ impl GameDataSet {
             destination_spawn_identifier,
             flypoint_flag,
         )?;
-        staged_state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        staged_state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         staged_state.script_runtime.pending_field_travel = Some(PendingFieldTravel {
             move_id: self.field_moves.fly.move_id.clone(),
             actor_party_index: Some(outcome.actor_party_index),
@@ -15257,10 +15962,10 @@ impl GameDataSet {
             "cannot prepare DIG while another field travel is pending"
         );
         let outcome = self.use_dig_field_move(&staged_state, &source_map, party_index)?;
-        staged_state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        staged_state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         staged_state.script_runtime.pending_field_travel = Some(PendingFieldTravel {
             move_id: self.field_moves.dig.move_id.clone(),
             actor_party_index: Some(outcome.actor_party_index),
@@ -15327,10 +16032,10 @@ impl GameDataSet {
             "cannot prepare TELEPORT while another field travel is pending"
         );
         let outcome = self.use_teleport_field_move(&staged_state, &source_map, party_index)?;
-        staged_state.script_runtime.memory.insert(
-            "wCurPartyMon".to_string(),
-            party_index.to_string(),
-        );
+        staged_state
+            .script_runtime
+            .memory
+            .insert("wCurPartyMon".to_string(), party_index.to_string());
         staged_state.script_runtime.pending_field_travel = Some(PendingFieldTravel {
             move_id: self.field_moves.teleport.move_id.clone(),
             actor_party_index: Some(outcome.actor_party_index),
@@ -15409,6 +16114,9 @@ impl GameDataSet {
         consumed: bool,
     ) -> Result<BattleItemOutcome> {
         let item = self.item(item_id)?;
+        if item.revive_hp_percent.is_some() {
+            crate::nuzlocke::ensure_can_restore_hp(self.nuzlocke_rules, pokemon)?;
+        }
         core_apply_active_battle_item_effect(pokemon, item, consumed)
             .map_err(anyhow::Error::new)
             .with_context(|| format!("use item {item_id}"))
@@ -15444,12 +16152,16 @@ impl GameDataSet {
         party_index: usize,
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
         let x_accuracy = self.item(item_id)?.script_name == "X_ACCURACY";
-        if x_accuracy {
-            let combat = active_battle_combat_state(state)
-                .context("use X Accuracy in active battle")?;
-            if combat.player_x_accuracy {
-                anyhow::bail!("use battle item {item_id}: X Accuracy is already active");
-            }
+        let active = state.battle_active_party_index == Some(party_index);
+        let mut combat = active_battle_combat_state(state)
+            .with_context(|| format!("use battle item {item_id} in active battle"))?;
+        if active && x_accuracy && combat.player_x_accuracy {
+            anyhow::bail!("use battle item {item_id}: X Accuracy is already active");
+        }
+        let combat_status_before = active.then(|| combat.player.status.clone());
+        if active {
+            let mut combat_preview = combat.player.clone();
+            self.apply_active_battle_item_effect(&mut combat_preview, item_id, false)?;
         }
         let mut preview = clone_active_battle_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
@@ -15458,15 +16170,31 @@ impl GameDataSet {
         let item_use = self.use_bag_item(state, item_id, ItemUseContext::Battle)?;
         let pokemon = require_active_battle_party_pokemon_mut(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
-        let battle_item =
+        let stored_item =
             self.apply_active_battle_item_effect(pokemon, item_id, item_use.consumed)?;
+        let battle_item = if active {
+            self.apply_active_battle_item_effect(&mut combat.player, item_id, item_use.consumed)?
+        } else {
+            stored_item
+        };
         state.sync_party_from_storage();
-        if x_accuracy {
-            let mut combat = active_battle_combat_state(state)
-                .context("apply X Accuracy to active battle")?;
-            combat.player_x_accuracy = true;
-            state.script_runtime.active_battle_combat = Some(combat);
+        let stored = state.storage.party.pokemon[party_index]
+            .clone()
+            .with_context(|| format!("battle party index {party_index} became empty"))?;
+        let combat_party_slot = combat.player_party.get_mut(party_index).with_context(|| {
+            format!("active combat party is missing battle item target index {party_index}")
+        })?;
+        *combat_party_slot = stored;
+        if active {
+            if combat_status_before.flatten().is_some() && combat.player.status.is_none() {
+                combat.player_toxic_turns = 0;
+                combat.player_nightmare_source = None;
+            }
         }
+        if active && x_accuracy {
+            combat.player_x_accuracy = true;
+        }
+        state.script_runtime.active_battle_combat = Some(combat);
         Ok((item_use, battle_item))
     }
 
@@ -15477,6 +16205,10 @@ impl GameDataSet {
         party_index: usize,
         move_slot: Option<usize>,
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
+        let pp_up = self.item(item_id)?.script_name == "PP_UP";
+        let active = state.battle_active_party_index == Some(party_index);
+        let mut combat = active_battle_combat_state(state)
+            .with_context(|| format!("use battle PP item {item_id} in active battle"))?;
         let mut preview = clone_active_battle_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use battle item {item_id}: {error:?}"))?;
         self.apply_battle_pp_item_effect(&mut preview, item_id, move_slot, false)?;
@@ -15487,6 +16219,22 @@ impl GameDataSet {
         let battle_item =
             self.apply_battle_pp_item_effect(pokemon, item_id, move_slot, item_use.consumed)?;
         state.sync_party_from_storage();
+        let stored = state.storage.party.pokemon[party_index]
+            .clone()
+            .with_context(|| format!("battle party index {party_index} became empty"))?;
+        let combat_party_slot = combat.player_party.get_mut(party_index).with_context(|| {
+            format!("active combat party is missing battle PP item target index {party_index}")
+        })?;
+        *combat_party_slot = stored.clone();
+        if active && !pp_up && combat.player_transform.is_none() {
+            for (battle_move, stored_move) in combat.player.moves.iter_mut().zip(&stored.moves) {
+                if battle_move.name == stored_move.name {
+                    battle_move.current_pp = stored_move.current_pp;
+                    battle_move.pp_ups = stored_move.pp_ups;
+                }
+            }
+        }
+        state.script_runtime.active_battle_combat = Some(combat);
         Ok((item_use, battle_item))
     }
 
@@ -15497,6 +16245,16 @@ impl GameDataSet {
         consumed: bool,
     ) -> Result<PartyItemOutcome> {
         let item = self.item(item_id)?;
+        if item.revive_hp_percent.is_some() && self.nuzlocke_rules.permadeath {
+            anyhow::ensure!(
+                !party
+                    .pokemon
+                    .iter()
+                    .flatten()
+                    .any(|pokemon| pokemon.hp == 0),
+                "Nuzlocke permadeath prevents reviving fainted Pokemon"
+            );
+        }
         core_apply_party_wide_item_effect(party, item, consumed)
             .map_err(anyhow::Error::new)
             .with_context(|| format!("use whole-party item {item_id}"))
@@ -15510,6 +16268,9 @@ impl GameDataSet {
         consumed: bool,
     ) -> Result<BattleItemOutcome> {
         let item = self.item(item_id)?;
+        if item.revive_hp_percent.is_some() {
+            crate::nuzlocke::ensure_can_restore_hp(self.nuzlocke_rules, pokemon)?;
+        }
         let mut outcome = if item.rare_candy_level_gain.is_some()
             || self.evolutions.contains_item_evolution(&item.script_name)
         {
@@ -15560,8 +16321,8 @@ impl GameDataSet {
             replace_slot,
             consumed,
         )
-            .map_err(anyhow::Error::new)
-            .with_context(|| format!("use TM/HM {item_id}"))
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("use TM/HM {item_id}"))
     }
 
     pub fn use_bag_item_on_party_pokemon(
@@ -15573,7 +16334,7 @@ impl GameDataSet {
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
         let mut preview = clone_field_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
-        if preview.is_egg || preview.species.id == "EGG" {
+        if preview.is_egg {
             anyhow::bail!("use party item {item_id}: Eggs can't use that");
         }
         let preview_effect =
@@ -15829,7 +16590,7 @@ impl GameDataSet {
     ) -> Result<(ItemUseOutcome, BattleItemOutcome)> {
         let mut preview = clone_field_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use party item {item_id}: {error:?}"))?;
-        if preview.is_egg || preview.species.id == "EGG" {
+        if preview.is_egg {
             anyhow::bail!("use party item {item_id}: Eggs can't use that");
         }
         self.apply_battle_pp_item_effect(&mut preview, item_id, move_slot, false)?;
@@ -15852,7 +16613,7 @@ impl GameDataSet {
     ) -> Result<(ItemUseOutcome, TmHmLearnOutcome)> {
         let mut preview = clone_field_party_pokemon(state, party_index)
             .map_err(|error| anyhow::anyhow!("use TM/HM {item_id}: {error:?}"))?;
-        if preview.is_egg || preview.species.id == "EGG" {
+        if preview.is_egg {
             anyhow::bail!("use TM/HM {item_id}: Eggs can't use that");
         }
         self.teach_tmhm_move(&mut preview, item_id, replace_slot, false)?;
@@ -15868,6 +16629,18 @@ impl GameDataSet {
 
     pub fn saved_item(&self, item_id: &str) -> Option<&Item> {
         self.items.get(item_id)
+    }
+
+    pub fn nuzlocke_rules(&self) -> NuzlockeRules {
+        self.nuzlocke_rules
+    }
+
+    pub fn nuzlocke_encounter_was_used(&self, state: &GameState, map_name: &str) -> bool {
+        crate::nuzlocke::encounter_was_used(self.nuzlocke_rules, state, map_name)
+    }
+
+    pub fn nuzlocke_run_is_over(&self, state: &GameState) -> bool {
+        crate::nuzlocke::run_is_over(self.nuzlocke_rules, state)
     }
 
     pub fn saved_species_exists(&self, species: &str) -> bool {
@@ -15918,6 +16691,21 @@ impl GameDataSet {
         Ok(ball)
     }
 
+    pub fn active_battle_capture_storage_full(&self, state: &GameState) -> Result<bool> {
+        match &state.battle {
+            BattleMemory::Wild { .. } | BattleMemory::StaticWild { .. } => state
+                .storage
+                .has_capture_space_in_box(state.current_pc_box)
+                .map(|has_space| !has_space)
+                .map_err(|error| anyhow::anyhow!("check current capture box: {error}")),
+            BattleMemory::Trainer { .. } => Ok(false),
+            BattleMemory::Inactive => {
+                anyhow::bail!("cannot check capture storage without an active battle")
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn throw_ball_from_bag(
         &self,
         bag: &mut Bag,
@@ -15965,11 +16753,8 @@ impl GameDataSet {
         S::Error: std::fmt::Display,
     {
         let mut next_state = state.clone();
-        let outcome = self.throw_ball_at_active_battle_with_divider_inner(
-            &mut next_state,
-            ball_id,
-            divider,
-        )?;
+        let outcome =
+            self.throw_ball_at_active_battle_with_divider_inner(&mut next_state, ball_id, divider)?;
         *state = next_state;
         Ok(outcome)
     }
@@ -15984,6 +16769,7 @@ impl GameDataSet {
         S: DividerSource + ?Sized,
         S::Error: std::fmt::Display,
     {
+        crate::nuzlocke::ensure_active_capture_allowed(self.nuzlocke_rules, state)?;
         let active_index =
             require_active_battle_party_index(state).map_err(|error| anyhow::anyhow!("{error}"))?;
         let player = state.storage.party.pokemon[active_index]
@@ -16132,6 +16918,7 @@ impl GameDataSet {
         S: DividerSource + ?Sized,
         S::Error: std::fmt::Display,
     {
+        crate::nuzlocke::ensure_capture_nickname(self.nuzlocke_rules, nickname)?;
         let mut staged_state = state.clone();
         if let Some(nickname) = nickname {
             if nickname.is_empty()
@@ -16154,8 +16941,36 @@ impl GameDataSet {
         };
         let battle_end = self.active_battle_end_context(&staged_state)?;
         let pay_day_money = self.active_battle_pay_day_payout(&staged_state);
-        let mut completion = core_complete_active_wild_capture(&mut staged_state, outcome)
-            .map_err(|error| anyhow::anyhow!("complete captured Pokemon: {error}"))?;
+        let transformed_replacement = if staged_state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .is_some_and(|combat| combat.enemy_transform.is_some())
+        {
+            let enemy = match &staged_state.battle {
+                crystal_core::state::BattleMemory::Wild { enemy_pokemon, .. }
+                | crystal_core::state::BattleMemory::StaticWild { enemy_pokemon, .. } => {
+                    enemy_pokemon
+                }
+                crystal_core::state::BattleMemory::Trainer { trainer_id, .. } => {
+                    anyhow::bail!(
+                        "cannot capture transformed enemy during trainer battle {trainer_id}"
+                    )
+                }
+                crystal_core::state::BattleMemory::Inactive => {
+                    anyhow::bail!("cannot materialize transformed capture without an active battle")
+                }
+            };
+            Some(
+                self.create_pokemon("DITTO", enemy.level, enemy.dvs)
+                    .context("materialize DITTO for transformed capture")?,
+            )
+        } else {
+            None
+        };
+        let mut completion =
+            core_complete_active_wild_capture(&mut staged_state, outcome, transformed_replacement)
+                .map_err(|error| anyhow::anyhow!("complete captured Pokemon: {error}"))?;
         if let (Some(nickname), Some(stored)) = (nickname, completion.stored.as_mut()) {
             stored.pokemon.nickname = nickname.to_string();
             match stored.location {
@@ -16307,11 +17122,7 @@ impl GameDataSet {
         item_id: &str,
     ) -> Result<BattleEscapeItemUseOutcome> {
         let mut divider = RuntimeDividerSource::live();
-        self.use_bag_item_to_escape_active_wild_battle_with_divider(
-            state,
-            item_id,
-            &mut divider,
-        )
+        self.use_bag_item_to_escape_active_wild_battle_with_divider(state, item_id, &mut divider)
     }
 
     pub fn use_bag_item_to_escape_active_wild_battle_with_divider<S>(
@@ -16327,11 +17138,7 @@ impl GameDataSet {
         let mut staged_state = state.clone();
         let battle_escape_mode = self.require_battle_escape_item_context(&staged_state, item_id)?;
         let item_use = self.use_bag_item(&mut staged_state, item_id, ItemUseContext::Battle)?;
-        self.apply_battle_escape_item_use_with_divider(
-            &mut staged_state,
-            item_id,
-            divider,
-        )?;
+        self.apply_battle_escape_item_use_with_divider(&mut staged_state, item_id, divider)?;
         *state = staged_state;
         Ok(BattleEscapeItemUseOutcome {
             item_use,
@@ -16417,16 +17224,13 @@ impl GameDataSet {
     {
         let mut staged_state = state.clone();
         let battle_end = self.active_battle_end_context(&staged_state)?;
-        let mut rng = ExactBattleRandom::new(
-            staged_state.random_state,
-            staged_state.rng_seed,
-            divider,
-        );
+        let mut rng = ExactBattleRandom::new(staged_state.random_state, divider);
         let outcome = self.resolve_active_battle_turn_with_rng(
             &mut staged_state,
             player_action,
             enemy_action,
             &mut rng,
+            None,
         )?;
         if let Some(error) = rng.divider_error() {
             anyhow::bail!("resolve exact active battle turn: {error}");
@@ -16449,12 +17253,273 @@ impl GameDataSet {
         Ok(outcome)
     }
 
+    pub fn resolve_active_battle_turn_with_enemy_ai_actions_with_divider<S>(
+        &self,
+        state: &mut GameState,
+        player_action: BattleAction,
+        divider: &mut S,
+        select_enemy_move: &mut EnemyMoveSelector<'_>,
+        select_enemy_action: &mut EnemyPostOrderActionSelector<'_>,
+    ) -> Result<BattleTurnOutcome>
+    where
+        S: DividerSource + ?Sized,
+        S::Error: std::fmt::Display,
+    {
+        let mut staged_state = state.clone();
+        let battle_end = self.active_battle_end_context(&staged_state)?;
+        let mut rng = ExactBattleRandom::new(staged_state.random_state, divider);
+        let outcome = self.resolve_active_battle_turn_with_rng(
+            &mut staged_state,
+            player_action,
+            BattleAction::Move { slot: 0 },
+            &mut rng,
+            Some((select_enemy_move, select_enemy_action)),
+        )?;
+        if let Some(error) = rng.divider_error() {
+            anyhow::bail!("resolve exact active battle turn with trainer action: {error}");
+        }
+        staged_state.random_state = rng.state();
+        drop(rng);
+        if matches!(staged_state.battle, BattleMemory::Inactive)
+            && let Some((battle_type, roaming_slot, _, map_name)) = battle_end
+        {
+            self.finish_battle_roaming_update_exact(
+                &mut staged_state,
+                &battle_type,
+                roaming_slot,
+                &outcome.state.enemy,
+                &map_name,
+                divider,
+            )?;
+        }
+        *state = staged_state;
+        Ok(outcome)
+    }
+
+    pub fn resolve_active_battle_ball_turn_with_enemy_ai_actions_with_divider<S>(
+        &self,
+        state: &mut GameState,
+        ball_id: &str,
+        enemy_action: BattleAction,
+        divider: &mut S,
+        enemy_ai_actions: Option<(
+            &mut EnemyMoveSelector<'_>,
+            &mut EnemyPostOrderActionSelector<'_>,
+        )>,
+    ) -> Result<(CaptureOutcome, BattleTurnOutcome)>
+    where
+        S: DividerSource + ?Sized,
+        S::Error: std::fmt::Display,
+    {
+        crate::nuzlocke::ensure_active_capture_allowed(self.nuzlocke_rules, state)?;
+        let ball = self.capture_ball_item(ball_id)?;
+        if !ball.battle_usable {
+            anyhow::bail!("battle capture item {ball_id} is not usable in battle");
+        }
+        let mut staged_state = state.clone();
+        let active_index = require_active_battle_party_index(&staged_state)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let active_enemy_index = require_active_battle_enemy_party_index(&staged_state)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let player = staged_state.storage.party.pokemon[active_index]
+            .as_ref()
+            .cloned()
+            .with_context(|| format!("active battle party index {active_index} has no Pokemon"))?;
+        let player_party = Self::active_battle_player_party(&staged_state)?;
+        let (enemy, enemy_party, mut context) = match &staged_state.battle {
+            BattleMemory::Wild {
+                battle_type,
+                enemy_pokemon,
+                enemy_party,
+                ..
+            }
+            | BattleMemory::StaticWild {
+                battle_type,
+                enemy_pokemon,
+                enemy_party,
+                ..
+            } => {
+                let mut context = CaptureAttemptContext::wild(ball_id);
+                context.battle_type = battle_type.clone();
+                (enemy_pokemon.clone(), enemy_party.clone(), context)
+            }
+            BattleMemory::Trainer {
+                battle_type,
+                enemy_pokemon,
+                enemy_party,
+                ..
+            } => {
+                let mut context = CaptureAttemptContext::wild(ball_id);
+                context.battle_type = battle_type.clone();
+                context.trainer_battle = true;
+                (enemy_pokemon.clone(), enemy_party.clone(), context)
+            }
+            BattleMemory::Inactive => {
+                anyhow::bail!("cannot throw a ball without an active battle");
+            }
+        };
+        Self::require_active_enemy_in_battle_party(&enemy_party, active_enemy_index)?;
+        if !context.trainer_battle
+            && !staged_state
+                .storage
+                .has_capture_space_in_box(staged_state.current_pc_box)
+                .map_err(|error| anyhow::anyhow!("check current capture box: {error}"))?
+        {
+            anyhow::bail!("capture storage is full; Ball selection does not spend a turn");
+        }
+
+        let badge_boosts_enabled = staged_state.link_session.link_mode == 0
+            && active_battle_type(&staged_state) != Some("BATTLETYPE_BATTLE_TOWER");
+        let mut combat = staged_state
+            .script_runtime
+            .active_battle_combat
+            .clone()
+            .unwrap_or_else(|| {
+                BattleCombatState::new(player, enemy)
+                    .with_parties(player_party, enemy_party.to_vec())
+                    .with_party_indices(active_index, active_enemy_index)
+                    .with_obedience(staged_state.player_id, staged_state.badges.johto)
+                    .with_kanto_badges(staged_state.badges.kanto)
+                    .with_link_context(
+                        staged_state.time.time_of_day,
+                        staged_state.link_session.link_mode,
+                        staged_state.link_session.serial_connection_status,
+                    )
+                    .with_badge_boosts_enabled(badge_boosts_enabled)
+            });
+        combat.link_battle = staged_state.link_session.link_mode != 0;
+        combat.link_colosseum = staged_state.link_session.link_mode == LINK_MODE_COLOSSEUM;
+        combat.serial_connection_status = staged_state.link_session.serial_connection_status;
+        combat.obedience_badges = staged_state.badges.johto;
+        combat.kanto_badges = staged_state.badges.kanto;
+        combat.badge_boosts_enabled = badge_boosts_enabled;
+
+        let player_held_item = match combat.player.item.as_deref() {
+            Some(item_id) => Some(
+                self.items
+                    .get(item_id)
+                    .with_context(|| format!("active Pokemon holds unknown item {item_id}"))?,
+            ),
+            None => None,
+        };
+        context.ball_id = ball_id.to_string();
+        let tutorial = context.battle_type == "BATTLETYPE_TUTORIAL";
+        let contest = context.battle_type == "BATTLETYPE_CONTEST";
+        if tutorial && ball_id != "POKE_BALL" {
+            anyhow::bail!("catching tutorial requires POKE_BALL");
+        }
+        if contest && ball_id != "PARK_BALL" {
+            anyhow::bail!("Bug-Catching Contest battles require PARK_BALL");
+        }
+        if contest && staged_state.bug_contest.park_balls_remaining == 0 {
+            anyhow::bail!("no PARK_BALLs remain in the Bug-Catching Contest");
+        }
+
+        let mut capture = None;
+        let mut execute_ball = |combat: &mut BattleCombatState,
+                                action_ball_id: &str,
+                                rng: &mut dyn BattleRandomSource,
+                                events: &mut Vec<BattleEvent>|
+         -> std::result::Result<(), BattleTurnError> {
+            if action_ball_id != ball_id {
+                return Err(BattleTurnError::BattleItem {
+                    side: BattleSide::Player,
+                    item_id: action_ball_id.to_string(),
+                    error: format!("expected selected ball {ball_id}"),
+                });
+            }
+            let mut outcome = if tutorial {
+                CaptureOutcome {
+                    caught: true,
+                    blocked: false,
+                    storage_full: false,
+                    wobble_count: 3,
+                    animation_shakes: 4,
+                    final_catch_rate: 255,
+                    ball_id: None,
+                }
+            } else {
+                if contest {
+                    staged_state.bug_contest.park_balls_remaining -= 1;
+                } else if !staged_state.bag.consume_ball(ball).map_err(|error| {
+                    BattleTurnError::BattleItem {
+                        side: BattleSide::Player,
+                        item_id: ball_id.to_string(),
+                        error,
+                    }
+                })? {
+                    return Err(BattleTurnError::BattleItem {
+                        side: BattleSide::Player,
+                        item_id: ball_id.to_string(),
+                        error: "ball is absent from the Bag".to_string(),
+                    });
+                }
+                core_resolve_capture_attempt_with_battle_rng(
+                    &combat.player,
+                    &combat.enemy,
+                    player_held_item,
+                    &context,
+                    &self.capture_rules,
+                    &self.capture_wobble_probabilities,
+                    rng,
+                )
+                .map_err(|error| BattleTurnError::BattleItem {
+                    side: BattleSide::Player,
+                    item_id: ball_id.to_string(),
+                    error: format!("{error:?}"),
+                })?
+            };
+            outcome.ball_id = Some(ball_id.to_string());
+            capture = Some(outcome.clone());
+            events.push(BattleEvent::BallThrown {
+                side: BattleSide::Player,
+                outcome,
+            });
+            Ok(())
+        };
+        let mut rng = ExactBattleRandom::new(staged_state.random_state, divider);
+        let turn = core_resolve_battle_turn_with_ball_action_and_enemy_ai_actions(
+            combat,
+            BattleAction::Ball {
+                item_id: ball_id.to_string(),
+            },
+            enemy_action,
+            &self.moves,
+            &self.items,
+            &self.move_priorities,
+            &self.battle_stat_multipliers,
+            &self.type_categories,
+            &self.type_effectiveness,
+            &self.weather_modifiers,
+            &mut rng,
+            !context.trainer_battle,
+            enemy_ai_actions,
+            &mut execute_ball,
+        )
+        .map_err(|error| anyhow::anyhow!("resolve active battle Ball turn: {error:?}"))?;
+        drop(execute_ball);
+        if let Some(error) = rng.divider_error() {
+            anyhow::bail!("resolve exact active battle Ball turn: {error}");
+        }
+        staged_state.random_state = rng.state();
+        drop(rng);
+        let capture = capture.context("Ball action did not produce a capture outcome")?;
+        commit_battle_turn_outcome(&mut staged_state, active_index, &turn)
+            .map_err(|error| anyhow::anyhow!("commit active battle Ball turn: {error:?}"))?;
+        *state = staged_state;
+        Ok((capture, turn))
+    }
+
     fn resolve_active_battle_turn_with_rng(
         &self,
         state: &mut GameState,
         player_action: BattleAction,
         enemy_action: BattleAction,
         rng: &mut dyn BattleRandomSource,
+        enemy_ai_actions: Option<(
+            &mut EnemyMoveSelector<'_>,
+            &mut EnemyPostOrderActionSelector<'_>,
+        )>,
     ) -> Result<BattleTurnOutcome> {
         let active_index =
             require_active_battle_party_index(state).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -16503,7 +17568,7 @@ impl GameDataSet {
             .active_battle_combat
             .clone()
             .unwrap_or_else(|| {
-                BattleCombatState::new(player, enemy, state.rng_seed)
+                BattleCombatState::new(player, enemy)
                     .with_parties(player_party, enemy_party.to_vec())
                     .with_party_indices(active_index, active_enemy_index)
                     .with_obedience(state.player_id, state.badges.johto)
@@ -16523,24 +17588,60 @@ impl GameDataSet {
         combat.badge_boosts_enabled = badge_boosts_enabled;
         if matches!(player_action, BattleAction::Run)
             && active_battle_type(state).is_some_and(battle_type_blocks_escape)
-            && combat.player_escape_trap.is_none()
         {
-            combat.player_escape_trap = Some(BattleEscapeTrapState {
-                source: BattleSide::Enemy,
-                move_name: active_battle_type(state).unwrap_or_default().to_string(),
-            });
+            combat.force_switch_blocked = true;
         }
         let input = BattleTurnInput {
             player: player_action,
             enemy: enemy_action,
         };
         let outcome = if is_wild_battle {
-            self.resolve_wild_battle_turn_with_items(
+            if let Some((select_enemy_move, select_enemy_action)) = enemy_ai_actions {
+                core_resolve_wild_battle_turn_with_enemy_ai_actions(
+                    combat,
+                    input.player,
+                    &self.moves,
+                    &self.items,
+                    &self.move_priorities,
+                    &self.battle_stat_multipliers,
+                    &self.type_categories,
+                    &self.type_effectiveness,
+                    &self.weather_modifiers,
+                    &self.battle_escape_rules,
+                    state.battle_escape_attempts,
+                    rng,
+                    select_enemy_move,
+                    select_enemy_action,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("resolve active wild battle turn with AI: {error:?}")
+                })?
+            } else {
+                self.resolve_wild_battle_turn_with_items(
+                    combat,
+                    input,
+                    state.battle_escape_attempts,
+                    rng,
+                )?
+            }
+        } else if let Some((select_enemy_move, select_enemy_action)) = enemy_ai_actions {
+            core_resolve_battle_turn_with_enemy_ai_actions(
                 combat,
-                input,
-                state.battle_escape_attempts,
+                input.player,
+                &self.moves,
+                &self.items,
+                &self.move_priorities,
+                &self.battle_stat_multipliers,
+                &self.type_categories,
+                &self.type_effectiveness,
+                &self.weather_modifiers,
                 rng,
-            )?
+                select_enemy_move,
+                select_enemy_action,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("resolve active battle turn with trainer action: {error:?}")
+            })?
         } else {
             self.resolve_battle_turn_with_items(combat, input, rng)?
         };
@@ -16557,7 +17658,6 @@ impl GameDataSet {
                 commit_wild_battle_escape_attempt(state, escape);
             }
         }
-        state.commit_rng_seed(rng.legacy_seed());
         Ok(outcome)
     }
 
@@ -16642,7 +17742,7 @@ impl GameDataSet {
             *state = staged_state;
             return Ok(outcome);
         }
-        let active_index = require_active_battle_party_index(&staged_state)
+        let active_index = require_active_battle_party_slot_index(&staged_state)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let player = staged_state.storage.party.pokemon[active_index]
             .as_ref()
@@ -16664,12 +17764,11 @@ impl GameDataSet {
             .active_battle_combat
             .clone()
             .unwrap_or_else(|| {
-                BattleCombatState::new(player, enemy.clone(), staged_state.rng_seed)
-                    .with_link_context(
-                        staged_state.time.time_of_day,
-                        staged_state.link_session.link_mode,
-                        staged_state.link_session.serial_connection_status,
-                    )
+                BattleCombatState::new(player, enemy.clone()).with_link_context(
+                    staged_state.time.time_of_day,
+                    staged_state.link_session.link_mode,
+                    staged_state.link_session.serial_connection_status,
+                )
             });
         combat.link_battle = staged_state.link_session.link_mode != 0;
         combat.link_colosseum = staged_state.link_session.link_mode == LINK_MODE_COLOSSEUM;
@@ -16687,12 +17786,13 @@ impl GameDataSet {
             });
         }
         let held_escape = match combat.player.item.as_deref() {
-            Some(item_id) => self
-                .items
-                .get(item_id)
-                .with_context(|| format!("active Pokemon holds unknown item {item_id}"))?
-                .held_effect
-                == "HELD_ESCAPE",
+            Some(item_id) => {
+                self.items
+                    .get(item_id)
+                    .with_context(|| format!("active Pokemon holds unknown item {item_id}"))?
+                    .held_effect
+                    == "HELD_ESCAPE"
+            }
             None => false,
         };
         let outcome = if held_escape {
@@ -16704,10 +17804,32 @@ impl GameDataSet {
                 attempts_after: staged_state.battle_escape_attempts,
             }
         } else {
-            core_attempt_wild_battle_escape_exact(
-                &combat.player,
-                &combat.enemy,
-                &self.battle_stat_multipliers,
+            let player_speed = if combat.player.hp == 0 {
+                anyhow::ensure!(
+                    staged_state
+                        .storage
+                        .party
+                        .pokemon
+                        .iter()
+                        .enumerate()
+                        .any(|(index, pokemon)| index != active_index
+                            && pokemon.as_ref().is_some_and(|pokemon| pokemon.hp > 0)),
+                    "fainted-player escape requires an available replacement Pokemon"
+                );
+                staged_state.storage.party.pokemon[0]
+                    .as_ref()
+                    .context("fainted-player escape requires party slot 0")?
+                    .speed
+            } else {
+                battle_speed(&combat, BattleSide::Player, &self.battle_stat_multipliers)
+                    .map_err(|error| anyhow::anyhow!("resolve player escape speed: {error:?}"))?
+            };
+            let enemy_speed =
+                battle_speed(&combat, BattleSide::Enemy, &self.battle_stat_multipliers)
+                    .map_err(|error| anyhow::anyhow!("resolve enemy escape speed: {error:?}"))?;
+            core_attempt_wild_battle_escape_exact_with_loaded_speeds(
+                player_speed,
+                enemy_speed,
                 &self.battle_escape_rules,
                 staged_state.battle_escape_attempts,
                 &mut rng,
@@ -16839,13 +17961,8 @@ impl GameDataSet {
                 }
             }
         }
-        self.resolve_active_battle_turn_with_divider(
-            state,
-            player_action,
-            enemy_action,
-            divider,
-        )
-        .map(ActiveBattleCommandOutcome::Turn)
+        self.resolve_active_battle_turn_with_divider(state, player_action, enemy_action, divider)
+            .map(ActiveBattleCommandOutcome::Turn)
     }
 
     pub fn resolve_active_battle_enemy_action(
@@ -16869,11 +17986,7 @@ impl GameDataSet {
     {
         let mut staged_state = state.clone();
         let battle_end = self.active_battle_end_context(&staged_state)?;
-        let mut rng = ExactBattleRandom::new(
-            staged_state.random_state,
-            staged_state.rng_seed,
-            divider,
-        );
+        let mut rng = ExactBattleRandom::new(staged_state.random_state, divider);
         let outcome = self.resolve_active_battle_enemy_action_with_rng(
             &mut staged_state,
             enemy_action,
@@ -16951,7 +18064,7 @@ impl GameDataSet {
             .active_battle_combat
             .clone()
             .unwrap_or_else(|| {
-                BattleCombatState::new(player, enemy, state.rng_seed)
+                BattleCombatState::new(player, enemy)
                     .with_parties(player_party, enemy_party.to_vec())
                     .with_party_indices(active_index, active_enemy_index)
                     .with_obedience(state.player_id, state.badges.johto)
@@ -16981,7 +18094,6 @@ impl GameDataSet {
         if matches!(state.battle, BattleMemory::Inactive) && state.battle_result & 0x3f == 0 {
             self.claim_active_battle_pay_day_money(state, pay_day_money_after_turn)?;
         }
-        state.commit_rng_seed(rng.legacy_seed());
         Ok(outcome)
     }
 
@@ -17004,6 +18116,802 @@ impl GameDataSet {
             rng,
         )
         .map_err(|error| anyhow::anyhow!("resolve active battle turn: {error:?}"))
+    }
+
+    pub fn select_trainer_enemy_move_slot(
+        &self,
+        combat: &BattleCombatState,
+        ai_flags: u32,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<usize> {
+        if battle_action_locked_before_menu(combat, BattleSide::Enemy) {
+            return Ok(core_select_wild_enemy_move_slot(combat, rng));
+        }
+        let enemy_moves = battle_moves(combat, BattleSide::Enemy);
+        let disabled = combat
+            .enemy_disable
+            .as_ref()
+            .filter(|disable| disable.turns_remaining > 0)
+            .map(|disable| disable.move_name.as_str());
+        let usable_slots = enemy_moves
+            .iter()
+            .take(4)
+            .enumerate()
+            .filter_map(|(slot, learned)| {
+                (learned.current_pp > 0 && disabled != Some(learned.name.as_str())).then_some(slot)
+            })
+            .collect::<BTreeSet<_>>();
+        if usable_slots.is_empty() {
+            return Ok(0);
+        }
+        let move_data_by_slot = enemy_moves
+            .iter()
+            .take(4)
+            .map(|learned| {
+                self.moves
+                    .get(&learned.name)
+                    .with_context(|| format!("trainer AI references unknown move {}", learned.name))
+                    .map(Some)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut scores = move_data_by_slot
+            .iter()
+            .enumerate()
+            .map(|(slot, move_data)| {
+                if usable_slots.contains(&slot) && move_data.is_some() {
+                    20_i16
+                } else {
+                    80_i16
+                }
+            })
+            .collect::<Vec<_>>();
+        let player_types = combat
+            .player_type_override
+            .as_ref()
+            .map(|types| vec![types.type1.clone(), types.type2.clone()])
+            .unwrap_or_else(|| {
+                vec![
+                    combat.player.species.type1.clone(),
+                    combat.player.species.type2.clone(),
+                ]
+            });
+        let enemy_types = combat
+            .enemy_type_override
+            .as_ref()
+            .map(|types| vec![types.type1.clone(), types.type2.clone()])
+            .or_else(|| {
+                combat.enemy_transform.as_ref().map(|transform| {
+                    vec![
+                        transform.species.type1.clone(),
+                        transform.species.type2.clone(),
+                    ]
+                })
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    combat.enemy.species.type1.clone(),
+                    combat.enemy.species.type2.clone(),
+                ]
+            });
+        let matchup_for = |move_type: &str, defender_types: &[String], identified: bool| {
+            trainer_ai_type_matchup(
+                &self.type_effectiveness,
+                move_type,
+                defender_types,
+                identified,
+            )
+        };
+        let known_move_data = move_data_by_slot
+            .iter()
+            .flatten()
+            .map(|move_data| (move_data.move_type.as_str(), move_data.power))
+            .collect::<Vec<_>>();
+
+        if ai_flags & (1 << 0) != 0 {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                *score +=
+                    crystal_core::battle::ai::trainer_basic_score_delta(combat, &move_data.effect);
+            }
+        }
+        if ai_flags & (1 << 1) != 0 {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                *score += crystal_core::battle::ai::trainer_setup_score_delta(
+                    &move_data.effect,
+                    combat.enemy_turns_taken,
+                    combat.player_turns_taken,
+                    rng,
+                );
+            }
+        }
+        if ai_flags & (1 << 2) != 0 {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                *score += crystal_core::battle::ai::trainer_types_score_delta(
+                    &move_data.move_type,
+                    move_data.power,
+                    &known_move_data,
+                    matchup_for(
+                        &move_data.move_type,
+                        &player_types,
+                        combat.player_identified,
+                    ),
+                );
+            }
+        }
+        if ai_flags & (1 << 3) != 0 {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                *score += crystal_core::battle::ai::trainer_offensive_score_delta(move_data.power);
+            }
+        }
+        if ai_flags & (1 << 4) != 0 {
+            let smart_moves = move_data_by_slot
+                .iter()
+                .map(|move_data| {
+                    move_data.map(|move_data| {
+                        let (power, matchup) = if move_data.effect == "HIDDEN_POWER" {
+                            let (move_type, power) =
+                                crystal_core::battle::ai::trainer_smart_hidden_power(combat);
+                            (
+                                power,
+                                matchup_for(&move_type, &player_types, combat.player_identified),
+                            )
+                        } else {
+                            (
+                                move_data.power,
+                                matchup_for(
+                                    &move_data.move_type,
+                                    &player_types,
+                                    combat.player_identified,
+                                ),
+                            )
+                        };
+                        crystal_core::battle::ai::TrainerSmartMove {
+                            move_id: move_data.name.as_str(),
+                            effect: move_data.effect.as_str(),
+                            power,
+                            accuracy: move_data.accuracy,
+                            matchup,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            let effective_player_moves = battle_moves(combat, BattleSide::Player);
+            let mut smart_player_moves = Vec::with_capacity(combat.player_used_moves.len());
+            for move_id in &combat.player_used_moves {
+                let move_data = self.moves.get(move_id).with_context(|| {
+                    format!("Smart AI references unknown player move {move_id}")
+                })?;
+                smart_player_moves.push(crystal_core::battle::ai::TrainerSmartPlayerMove {
+                    move_id: move_data.name.as_str(),
+                    effect: move_data.effect.as_str(),
+                    power: move_data.power,
+                    physical: self.type_categories.physical.contains(&move_data.move_type),
+                    matchup_against_enemy: matchup_for(
+                        &move_data.move_type,
+                        &enemy_types,
+                        combat.enemy_identified,
+                    ),
+                    matchup_against_player: matchup_for(
+                        &move_data.move_type,
+                        &player_types,
+                        combat.player_identified,
+                    ),
+                    current_pp: effective_player_moves
+                        .iter()
+                        .find(|learned| learned.name == *move_id)
+                        .map(|learned| learned.current_pp),
+                });
+            }
+            let player_type_matchups_against_enemy = player_types
+                .iter()
+                .filter(|type_id| type_id.as_str() != "NONE")
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|type_id| matchup_for(type_id, &enemy_types, combat.enemy_identified))
+                .collect::<Vec<_>>();
+            let enemy_move_matchups_against_enemy = move_data_by_slot
+                .iter()
+                .map(|move_data| {
+                    move_data
+                        .map(|move_data| {
+                            matchup_for(&move_data.move_type, &enemy_types, combat.enemy_identified)
+                        })
+                        .unwrap_or(crystal_core::battle::ai::TrainerAiTypeMatchup::Neutral)
+                })
+                .collect::<Vec<_>>();
+            let mut priority_damage_by_slot = Vec::with_capacity(move_data_by_slot.len());
+            for move_data in &move_data_by_slot {
+                priority_damage_by_slot.push(match move_data {
+                    Some(move_data) if move_data.effect == "PRIORITY_HIT" => {
+                        Some(self.trainer_ai_damage_for_move(combat, move_data, rng)?)
+                    }
+                    Some(_) | None => None,
+                });
+            }
+            crystal_core::battle::ai::apply_trainer_smart_scores(
+                combat,
+                &mut scores,
+                &smart_moves,
+                &smart_player_moves,
+                &player_type_matchups_against_enemy,
+                &enemy_move_matchups_against_enemy,
+                &priority_damage_by_slot,
+                rng,
+            );
+        }
+        if ai_flags & (1 << 5) != 0
+            && crystal_core::battle::ai::trainer_opportunist_discourages(
+                combat.enemy.hp,
+                combat.enemy.max_hp,
+                rng,
+            )
+        {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                if crystal_core::battle::ai::trainer_ai_stall_move(&move_data.name) {
+                    *score += 1;
+                }
+            }
+        }
+        if ai_flags & (1 << 6) != 0 {
+            let mut evaluations = Vec::with_capacity(move_data_by_slot.len());
+            for move_data in &move_data_by_slot {
+                evaluations.push(match move_data {
+                    Some(move_data) => Some(crystal_core::battle::ai::TrainerAiDamageEvaluation {
+                        effect: move_data.effect.as_str(),
+                        power: move_data.power,
+                        damage: self.trainer_ai_damage_for_move(combat, move_data, rng)?,
+                    }),
+                    None => None,
+                });
+            }
+            crystal_core::battle::ai::apply_trainer_aggressive_scores(&mut scores, &evaluations);
+        }
+        if ai_flags & (1 << 7) != 0 {
+            let move_names = move_data_by_slot
+                .iter()
+                .map(|move_data| move_data.map(|move_data| move_data.name.as_str()))
+                .collect::<Vec<_>>();
+            crystal_core::battle::ai::apply_trainer_cautious_scores(
+                &mut scores,
+                &move_names,
+                combat.enemy_turns_taken,
+                rng,
+            );
+        }
+        if ai_flags & (1 << 8) != 0 {
+            let player_type_refs = player_types.iter().map(String::as_str).collect::<Vec<_>>();
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                *score += crystal_core::battle::ai::trainer_status_score_delta(
+                    &move_data.effect,
+                    move_data.power,
+                    &player_type_refs,
+                    matchup_for(
+                        &move_data.move_type,
+                        &player_types,
+                        combat.player_identified,
+                    ),
+                );
+            }
+        }
+        if ai_flags & (1 << 9) != 0 {
+            for (score, move_data) in scores.iter_mut().zip(&move_data_by_slot) {
+                let Some(move_data) = move_data else { break };
+                if crystal_core::battle::ai::trainer_risky_should_check_ko(
+                    &move_data.effect,
+                    move_data.power,
+                    combat.enemy.hp,
+                    combat.enemy.max_hp,
+                    rng,
+                ) {
+                    let damage = self.trainer_ai_damage_for_move(combat, move_data, rng)?;
+                    *score += crystal_core::battle::ai::trainer_risky_ko_score_delta(
+                        damage,
+                        combat.player.hp,
+                    );
+                }
+            }
+        }
+        let best_score = scores.iter().copied().min().unwrap_or(20);
+        let best = scores
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, score)| (*score == best_score).then_some(slot))
+            .collect::<BTreeSet<_>>();
+        loop {
+            let slot = usize::from(rng.battle_random_byte() & 3);
+            if best.contains(&slot) {
+                return Ok(slot);
+            }
+        }
+    }
+
+    fn trainer_ai_damage_for_move(
+        &self,
+        combat: &BattleCombatState,
+        move_data: &Move,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<u16> {
+        let held_type_boost_percent = if let Some(item_id) = combat.enemy.item.as_deref() {
+            let item = self.items.get(item_id).with_context(|| {
+                format!("enemy AI damage references unknown held item {item_id}")
+            })?;
+            match crystal_core::battle::ai::trainer_ai_held_type_boost_percent(
+                &item.held_effect,
+                item.parameter,
+                &move_data.move_type,
+            ) {
+                Some(Ok(parameter)) => parameter,
+                Some(Err(parameter)) => anyhow::bail!(
+                    "enemy AI held item {item_id} has invalid type-boost parameter {parameter}"
+                ),
+                None => 0,
+            }
+        } else {
+            0
+        };
+        crystal_core::battle::ai::trainer_ai_damage(
+            combat,
+            move_data,
+            &self.battle_stat_multipliers,
+            &self.type_categories,
+            &self.type_effectiveness,
+            &self.weather_modifiers,
+            held_type_boost_percent,
+            rng,
+        )
+        .map_err(|error| anyhow::anyhow!("enemy AI damage calculation failed: {error:?}"))
+    }
+
+    pub fn select_trainer_post_order_action(
+        &self,
+        combat: &BattleCombatState,
+        trainer_id: &str,
+        battle_type: &str,
+        ai_item_switch_flags: u32,
+        trainer_items_used: &mut BTreeSet<String>,
+        selected_move_slot: usize,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<BattleAction> {
+        let switch_flags = if battle_type == "BATTLETYPE_BATTLE_TOWER" {
+            self.trainers
+                .trainers
+                .values()
+                .find(|trainer| trainer.trainer_class == "FALKNER")
+                .context("Battle Tower AI requires trainer class 1 FALKNER attributes")?
+                .ai_item_switch_flags
+        } else {
+            ai_item_switch_flags
+        };
+        if battle_action_locked_before_menu(combat, BattleSide::Enemy) {
+            return Ok(BattleAction::Move {
+                slot: selected_move_slot,
+            });
+        }
+
+        let switch_blocked = combat.player_escape_trap.is_some() || combat.enemy_trap.is_some();
+        let candidate = if switch_blocked {
+            None
+        } else {
+            self.trainer_switch_candidate(combat)?
+        };
+        let Some((party_index, switch_tier)) = candidate else {
+            return self.trainer_item_or_move(
+                combat,
+                trainer_id,
+                battle_type,
+                switch_flags,
+                trainer_items_used,
+                selected_move_slot,
+                rng,
+            );
+        };
+        let switch_mask = switch_flags & 0x07;
+        if switch_mask == 0 {
+            return self.trainer_item_or_move(
+                combat,
+                trainer_id,
+                battle_type,
+                switch_flags,
+                trainer_items_used,
+                selected_move_slot,
+                rng,
+            );
+        }
+        let roll = u32::from(rng.battle_random_byte());
+        let should_switch = if switch_mask & 0x01 != 0 {
+            match switch_tier {
+                0x10 => roll < 128,
+                0x20 => roll < 200,
+                _ => roll >= 10,
+            }
+        } else if switch_mask & 0x02 != 0 {
+            match switch_tier {
+                0x10 => roll < 20,
+                0x20 => roll < 30,
+                _ => roll >= 200,
+            }
+        } else {
+            match switch_tier {
+                0x10 => roll < 50,
+                0x20 => roll < 128,
+                _ => roll >= 50,
+            }
+        };
+        if should_switch {
+            return Ok(BattleAction::TrainerSwitch {
+                selected_move_slot,
+                party_index,
+            });
+        }
+        self.trainer_item_or_move(
+            combat,
+            trainer_id,
+            battle_type,
+            switch_flags,
+            trainer_items_used,
+            selected_move_slot,
+            rng,
+        )
+    }
+
+    fn trainer_item_or_move(
+        &self,
+        combat: &BattleCombatState,
+        trainer_id: &str,
+        battle_type: &str,
+        flags: u32,
+        used: &mut BTreeSet<String>,
+        selected_move_slot: usize,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<BattleAction> {
+        Ok(
+            match self.select_trainer_item(combat, trainer_id, battle_type, flags, used, rng)? {
+                Some(item_id) => BattleAction::TrainerItem {
+                    selected_move_slot,
+                    item_id,
+                },
+                None => BattleAction::Move {
+                    slot: selected_move_slot,
+                },
+            },
+        )
+    }
+
+    fn select_trainer_item(
+        &self,
+        combat: &BattleCombatState,
+        trainer_id: &str,
+        battle_type: &str,
+        flags: u32,
+        used: &mut BTreeSet<String>,
+        rng: &mut dyn BattleRandomSource,
+    ) -> Result<Option<String>> {
+        if battle_type == "BATTLETYPE_BATTLE_TOWER" {
+            return Ok(None);
+        }
+        let trainer =
+            self.trainers.trainers.get(trainer_id).with_context(|| {
+                format!("trainer item AI references unknown trainer {trainer_id}")
+            })?;
+        let active = combat
+            .enemy_party
+            .get(combat.enemy_party_index)
+            .context("trainer item AI active enemy index is outside its party")?;
+        if active.max_hp == 0 || active.hp == 0 {
+            return Ok(None);
+        }
+        if combat
+            .enemy_party
+            .iter()
+            .any(|pokemon| pokemon.level > active.level)
+        {
+            return Ok(None);
+        }
+        let has_status = active
+            .status
+            .as_deref()
+            .is_some_and(|status| !status.is_empty() && status != "NONE");
+        let below_half = active.hp.saturating_mul(2) <= active.max_hp;
+        let below_quarter = active.hp.saturating_mul(4) <= active.max_hp;
+        let context_use = flags & (1 << 6) != 0;
+        let always_use = flags & (1 << 4) != 0;
+        let unknown_use = flags & (1 << 5) != 0;
+        let heal_item_usable = |rng: &mut dyn BattleRandomSource| {
+            if context_use {
+                below_quarter || (below_half && rng.battle_random_byte() < 50)
+            } else if unknown_use {
+                below_quarter && rng.battle_random_byte() >= 50
+            } else {
+                below_quarter || (below_half && rng.battle_random_byte() < 128)
+            }
+        };
+        const ITEM_ORDER: [&str; 13] = [
+            "FULL_RESTORE",
+            "MAX_POTION",
+            "HYPER_POTION",
+            "SUPER_POTION",
+            "POTION",
+            "X_ACCURACY",
+            "FULL_HEAL",
+            "GUARD_SPEC",
+            "DIRE_HIT",
+            "X_ATTACK",
+            "X_DEFEND",
+            "X_SPEED",
+            "X_SPECIAL",
+        ];
+        for item_id in ITEM_ORDER {
+            let Some(item_slot) = trainer.items.iter().enumerate().find_map(|(slot, owned)| {
+                (owned.as_deref() == Some(item_id)
+                    && !used.contains(&format!("{trainer_id}:{item_id}:{slot}")))
+                .then_some(slot)
+            }) else {
+                continue;
+            };
+            let usable = match item_id {
+                "FULL_RESTORE" => {
+                    heal_item_usable(rng)
+                        || (context_use
+                            && (matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
+                                || (active.status.as_deref() == Some("BAD_POISON")
+                                    && combat.enemy_toxic_turns >= 4
+                                    && rng.battle_random_byte() < 128)))
+                }
+                "MAX_POTION" | "HYPER_POTION" | "SUPER_POTION" | "POTION" => heal_item_usable(rng),
+                "FULL_HEAL" if context_use => {
+                    matches!(active.status.as_deref(), Some("FREEZE" | "SLEEP"))
+                        || (active.status.as_deref() == Some("BAD_POISON")
+                            && combat.enemy_toxic_turns >= 4
+                            && rng.battle_random_byte() < 128)
+                }
+                "FULL_HEAL" if always_use => has_status,
+                "FULL_HEAL" => has_status && rng.battle_random_byte() < 50,
+                "X_ACCURACY" | "GUARD_SPEC" | "DIRE_HIT" | "X_ATTACK" | "X_DEFEND" | "X_SPEED"
+                | "X_SPECIAL" => {
+                    if combat.enemy_turns_taken == 0 {
+                        always_use
+                            || (rng.battle_random_byte() >= 128
+                                && (context_use || rng.battle_random_byte() >= 128))
+                    } else {
+                        always_use && rng.battle_random_byte() < 50
+                    }
+                }
+                _ => false,
+            };
+            if usable {
+                used.insert(format!("{trainer_id}:{item_id}:{item_slot}"));
+                return Ok(Some(item_id.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn trainer_switch_candidate(&self, combat: &BattleCombatState) -> Result<Option<(usize, u8)>> {
+        let active_index = combat.enemy_party_index;
+        let active = combat
+            .enemy_party
+            .get(active_index)
+            .context("trainer switch active enemy index is outside its party")?;
+        let player = combat
+            .player_party
+            .get(combat.player_party_index)
+            .context("trainer switch active player index is outside its party")?;
+        let alive = combat
+            .enemy_party
+            .iter()
+            .enumerate()
+            .filter(|(index, pokemon)| {
+                *index != active_index
+                    && pokemon.hp > 0
+                    && !pokemon.is_egg
+                    && pokemon.species.id != "EGG"
+            })
+            .collect::<Vec<_>>();
+        if alive.is_empty() {
+            return Ok(None);
+        }
+        let last_player_move = combat
+            .player_last_move
+            .as_deref()
+            .and_then(|move_id| self.moves.get(move_id));
+        let candidate_is_healthy = |pokemon: &Pokemon| {
+            pokemon.max_hp > 0 && u32::from(pokemon.hp) * 4 >= u32::from(pokemon.max_hp)
+        };
+        let resists_player = |pokemon: &Pokemon| -> Result<bool> {
+            if let Some(move_data) = last_player_move.filter(|move_data| move_data.power > 0) {
+                return Ok(trainer_switch_type_matchup(
+                    &self.type_effectiveness,
+                    &move_data.move_type,
+                    pokemon,
+                )? <= 0);
+            }
+            Ok(trainer_switch_type_matchup(
+                &self.type_effectiveness,
+                &player.species.type1,
+                pokemon,
+            )? <= 0
+                && trainer_switch_type_matchup(
+                    &self.type_effectiveness,
+                    &player.species.type2,
+                    pokemon,
+                )? <= 0)
+        };
+        let has_super_effective_move = |pokemon: &Pokemon| -> Result<bool> {
+            for learned in &pokemon.moves {
+                let move_data = self
+                    .moves
+                    .get(&learned.name)
+                    .with_context(|| format!("trainer switch move {} is missing", learned.name))?;
+                if move_data.power > 0
+                    && trainer_switch_type_matchup(
+                        &self.type_effectiveness,
+                        &move_data.move_type,
+                        player,
+                    )? > 0
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+
+        if active.perish_song_turns == 1 {
+            for (index, pokemon) in &alive {
+                if candidate_is_healthy(pokemon)
+                    && resists_player(pokemon)?
+                    && has_super_effective_move(pokemon)?
+                {
+                    return Ok(Some((*index, 0x30)));
+                }
+            }
+            return Ok(Some((alive[0].0, 0x30)));
+        }
+
+        let switch_score = |enemy: &Pokemon, enemy_moves: &[LearnedMove]| -> Result<i8> {
+            let mut score = 10_i8;
+            if combat.player_used_moves.is_empty() {
+                for player_type in [&player.species.type1, &player.species.type2] {
+                    if trainer_switch_type_matchup(&self.type_effectiveness, player_type, enemy)?
+                        > 0
+                    {
+                        score -= 1;
+                    }
+                    if player.species.type1 == player.species.type2 {
+                        break;
+                    }
+                }
+            } else {
+                let mut best = 0_i8;
+                for move_id in &combat.player_used_moves {
+                    let move_data = self
+                        .moves
+                        .get(move_id)
+                        .with_context(|| format!("used player move {move_id} is missing"))?;
+                    if move_data.power == 0 {
+                        continue;
+                    }
+                    let matchup = trainer_switch_type_matchup(
+                        &self.type_effectiveness,
+                        &move_data.move_type,
+                        enemy,
+                    )?;
+                    if matchup > 0 {
+                        score -= 1;
+                        best = 2;
+                        break;
+                    }
+                    if matchup == 0 {
+                        best = 2;
+                    } else if matchup == -1 && best == 0 {
+                        best = 1;
+                    }
+                }
+                if best != 2 {
+                    score += 1;
+                    if best == 0 {
+                        score += 1;
+                    }
+                }
+            }
+            let mut enemy_matchup_score = 0_u16;
+            for learned in enemy_moves {
+                let move_data = self
+                    .moves
+                    .get(&learned.name)
+                    .with_context(|| format!("trainer switch move {} is missing", learned.name))?;
+                if move_data.power == 0 {
+                    continue;
+                }
+                match trainer_switch_type_matchup(
+                    &self.type_effectiveness,
+                    &move_data.move_type,
+                    player,
+                )? {
+                    -2 => {}
+                    -1 => enemy_matchup_score = enemy_matchup_score.saturating_add(1),
+                    0 => enemy_matchup_score = enemy_matchup_score.saturating_add(5),
+                    _ => enemy_matchup_score = 100,
+                }
+            }
+            if enemy_matchup_score == 0 {
+                score -= 2;
+            } else if enemy_matchup_score < 5 {
+                score -= 1;
+            } else if enemy_matchup_score >= 100 {
+                score += 1;
+            }
+            Ok(score)
+        };
+
+        if switch_score(active, battle_moves(combat, BattleSide::Enemy))? >= 11 {
+            return Ok(None);
+        }
+        if let Some(last_move) = last_player_move.filter(|move_data| move_data.power > 0) {
+            let mut neutral_immune = None;
+            let mut super_immune = None;
+            for (index, pokemon) in &alive {
+                if trainer_switch_type_matchup(
+                    &self.type_effectiveness,
+                    &last_move.move_type,
+                    pokemon,
+                )? != -2
+                {
+                    continue;
+                }
+                let mut has_neutral = false;
+                for learned in &pokemon.moves {
+                    let move_data = self.moves.get(&learned.name).with_context(|| {
+                        format!("trainer switch move {} is missing", learned.name)
+                    })?;
+                    if move_data.power == 0 {
+                        continue;
+                    }
+                    match trainer_switch_type_matchup(
+                        &self.type_effectiveness,
+                        &move_data.move_type,
+                        player,
+                    )? {
+                        matchup if matchup > 0 => {
+                            super_immune.get_or_insert((*index, *pokemon));
+                            break;
+                        }
+                        0 => has_neutral = true,
+                        _ => {}
+                    }
+                }
+                if has_neutral {
+                    neutral_immune.get_or_insert((*index, *pokemon));
+                }
+            }
+            if let Some((index, pokemon)) = super_immune.or(neutral_immune) {
+                let candidate_score = switch_score(pokemon, &pokemon.moves)?;
+                if combat.enemy_party.len() == 2 {
+                    return Ok(Some((
+                        index,
+                        if candidate_score < 10 { 0x20 } else { 0x10 },
+                    )));
+                }
+                if candidate_score < 10 {
+                    return Ok(Some((index, 0x10)));
+                }
+                return Ok(None);
+            }
+        }
+        for (index, pokemon) in alive {
+            if candidate_is_healthy(pokemon)
+                && resists_player(pokemon)?
+                && has_super_effective_move(pokemon)?
+                && switch_score(pokemon, &pokemon.moves)? < 10
+            {
+                return Ok(Some((index, 0x10)));
+            }
+        }
+        Ok(None)
     }
 
     pub fn resolve_wild_battle_turn_with_items(
@@ -17180,24 +19088,16 @@ impl GameDataSet {
         state: &GameState,
         outcome: &BattleTurnOutcome,
     ) -> u32 {
-        let amount = state
-            .battle_pay_day_money
-            .saturating_add(
-                outcome
-                    .events
-                    .iter()
-                    .filter_map(|event| match event {
-                        BattleEvent::PayDayMoney {
-                            side: BattleSide::Player,
-                            amount,
-                            ..
-                        } => Some(*amount),
-                        BattleEvent::PayDayMoney { .. } => None,
-                        _ => None,
-                    })
-                    .fold(0_u32, u32::saturating_add),
-            )
-            .min(0x00ff_ffff);
+        let amount = state.battle_pay_day_money.wrapping_add(
+            outcome
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    BattleEvent::PayDayMoney { amount, .. } => Some(*amount),
+                    _ => None,
+                })
+                .fold(0_u32, u32::wrapping_add),
+        ) & 0x00ff_ffff;
         if state.battle_amulet_coin_active {
             amount.saturating_mul(2).min(0x00ff_ffff)
         } else {
@@ -17282,16 +19182,20 @@ impl GameDataSet {
         let wild_battle = if bite == Some(true) {
             fishing_battle_trigger(&mut next_state);
             if let Some(encounter) = fishing_session.outcome.encounter.clone() {
-                Some(self.start_fishing_battle_with_rng(
-                    &mut next_state,
-                    &map_name,
-                    session.player.tile,
-                    encounter,
-                    time_of_day,
-                    rolled.bite_roll,
-                    rolled.slot_roll.context("fishing bite is missing its slot roll")?,
-                    &mut rng,
-                )?)
+                Some(
+                    self.start_fishing_battle_with_rng(
+                        &mut next_state,
+                        &map_name,
+                        session.player.tile,
+                        encounter,
+                        time_of_day,
+                        rolled.bite_roll,
+                        rolled
+                            .slot_roll
+                            .context("fishing bite is missing its slot roll")?,
+                        &mut rng,
+                    )?,
+                )
             } else {
                 None
             }
@@ -17321,12 +19225,8 @@ impl GameDataSet {
         self.require_no_active_battle(state, "field fishing rod item")?;
         let rod = self.field_fishing_rod(state, item_id)?;
         let mut next_state = state.clone();
-        let cast = self.cast_fishing_rod_in_session_with_divider(
-            &mut next_state,
-            session,
-            &rod,
-            divider,
-        )?;
+        let cast =
+            self.cast_fishing_rod_in_session_with_divider(&mut next_state, session, &rod, divider)?;
         let cast_state_checksum =
             game_state_checksum(&next_state).context("checksum field fishing rod cast")?;
         let item_use = self.use_bag_item(&mut next_state, item_id, ItemUseContext::Field)?;
@@ -17448,7 +19348,7 @@ impl GameDataSet {
                 })
             })
             || saved_special_battle_type_builtin_routine(battle_type)
-            .is_some_and(|routine| self.saved_special_routine_exists(routine))
+                .is_some_and(|routine| self.saved_special_routine_exists(routine))
     }
 
     pub fn saved_static_wild_battle_origin_exists(
@@ -17521,24 +19421,24 @@ impl GameDataSet {
         {
             return match battle_type {
                 "BATTLETYPE_NORMAL" => {
-                    self.wild_encounters.get(map_name).is_some_and(|encounters| {
-                        encounters
-                            .grass
-                            .iter()
-                            .chain(encounters.water.iter())
-                            .flat_map(|table| {
-                                table
-                                    .morning
-                                    .iter()
-                                    .chain(&table.day)
-                                    .chain(&table.night)
-                            })
-                            .any(|entry| entry.species == species && entry.level == level)
-                    })
+                    self.wild_encounters
+                        .get(map_name)
+                        .is_some_and(|encounters| {
+                            encounters
+                                .grass
+                                .iter()
+                                .chain(encounters.water.iter())
+                                .flat_map(|table| {
+                                    table.morning.iter().chain(&table.day).chain(&table.night)
+                                })
+                                .any(|entry| entry.species == species && entry.level == level)
+                        })
                 }
-                "BATTLETYPE_ROAMING" => self.roaming_pokemon.init_writes.iter().any(|write| {
-                    write.species == species && write.level == level
-                }),
+                "BATTLETYPE_ROAMING" => self
+                    .roaming_pokemon
+                    .init_writes
+                    .iter()
+                    .any(|write| write.species == species && write.level == level),
                 _ => false,
             };
         }
@@ -17673,6 +19573,47 @@ impl GameDataSet {
         self.wild_encounters.get(map_name)
     }
 
+    fn active_swarm_wild_encounters_for_map(
+        &self,
+        state: &GameState,
+        map_name: &str,
+    ) -> Result<Option<WildEncounterData>> {
+        let Some(base) = self.wild_encounters_for_map(map_name) else {
+            return Ok(None);
+        };
+        if base.swarm_overrides.is_empty() {
+            return Ok(None);
+        }
+        let metadata = self.runtime_map_metadata_for_name(map_name)?;
+        for (swarm_token, swarm) in &base.swarm_overrides {
+            let Some(target) = state.swarms.active.get(swarm_token) else {
+                continue;
+            };
+            if target.map_group != Some(metadata.group_id)
+                || target.map_number != Some(metadata.map_id)
+            {
+                continue;
+            }
+            if !state
+                .flags
+                .is_engine_flag_set(&swarm.engine_flag)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "check {} for active {swarm_token} encounter table: {error}",
+                        swarm.engine_flag
+                    )
+                })?
+            {
+                continue;
+            }
+            let mut selected = base.clone();
+            selected.grass_rates = Some(swarm.grass_rates.clone());
+            selected.grass = Some(swarm.grass.clone());
+            return Ok(Some(selected));
+        }
+        Ok(None)
+    }
+
     pub fn require_wild_encounters_for_map(&self, map_name: &str) -> Result<&WildEncounterData> {
         self.wild_encounters
             .get(map_name)
@@ -17685,6 +19626,7 @@ impl GameDataSet {
             .with_context(|| format!("compiled game pack missing field encounters for {map_name}"))
     }
 
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn roll_headbutt_encounter(
         &self,
         map_name: &str,
@@ -17865,8 +19807,7 @@ impl GameDataSet {
         state: &mut GameState,
         overworld: &mut OverworldSession,
         party_index: usize,
-    ) -> Result<()>
-    {
+    ) -> Result<()> {
         self.require_no_active_battle(state, "SWEET_SCENT field move")?;
         anyhow::ensure!(
             self.is_exact_sweet_scent_encounter_command(&RuntimeScriptCommandRef::new(
@@ -17916,23 +19857,32 @@ impl GameDataSet {
         )?;
         let mut rng = CrystalRandom::new(state.random_state, divider);
         let contest_mode = self.bug_contest_encounter_mode(state)?;
-        let encounters = self.wild_encounters_for_map(&overworld.map.name);
+        let swarm_encounters =
+            self.active_swarm_wild_encounters_for_map(state, &overworld.map.name)?;
+        let encounters = swarm_encounters
+            .as_ref()
+            .or_else(|| self.wild_encounters_for_map(&overworld.map.name));
         if !contest_mode && encounters.is_none() {
             state.random_state = rng.state();
-            state.script_runtime.memory.insert("wScriptVar".to_string(), "0".to_string());
-            state.script_runtime.memory.insert("wBattleType".to_string(), "0".to_string());
+            state
+                .script_runtime
+                .memory
+                .insert("wScriptVar".to_string(), "0".to_string());
+            state
+                .script_runtime
+                .memory
+                .insert("wBattleType".to_string(), "0".to_string());
             state.script_runtime.script_value = Some("0".to_string());
-            return Ok(SweetScentEncounterOutcome { wild_encounter: None });
+            return Ok(SweetScentEncounterOutcome {
+                wild_encounter: None,
+            });
         }
         let metadata = self.runtime_map_metadata_for_name(&overworld.map.name)?;
         let current_map = (
             u8::try_from(metadata.group_id).context("Sweet Scent map group exceeds byte")?,
             u8::try_from(metadata.map_id).context("Sweet Scent map number exceeds byte")?,
         );
-        let tileset_name = self.map_tileset_name(&overworld.map.name)?;
-        let land_encounters_on_any_land = metadata.environment.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("dark_cave");
+        let land_encounters_on_any_land = can_encounter_on_any_non_ice_land(&metadata.environment);
         let contest_encounters = contest_mode
             .then(|| {
                 self.bug_contest_config
@@ -17978,9 +19928,18 @@ impl GameDataSet {
                 )
             })
             .unwrap_or_else(|| ("0".to_string(), "0".to_string(), false));
-        state.script_runtime.memory.insert("wTempWildMonSpecies".to_string(), species);
-        state.script_runtime.memory.insert("wCurPartyLevel".to_string(), level);
-        state.script_runtime.memory.insert("wScriptVar".to_string(), u8::from(found).to_string());
+        state
+            .script_runtime
+            .memory
+            .insert("wTempWildMonSpecies".to_string(), species);
+        state
+            .script_runtime
+            .memory
+            .insert("wCurPartyLevel".to_string(), level);
+        state
+            .script_runtime
+            .memory
+            .insert("wScriptVar".to_string(), u8::from(found).to_string());
         state.script_runtime.memory.insert(
             "wBattleType".to_string(),
             if wild_encounter
@@ -18065,10 +20024,24 @@ impl GameDataSet {
         let environment = &self
             .runtime_map_metadata_for_name(&session.map.name)?
             .environment;
-        let tileset_name = self.map_tileset_name(&session.map.name)?;
-        let land_encounters_on_any_land = environment.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("dark_cave");
+        let swarm_encounters =
+            self.active_swarm_wild_encounters_for_map(state, &session.map.name)?;
+        let base_encounters = swarm_encounters
+            .as_ref()
+            .or_else(|| self.wild_encounters_for_map(&session.map.name));
+        let zone = base_encounters
+            .and_then(|data| data.zone_at(session.player.tile.x, session.player.tile.y));
+        let zoned_encounters = zone.map(|zone| {
+            let mut data = base_encounters
+                .expect("zone came from encounter data")
+                .clone();
+            data.grass_rates = Some(zone.grass_rates.clone());
+            data.grass = Some(zone.grass.clone());
+            data.zones.clear();
+            data
+        });
+        let land_encounters_on_any_land =
+            can_encounter_on_any_non_ice_land(environment) || zone.is_some();
         let metadata = self.runtime_map_metadata_for_name(&session.map.name)?;
         let current_map = (
             u8::try_from(metadata.group_id).context("wild encounter map group exceeds byte")?,
@@ -18083,17 +20056,16 @@ impl GameDataSet {
                     .map(|config| config.encounters.as_slice())
             })
             .transpose()?;
-        let encounters = self.wild_encounters_for_map(&session.map.name);
-        if !contest_mode && encounters.is_none() {
-            return Ok(None);
+        let encounters = zoned_encounters.as_ref().or(base_encounters);
+        if contest_mode || encounters.is_some() {
+            self.preflight_exact_wild_encounter_transaction(
+                state,
+                session,
+                encounters,
+                contest_mode,
+                land_encounters_on_any_land,
+            )?;
         }
-        self.preflight_exact_wild_encounter_transaction(
-            state,
-            session,
-            encounters,
-            contest_mode,
-            land_encounters_on_any_land,
-        )?;
         let roll = session
             .check_wild_encounter_exact(
                 encounters,
@@ -18106,6 +20078,7 @@ impl GameDataSet {
                     has_cleanse_tag: Self::party_has_cleanse_tag(state),
                     active_repel_item,
                     lead_party_level: leading_usable_party_level(state),
+                    lead_ability: leading_usable_party_ability(state),
                     land_encounters_on_any_land,
                     ..EncounterCheckOptions::default()
                 },
@@ -18528,10 +20501,12 @@ impl GameDataSet {
             .get(&resolved.encounter.species)
             .with_context(|| format!("unknown wild species {}", resolved.encounter.species))?;
         let metadata = self.runtime_map_metadata_for_name(&encounter.map_name)?;
-        let tileset_name = self.map_tileset_name(&encounter.map_name)?;
-        let land_encounters_on_any_land = metadata.environment.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("cave")
-            || tileset_name.eq_ignore_ascii_case("dark_cave");
+        let zone_uses_land_surface = self
+            .wild_encounters_for_map(&encounter.map_name)
+            .and_then(|data| data.zone_at(encounter.tile.x, encounter.tile.y))
+            .is_some();
+        let land_encounters_on_any_land =
+            can_encounter_on_any_non_ice_land(&metadata.environment) || zone_uses_land_surface;
         let live_surface = session
             .current_encounter_surface_checked_with_land_encounters(land_encounters_on_any_land)
             .map_err(|error| anyhow::anyhow!("resolve live wild encounter surface: {error}"))?;
@@ -18618,6 +20593,12 @@ impl GameDataSet {
             .memory
             .insert("wBattleScriptFlags".to_string(), "0".to_string());
         activate_wild_battle_start(state, &battle).context("activate exact wild battle")?;
+        crate::nuzlocke::register_wild_encounter(
+            self.nuzlocke_rules,
+            state,
+            &battle.encounter.map_name,
+            &battle.battle_type,
+        );
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
@@ -18678,6 +20659,50 @@ impl GameDataSet {
             })
     }
 
+    fn landmark_byte(&self, constant: &str) -> Result<u8> {
+        let landmark = self
+            .pokegear_landmarks
+            .landmarks
+            .iter()
+            .find(|landmark| landmark.constant == constant)
+            .with_context(|| format!("compiled landmark catalog missing {constant}"))?;
+        u8::try_from(landmark.id)
+            .with_context(|| format!("compiled landmark {constant} id exceeds one byte"))
+    }
+
+    fn init_map_name_sign(
+        &self,
+        state: &mut GameState,
+        map_name: &str,
+    ) -> Result<crystal_core::systems::map_name_sign::MapNameSignOutcome> {
+        let landmark = self.pokegear_landmark_for_map(map_name)?;
+        let landmark = u8::try_from(landmark.id)
+            .with_context(|| format!("compiled landmark for {map_name} exceeds one byte"))?;
+        let environment = self.map_environment(map_name)?;
+        let special = self.landmark_byte("LANDMARK_SPECIAL")?;
+        let suppressed = [
+            "LANDMARK_RADIO_TOWER",
+            "LANDMARK_LAV_RADIO_TOWER",
+            "LANDMARK_UNDERGROUND_PATH",
+            "LANDMARK_INDIGO_PLATEAU",
+            "LANDMARK_POWER_PLANT",
+        ]
+        .map(|constant| self.landmark_byte(constant))
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        Ok(crystal_core::systems::map_name_sign::init_map_name_sign(
+            &mut state.map_name_sign,
+            landmark,
+            environment.eq_ignore_ascii_case("GATE"),
+            matches!(
+                map_name,
+                "Route35NationalParkGate" | "Route36NationalParkGate"
+            ),
+            special,
+            &suppressed,
+        ))
+    }
+
     pub fn saved_event_flag_exists(&self, flag: &str) -> bool {
         self.initialize_events
             .event_flags
@@ -18718,18 +20743,22 @@ impl GameDataSet {
                     .objects
                     .iter()
                     .any(|object| object.event_flag == flag)
-                    || module.scripts.values().filter_map(Value::as_array).any(|body| {
-                        body.iter().any(|command| {
-                            command.get("command").and_then(Value::as_str)
-                                == Some("conditional_event")
-                                && command
-                                    .get("args")
-                                    .and_then(Value::as_array)
-                                    .and_then(|args| args.first())
-                                    .and_then(Value::as_str)
-                                    == Some(flag)
+                    || module
+                        .scripts
+                        .values()
+                        .filter_map(Value::as_array)
+                        .any(|body| {
+                            body.iter().any(|command| {
+                                command.get("command").and_then(Value::as_str)
+                                    == Some("conditional_event")
+                                    && command
+                                        .get("args")
+                                        .and_then(Value::as_array)
+                                        .and_then(|args| args.first())
+                                        .and_then(Value::as_str)
+                                        == Some(flag)
+                            })
                         })
-                    })
             })
     }
 
@@ -19001,10 +21030,7 @@ impl GameDataSet {
                     crystal_core::systems::special_routines::MagikarpLengthTable,
                 >(payload)?
                 .0;
-                insert_magikarp_length_table(
-                    &mut self.magikarp_lengths,
-                    entries,
-                )?;
+                insert_magikarp_length_table(&mut self.magikarp_lengths, entries)?;
             }
             ContentPackCategory::HappinessData => {
                 insert_happiness_data(&mut self.happiness_data, serde_json::from_value(payload)?)?;
@@ -20023,6 +22049,12 @@ impl GameDataSet {
             .memory
             .insert("wBattleScriptFlags".to_string(), "0".to_string());
         activate_wild_battle_start(state, &battle).context("activate exact fishing battle")?;
+        crate::nuzlocke::register_wild_encounter(
+            self.nuzlocke_rules,
+            state,
+            map_name,
+            &battle.battle_type,
+        );
         state.battle_active_party_index = first_available_battle_party_index(state);
         state.battle_active_enemy_party_index = Some(0);
         state.battle_rewarded_enemy_party_indices.clear();
@@ -20192,8 +22224,11 @@ impl GameDataSet {
             .map_scripts
             .get(map_scripts_label)
             .with_context(|| format!("missing map scripts label {map_scripts_label}"))?;
-        let scripts =
-            runtime_module_script_subset(&self.map_scripts, [map_scripts_label, map_events_label], true);
+        let scripts = runtime_module_script_subset(
+            &self.map_scripts,
+            [map_scripts_label, map_events_label],
+            true,
+        );
         let scenes = parse_map_scene_table(map_name, map_scripts)?;
         let map_script_section_commands =
             parse_map_script_section_commands(map_name, map_scripts_label, map_scripts)?;
@@ -20634,18 +22669,13 @@ fn conditional_background_event_payload<'a>(
         .get(source_script)
         .and_then(serde_json::Value::as_array)
         .with_context(|| {
-            format!(
-                "{event_type} background event {source_script} has no script data payload"
-            )
+            format!("{event_type} background event {source_script} has no script data payload")
         })?;
     let mut matching = commands.iter().filter(|command| {
-        command.get("command").and_then(serde_json::Value::as_str)
-            == Some("conditional_event")
+        command.get("command").and_then(serde_json::Value::as_str) == Some("conditional_event")
     });
     let command = matching.next().with_context(|| {
-        format!(
-            "{event_type} background event {source_script} has no conditional_event payload"
-        )
+        format!("{event_type} background event {source_script} has no conditional_event payload")
     })?;
     anyhow::ensure!(
         matching.next().is_none(),
@@ -20712,9 +22742,7 @@ impl BranchingCallasmHostService {
             "UpdateSprites" => Some(Self::UpdateSprites),
             "UpdatePlayerSprite" => Some(Self::UpdatePlayerSprite),
             "CheckWaterfallTile" => Some(Self::CheckWaterfallTile),
-            "StubbedTrainerRankings_Waterfall" => {
-                Some(Self::StubbedTrainerRankingsWaterfall)
-            }
+            "StubbedTrainerRankings_Waterfall" => Some(Self::StubbedTrainerRankingsWaterfall),
             _ => None,
         }
     }
@@ -21208,9 +23236,7 @@ fn certify_branching_script_callasm_target(
                         .insert("de".to_string(), "wStringBuffer1".to_string());
                 }
                 BranchingCallasmHostService::CopyName1 => {
-                    if state.registers.get("de").map(String::as_str)
-                        != Some("wStringBuffer1")
-                    {
+                    if state.registers.get("de").map(String::as_str) != Some("wStringBuffer1") {
                         return Err(ScriptCallasmCertificateFailure::at(
                             &label,
                             command_index,
@@ -21220,10 +23246,8 @@ fn certify_branching_script_callasm_target(
                     }
                 }
                 BranchingCallasmHostService::CopyName2 => {
-                    if state.registers.get("de").map(String::as_str)
-                        != Some("wStringBuffer2")
-                        || state.registers.get("hl").map(String::as_str)
-                            != Some("wStringBuffer3")
+                    if state.registers.get("de").map(String::as_str) != Some("wStringBuffer2")
+                        || state.registers.get("hl").map(String::as_str) != Some("wStringBuffer3")
                     {
                         return Err(ScriptCallasmCertificateFailure::at(
                             &label,
@@ -22082,9 +24106,7 @@ fn commit_pending_block_field_move(
         .pending_block_field_move
         .as_ref()
         .with_context(|| {
-            format!(
-                "{expected_move_id} source callasm has no prepared block field move"
-            )
+            format!("{expected_move_id} source callasm has no prepared block field move")
         })?;
     anyhow::ensure!(
         pending.move_id == expected_move_id,
@@ -22399,12 +24421,8 @@ fn branching_callasm_bit_effect<'a>(
     bit: &'a str,
 ) -> Option<BranchingCallasmBitEffect<'a>> {
     let (engine_flag, inverted) = match (memory, bit) {
-        ("wBikeFlags", "BIKEFLAGS_STRENGTH_ACTIVE_F" | "0") => {
-            ("ENGINE_STRENGTH_ACTIVE", false)
-        }
-        ("wBikeFlags", "BIKEFLAGS_ALWAYS_ON_BIKE_F" | "1") => {
-            ("ENGINE_ALWAYS_ON_BIKE", false)
-        }
+        ("wBikeFlags", "BIKEFLAGS_STRENGTH_ACTIVE_F" | "0") => ("ENGINE_STRENGTH_ACTIVE", false),
+        ("wBikeFlags", "BIKEFLAGS_ALWAYS_ON_BIKE_F" | "1") => ("ENGINE_ALWAYS_ON_BIKE", false),
         ("wBikeFlags", "BIKEFLAGS_DOWNHILL_F" | "2") => ("ENGINE_DOWNHILL", false),
         (
             "wEnabledPlayerEvents",
@@ -22498,10 +24516,10 @@ mod branching_callasm_host_service_tests {
     fn describedecoration_resolves_equipped_poster_and_ornament_scripts() {
         let data = GameDataSet::default();
         let mut state = GameState::default();
-        state
-            .script_runtime
-            .memory
-            .insert("wDecoPoster".to_string(), "DECO_CLEFAIRY_POSTER".to_string());
+        state.script_runtime.memory.insert(
+            "wDecoPoster".to_string(),
+            "DECO_CLEFAIRY_POSTER".to_string(),
+        );
         state.script_runtime.memory.insert(
             "wDecoLeftOrnament".to_string(),
             "DECO_PIKACHU_DOLL".to_string(),
@@ -22564,30 +24582,20 @@ mod branching_callasm_host_service_tests {
             .expect("town-map decoration body");
         assert_eq!(town_map.len(), 6);
         assert_eq!(
-            data.script_text_command(
-                "PlayersHouse2F",
-                "DecorationDesc_TownMapPoster",
-                1,
-            )
-            .expect("town-map text command")
-            .text_label,
+            data.script_text_command("PlayersHouse2F", "DecorationDesc_TownMapPoster", 1,)
+                .expect("town-map text command")
+                .text_label,
             Some("_LookTownMapText".to_string())
         );
         assert_eq!(
-            data.script_runtime_command(
-                "PlayersHouse2F",
-                "DecorationDesc_TownMapPoster",
-                3,
-            )
-            .expect("town-map special command")
-            .args,
+            data.script_runtime_command("PlayersHouse2F", "DecorationDesc_TownMapPoster", 3,)
+                .expect("town-map special command")
+                .args,
             ["OverworldTownMap"]
         );
         assert!(
-            data.compiled_script_body(
-                ".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole"
-            )
-            .is_some()
+            data.compiled_script_body(".OrnamentConsoleScript@DecorationDesc_OrnamentOrConsole")
+                .is_some()
         );
     }
 
@@ -22651,14 +24659,18 @@ mod branching_callasm_host_service_tests {
             state.script_runtime.named_buffers.get("STRING_BUFFER_1"),
             Some(&"LEAF".to_string())
         );
-        assert!(!state
-            .script_runtime
-            .named_buffers
-            .contains_key("STRING_BUFFER_2"));
-        assert!(!state
-            .script_runtime
-            .named_buffers
-            .contains_key("STRING_BUFFER_3"));
+        assert!(
+            !state
+                .script_runtime
+                .named_buffers
+                .contains_key("STRING_BUFFER_2")
+        );
+        assert!(
+            !state
+                .script_runtime
+                .named_buffers
+                .contains_key("STRING_BUFFER_3")
+        );
         assert_eq!(
             cpu.registers.get("de").map(String::as_str),
             Some("wStringBuffer1")
@@ -22676,10 +24688,12 @@ mod branching_callasm_host_service_tests {
             state.script_runtime.named_buffers.get("STRING_BUFFER_2"),
             Some(&"LEAF".to_string())
         );
-        assert!(!state
-            .script_runtime
-            .named_buffers
-            .contains_key("STRING_BUFFER_3"));
+        assert!(
+            !state
+                .script_runtime
+                .named_buffers
+                .contains_key("STRING_BUFFER_3")
+        );
 
         cpu.registers
             .insert("de".to_string(), "wStringBuffer2".to_string());
@@ -22864,6 +24878,14 @@ fn strip_compiled_mail_text(value: &str) -> String {
     unquoted.trim_end_matches('@').to_string()
 }
 
+fn warp_sound_effect_for_collision(permission: u8) -> &'static str {
+    match permission {
+        permissions::DOOR => "SFX_ENTER_DOOR",
+        permissions::WARP_PANEL => "SFX_WARP_TO",
+        _ => "SFX_EXIT_BUILDING",
+    }
+}
+
 fn set_compiled_mail_check_result(state: &mut GameState, result: u8) {
     let result = result.to_string();
     state.script_runtime.script_value = Some(result.clone());
@@ -22882,13 +24904,16 @@ fn set_npc_trade_result(state: &mut GameState, result: u8) {
         .insert("_npc_trade_result".to_string(), result);
 }
 
-fn compiled_mail_message(entries: &[serde_json::Value]) -> Result<String> {
+fn compiled_mail_message(
+    entries: &[serde_json::Value],
+    first_entry_is_mail_item: bool,
+) -> Result<String> {
     if entries.is_empty() {
         anyhow::bail!("compiled mail definition has no entries");
     }
     Ok(entries
         .iter()
-        .skip(1)
+        .skip(usize::from(first_entry_is_mail_item))
         .filter_map(|entry| {
             entry
                 .get("args")
@@ -23174,6 +25199,79 @@ fn connection_destination_tile_components(
     Ok((target_x, target_y, max_x, max_y))
 }
 
+fn trainer_ai_type_matchup(
+    table: &TypeEffectivenessTable,
+    move_type: &str,
+    defender_types: &[String],
+    identified: bool,
+) -> crystal_core::battle::ai::TrainerAiTypeMatchup {
+    let mut effectiveness_num = 1_u32;
+    let mut effectiveness_den = 1_u32;
+    for defender_type in defender_types
+        .iter()
+        .map(String::as_str)
+        .filter(|defender_type| *defender_type != "NONE")
+    {
+        if let Some(multiplier) = identified
+            .then(|| {
+                table
+                    .foresight_matchups
+                    .get(move_type)
+                    .and_then(|defenders| defenders.get(defender_type))
+            })
+            .flatten()
+            .or_else(|| {
+                table
+                    .matchups
+                    .get(move_type)
+                    .and_then(|defenders| defenders.get(defender_type))
+            })
+        {
+            effectiveness_num = effectiveness_num.saturating_mul(u32::from(multiplier.numerator));
+            effectiveness_den =
+                effectiveness_den.saturating_mul(u32::from(multiplier.denominator.max(1)));
+        }
+    }
+    if effectiveness_num == 0 {
+        crystal_core::battle::ai::TrainerAiTypeMatchup::Immune
+    } else if effectiveness_num > effectiveness_den {
+        crystal_core::battle::ai::TrainerAiTypeMatchup::SuperEffective
+    } else if effectiveness_num < effectiveness_den {
+        crystal_core::battle::ai::TrainerAiTypeMatchup::NotVeryEffective
+    } else {
+        crystal_core::battle::ai::TrainerAiTypeMatchup::Neutral
+    }
+}
+
+fn trainer_switch_type_matchup(
+    table: &TypeEffectivenessTable,
+    move_type: &str,
+    defender: &Pokemon,
+) -> Result<i8> {
+    let defender_types = if defender.species.type1 == defender.species.type2 {
+        vec![defender.species.type1.clone()]
+    } else {
+        vec![
+            defender.species.type1.clone(),
+            defender.species.type2.clone(),
+        ]
+    };
+    let multiplier = crystal_core::battle::damage::calculate_type_effectiveness_multiplier(
+        table,
+        move_type,
+        &defender_types,
+    )
+    .map_err(|error| anyhow::anyhow!("trainer switch type matchup: {error:?}"))?;
+    if multiplier.numerator == 0 {
+        return Ok(-2);
+    }
+    Ok(match multiplier.numerator.cmp(&multiplier.denominator) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })
+}
+
 fn read_json_file<T>(path: &Path) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -23245,9 +25343,9 @@ pub fn write_compiled_game_pack_for_tests(
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
-pub fn write_compiled_game_pack_with_pcm_sidecars_for_tests(
+pub fn write_compiled_game_pack_with_midi_audio_for_tests(
     path: impl AsRef<Path>,
     pack: &CompiledGamePack,
 ) -> Result<()> {
-    write_compiled_game_pack_with_pcm_sidecars(path, pack)
+    write_compiled_game_pack_with_midi_audio(path, pack)
 }

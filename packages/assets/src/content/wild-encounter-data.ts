@@ -13,14 +13,34 @@ export const WildEncounterTableSchema = z.object({
 }).strict();
 export type WildEncounterTable = z.infer<typeof WildEncounterTableSchema>;
 
+export const WildEncounterZoneSchema = z.object({
+  id: z.string(),
+  minX: z.number().int(),
+  minY: z.number().int(),
+  maxX: z.number().int(),
+  maxY: z.number().int(),
+  grassRates: z.record(z.string(), z.number()),
+  grass: WildEncounterTableSchema,
+}).strict();
+export type WildEncounterZone = z.infer<typeof WildEncounterZoneSchema>;
+
+export const WildEncounterSwarmOverrideSchema = z.object({
+  engine_flag: z.string(),
+  grass_rates: z.record(z.string(), z.number()),
+  grass: WildEncounterTableSchema,
+}).strict();
+export type WildEncounterSwarmOverride = z.infer<typeof WildEncounterSwarmOverrideSchema>;
+
 export const WildEncounterDataSchema = z.object({
   map_name: z.string(),
   grass_rates: z.record(z.string(), z.number()).nullable(),
   water_rate: z.number().nullable(),
   grass: WildEncounterTableSchema.nullable(),
   water: WildEncounterTableSchema.nullable(),
+  swarm_overrides: z.record(z.string(), WildEncounterSwarmOverrideSchema).default({}),
+  zones: z.array(WildEncounterZoneSchema).default([]),
 }).strict();
-export type WildEncounterData = z.infer<typeof WildEncounterDataSchema>;
+export type WildEncounterData = z.input<typeof WildEncounterDataSchema>;
 
 export const wildEncounterData: WildEncounterData[] = [
   {

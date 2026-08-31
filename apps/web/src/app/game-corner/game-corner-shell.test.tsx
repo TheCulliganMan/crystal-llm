@@ -16,10 +16,6 @@ jest.mock("@/app/game-corner/krabbyclaw-arena-panel", () => ({
   KrabbyClawArenaPanel: () => <div data-testid="krabbyclaw-arena-panel">KrabbyClaw Arena Panel</div>,
 }));
 
-jest.mock("@/app/audio/audio-convert-client", () => ({
-  AudioConvertClient: () => <div data-testid="audio-convert-client">Audio Convert Client</div>,
-}));
-
 jest.mock("@/app/game-corner/progress-tracker-panel", () => ({
   ProgressTrackerPanel: () => <div data-testid="progress-tracker-panel">Progress Tracker Panel</div>,
 }));
@@ -33,16 +29,6 @@ describe("GameCornerShell", () => {
     expect(screen.getByTestId("game-corner-slot-machine")).toBeInTheDocument();
     expect(screen.getByTestId("slot-machine-client")).toHaveAttribute("data-initial-tab", "slot-machine");
   });
-
-
-  it("renders audio generation tab content", () => {
-    render(<GameCornerShell initialTab="audio-generation" />);
-
-    expect(screen.getByRole("heading", { name: "Audio Generation" })).toBeInTheDocument();
-    expect(screen.getByTestId("game-corner-audio-generation")).toBeInTheDocument();
-    expect(screen.getByTestId("audio-convert-client")).toBeInTheDocument();
-  });
-
   it("renders arena mcp/skill content and quick links", () => {
     render(<GameCornerShell initialTab="arena-mcp-skill" />);
 

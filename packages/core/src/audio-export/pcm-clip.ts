@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { GB_FRAME_DURATION_MS } from "@pokecrystal/core/core/gb-timing";
-import { WavConverter } from "./converter";
+import { PcmConverter } from "./converter";
 import { AsmAudioParser, DrumkitParser, WaveSampleParser, type ParsedMusicData } from "./parsers";
 import type { NoiseNote } from "./schemas";
 import { buildAsmAudioProgram, type AsmAudioProgramKind } from "./asm-programs";
@@ -117,11 +117,12 @@ export function renderPcmClip({
   cryPitch = null,
   cryLength = null,
 }: RenderClipOptions): PcmClip {
-  const converter = new WavConverter(
+  const converter = new PcmConverter(
     musicData,
     context.drumkits,
     context.waveSamples,
     {
+      qualityMode: "accurate",
       waveInstrumentMap: context.waveInstrumentMap,
       loopedMusicExportSeconds: null,
       soloChannel,

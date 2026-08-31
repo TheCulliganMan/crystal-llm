@@ -1,5 +1,4 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 import { parseJsonText } from "./client";
 import type { ToolResult } from "./types";
@@ -80,43 +79,6 @@ const loadPcmToolchain = (): PcmToolchain => {
   };
   return cachedPcmToolchain;
 };
-
-const candidateAudioRoots = (): string[] => [
-  ...(process.env.POKECRYSTAL_CLI_AUDIO_ROOT ? [process.env.POKECRYSTAL_CLI_AUDIO_ROOT] : []),
-  path.join(repoRoot, "apps", "web", "assets", "audio"),
-  path.join(repoRoot, "apps", "web", "public", "assets", "audio"),
-  path.join(repoRoot, "apps", "web", ".next-electron", "standalone", "apps", "web", "assets", "audio"),
-];
-
-const fileExists = (filePath: string): boolean => {
-  try {
-    return fs.statSync(filePath).isFile();
-  } catch {
-    return false;
-  }
-};
-
-const sourceCandidates = (source: string): string[] => {
-  const normalized = source.trim();
-  if (!normalized) {
-    return [];
-  }
-  const apiAudio = normalized.match(/^\/api\/audio\/(.+)$/);
-  const assetAudio = normalized.match(/^\/assets\/audio\/(.+)$/);
-  const rootRelativeAudio = normalized.match(/^\/audio\/(.+)$/);
-  const relative =
-    apiAudio?.[1] ??
-    assetAudio?.[1] ??
-    rootRelativeAudio?.[1] ??
-    normalized.replace(/^assets\/audio\//, "");
-  if (relative === normalized && path.isAbsolute(normalized)) {
-    return [normalized];
-  }
-  return candidateAudioRoots().map((root) => path.join(root, relative));
-};
-
-export const resolveTuiAudioSourcePath = (source: string): string | null =>
-  sourceCandidates(source).find(fileExists) ?? null;
 
 const commandExists = (command: string): boolean => {
   const result = spawnSync("sh", ["-c", `command -v ${JSON.stringify(command)} >/dev/null 2>&1`], {
@@ -309,20 +271,6 @@ const parseSourceStem = (event: TuiAudioPlaybackEvent): { kind: "music" | "sfx" 
     return {
       kind: direct[1] === "cries" ? "cry" : direct[1] as "music" | "sfx",
       stem: normalizeStem(direct[2]),
-    };
-  }
-  const legacy = source.match(/\/api\/audio\/(?:(sfx|cries)\/)?([^/.]+)\.(?:mp3|wav|pcm|json)$/);
-  if (legacy) {
-    const group = legacy[1];
-    return {
-      kind: group === "cries" ? "cry" : group === "sfx" ? "sfx" : event.kind === "music" ? "music" : event.kind === "cry" ? "cry" : "sfx",
-      stem: normalizeStem(legacy[2]),
-    };
-  }
-  if (event.kind === "music" || event.kind === "sfx" || event.kind === "cry") {
-    return {
-      kind: event.kind === "cry" ? "cry" : event.kind,
-      stem: normalizeStem(path.basename(source, path.extname(source)) || event.token),
     };
   }
   return null;

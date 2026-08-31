@@ -12,6 +12,7 @@ fn parse_script_phone_commands(
                 continue;
             };
             if !SCRIPT_PHONE_CHECK_COMMANDS.contains(&command_name)
+                && !SCRIPT_PHONE_MUTATION_COMMANDS.contains(&command_name)
                 && !SCRIPT_PHONE_REGISTRATION_COMMANDS.contains(&command_name)
             {
                 continue;
@@ -317,6 +318,22 @@ fn parse_script_scene_commands(
                         command_index: index,
                     });
                 }
+                command if SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS.contains(&command) => {
+                    let args = script_command_args(map_name, script_name, command_name, entry)?;
+                    if args.len() != 1 {
+                        anyhow::bail!(
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            args.len()
+                        );
+                    }
+                    commands.push(ScriptSceneCommand {
+                        command: command_name.to_string(),
+                        map_id: Some(args[0].to_string()),
+                        scene_id: None,
+                        source_script: script_name.clone(),
+                        command_index: index,
+                    });
+                }
                 command if SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
@@ -497,6 +514,28 @@ fn parse_script_object_commands(
                     });
                 }
                 command if SCRIPT_OBJECT_VISIBILITY_COMMANDS.contains(&command) => {
+                    let args = script_command_args(map_name, script_name, command_name, entry)?;
+                    if args.len() != 1 {
+                        anyhow::bail!(
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            args.len()
+                        );
+                    }
+                    commands.push(ScriptObjectCommand {
+                        command: command_name.to_string(),
+                        object_id: Some(args[0].to_string()),
+                        target_object_id: None,
+                        x: None,
+                        y: None,
+                        direction: None,
+                        movement: None,
+                        emote: None,
+                        duration: None,
+                        source_script: script_name.clone(),
+                        command_index: index,
+                    });
+                }
+                command if SCRIPT_OBJECT_WRITE_COORDINATE_COMMANDS.contains(&command) => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
@@ -1500,8 +1539,7 @@ fn parse_script_control_commands(
                         command_index: index,
                     });
                 }
-                "iftrue" | "iffalse" | "sjump" | "farsjump" | "scall"
-                | "farscall" | "sdefer" => {
+                "iftrue" | "iffalse" | "sjump" | "farsjump" | "scall" | "farscall" | "sdefer" => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
@@ -1523,11 +1561,11 @@ fn parse_script_control_commands(
                         command_index: index,
                     });
                 }
-                "jumpstd" => {
+                "jumpstd" | "callstd" => {
                     let args = script_command_args(map_name, script_name, command_name, entry)?;
                     if args.len() != 1 {
                         anyhow::bail!(
-                            "Malformed jumpstd command in {script_name} for {map_name}: expected 1 arg, found {}.",
+                            "Malformed {command_name} command in {script_name} for {map_name}: expected 1 arg, found {}.",
                             args.len()
                         );
                     }
@@ -1572,7 +1610,8 @@ fn resolve_script_target_label(
     if target_label.starts_with('.') {
         let parent_script = script_label_parent(source_script);
         let local = if target_label.contains('@') {
-            (script_label_parent(target_label) == parent_script).then(|| target_label.to_string())?
+            (script_label_parent(target_label) == parent_script)
+                .then(|| target_label.to_string())?
         } else {
             format!("{target_label}@{parent_script}")
         };
@@ -1624,47 +1663,53 @@ fn parse_script_movements(
             movement_label.to_string()
         };
         if !scripts.contains_key(&script_key) {
-                if movement_label == "wMovementBuffer"
-                    && commands.iter().all(|command| {
-                        command.command == "applymovement"
-                            && command.object_id.as_deref() == Some("PLAYER")
-                            && scripts
-                                .get(&command.source_script)
-                                .and_then(Value::as_array)
-                                .and_then(|entries| command.command_index.checked_sub(1).and_then(|index| entries.get(index)))
-                                .is_some_and(|entry| {
-                                    entry.get("command").and_then(Value::as_str) == Some("special")
-                                        && entry.get("args").and_then(Value::as_array).is_some_and(|args| {
-                                            args.len() == 1 && args[0].as_str() == Some("SurfStartStep")
-                                        })
-                                })
-                    })
-                {
-                    movements.push(ScriptMovement {
-                        label: movement_label.to_string(),
-                        source_script: Some(parent_script.to_string()),
-                        steps: vec![
-                            ScriptMovementStep {
-                                command: "slow_step".to_string(),
-                                direction: Some(
-                                    SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION.to_string(),
-                                ),
-                                duration: None,
-                                index: 0,
-                            },
-                            ScriptMovementStep {
-                                command: "step_end".to_string(),
-                                direction: None,
-                                duration: None,
-                                index: 1,
-                            },
-                        ],
-                    });
-                    continue;
-                }
-                anyhow::bail!(
-                    "movement reference '{movement_label}' from {parent_script} on {map_name} resolves to missing script"
-                );
+            if movement_label == "wMovementBuffer"
+                && commands.iter().all(|command| {
+                    command.command == "applymovement"
+                        && command.object_id.as_deref() == Some("PLAYER")
+                        && scripts
+                            .get(&command.source_script)
+                            .and_then(Value::as_array)
+                            .and_then(|entries| {
+                                command
+                                    .command_index
+                                    .checked_sub(1)
+                                    .and_then(|index| entries.get(index))
+                            })
+                            .is_some_and(|entry| {
+                                entry.get("command").and_then(Value::as_str) == Some("special")
+                                    && entry.get("args").and_then(Value::as_array).is_some_and(
+                                        |args| {
+                                            args.len() == 1
+                                                && args[0].as_str() == Some("SurfStartStep")
+                                        },
+                                    )
+                            })
+                })
+            {
+                movements.push(ScriptMovement {
+                    label: movement_label.to_string(),
+                    source_script: Some(parent_script.to_string()),
+                    steps: vec![
+                        ScriptMovementStep {
+                            command: "slow_step".to_string(),
+                            direction: Some(SCRIPT_MOVEMENT_PLAYER_FACING_DIRECTION.to_string()),
+                            duration: None,
+                            index: 0,
+                        },
+                        ScriptMovementStep {
+                            command: "step_end".to_string(),
+                            direction: None,
+                            duration: None,
+                            index: 1,
+                        },
+                    ],
+                });
+                continue;
+            }
+            anyhow::bail!(
+                "movement reference '{movement_label}' from {parent_script} on {map_name} resolves to missing script"
+            );
         }
         let Some(payload) = scripts.get(&script_key) else {
             anyhow::bail!("movement script {script_key} for {map_name} is missing");

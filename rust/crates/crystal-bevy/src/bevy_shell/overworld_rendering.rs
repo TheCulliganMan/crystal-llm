@@ -63,53 +63,21 @@ fn sync_visible_map_name_sign(
     snapshot: &RuntimeShellSnapshot,
 ) {
     let landmarks = &snapshot.presentation.pokegear_landmarks;
-    let national_park_gate = matches!(
-        snapshot.overworld.map_name.as_str(),
-        "Route35NationalParkGate" | "Route36NationalParkGate"
-    );
-    let current = if national_park_gate {
-        Some("__MAP_NAME_SIGN_SENTINEL__".to_string())
-    } else {
-        landmarks
-            .map_to_landmark
-            .get(&snapshot.overworld.map_name)
-            .cloned()
-    };
-    let previous = runtime_shell.previous_map_sign_landmark.clone();
-    runtime_shell.previous_map_sign_landmark = current.clone();
     runtime_shell.visible_map_name_sign = None;
-
-    let Some(landmark) = current else {
-        return;
-    };
-    if previous.as_ref() == Some(&landmark)
-        || previous.is_none()
-        || previous.as_deref() == Some("LANDMARK_SPECIAL")
-        || national_park_gate
-        || matches!(
-            landmark.as_str(),
-            "LANDMARK_RADIO_TOWER"
-                | "LANDMARK_LAV_RADIO_TOWER"
-                | "LANDMARK_UNDERGROUND_PATH"
-                | "LANDMARK_INDIGO_PLATEAU"
-                | "LANDMARK_POWER_PLANT"
-                | "LANDMARK_SPECIAL"
-        )
-    {
+    if snapshot.map_name_sign.timer != 60 {
         return;
     }
-    let Some(label) = landmarks
+    let Some(entry) = landmarks
         .landmarks
         .iter()
-        .find(|entry| entry.constant == landmark)
-        .map(|entry| entry.name.clone())
+        .find(|entry| entry.id == u16::from(snapshot.map_name_sign.current_landmark))
     else {
         return;
     };
     runtime_shell.visible_map_name_sign = Some(VisibleMapNameSign {
-        landmark,
-        label,
-        frames_remaining: 60,
+        landmark: entry.constant.clone(),
+        label: entry.name.clone(),
+        frames_remaining: snapshot.map_name_sign.timer,
     });
 }
 
@@ -127,6 +95,11 @@ fn spawn_visible_map_name_sign(
     let Some(sign) = runtime_shell.visible_map_name_sign.as_ref() else {
         return Ok(());
     };
+    // PlaceMapNameSign pre-decrements the timer. Old values 60 and 59 own
+    // the setup/initialization holds; the window becomes visible at 58.
+    if sign.frames_remaining >= 59 {
+        return Ok(());
+    }
     require_bitmap_font_art(rendered_art, asset_root, images)?;
     let palette_key = normalize_tileset_time_of_day(snapshot.progression.time.time_of_day.as_key());
     if !rendered_art.map_name_sign_cache.contains_key(&palette_key)
@@ -527,9 +500,10 @@ fn retained_field_fullscreen_active(runtime_shell: &BevyRuntimeShell) -> bool {
         || (runtime_shell.storage_cursor.is_some() && !runtime_shell.party_menu_open)
         || (runtime_shell.pc_item_cursor.is_some() && !visible_field_pack_is_open(runtime_shell))
         || runtime_shell.bill_pc_box_cursor.is_some()
-        || runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
-            hatch.phase != VisibleEggHatchPhase::HuhText
-        })
+        || runtime_shell
+            .visible_egg_hatch
+            .as_ref()
+            .is_some_and(|hatch| hatch.phase != VisibleEggHatchPhase::HuhText)
 }
 
 fn textbox_frame_id(frame: crate::core::state::FrameType) -> u8 {
@@ -672,13 +646,9 @@ fn spawn_field_command_menu(
         return;
     }
     if runtime_shell.visible_unown_printer.is_some() {
-        if let Err(error) = spawn_visible_unown_printer(
-            commands,
-            runtime_shell,
-            rendered_art,
-            asset_root,
-            images,
-        ) {
+        if let Err(error) =
+            spawn_visible_unown_printer(commands, runtime_shell, rendered_art, asset_root, images)
+        {
             *render_error = Some(error);
         }
         return;
@@ -984,7 +954,10 @@ fn spawn_visible_buena_password_menu(
         .visible_buena_password
         .as_ref()
         .context("no Buena password menu is open")?;
-    anyhow::ensure!(menu.options.len() == 3, "Buena password menu must have three choices");
+    anyhow::ensure!(
+        menu.options.len() == 3,
+        "Buena password menu must have three choices"
+    );
     let snapshot = runtime_shell.shell.presentation_snapshot()?;
     let labels = menu
         .options
@@ -1015,10 +988,7 @@ fn spawn_visible_buena_password_menu(
         SpriteBundle {
             sprite: Sprite {
                 color: Color::WHITE,
-                custom_size: Some(Vec2::new(
-                    TILE_SIZE * (width - 2) as f32,
-                    TILE_SIZE * 6.0,
-                )),
+                custom_size: Some(Vec2::new(TILE_SIZE * (width - 2) as f32, TILE_SIZE * 6.0)),
                 ..default()
             },
             transform: Transform::from_xyz(center_x, center_y, 3.3),
@@ -1128,14 +1098,25 @@ fn spawn_visible_battle_tower_room_menu(
                 .unwrap_or_else(|| "CANCEL".to_string());
             spawn_field_command_window_frame_tiles(commands, frame, 12.0, 7.0, 8, 7, 3.35);
             for (text, tile_x, tile_y) in [
-                ("What level do you\nwant to challenge?".to_string(), 1.0, 2.0),
+                (
+                    "What level do you\nwant to challenge?".to_string(),
+                    1.0,
+                    2.0,
+                ),
                 ("▲".to_string(), 16.0, 8.0),
                 (choice, 13.0, 10.0),
                 ("▼".to_string(), 16.0, 12.0),
             ] {
                 let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
                 spawn_field_command_bitmap_text(
-                    commands, rendered_art, asset_root, images, &text, x, y, 3.6,
+                    commands,
+                    rendered_art,
+                    asset_root,
+                    images,
+                    &text,
+                    x,
+                    y,
+                    3.6,
                 );
             }
         }
@@ -1156,14 +1137,28 @@ fn spawn_visible_battle_tower_room_menu(
             ] {
                 let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
                 spawn_field_command_bitmap_text(
-                    commands, rendered_art, asset_root, images, &text, x, y, 3.6,
+                    commands,
+                    rendered_art,
+                    asset_root,
+                    images,
+                    &text,
+                    x,
+                    y,
+                    3.6,
                 );
             }
         }
         VisibleBattleTowerRoomMenuPhase::Rejection { message } => {
             let (x, y) = battle_hud_tile_origin(1.0, 2.0);
             spawn_field_command_bitmap_text(
-                commands, rendered_art, asset_root, images, message, x, y, 3.6,
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                message,
+                x,
+                y,
+                3.6,
             );
         }
     }
@@ -1450,35 +1445,33 @@ fn render_visible_card_flip_frame(
         );
     }
     match game.phase {
-        VisibleCardFlipPhase::ChooseCard => {
-            match game.animation {
-                VisibleCardFlipAnimation::Deal { frame } if frame < 20 => {}
-                VisibleCardFlipAnimation::Deal { .. } => {
-                    draw_card_flip_face_down(sources, 2, 0, &mut target);
-                }
-                VisibleCardFlipAnimation::Cycle { .. } => {
-                    draw_card_flip_face_down(sources, 2, 0, &mut target);
-                    draw_card_flip_face_down(sources, 2, 6, &mut target);
+        VisibleCardFlipPhase::ChooseCard => match game.animation {
+            VisibleCardFlipAnimation::Deal { frame } if frame < 20 => {}
+            VisibleCardFlipAnimation::Deal { .. } => {
+                draw_card_flip_face_down(sources, 2, 0, &mut target);
+            }
+            VisibleCardFlipAnimation::Cycle { .. } => {
+                draw_card_flip_face_down(sources, 2, 0, &mut target);
+                draw_card_flip_face_down(sources, 2, 6, &mut target);
+                draw_card_flip_border(sources, game.which_card, &mut target);
+            }
+            VisibleCardFlipAnimation::SelectFlash { frame } => {
+                draw_card_flip_face_down(sources, 2, 0, &mut target);
+                draw_card_flip_face_down(sources, 2, 6, &mut target);
+                if frame / 4 % 2 == 0 {
                     draw_card_flip_border(sources, game.which_card, &mut target);
                 }
-                VisibleCardFlipAnimation::SelectFlash { frame } => {
-                    draw_card_flip_face_down(sources, 2, 0, &mut target);
-                    draw_card_flip_face_down(sources, 2, 6, &mut target);
-                    if frame / 4 % 2 == 0 {
-                        draw_card_flip_border(sources, game.which_card, &mut target);
-                    }
-                }
-                VisibleCardFlipAnimation::None
-                | VisibleCardFlipAnimation::WaitStake
-                | VisibleCardFlipAnimation::WaitBeforeReveal
-                | VisibleCardFlipAnimation::WaitReveal
-                | VisibleCardFlipAnimation::WaitResult { .. }
-                | VisibleCardFlipAnimation::Payout { .. }
-                | VisibleCardFlipAnimation::AwaitResult
-                | VisibleCardFlipAnimation::QuitWaitBefore
-                | VisibleCardFlipAnimation::QuitWaitAfter => {}
             }
-        }
+            VisibleCardFlipAnimation::None
+            | VisibleCardFlipAnimation::WaitStake
+            | VisibleCardFlipAnimation::WaitBeforeReveal
+            | VisibleCardFlipAnimation::WaitReveal
+            | VisibleCardFlipAnimation::WaitResult { .. }
+            | VisibleCardFlipAnimation::Payout { .. }
+            | VisibleCardFlipAnimation::AwaitResult
+            | VisibleCardFlipAnimation::QuitWaitBefore
+            | VisibleCardFlipAnimation::QuitWaitAfter => {}
+        },
         VisibleCardFlipPhase::PlaceBet => {
             draw_card_flip_face_down(sources, 2, game.which_card * 6, &mut target);
             draw_card_flip_bet_cursor(sources, game.bet_x, game.bet_y, &mut target);
@@ -1585,7 +1578,10 @@ fn draw_card_flip_face_up(
         "ODDISH" => (4, 0x60),
         other => anyhow::bail!("unknown Card Flip face species {other}"),
     };
-    anyhow::ensure!((1..=6).contains(&level), "invalid Card Flip face level {level}");
+    anyhow::ensure!(
+        (1..=6).contains(&level),
+        "invalid Card Flip face level {level}"
+    );
     draw_card_flip_bg_box(
         sources,
         &CARD_FLIP_FACE_UP,
@@ -1637,7 +1633,9 @@ fn draw_card_flip_level(
     let source_y = tile_index / columns * 8;
     for y in 0..7 {
         for x in 0..8 {
-            let pixel = sources.font.get_pixel((source_x + x) as u32, (source_y + y + 1) as u32);
+            let pixel = sources
+                .font
+                .get_pixel((source_x + x) as u32, (source_y + y + 1) as u32);
             let color = palette_index_from_gray(pixel[0]);
             let [red, green, blue] = sources.palettes[palette_index][color];
             let offset = ((dest_y + y) * 160 + dest_x + x) * 4;
@@ -1646,22 +1644,28 @@ fn draw_card_flip_level(
     }
 }
 
-fn draw_card_flip_border(
-    sources: &CardFlipRenderSources,
-    which_card: usize,
-    target: &mut [u8],
-) {
+fn draw_card_flip_border(sources: &CardFlipRenderSources, which_card: usize, target: &mut [u8]) {
     let origin_x = 2 * 8;
     let origin_y = which_card * 6 * 8;
     for (x, y, tile, flip_x, flip_y) in [
-        (0, 0, 4, false, false), (1, 0, 6, false, false),
-        (2, 0, 6, false, false), (3, 0, 6, false, false), (4, 0, 4, true, false),
-        (0, 1, 5, false, false), (4, 1, 5, true, false),
-        (0, 2, 5, false, false), (4, 2, 5, true, false),
-        (0, 3, 5, false, false), (4, 3, 5, true, false),
-        (0, 4, 5, false, false), (4, 4, 5, true, false),
-        (0, 5, 4, false, true), (1, 5, 6, false, true),
-        (2, 5, 6, false, true), (3, 5, 6, false, true), (4, 5, 4, true, true),
+        (0, 0, 4, false, false),
+        (1, 0, 6, false, false),
+        (2, 0, 6, false, false),
+        (3, 0, 6, false, false),
+        (4, 0, 4, true, false),
+        (0, 1, 5, false, false),
+        (4, 1, 5, true, false),
+        (0, 2, 5, false, false),
+        (4, 2, 5, true, false),
+        (0, 3, 5, false, false),
+        (4, 3, 5, true, false),
+        (0, 4, 5, false, false),
+        (4, 4, 5, true, false),
+        (0, 5, 4, false, true),
+        (1, 5, 6, false, true),
+        (2, 5, 6, false, true),
+        (3, 5, 6, false, true),
+        (4, 5, 4, true, true),
     ] {
         blit_card_flip_object_tile(
             sources,
@@ -1773,7 +1777,13 @@ fn draw_card_flip_bet_cursor(
         }
         Shape::NumGroupPair => {
             for column in 0..=9 {
-                let tile = if column == 0 { 0 } else if column <= 2 || column % 2 == 0 { 2 } else { 3 };
+                let tile = if column == 0 {
+                    0
+                } else if column <= 2 || column % 2 == 0 {
+                    2
+                } else {
+                    3
+                };
                 sprite(column, 0, 0, 0, tile, false, false);
             }
             for row in 1..=2 {
@@ -1823,7 +1833,9 @@ fn blit_card_flip_object_tile(
         for x in 0..8 {
             let source_x = if flip_x { 7 - x } else { x };
             let source_y = if flip_y { 7 - y } else { y };
-            let pixel = sources.object_tiles.get_pixel(source_x as u32, (tile * 8 + source_y) as u32);
+            let pixel = sources
+                .object_tiles
+                .get_pixel(source_x as u32, (tile * 8 + source_y) as u32);
             let color = palette_index_from_gray(pixel[0]);
             let output_x = dest_x + x as i32;
             let output_y = dest_y + y as i32;
@@ -2040,8 +2052,7 @@ fn draw_visible_slot_actor(
         (-4, 4, 6, false),
         (4, 4, 4, true),
     ];
-    const CHANSEY_TOP: [(i16, i16, usize); 3] =
-        [(-12, -12, 0), (-4, -12, 2), (4, -12, 4)];
+    const CHANSEY_TOP: [(i16, i16, usize); 3] = [(-12, -12, 0), (-4, -12, 2), (4, -12, 4)];
     const CHANSEY_BOTTOMS: [[usize; 3]; 5] = [
         [6, 8, 10],
         [12, 14, 16],
@@ -2066,9 +2077,7 @@ fn draw_visible_slot_actor(
                     frame_base + tile,
                     palette,
                     x + if flip_x { -8 - relative_x } else { relative_x } - 8,
-                    104 + y_offset
-                        + if flip_y { -8 - relative_y } else { relative_y }
-                        - 16,
+                    104 + y_offset + if flip_y { -8 - relative_y } else { relative_y } - 16,
                     piece_flip_x ^ flip_x,
                     flip_y,
                     target,
@@ -2280,7 +2289,15 @@ fn spawn_visible_unown_puzzle(
         .unown_puzzle_sources
         .as_ref()
         .context("Unown puzzle render sources are unavailable")?;
-    let frame = render_visible_unown_puzzle_frame(sources, puzzle, images)?;
+    let frame = render_visible_unown_puzzle_frame(
+        sources,
+        puzzle,
+        visible_unown_puzzle_cursor_visible(
+            puzzle,
+            runtime_shell.shell.session().state().vblank_counter,
+        ),
+        images,
+    )?;
     commit_presented_fullscreen_frame(
         commands,
         rendered_art,
@@ -2519,6 +2536,7 @@ fn load_unown_puzzle_render_sources(asset_root: &AssetRoot) -> Result<UnownPuzzl
 fn render_visible_unown_puzzle_frame(
     sources: &UnownPuzzleRenderSources,
     puzzle: &VisibleUnownPuzzle,
+    cursor_visible: bool,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
     const WIDTH: usize = 160;
@@ -2638,7 +2656,7 @@ fn render_visible_unown_puzzle_frame(
             false,
             &mut target,
         );
-    } else {
+    } else if cursor_visible {
         let cursor_tiles = [
             (0, false, false),
             (1, false, false),
@@ -2682,6 +2700,10 @@ fn render_visible_unown_puzzle_frame(
         handle: images.add(image),
         size: Vec2::new(WIDTH as f32, HEIGHT as f32),
     })
+}
+
+fn visible_unown_puzzle_cursor_visible(puzzle: &VisibleUnownPuzzle, vblank_counter: u8) -> bool {
+    puzzle.holding_piece.is_some() || vblank_counter & 0x10 != 0
 }
 
 fn overlay_unown_border(
@@ -3096,7 +3118,11 @@ fn spawn_field_pokegear_screen(
             let key = (
                 format!(
                     "{}:{}",
-                    if runtime_shell.pokegear_standalone_map { "standalone" } else { "pokegear" },
+                    if runtime_shell.pokegear_standalone_map {
+                        "standalone"
+                    } else {
+                        "pokegear"
+                    },
                     region.to_ascii_lowercase()
                 ),
                 snapshot.trainer.player_gender,
@@ -3205,7 +3231,11 @@ fn spawn_non_map_pokegear_content(
             if let Some(time) = entries.get(1) {
                 spawn(&time.chars().take(14).collect::<String>(), 6.0, 8.0);
             }
-            spawn(&entries.join(" ").chars().take(18).collect::<String>(), 1.0, 13.0);
+            spawn(
+                &entries.join(" ").chars().take(18).collect::<String>(),
+                1.0,
+                13.0,
+            );
         }
         PokegearPage::Phone => {
             for (index, line) in entries.iter().take(7).enumerate() {
@@ -3262,7 +3292,11 @@ fn town_map_label_lines(name: &str) -> [String; 2] {
         .filter(|(index, character)| *character == ' ' && *index <= 11)
         .map(|(index, _)| index)
         .last()
-        .unwrap_or_else(|| name.char_indices().nth(11).map_or(name.len(), |(index, _)| index));
+        .unwrap_or_else(|| {
+            name.char_indices()
+                .nth(11)
+                .map_or(name.len(), |(index, _)| index)
+        });
     [
         name[..split].trim().to_string(),
         name[split..].trim().chars().take(11).collect(),
@@ -3907,10 +3941,7 @@ fn spawn_field_party_summary_screen(
         (
             8,
             0.0,
-            format!(
-                "No.{:03}  L{:>2}",
-                pokemon.species.int_id, pokemon.level
-            ),
+            format!("No.{:03}  L{:>2}", pokemon.species.int_id, pokemon.level),
         ),
         (8, 2.0, compact_scene_label(&pokemon.nickname, 10)),
         (
@@ -3990,7 +4021,11 @@ fn spawn_field_party_summary_screen(
                 } else {
                     for (index, learned) in pokemon.moves.iter().take(4).enumerate() {
                         let row = 8.0 + index as f32 * 2.0;
-                        rows.push((8, row + 2.0, battle_move_display_name(snapshot, &learned.name)));
+                        rows.push((
+                            8,
+                            row + 2.0,
+                            battle_move_display_name(snapshot, &learned.name),
+                        ));
                         rows.push((12, row + 3.0, visible_move_pp_text(snapshot, learned)));
                     }
                 }
@@ -4027,7 +4062,11 @@ fn spawn_field_party_summary_screen(
         3.4,
         images,
     )?;
-    let sprite_species = if pokemon.is_egg { "EGG" } else { &pokemon.species.id };
+    let sprite_species = if pokemon.is_egg {
+        "EGG"
+    } else {
+        &pokemon.species.id
+    };
     let shiny = !pokemon.is_egg && visible_pokemon_is_shiny(pokemon);
     let sprite = pokemon_frame_for_art(
         rendered_art,
@@ -4042,7 +4081,10 @@ fn spawn_field_party_summary_screen(
     commands.spawn((
         SpriteBundle {
             texture: sprite.handle,
-            sprite: Sprite { custom_size: Some(sprite.size * 4.0), ..default() },
+            sprite: Sprite {
+                custom_size: Some(sprite.size * 4.0),
+                ..default()
+            },
             transform: Transform::from_xyz(x, y, 3.8),
             ..default()
         },
@@ -4086,9 +4128,7 @@ fn visible_egg_hatch_tiles<'a>(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<&'a [SpriteFrame; 2]> {
-    if rendered_art.egg_hatch_tile_cache.is_none()
-        && rendered_art.egg_hatch_tile_error.is_none()
-    {
+    if rendered_art.egg_hatch_tile_cache.is_none() && rendered_art.egg_hatch_tile_error.is_none() {
         let loaded = (|| -> Result<[SpriteFrame; 2]> {
             let bytes = crate::read_runtime_asset(
                 asset_root.runtime_assets().join("gfx/evo/egg_hatch.2bpp"),
@@ -4525,7 +4565,14 @@ fn spawn_field_party_action_window(
     asset_root: &AssetRoot,
     images: &mut Assets<Image>,
 ) -> Result<()> {
-    let _ = (commands, snapshot, runtime_shell, rendered_art, asset_root, images);
+    let _ = (
+        commands,
+        snapshot,
+        runtime_shell,
+        rendered_art,
+        asset_root,
+        images,
+    );
     Ok(())
 }
 
@@ -4672,18 +4719,13 @@ fn spawn_bug_contest_start_menu_status(
     let frame = battle_window_frame_art(rendered_art, asset_root, images)
         .context("Bug Contest status requires window-frame art")?;
     spawn_field_command_window_frame_tiles(commands, frame, LEFT, TOP, WIDTH, HEIGHT, 3.4);
-    let caught = snapshot
-        .bug_contest
-        .caught_species
-        .as_deref()
+    let caught_mon = snapshot.bug_contest.caught_mon.as_ref();
+    let caught = caught_mon
+        .map(|pokemon| pokemon.species.id.as_str())
         .unwrap_or("None");
     let mut rows = vec![format!("CAUGHT  {caught}")];
-    if snapshot.bug_contest.caught_species.is_some() {
-        let caught_level = snapshot
-            .bug_contest
-            .caught_level
-            .context("Bug Contest caught species is missing its level")?;
-        rows.push(format!("LEVEL   {}", caught_level));
+    if let Some(pokemon) = caught_mon {
+        rows.push(format!("LEVEL   {}", pokemon.level));
     }
     rows.push(format!(
         "BALLS:  {}",
@@ -4860,20 +4902,16 @@ fn spawn_scene_dialog(
         )?;
         return Ok(());
     }
-    if runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
-        hatch.phase != VisibleEggHatchPhase::HuhText
-    }) {
+    if runtime_shell
+        .visible_egg_hatch
+        .as_ref()
+        .is_some_and(|hatch| hatch.phase != VisibleEggHatchPhase::HuhText)
+    {
         let hatch_text = runtime_shell
             .visible_egg_hatch
             .as_ref()
             .is_some_and(|hatch| hatch.phase == VisibleEggHatchPhase::HatchText);
-        spawn_visible_egg_hatch(
-            commands,
-            runtime_shell,
-            rendered_art,
-            asset_root,
-            images,
-        )?;
+        spawn_visible_egg_hatch(commands, runtime_shell, rendered_art, asset_root, images)?;
         if !hatch_text {
             return Ok(());
         }
@@ -4941,23 +4979,11 @@ fn spawn_scene_dialog(
         return Ok(());
     }
     if let Some(input) = runtime_shell.pending_mail_input.as_ref() {
-        spawn_visible_mail_entry_screen(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            input,
-        )?;
+        spawn_visible_mail_entry_screen(commands, rendered_art, asset_root, images, input)?;
         return Ok(());
     }
     if let Some(reader) = runtime_shell.pending_mail_read.as_ref() {
-        spawn_visible_mail_read_screen(
-            commands,
-            rendered_art,
-            asset_root,
-            images,
-            reader,
-        )?;
+        spawn_visible_mail_read_screen(commands, rendered_art, asset_root, images, reader)?;
         return Ok(());
     }
     if let Some(shop) = snapshot.pending_shop.as_ref() {
@@ -4995,13 +5021,7 @@ fn spawn_scene_dialog(
         return Ok(());
     }
     if runtime_shell.decoration_menu.is_some() {
-        spawn_visible_decoration_screen(
-            commands,
-            runtime_shell,
-            rendered_art,
-            asset_root,
-            images,
-        )?;
+        spawn_visible_decoration_screen(commands, runtime_shell, rendered_art, asset_root, images)?;
         return Ok(());
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
@@ -5089,13 +5109,7 @@ fn spawn_visible_egg_hatch(
         .visible_egg_hatch
         .as_ref()
         .context("egg hatch renderer requires active hatch state")?;
-    commit_presented_fullscreen_solid(
-        commands,
-        rendered_art,
-        [247, 247, 247, 255],
-        5.8,
-        images,
-    )?;
+    commit_presented_fullscreen_solid(commands, rendered_art, [247, 247, 247, 255], 5.8, images)?;
     let (species_id, x_offset, animation_frame) = match hatch.phase {
         VisibleEggHatchPhase::EggHold => ("EGG", 0, 0),
         VisibleEggHatchPhase::Wobble => ("EGG", visible_egg_wobble_x(hatch.frame), 0),
@@ -5286,7 +5300,8 @@ fn spawn_visible_decoration_screen(
             4.2,
         );
     }
-    let (left, top, width, height, entries, selected, surface_id, visible_rows) = match &menu.phase {
+    let (left, top, width, height, entries, selected, surface_id, visible_rows) = match &menu.phase
+    {
         VisibleDecorationMenuPhase::Categories { categories, cursor } => (
             5.0,
             0.0,
@@ -5589,16 +5604,28 @@ fn spawn_visible_magnet_train(
     let Some(animation) = runtime_shell.visible_magnet_train.as_ref() else {
         return Ok(());
     };
-    if rendered_art.magnet_train_base_cache.is_none() {
-        match load_visible_magnet_train_base(asset_root) {
-            Ok(data) => rendered_art.magnet_train_base_cache = Some(data),
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let time_of_day = normalize_tileset_time_of_day(snapshot.progression.time.time_of_day.as_key());
+    if !rendered_art
+        .magnet_train_base_cache
+        .contains_key(&time_of_day)
+    {
+        match load_visible_magnet_train_base(asset_root, &time_of_day) {
+            Ok(data) => {
+                rendered_art
+                    .magnet_train_base_cache
+                    .insert(time_of_day.clone(), data);
+            }
             Err(error) => rendered_art.magnet_train_base_error = Some(format!("{error:#}")),
         }
     }
     if let Some(error) = rendered_art.magnet_train_base_error.as_deref() {
         anyhow::bail!(error.to_string());
     }
-    let base = rendered_art.magnet_train_base_cache.as_ref().unwrap();
+    let base = rendered_art
+        .magnet_train_base_cache
+        .get(&time_of_day)
+        .context("Magnet Train background disappeared from the render cache")?;
     let background_shift = i16::from(((animation.offset * 2) & 0xff) as u8);
     let background_shift = if background_shift < 128 {
         background_shift
@@ -5612,6 +5639,7 @@ fn spawn_visible_magnet_train(
         train_shift - 256
     };
     let mut data = vec![0_u8; WIDTH * HEIGHT * 4];
+    let mut background_palette_zero = vec![false; WIDTH * HEIGHT];
     for y in 0..HEIGHT {
         let shift = if (TOP_BAND..TOP_BAND + MID_BAND).contains(&y) {
             train_shift
@@ -5623,8 +5651,40 @@ fn spawn_visible_magnet_train(
             let source_offset = (y * WIDTH + source_x) * 4;
             let target_offset = (y * WIDTH + x) * 4;
             data[target_offset..target_offset + 4]
-                .copy_from_slice(&base[source_offset..source_offset + 4]);
+                .copy_from_slice(&base.rgba[source_offset..source_offset + 4]);
+            background_palette_zero[y * WIDTH + x] =
+                base.palette_indices[y * WIDTH + source_x] == 0;
         }
+    }
+    let female = snapshot.trainer.player_gender == PLAYER_GENDER_FEMALE;
+    let player_key = (female, time_of_day.clone());
+    if !rendered_art
+        .magnet_train_player_cache
+        .contains_key(&player_key)
+    {
+        let frames = load_visible_magnet_train_player_frames(asset_root, female, &time_of_day)?;
+        rendered_art
+            .magnet_train_player_cache
+            .insert(player_key.clone(), frames);
+    }
+    let player_frames = rendered_art
+        .magnet_train_player_cache
+        .get(&player_key)
+        .context("Magnet Train player frames disappeared from the render cache")?;
+    if animation.player_sprite_visible {
+        let player_frame = if animation.player_sprite_frame % 2 == 0 {
+            &player_frames.standing
+        } else {
+            &player_frames.walking
+        };
+        composite_visible_magnet_train_player(
+            &mut data,
+            &background_palette_zero,
+            player_frame,
+            animation.player_x - 16,
+            61,
+            animation.player_sprite_frame == 3,
+        );
     }
     let mut image = Image::new(
         Extent3d {
@@ -5653,13 +5713,25 @@ fn spawn_visible_magnet_train(
     Ok(())
 }
 
-fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
+fn load_visible_magnet_train_base(
+    asset_root: &AssetRoot,
+    time_of_day: &str,
+) -> Result<MagnetTrainBase> {
     const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
     const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
+    const PAL_BG_GRAY: usize = 0;
+    const PAL_BG_GREEN: usize = 2;
+    const PAL_BG_YELLOW: usize = 4;
     let tileset =
         crate::open_runtime_image(asset_root.resolve_vendor("gfx/tilesets/train_station.png"))
             .context("decode magnet-train station tileset")?
             .to_rgba8();
+    let palettes = load_tileset_palette_bank(asset_root, "train_station", time_of_day)?
+        .context("Magnet Train requires the source tileset palette bank")?;
+    anyhow::ensure!(
+        palettes.len() > PAL_BG_YELLOW,
+        "Magnet Train tileset palette bank must include PAL_BG_YELLOW"
+    );
     let background = crate::read_runtime_asset(
         asset_root.resolve_vendor("gfx/overworld/magnet_train_bg.tilemap"),
     )
@@ -5677,7 +5749,16 @@ fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
         "magnet-train foreground tilemap must be 80 bytes"
     );
     let mut data = vec![0_u8; WIDTH * HEIGHT * 4];
+    let mut palette_indices = vec![0_u8; WIDTH * HEIGHT];
     let mut draw_tile = |tile_id: u8, tile_x: usize, tile_y: usize| -> Result<()> {
+        let palette_id = if tile_y == 8 && (7..13).contains(&tile_x) {
+            PAL_BG_YELLOW
+        } else if tile_y < 4 || tile_y >= 14 {
+            PAL_BG_GREEN
+        } else {
+            PAL_BG_GRAY
+        };
+        let palette = &palettes[palette_id];
         let source_x = usize::from(tile_id % 16) * SOURCE_TILE_SIZE;
         let source_y = usize::from(tile_id / 16) * SOURCE_TILE_SIZE;
         anyhow::ensure!(
@@ -5691,7 +5772,10 @@ fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
                 let target =
                     (((tile_y * SOURCE_TILE_SIZE + row) * WIDTH) + tile_x * SOURCE_TILE_SIZE + col)
                         * 4;
-                data[target..target + 4].copy_from_slice(&pixel.0);
+                let palette_index = palette_index_from_gray(pixel[0]);
+                let color = palette[palette_index];
+                data[target..target + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
+                palette_indices[target / 4] = palette_index as u8;
             }
         }
         Ok(())
@@ -5707,7 +5791,82 @@ fn load_visible_magnet_train_base(asset_root: &AssetRoot) -> Result<Vec<u8>> {
             draw_tile(foreground[row * 20 + col], col, row + 6)?;
         }
     }
-    Ok(data)
+    Ok(MagnetTrainBase {
+        rgba: data,
+        palette_indices,
+    })
+}
+
+fn load_visible_magnet_train_player_frames(
+    asset_root: &AssetRoot,
+    female: bool,
+    time_of_day: &str,
+) -> Result<MagnetTrainPlayerFrames> {
+    const FRAME_SIZE: usize = 16;
+    let sprite_id = if female { "kris" } else { "chris" };
+    let path = asset_root
+        .runtime_assets()
+        .join("gfx/sprites")
+        .join(format!("{sprite_id}.png"));
+    let source = crate::open_runtime_image(&path)
+        .with_context(|| format!("decode Magnet Train player sprite {}", path.display()))?
+        .to_rgba8();
+    anyhow::ensure!(
+        source.width() == FRAME_SIZE as u32 && source.height() == (FRAME_SIZE * 6) as u32,
+        "Magnet Train player sprite {} must contain six 16x16 source frames",
+        path.display()
+    );
+    let palettes = load_npc_sprite_palette_bank(asset_root, time_of_day)?;
+    let palette_index = usize::from(female);
+    let palette = palettes.get(palette_index).with_context(|| {
+        format!(
+            "Magnet Train player palette bank is missing PAL_OW_{}",
+            if female { "BLUE" } else { "RED" }
+        )
+    })?;
+    let mut standing = vec![0_u8; FRAME_SIZE * FRAME_SIZE * 4];
+    let mut walking = vec![0_u8; FRAME_SIZE * FRAME_SIZE * 4];
+    copy_source_sprite_rgba(&source, FRAME_SIZE, 0, palette, false, &mut standing);
+    copy_source_sprite_rgba(&source, FRAME_SIZE, 3, palette, false, &mut walking);
+    Ok(MagnetTrainPlayerFrames { standing, walking })
+}
+
+fn composite_visible_magnet_train_player(
+    target: &mut [u8],
+    background_palette_zero: &[bool],
+    player: &[u8],
+    origin_x: i16,
+    origin_y: i16,
+    flip_x: bool,
+) {
+    const WIDTH: usize = 20 * SOURCE_TILE_SIZE;
+    const HEIGHT: usize = 18 * SOURCE_TILE_SIZE;
+    const FRAME_SIZE: usize = 16;
+    for row in 0..FRAME_SIZE {
+        for col in 0..FRAME_SIZE {
+            let source_col = if flip_x { FRAME_SIZE - 1 - col } else { col };
+            let source_offset = (row * FRAME_SIZE + source_col) * 4;
+            if player[source_offset + 3] == 0 {
+                continue;
+            }
+            let target_x = origin_x + col as i16;
+            let target_y = origin_y + row as i16;
+            if target_x < 0 || target_y < 0 || target_x >= WIDTH as i16 || target_y >= HEIGHT as i16
+            {
+                continue;
+            }
+            let target_pixel = target_y as usize * WIDTH + target_x as usize;
+            // Both Magnet Train OAM sets carry OAM_PRIO. On CGB hardware that
+            // places OBJ pixels behind BG colors 1-3 but still above BG color
+            // zero, including after the scanline-specific SCX shifts.
+            if !background_palette_zero[target_pixel] {
+                continue;
+            }
+            let target_offset = target_pixel * 4;
+            target[target_offset..target_offset + 4]
+                .copy_from_slice(&player[source_offset..source_offset + 4]);
+        }
+    }
 }
 
 fn spawn_visible_heal_machine(
@@ -6068,11 +6227,20 @@ fn spawn_visible_mom_bank_screen(
         } else {
             "DEPOSIT"
         };
+        let mut amount_digits = format!("{:06}", bank.amount).into_bytes();
+        if !visible_vblank_counter_bit4(runtime_shell)
+            && let Some(digit) = amount_digits.get_mut(usize::from(bank.digit))
+        {
+            // MomBank's editor blinks by erasing the selected digit whenever
+            // hVBlankCounter bit 4 is clear; it does not draw a host cursor.
+            *digit = b' ';
+        }
+        let amount_digits = String::from_utf8(amount_digits)
+            .expect("Mom bank amount formatting contains only ASCII digits/spaces");
         vec![
             format!("SAVED      ¥{:>6}", snapshot.trainer.moms_money),
             format!("HELD       ¥{:>6}", snapshot.trainer.money),
-            format!("{action}   ¥{:06}", bank.amount),
-            format!("             {}▲", " ".repeat(usize::from(bank.digit))),
+            format!("{action}   ¥{amount_digits}"),
         ]
     };
     for (index, line) in lines.iter().enumerate() {
@@ -6195,7 +6363,7 @@ fn spawn_field_shop_screen(
             );
         }
         if visible_field_text_reveal_is_complete_for_text(runtime_shell, notice)
-            && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+            && visible_vblank_counter_bit4(runtime_shell)
         {
             let (x, y) = battle_hud_tile_origin(18.0, 16.0);
             spawn_scene_dialog_bitmap_text(
@@ -6835,7 +7003,7 @@ fn spawn_pc_notice(
             );
         }
         if visible_field_text_reveal_is_complete_for_text(runtime_shell, notice)
-            && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+            && visible_vblank_counter_bit4(runtime_shell)
         {
             let (x, y) = battle_hud_tile_origin(18.0, 16.0);
             spawn_scene_dialog_bitmap_text(
@@ -7004,12 +7172,9 @@ fn spawn_field_pc_box_selection_screen(
         );
     }
     if let Some(cursor) = runtime_shell.bill_pc_box_action_cursor.as_ref() {
-        let selected_action = strict_readonly_cursor_index(
-            &Some(cursor.clone()),
-            "pc:bill-box-actions",
-            4,
-        )
-        .context("PC box-action cursor is invalid")?;
+        let selected_action =
+            strict_readonly_cursor_index(&Some(cursor.clone()), "pc:bill-box-actions", 4)
+                .context("PC box-action cursor is invalid")?;
         spawn_battle_window(
             commands,
             rendered_art,
@@ -7028,7 +7193,11 @@ fn spawn_field_pc_box_selection_screen(
                 rendered_art,
                 asset_root,
                 images,
-                &format!("{}{}", if index == selected_action { ">" } else { " " }, label),
+                &format!(
+                    "{}{}",
+                    if index == selected_action { ">" } else { " " },
+                    label
+                ),
                 x,
                 y,
                 4.2,
@@ -7107,7 +7276,7 @@ fn field_dialogue_prompt_arrow_visible(
             && visible_field_text_reveal_is_complete(reveal, &pages[page_index])
             && (page_index + 1 < pages.len()
                 || visible_field_notice_uses_prompt_arrow(runtime_shell))
-            && runtime_shell.lcd_animation_frame & (1 << 4) != 0;
+            && visible_vblank_counter_bit4(runtime_shell);
     }
     snapshot.ui.pending_text_wait.is_some()
         && runtime_shell
@@ -7119,7 +7288,7 @@ fn field_dialogue_prompt_arrow_visible(
             .as_ref()
             .is_some_and(|wait| pending_text_wait_command_shows_prompt_arrow(&wait.command))
         && visible_field_dialogue_is_entirely_consumed(runtime_shell, snapshot)
-        && runtime_shell.lcd_animation_frame & (1 << 4) != 0
+        && visible_vblank_counter_bit4(runtime_shell)
 }
 
 fn pending_text_wait_command_shows_prompt_arrow(command: &str) -> bool {
@@ -7187,7 +7356,10 @@ fn scene_dialog_yes_no_cursor_index(
         .as_ref()
         .filter(|prompt| prompt.confirming)
     {
-        anyhow::ensure!(prompt.yes_no_index < 2, "day-of-week YES/NO cursor is invalid");
+        anyhow::ensure!(
+            prompt.yes_no_index < 2,
+            "day-of-week YES/NO cursor is invalid"
+        );
         return Ok(prompt.yes_no_index);
     }
     if snapshot.ui.pending_yes_no.is_some() {
@@ -7660,10 +7832,9 @@ fn load_mail_read_frame(
     reader: &VisibleMailRead,
     images: &mut Assets<Image>,
 ) -> Result<SpriteFrame> {
-    let palette_source = std::fs::read_to_string(
-        asset_root.runtime_assets().join("gfx/mail/mail.pal"),
-    )
-    .context("read Mail palette bank")?;
+    let palette_source =
+        std::fs::read_to_string(asset_root.runtime_assets().join("gfx/mail/mail.pal"))
+            .context("read Mail palette bank")?;
     let palettes = parse_palette_file(&palette_source, None)?;
     let mail_index = crate::core::models::item::MAIL_ITEM_IDS
         .iter()
@@ -7675,12 +7846,7 @@ fn load_mail_read_frame(
         .with_context(|| format!("Mail palette bank has no row {mail_index}"))?;
     let mut tilemap = [[0x7f_u8; NAME_ENTRY_SCREEN_TILE_WIDTH]; NAME_ENTRY_SCREEN_TILE_HEIGHT];
     let mut tiles = BTreeMap::<u8, MailReadTile>::new();
-    build_mail_read_stationery(
-        asset_root,
-        &reader.mail.mail_type,
-        &mut tilemap,
-        &mut tiles,
-    )?;
+    build_mail_read_stationery(asset_root, &reader.mail.mail_type, &mut tilemap, &mut tiles)?;
     place_mail_read_text(&reader.mail, mail_index, &mut tilemap)?;
 
     let font = crate::open_runtime_image(asset_root.runtime_assets().join("gfx/font/font.png"))
@@ -7775,9 +7941,12 @@ fn register_mail_tiles(
     count: usize,
     color_index: usize,
 ) -> Result<u8> {
-    let selected = source
-        .get(offset..offset + count)
-        .with_context(|| format!("Mail tile slice {offset}..{} is outside source", offset + count))?;
+    let selected = source.get(offset..offset + count).with_context(|| {
+        format!(
+            "Mail tile slice {offset}..{} is outside source",
+            offset + count
+        )
+    })?;
     for (index, set_pixels) in selected.iter().enumerate() {
         let tile_id = start
             .checked_add(u8::try_from(index).context("Mail tile index exceeds byte")?)
@@ -7832,13 +8001,7 @@ fn mail_draw_row(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8, count: 
     }
 }
 
-fn mail_draw_column(
-    map: &mut [[u8; 20]; 18],
-    x: usize,
-    y: usize,
-    tile: u8,
-    count: usize,
-) {
+fn mail_draw_column(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8, count: usize) {
     for row in y..y + count {
         map[row][x] = tile;
     }
@@ -7858,13 +8021,7 @@ fn mail_draw_3x2(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8) {
     }
 }
 
-fn mail_draw_alternating_row(
-    map: &mut [[u8; 20]; 18],
-    x: usize,
-    y: usize,
-    tile: u8,
-    pairs: usize,
-) {
+fn mail_draw_alternating_row(map: &mut [[u8; 20]; 18], x: usize, y: usize, tile: u8, pairs: usize) {
     for index in 0..=pairs * 2 {
         map[y][x + index] = tile + (index % 2) as u8;
     }
@@ -7957,7 +8114,11 @@ fn build_surf_or_liteblue_mail_stationery(
         asset_root,
         tiles,
         next,
-        if lite_blue { "portraitmail_underline" } else { "wave" },
+        if lite_blue {
+            "portraitmail_underline"
+        } else {
+            "wave"
+        },
         0,
         1,
         2,
@@ -8223,8 +8384,7 @@ fn draw_mail_read_tile(
         for x in 0..8 {
             if tile.set_pixels[y * 8 + x] {
                 let target_index = ((dest_y + y) * 160 + dest_x + x) * 4;
-                target[target_index..target_index + 3]
-                    .copy_from_slice(&palette[tile.color_index]);
+                target[target_index..target_index + 3].copy_from_slice(&palette[tile.color_index]);
             }
         }
     }
@@ -8247,10 +8407,17 @@ fn draw_mail_read_font_tile(
         return Ok(());
     };
     let tiles_per_row = source.width() as usize / 8;
-    anyhow::ensure!(tiles_per_row > 0, "Mail font has invalid width {}", source.width());
+    anyhow::ensure!(
+        tiles_per_row > 0,
+        "Mail font has invalid width {}",
+        source.width()
+    );
     let source_x = (index % tiles_per_row) * 8;
     let source_y = (index / tiles_per_row) * 8;
-    anyhow::ensure!(source_y + 8 <= source.height() as usize, "Mail font tile {tile_id:#x} is absent");
+    anyhow::ensure!(
+        source_y + 8 <= source.height() as usize,
+        "Mail font tile {tile_id:#x} is absent"
+    );
     for y in 0..8 {
         for x in 0..8 {
             let pixel = source.get_pixel((source_x + x) as u32, (source_y + y) as u32);
@@ -8278,7 +8445,12 @@ fn draw_mail_portrait(
         .with_context(|| format!("decode Portrait Mail frontpic {}", path.display()))?
         .to_rgba8();
     let frame_size = source.width().min(source.height()) as usize;
-    anyhow::ensure!(frame_size > 0 && frame_size <= 56, "invalid Portrait Mail frontpic dimensions {}x{}", source.width(), source.height());
+    anyhow::ensure!(
+        frame_size > 0 && frame_size <= 56,
+        "invalid Portrait Mail frontpic dimensions {}x{}",
+        source.width(),
+        source.height()
+    );
     let dest_x = 8 + (56 - frame_size) / 2;
     let dest_y = 80 + (56 - frame_size) / 2;
     for y in 0..frame_size {
@@ -8381,7 +8553,12 @@ fn build_mail_entry_tilemap(input: &PendingMailInput) -> Result<Vec<Vec<u8>>> {
         row.fill(NAME_ENTRY_BORDER_TILE);
     }
     clear_name_entry_box(&mut tilemap, 1, 1, 18, 4);
-    for (index, character) in input.value.chars().take(MAIL_INPUT_MESSAGE_LENGTH).enumerate() {
+    for (index, character) in input
+        .value
+        .chars()
+        .take(MAIL_INPUT_MESSAGE_LENGTH)
+        .enumerate()
+    {
         let (x, y) = if index < MAIL_INPUT_LINE_LENGTH {
             (2 + index, 2)
         } else {
@@ -8402,8 +8579,10 @@ fn build_mail_entry_tilemap(input: &PendingMailInput) -> Result<Vec<Vec<u8>>> {
     for row in 0..5 {
         for column in 0..MAIL_INPUT_COLUMNS {
             if let Some(character) = visible_mail_input_row_chars(input.case, row)[column] {
-                tilemap[7 + row * 2][column * 2] = mail_entry_char_tile(character)
-                    .with_context(|| format!("unsupported Mail keyboard character {character:?}"))?;
+                tilemap[7 + row * 2][column * 2] =
+                    mail_entry_char_tile(character).with_context(|| {
+                        format!("unsupported Mail keyboard character {character:?}")
+                    })?;
             }
         }
     }
@@ -8422,7 +8601,10 @@ fn name_entry_string_tiles_19(text: &str) -> Result<Vec<u8>> {
         tiles.push(tile);
     }
     if tiles.len() != 19 {
-        anyhow::bail!("Mail keyboard command row has {} tiles, expected 19", tiles.len());
+        anyhow::bail!(
+            "Mail keyboard command row has {} tiles, expected 19",
+            tiles.len()
+        );
     }
     Ok(tiles)
 }
@@ -8532,12 +8714,9 @@ fn spawn_visible_name_choice_screen(
             FIELD_YES_NO_HEIGHT_TILES,
             6.1,
         );
-        for (line_index, line) in [
-            "Give a nickname to".to_string(),
-            default_name.to_string(),
-        ]
-        .into_iter()
-        .enumerate()
+        for (line_index, line) in ["Give a nickname to".to_string(), default_name.to_string()]
+            .into_iter()
+            .enumerate()
         {
             let (x, y) = battle_hud_tile_origin(1.0, 13.0 + line_index as f32);
             spawn_scene_dialog_bitmap_text(
@@ -8888,11 +9067,18 @@ fn load_name_entry_frame(
     let mut underline = crate::open_runtime_image(assets.join("gfx/naming_screen/underline.png"))
         .context("decode naming screen underline PNG")?
         .to_rgba8();
-    let mut middle_line = crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
-        .context("decode naming screen middle-line PNG")?
-        .to_rgba8();
+    let mut middle_line =
+        crate::open_runtime_image(assets.join("gfx/naming_screen/middle_line.png"))
+            .context("decode naming screen middle-line PNG")?
+            .to_rgba8();
 
-    for image in [&mut font, &mut font_extra, &mut border, &mut underline, &mut middle_line] {
+    for image in [
+        &mut font,
+        &mut font_extra,
+        &mut border,
+        &mut underline,
+        &mut middle_line,
+    ] {
         apply_name_entry_background_palette(image, &background_palette);
     }
 
@@ -9171,15 +9357,7 @@ fn draw_name_entry_tile(
         let source_x = (font_index % tiles_per_row) * SOURCE_TILE_SIZE;
         let source_y = (font_index / tiles_per_row) * SOURCE_TILE_SIZE;
         blit_name_entry_tile_image(
-            font_extra,
-            source_x,
-            source_y,
-            dest_x,
-            dest_y,
-            false,
-            false,
-            false,
-            target,
+            font_extra, source_x, source_y, dest_x, dest_y, false, false, false, target,
         );
     } else if tile_id >= 0x80 {
         let font_index = usize::from(tile_id - 0x80);
@@ -9609,10 +9787,9 @@ fn visible_field_dialog_pages(
     if let Some(notice) = runtime_shell.pc_notice.as_ref() {
         return Some(vec![notice.clone()]);
     }
-    // `last_special_routine` is execution history, not the identity of the
-    // current YesNoBox. Mom's later PHONE question is pending while
-    // `ComeHomeForDSTText` prints, so a stale Initial*DSTFlag value must not
-    // replace those four pages with the earlier clock confirmation.
+    // Mom's second YesNoBox confirms the live DST state written by the
+    // preceding Initial*DSTFlag special. Execution history is neither source
+    // state nor the identity of the current prompt.
     if snapshot.ui.pending_yes_no.is_some()
         && snapshot
             .ui
@@ -9620,23 +9797,16 @@ fn visible_field_dialog_pages(
             .as_ref()
             .is_some_and(|text| text.label == "IsItDSTText")
     {
-        match snapshot.script_events.last_special_routine.as_deref() {
-            Some("InitialSetDSTFlag") => {
-                return Some(vec![format!(
-                    "{:02}:{:02} DST,\nis that OK?",
-                    snapshot.progression.time.game_time_hours % 24,
-                    snapshot.progression.time.game_time_minutes.min(59)
-                )]);
-            }
-            Some("InitialClearDSTFlag") => {
-                return Some(vec![format!(
-                    "{:02}:{:02},\nis that OK?",
-                    snapshot.progression.time.game_time_hours % 24,
-                    snapshot.progression.time.game_time_minutes.min(59)
-                )]);
-            }
-            _ => {}
-        }
+        let dst_suffix = if snapshot.progression.time.dst {
+            " DST"
+        } else {
+            ""
+        };
+        return Some(vec![format!(
+            "{:02}:{:02}{dst_suffix},\nis that OK?",
+            snapshot.progression.time.game_time_hours % 24,
+            snapshot.progression.time.game_time_minutes.min(59)
+        )]);
     }
     if snapshot.pending_shop.is_some() {
         if !runtime_shell.shop_welcome_seen {
@@ -9833,14 +10003,15 @@ fn tick_visible_field_text_reveal(
     };
     let text_identity = pages.join("\u{1e}");
     {
-        let reveal = runtime_shell
-            .field_text_reveal
-            .get_or_insert_with(|| VisibleFieldTextReveal {
-                text: text_identity.clone(),
-                page_index: 0,
-                visible_chars: 0,
-                frames_until_next_char: 0,
-            });
+        let reveal =
+            runtime_shell
+                .field_text_reveal
+                .get_or_insert_with(|| VisibleFieldTextReveal {
+                    text: text_identity.clone(),
+                    page_index: 0,
+                    visible_chars: 0,
+                    frames_until_next_char: 0,
+                });
         if reveal.text != text_identity {
             *reveal = VisibleFieldTextReveal {
                 text: text_identity,
@@ -9909,12 +10080,7 @@ fn log_visible_dialogue_page(
     let script = runtime_shell
         .active_script_cursor
         .as_ref()
-        .map(|cursor| {
-            format!(
-                "{}:{}",
-                cursor.source_script, cursor.next_command_index
-            )
-        })
+        .map(|cursor| format!("{}:{}", cursor.source_script, cursor.next_command_index))
         .unwrap_or_else(|| "none".to_string());
     let text = pages.get(page_index).map(String::as_str).unwrap_or("");
     let event = format!(
@@ -10491,7 +10657,11 @@ fn push_visible_mail_input_entries(entries: &mut Vec<String>, runtime_shell: &Be
         return;
     };
     entries.push("MAIL COMPOSER".to_string());
-    let first = input.value.chars().take(MAIL_INPUT_LINE_LENGTH).collect::<String>();
+    let first = input
+        .value
+        .chars()
+        .take(MAIL_INPUT_LINE_LENGTH)
+        .collect::<String>();
     let second = input
         .value
         .chars()
@@ -10634,12 +10804,9 @@ fn push_visible_pending_move_learn_entries(
             .with_context(|| format!("move-learning text {text_target} has no final page"))?,
     );
     if let Some(cursor) = &runtime_shell.move_learn_decision_cursor {
-        let selected = strict_readonly_cursor_index(
-            &Some(cursor.clone()),
-            "move-learn:decision",
-            2,
-        )
-        .context("pending move-learn decision has no valid cursor")?;
+        let selected =
+            strict_readonly_cursor_index(&Some(cursor.clone()), "move-learn:decision", 2)
+                .context("pending move-learn decision has no valid cursor")?;
         entries.push(format!("{}YES", if selected == 0 { ">" } else { " " }));
         entries.push(format!("{}NO", if selected == 1 { ">" } else { " " }));
         return Ok(());
@@ -11373,9 +11540,7 @@ fn visible_field_command_entries(
     visible_field_idle_entries(snapshot, runtime_shell)
 }
 
-fn visible_decoration_command_entries(
-    runtime_shell: &BevyRuntimeShell,
-) -> Result<Vec<String>> {
+fn visible_decoration_command_entries(runtime_shell: &BevyRuntimeShell) -> Result<Vec<String>> {
     let phase = &runtime_shell
         .decoration_menu
         .as_ref()
@@ -11481,7 +11646,9 @@ fn visible_bill_pc_box_entries(
             ["SWITCH", "NAME", "PRINT", "QUIT"]
                 .iter()
                 .enumerate()
-                .map(|(index, label)| format!("{}{}", if index == action { ">" } else { " " }, label)),
+                .map(|(index, label)| {
+                    format!("{}{}", if index == action { ">" } else { " " }, label)
+                }),
         );
     }
     Ok(entries)

@@ -37,7 +37,14 @@ fn setup_shell_view(mut commands: Commands) {
     // OrthographicProjection from its generic Default loses Bevy's 2D depth
     // range and culls every positive-z LCD sprite.
     let mut camera = Camera2dBundle::default();
-    camera.projection.scaling_mode = bevy::render::camera::ScalingMode::WindowSize(1.0);
+    // Keep one complete 640x576 logical LCD visible at every host aspect and
+    // scale its tiles/text with the browser viewport. Landscape windows gain
+    // real horizontal world space for the optional 2.5D renderer, while
+    // portrait windows gain vertical space instead of cropping the LCD.
+    camera.projection.scaling_mode = bevy::render::camera::ScalingMode::AutoMin {
+        min_width: 640.0,
+        min_height: 576.0,
+    };
     commands.spawn((camera, MainCameraMarker));
     commands.spawn((
         SpriteBundle {
@@ -153,6 +160,27 @@ fn apply_keyboard_input(
     runtime_shell.field_text_consumed_a = false;
     runtime_shell.field_text_consumed_b = false;
     log_visible_key_presses(&mut runtime_shell, &keys);
+    let title_input_active = runtime_shell.title_menu.is_some();
+    if let Some(title) = runtime_shell.title_menu.as_mut()
+        && !matches!(title.phase, VisibleTitlePhase::MainMenu)
+    {
+        let pressed_mask = [
+            (KeyCode::KeyZ, 0x01_u8),
+            (KeyCode::KeyX, 0x02),
+            (KeyCode::ShiftRight, 0x04),
+            (KeyCode::Enter, 0x08),
+            (KeyCode::ArrowRight, 0x10),
+            (KeyCode::ArrowLeft, 0x20),
+            (KeyCode::ArrowUp, 0x40),
+            (KeyCode::ArrowDown, 0x80),
+        ]
+        .into_iter()
+        .filter_map(|(key, mask)| keys.just_pressed(key).then_some(mask))
+        .fold(0_u8, |mask, pressed| mask | pressed);
+        // The host and title interpreter advance on separate clocks. Latch
+        // each physical edge until one source frame samples hJoyDown.
+        title.joypad_mask |= pressed_mask;
+    }
     for key in [
         KeyCode::ArrowUp,
         KeyCode::ArrowDown,
@@ -163,7 +191,10 @@ fn apply_keyboard_input(
         KeyCode::Enter,
         KeyCode::ShiftRight,
     ] {
-        if keys.just_pressed(key) && !runtime_shell.pending_ui_button_presses.contains(&key) {
+        if !title_input_active
+            && keys.just_pressed(key)
+            && !runtime_shell.pending_ui_button_presses.contains(&key)
+        {
             runtime_shell.pending_ui_button_presses.push_back(key);
         }
     }
@@ -174,9 +205,11 @@ fn apply_keyboard_input(
     if elapsed_vblanks == 0 && elapsed_input_ticks == 0 {
         let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-        let ctrl_pressed = keys.pressed(KeyCode::ControlLeft)
-            || keys.pressed(KeyCode::ControlRight);
-        if !shift_pressed && !alt_pressed && !ctrl_pressed
+        let ctrl_pressed =
+            keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        if !shift_pressed
+            && !alt_pressed
+            && !ctrl_pressed
             && let Some(direction) = just_pressed_overworld_direction(&keys)
         {
             // Host rendering can run faster than Crystal's 60 Hz input loop.
@@ -184,6 +217,11 @@ fn apply_keyboard_input(
             // tap still reaches the next joypad sample after the key is up.
             runtime_shell.pending_overworld_direction_press = Some(direction);
         }
+        return;
+    }
+    if let Err(error) = advance_visible_music_fade(&mut runtime_shell, elapsed_vblanks) {
+        record_visible_runtime_error(&mut runtime_shell, &error);
+        runtime_shell.last_error = Some(error.to_string());
         return;
     }
     // The host can present frames faster than Crystal's input cadence. Keep
@@ -215,9 +253,14 @@ fn apply_keyboard_input(
     // early return; dialogue, menus, battles, and interpolation all consume
     // real play time unless the source gates explicitly pause it.
     if elapsed_vblanks > 0 {
+        let normal_vblanks = if visible_special_vblank_handler_active(&runtime_shell) {
+            0
+        } else {
+            elapsed_vblanks
+        };
         if let Err(error) = runtime_shell
             .shell
-            .advance_game_timer_vblanks(elapsed_vblanks)
+            .advance_vblanks(elapsed_vblanks, normal_vblanks)
         {
             record_visible_runtime_error(&mut runtime_shell, &error);
             runtime_shell.last_error = Some(error.to_string());
@@ -330,9 +373,7 @@ fn apply_keyboard_input(
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if let Some(earthquake) = runtime_shell.visible_earthquake.as_mut() {
-        earthquake.frames_remaining =
-            visible_effect_frames_after_ticks(earthquake.frames_remaining, elapsed_input_ticks);
-        earthquake.phase = earthquake.phase.wrapping_add(elapsed_input_ticks as u8) % 4;
+        earthquake.advance(elapsed_input_ticks);
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if runtime_shell
@@ -360,16 +401,10 @@ fn apply_keyboard_input(
     let mut field_object_effect_advanced = false;
     let field_notice_effect_finished = if runtime_shell.field_notice.is_none() {
         if let Some(frames) = runtime_shell.pending_field_notice_effect_frames {
-            let frames = frames.saturating_sub(
-                elapsed_input_ticks.min(u32::from(u8::MAX)) as u8,
-            );
+            let frames = frames.saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
             runtime_shell.pending_field_notice_effect_frames = Some(frames);
             if let Some(cut) = runtime_shell.visible_cut_animation.as_mut() {
-                cut.frame = 32_u8.saturating_sub(frames);
-                field_object_effect_advanced = true;
-            }
-            if let Some(whirlpool) = runtime_shell.visible_whirlpool_animation.as_mut() {
-                whirlpool.frame = 32_u8.saturating_sub(frames);
+                cut.frame = 34_u8.saturating_sub(frames);
                 field_object_effect_advanced = true;
             }
             if let Some(headbutt) = runtime_shell.visible_headbutt_animation.as_mut() {
@@ -399,7 +434,7 @@ fn apply_keyboard_input(
         runtime_shell.field_notice_scene = None;
         runtime_shell.visible_earthquake = None;
         runtime_shell.visible_cut_animation = None;
-        runtime_shell.visible_whirlpool_animation = None;
+        runtime_shell.pending_whirlpool_sound_wait = false;
         runtime_shell.visible_headbutt_animation = None;
         runtime_shell.visible_flash_animation = None;
         runtime_shell.pending_surf_start_from = None;
@@ -415,9 +450,7 @@ fn apply_keyboard_input(
         }
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if runtime_shell.field_notice.is_none()
-        && runtime_shell.visible_waterfall_animation.is_some()
-    {
+    if runtime_shell.field_notice.is_none() && runtime_shell.visible_waterfall_animation.is_some() {
         for _ in 0..elapsed_input_ticks {
             let Some(animation) = runtime_shell.visible_waterfall_animation else {
                 break;
@@ -519,70 +552,71 @@ fn apply_keyboard_input(
             let Some(animation) = runtime_shell.visible_fly_animation else {
                 break;
             };
-        let counter = match animation.phase {
-            VisibleFlyAnimationPhase::From => 128_u8.saturating_sub(animation.frame),
-            VisibleFlyAnimationPhase::To => 64_u8.saturating_sub(animation.frame),
-        };
-        if animation.frame > 0 && counter >= 0x40 && counter & 7 == 0 {
-            let BevyRuntimeShell {
-                shell,
-                pending_audio,
-                last_audio_events,
-                ..
-            } = &mut *runtime_shell;
-            if let Err(error) = queue_visible_sound_effect(
-                shell.runtime().audio(),
-                pending_audio,
-                last_audio_events,
-                "SFX_FLY",
-            ) {
-                record_visible_runtime_error(&mut runtime_shell, &error);
-                runtime_shell.last_error = Some(error.to_string());
-                return;
-            }
-        }
-        match animation.phase {
-            VisibleFlyAnimationPhase::From => {
-                if animation.frame >= 128 {
-                    runtime_shell.field_notice_scene = None;
-                    if let Err(error) = settle_visible_overworld_travel(&mut runtime_shell) {
-                        record_visible_runtime_error(&mut runtime_shell, &error);
-                        runtime_shell.last_error = Some(error.to_string());
-                        return;
-                    }
-                    runtime_shell.visible_fly_animation = Some(VisibleFlyAnimation {
-                        phase: VisibleFlyAnimationPhase::To,
-                        frame: 0,
-                    });
-                    let BevyRuntimeShell {
-                        shell,
-                        pending_audio,
-                        last_audio_events,
-                        ..
-                    } = &mut *runtime_shell;
-                    if let Err(error) = queue_visible_sound_effect(
-                        shell.runtime().audio(),
-                        pending_audio,
-                        last_audio_events,
-                        "SFX_FLY",
-                    ) {
-                        record_visible_runtime_error(&mut runtime_shell, &error);
-                        runtime_shell.last_error = Some(error.to_string());
-                        return;
-                    }
-                } else if let Some(animation) = runtime_shell.visible_fly_animation.as_mut() {
-                    animation.frame = animation.frame.saturating_add(1);
+            let counter = match animation.phase {
+                VisibleFlyAnimationPhase::From => 128_u8.saturating_sub(animation.frame),
+                VisibleFlyAnimationPhase::To => 64_u8.saturating_sub(animation.frame),
+            };
+            if animation.frame > 0 && counter >= 0x40 && counter & 7 == 0 {
+                let BevyRuntimeShell {
+                    shell,
+                    pending_audio,
+                    last_audio_events,
+                    ..
+                } = &mut *runtime_shell;
+                if let Err(error) = queue_visible_sound_effect(
+                    shell.runtime().audio(),
+                    pending_audio,
+                    last_audio_events,
+                    "SFX_FLY",
+                ) {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                    runtime_shell.last_error = Some(error.to_string());
+                    return;
                 }
             }
-            VisibleFlyAnimationPhase::To => {
-                if animation.frame >= 64 {
-                    runtime_shell.visible_fly_animation = None;
-                } else if let Some(animation) = runtime_shell.visible_fly_animation.as_mut() {
-                    animation.frame = animation.frame.saturating_add(1);
+            match animation.phase {
+                VisibleFlyAnimationPhase::From => {
+                    if animation.frame >= 128 {
+                        runtime_shell.field_notice_scene = None;
+                        if let Err(error) = settle_visible_overworld_travel(&mut runtime_shell) {
+                            record_visible_runtime_error(&mut runtime_shell, &error);
+                            runtime_shell.last_error = Some(error.to_string());
+                            return;
+                        }
+                        runtime_shell.visible_fly_animation = Some(VisibleFlyAnimation {
+                            phase: VisibleFlyAnimationPhase::To,
+                            frame: 0,
+                            actor_party_index: animation.actor_party_index,
+                        });
+                        let BevyRuntimeShell {
+                            shell,
+                            pending_audio,
+                            last_audio_events,
+                            ..
+                        } = &mut *runtime_shell;
+                        if let Err(error) = queue_visible_sound_effect(
+                            shell.runtime().audio(),
+                            pending_audio,
+                            last_audio_events,
+                            "SFX_FLY",
+                        ) {
+                            record_visible_runtime_error(&mut runtime_shell, &error);
+                            runtime_shell.last_error = Some(error.to_string());
+                            return;
+                        }
+                    } else if let Some(animation) = runtime_shell.visible_fly_animation.as_mut() {
+                        animation.frame = animation.frame.saturating_add(1);
+                    }
+                }
+                VisibleFlyAnimationPhase::To => {
+                    if animation.frame >= 64 {
+                        runtime_shell.visible_fly_animation = None;
+                    } else if let Some(animation) = runtime_shell.visible_fly_animation.as_mut() {
+                        animation.frame = animation.frame.saturating_add(1);
+                    }
                 }
             }
-        }
-        mark_runtime_snapshot_dirty(&mut runtime_shell);
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
         return;
     }
@@ -601,25 +635,32 @@ fn apply_keyboard_input(
         }
         return;
     }
-    if runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
-        matches!(
-            hatch.phase,
-            VisibleEggHatchPhase::EggHold
-                | VisibleEggHatchPhase::Wobble
-                | VisibleEggHatchPhase::Shell
-        ) || (hatch.phase == VisibleEggHatchPhase::Reveal
-            && runtime_shell.visible_frontpic_animation.is_none())
-    }) {
+    if runtime_shell
+        .visible_egg_hatch
+        .as_ref()
+        .is_some_and(|hatch| {
+            matches!(
+                hatch.phase,
+                VisibleEggHatchPhase::EggHold
+                    | VisibleEggHatchPhase::Wobble
+                    | VisibleEggHatchPhase::Shell
+            ) || (hatch.phase == VisibleEggHatchPhase::Reveal
+                && runtime_shell.visible_frontpic_animation.is_none())
+        })
+    {
         for _ in 0..elapsed_input_ticks {
-            let owns_frame = runtime_shell.visible_egg_hatch.as_ref().is_some_and(|hatch| {
-                matches!(
-                    hatch.phase,
-                    VisibleEggHatchPhase::EggHold
-                        | VisibleEggHatchPhase::Wobble
-                        | VisibleEggHatchPhase::Shell
-                ) || (hatch.phase == VisibleEggHatchPhase::Reveal
-                    && runtime_shell.visible_frontpic_animation.is_none())
-            });
+            let owns_frame = runtime_shell
+                .visible_egg_hatch
+                .as_ref()
+                .is_some_and(|hatch| {
+                    matches!(
+                        hatch.phase,
+                        VisibleEggHatchPhase::EggHold
+                            | VisibleEggHatchPhase::Wobble
+                            | VisibleEggHatchPhase::Shell
+                    ) || (hatch.phase == VisibleEggHatchPhase::Reveal
+                        && runtime_shell.visible_frontpic_animation.is_none())
+                });
             if !owns_frame {
                 break;
             }
@@ -632,12 +673,12 @@ fn apply_keyboard_input(
         return;
     }
     if runtime_shell
-        .visible_item_ball_notice
+        .visible_field_item_notice
         .as_ref()
-        .is_some_and(|notice| matches!(notice.phase, VisibleItemBallPhase::FanfarePause { .. }))
+        .is_some_and(|notice| matches!(notice.phase, VisibleFieldItemPhase::FanfarePause { .. }))
     {
         for _ in 0..elapsed_input_ticks {
-            if !advance_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+            if !advance_visible_field_item_fanfare_pause(&mut runtime_shell) {
                 break;
             }
         }
@@ -699,15 +740,18 @@ fn apply_keyboard_input(
             )
         })
     {
-        let timed = runtime_shell.visible_card_flip.as_ref().is_some_and(|game| {
-            matches!(
-                game.animation,
-                VisibleCardFlipAnimation::Deal { .. }
-                    | VisibleCardFlipAnimation::Cycle { .. }
-                    | VisibleCardFlipAnimation::SelectFlash { .. }
-                    | VisibleCardFlipAnimation::Payout { .. }
-            )
-        });
+        let timed = runtime_shell
+            .visible_card_flip
+            .as_ref()
+            .is_some_and(|game| {
+                matches!(
+                    game.animation,
+                    VisibleCardFlipAnimation::Deal { .. }
+                        | VisibleCardFlipAnimation::Cycle { .. }
+                        | VisibleCardFlipAnimation::SelectFlash { .. }
+                        | VisibleCardFlipAnimation::Payout { .. }
+                )
+            });
         let frame_budget = if timed { elapsed_input_ticks } else { 1 };
         for _ in 0..frame_budget {
             if let Err(error) = advance_visible_card_flip_animation(&mut runtime_shell) {
@@ -716,15 +760,18 @@ fn apply_keyboard_input(
                 break;
             }
             if timed
-                && !runtime_shell.visible_card_flip.as_ref().is_some_and(|game| {
-                    matches!(
-                        game.animation,
-                        VisibleCardFlipAnimation::Deal { .. }
-                            | VisibleCardFlipAnimation::Cycle { .. }
-                            | VisibleCardFlipAnimation::SelectFlash { .. }
-                            | VisibleCardFlipAnimation::Payout { .. }
-                    )
-                })
+                && !runtime_shell
+                    .visible_card_flip
+                    .as_ref()
+                    .is_some_and(|game| {
+                        matches!(
+                            game.animation,
+                            VisibleCardFlipAnimation::Deal { .. }
+                                | VisibleCardFlipAnimation::Cycle { .. }
+                                | VisibleCardFlipAnimation::SelectFlash { .. }
+                                | VisibleCardFlipAnimation::Payout { .. }
+                        )
+                    })
             {
                 break;
             }
@@ -970,20 +1017,28 @@ fn apply_keyboard_input(
         if let Some(tween) = runtime_shell.battle_exp_tween.as_mut()
             && tween.started
         {
-        if tween.frames_until_step > 0 {
-            tween.frames_until_step -= 1;
-        } else if tween.pixels < tween.target_pixels {
-            tween.pixels += 1;
-            tween.steps_in_segment += 1;
-            tween.frames_until_step = if tween.steps_in_segment <= 2 {
-                2
-            } else if tween.steps_in_segment <= 4 {
-                1
+            if tween.frames_until_step > 0 {
+                tween.frames_until_step -= 1;
+            } else if tween.pixels < tween.target_pixels {
+                tween.pixels += 1;
+                tween.steps_in_segment += 1;
+                tween.frames_until_step = if tween.steps_in_segment <= 2 {
+                    2
+                } else if tween.steps_in_segment <= 4 {
+                    1
+                } else {
+                    0
+                };
+                exp_pixels_changed = true;
+                if tween.pixels == tween.target_pixels {
+                    exp_segment_finished = !tween.remaining_targets.is_empty();
+                    exp_animation_finished = tween.remaining_targets.is_empty();
+                    if exp_segment_finished {
+                        tween.level = tween.level.saturating_add(1).min(100);
+                    }
+                    tween.started = false;
+                }
             } else {
-                0
-            };
-            exp_pixels_changed = true;
-            if tween.pixels == tween.target_pixels {
                 exp_segment_finished = !tween.remaining_targets.is_empty();
                 exp_animation_finished = tween.remaining_targets.is_empty();
                 if exp_segment_finished {
@@ -991,62 +1046,55 @@ fn apply_keyboard_input(
                 }
                 tween.started = false;
             }
-        } else {
-            exp_segment_finished = !tween.remaining_targets.is_empty();
-            exp_animation_finished = tween.remaining_targets.is_empty();
-            if exp_segment_finished {
-                tween.level = tween.level.saturating_add(1).min(100);
-            }
-            tween.started = false;
-        }
         }
         if exp_pixels_changed {
             mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
         if exp_segment_finished {
-        if let Err(error) =
-            queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_HIT_END_OF_EXP_BAR")
-        {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-        }
-        if runtime_shell
-            .battle_fanfare_messages
-            .front()
-            .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
-        {
-            runtime_shell.battle_fanfare_messages.pop_front();
             if let Err(error) =
-                queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+                queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_HIT_END_OF_EXP_BAR")
             {
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
-        }
+            if runtime_shell
+                .battle_fanfare_messages
+                .front()
+                .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
+            {
+                runtime_shell.battle_fanfare_messages.pop_front();
+                if let Err(error) =
+                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+                {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                }
+            }
         }
         if exp_animation_finished {
-        runtime_shell.battle_exp_tween = runtime_shell.pending_battle_exp_tweens.pop_front();
-        if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
-            && stats.triggered
-        {
-            stats.active = true;
-            // This activation occurs before the per-frame countdown below.
-            stats.frames_before_input = 31;
-            mark_runtime_snapshot_dirty(&mut runtime_shell);
-        }
-        if let Err(error) = finish_visible_empty_battle_reward_presentation(&mut runtime_shell) {
-            record_visible_runtime_error(&mut runtime_shell, &error);
-        }
-        if runtime_shell
-            .battle_fanfare_messages
-            .front()
-            .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
-        {
-            runtime_shell.battle_fanfare_messages.pop_front();
-            if let Err(error) =
-                queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+            runtime_shell.battle_exp_tween = runtime_shell.pending_battle_exp_tweens.pop_front();
+            if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
+                && stats.triggered
+            {
+                stats.active = true;
+                // This activation occurs before the per-frame countdown below.
+                stats.frames_before_input = 31;
+                mark_runtime_snapshot_dirty(&mut runtime_shell);
+            }
+            if let Err(error) = finish_visible_empty_battle_reward_presentation(&mut runtime_shell)
             {
                 record_visible_runtime_error(&mut runtime_shell, &error);
             }
-        }
+            if runtime_shell
+                .battle_fanfare_messages
+                .front()
+                .is_some_and(|fanfare| runtime_shell.battle_messages.front() == Some(fanfare))
+            {
+                runtime_shell.battle_fanfare_messages.pop_front();
+                if let Err(error) =
+                    queue_visible_shell_sound_effect(&mut runtime_shell, "SFX_DEX_FANFARE_50_79")
+                {
+                    record_visible_runtime_error(&mut runtime_shell, &error);
+                }
+            }
         }
         if let Some(stats) = runtime_shell.battle_level_stats.front_mut()
             && stats.active
@@ -1056,14 +1104,28 @@ fn apply_keyboard_input(
         }
     }
     if let Some(frames) = runtime_shell.visible_script_delay_frames.as_mut() {
-        *frames = frames.saturating_sub(
-            elapsed_input_ticks.min(u32::from(u16::MAX)) as u16,
-        );
+        *frames = frames.saturating_sub(elapsed_input_ticks.min(u32::from(u16::MAX)) as u16);
     }
     if runtime_shell.visible_script_delay_frames == Some(0) {
         if let Err(error) = drain_visible_delays(&mut runtime_shell) {
             record_visible_runtime_error(&mut runtime_shell, &error);
             runtime_shell.last_error = Some(format!("{error:#}"));
+        }
+        return;
+    }
+    if runtime_shell.pending_linked_friend_wait {
+        return;
+    }
+    if let Some(frames) = runtime_shell.visible_internal_special_delay_frames.as_mut() {
+        *frames = frames.saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
+        if *frames == 0 {
+            runtime_shell.visible_internal_special_delay_frames = None;
+            if let Err(error) = continue_visible_script_after_prompt(&mut runtime_shell) {
+                record_visible_runtime_error(&mut runtime_shell, &error);
+                runtime_shell.last_error = Some(format!("{error:#}"));
+            }
+        } else {
+            mark_runtime_snapshot_dirty(&mut runtime_shell);
         }
         return;
     }
@@ -1110,9 +1172,7 @@ fn apply_keyboard_input(
     let field_travel_delay_finished = if field_travel_text_complete
         && let Some(frames) = runtime_shell.pending_field_travel_delay_frames.as_mut()
     {
-        *frames = frames.saturating_sub(
-            elapsed_input_ticks.min(u32::from(u16::MAX)) as u16,
-        );
+        *frames = frames.saturating_sub(elapsed_input_ticks.min(u32::from(u16::MAX)) as u16);
         *frames == 0
     } else {
         false
@@ -1145,14 +1205,19 @@ fn apply_keyboard_input(
     runtime_shell.poison_flash_frames_remaining = runtime_shell
         .poison_flash_frames_remaining
         .saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
+    let mut clear_map_name_sign = false;
     if let Some(sign) = runtime_shell.visible_map_name_sign.as_mut() {
-        sign.frames_remaining = sign.frames_remaining.saturating_sub(
-            elapsed_input_ticks.min(u32::from(u8::MAX)) as u8,
-        );
-        if sign.frames_remaining == 0 {
-            runtime_shell.visible_map_name_sign = None;
-            mark_runtime_snapshot_dirty(&mut runtime_shell);
+        for _ in 0..elapsed_input_ticks {
+            if sign.frames_remaining == 0 {
+                clear_map_name_sign = true;
+                break;
+            }
+            sign.frames_remaining -= 1;
         }
+    }
+    if clear_map_name_sign {
+        runtime_shell.visible_map_name_sign = None;
+        mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if runtime_shell.pending_trainer_sight.is_some() {
         for _ in 0..elapsed_input_ticks {
@@ -1247,20 +1312,21 @@ fn apply_keyboard_input(
         if text_changed {
             mark_runtime_presentation_dirty(&mut runtime_shell);
         }
-        let completed_text_identity = runtime_shell
-            .shell
-            .presentation_snapshot()
-            .ok()
-            .and_then(|snapshot| {
-                visible_field_dialog_pages(&snapshot, &runtime_shell)?;
-                let reveal = runtime_shell.field_text_reveal.as_ref()?;
-                visible_field_dialogue_is_entirely_consumed(&runtime_shell, &snapshot).then(|| {
-                    (reveal.text.clone(), reveal.page_index)
-                })
+        let completed_text_identity =
+            runtime_shell
+                .shell
+                .presentation_snapshot()
+                .ok()
+                .and_then(|snapshot| {
+                    visible_field_dialog_pages(&snapshot, &runtime_shell)?;
+                    let reveal = runtime_shell.field_text_reveal.as_ref()?;
+                    visible_field_dialogue_is_entirely_consumed(&runtime_shell, &snapshot)
+                        .then(|| (reveal.text.clone(), reveal.page_index))
+                });
+        let completed_text_was_presented =
+            completed_text_identity.as_ref().is_none_or(|identity| {
+                runtime_shell.rendered_field_text_identity.as_ref() == Some(identity)
             });
-        let completed_text_was_presented = completed_text_identity.as_ref().is_none_or(|identity| {
-            runtime_shell.rendered_field_text_identity.as_ref() == Some(identity)
-        });
         // `waitsfx` is an autonomous ASM sequencing fence. Poll it from the
         // frame loop so the script resumes as soon as the transient channel
         // finishes; requiring an unrelated A/B press leaves item rewards and
@@ -1312,9 +1378,9 @@ fn apply_keyboard_input(
             }
             return;
         }
-        // UseFlashTextScript is text_asm rather than the ordinary
-        // field-move text script: once the line has printed it immediately
-        // plays SFX_FLASH and runs BlindingFlash, with no button wait.
+        // UseFlashTextScript is text_asm rather than an ordinary field-move
+        // prompt: after printing it plays and waits for SFX_FLASH, then the
+        // outer script runs BlindingFlash without a button boundary.
         if runtime_shell.visible_flash_animation.is_some() && runtime_shell.field_notice.is_some() {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
@@ -1326,11 +1392,9 @@ fn apply_keyboard_input(
                         runtime_shell.last_error = Some(error.to_string());
                         return;
                     }
-                    if let Err(error) = begin_pending_field_notice_effect(&mut runtime_shell) {
-                        record_visible_runtime_error(&mut runtime_shell, &error);
-                        runtime_shell.last_error = Some(error.to_string());
-                        return;
-                    }
+                    runtime_shell.visible_wait_sfx_boundary = true;
+                    runtime_shell.wait_play_sfx_completion =
+                        Some(VisibleWaitPlaySfxCompletion::FlashFieldMove);
                     mark_runtime_snapshot_dirty(&mut runtime_shell);
                     return;
                 }
@@ -1342,17 +1406,20 @@ fn apply_keyboard_input(
                 }
             }
         }
-        let item_ball_found_text_ready = runtime_shell
-            .visible_item_ball_notice
+        let field_item_found_text_ready = runtime_shell
+            .visible_field_item_notice
             .as_ref()
-            .is_some_and(|notice| notice.phase == VisibleItemBallPhase::FoundText)
-            && runtime_shell.field_notice.is_some();
-        if item_ball_found_text_ready {
+            .is_some_and(|notice| {
+                notice.phase == VisibleFieldItemPhase::FoundText
+                    && runtime_shell.field_notice.as_deref()
+                        == Some(notice.sound_trigger_text.as_str())
+            });
+        if field_item_found_text_ready {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
                     if visible_field_dialogue_is_fully_revealed(&runtime_shell, &snapshot) =>
                 {
-                    if let Err(error) = begin_visible_item_ball_fanfare_pause(&mut runtime_shell) {
+                    if let Err(error) = begin_visible_field_item_sound(&mut runtime_shell) {
                         record_visible_runtime_error(&mut runtime_shell, &error);
                         runtime_shell.last_error = Some(error.to_string());
                     }
@@ -1391,11 +1458,11 @@ fn apply_keyboard_input(
             }
         }
         let automatic_field_effect_ready = runtime_shell.field_notice.is_some()
-            && runtime_shell.pending_field_notice_effect_frames.is_some()
             && runtime_shell.visible_flash_animation.is_none()
-            && (runtime_shell.visible_cut_animation.is_some()
-                || runtime_shell.visible_whirlpool_animation.is_some()
-                || runtime_shell.visible_headbutt_animation.is_some());
+            && (runtime_shell.pending_whirlpool_sound_wait
+                || (runtime_shell.pending_field_notice_effect_frames.is_some()
+                    && (runtime_shell.visible_cut_animation.is_some()
+                        || runtime_shell.visible_headbutt_animation.is_some())));
         if automatic_field_effect_ready {
             match runtime_shell.shell.presentation_snapshot() {
                 Ok(snapshot)
@@ -1454,22 +1521,23 @@ fn apply_keyboard_input(
                 runtime_shell.rendered_field_text_identity = None;
                 mark_runtime_snapshot_dirty(&mut runtime_shell);
             } else {
-            let auto_continue =
-                visible_field_dialogue_is_entirely_consumed(&runtime_shell, &field_snapshot)
-                    && field_snapshot.ui.pending_text_wait.is_none()
-                    && field_snapshot.ui.pending_yes_no.is_none()
-                    && !visible_non_text_player_boundary(&runtime_shell, &field_snapshot)
-                    && runtime_shell.active_script_cursor.is_some();
-            if auto_continue {
-                runtime_shell.field_text_consumed_a |= keys.just_pressed(KeyCode::KeyZ);
-                runtime_shell.field_text_consumed_b |= keys.just_pressed(KeyCode::KeyX);
-                if let Err(error) = advance_visible_script_until_player_boundary(&mut runtime_shell)
-                {
-                    record_visible_runtime_error(&mut runtime_shell, &error);
-                    runtime_shell.last_error = Some(format!("{error:#}"));
+                let auto_continue =
+                    visible_field_dialogue_is_entirely_consumed(&runtime_shell, &field_snapshot)
+                        && field_snapshot.ui.pending_text_wait.is_none()
+                        && field_snapshot.ui.pending_yes_no.is_none()
+                        && !visible_non_text_player_boundary(&runtime_shell, &field_snapshot)
+                        && runtime_shell.active_script_cursor.is_some();
+                if auto_continue {
+                    runtime_shell.field_text_consumed_a |= keys.just_pressed(KeyCode::KeyZ);
+                    runtime_shell.field_text_consumed_b |= keys.just_pressed(KeyCode::KeyX);
+                    if let Err(error) =
+                        advance_visible_script_until_player_boundary(&mut runtime_shell)
+                    {
+                        record_visible_runtime_error(&mut runtime_shell, &error);
+                        runtime_shell.last_error = Some(format!("{error:#}"));
+                    }
                 }
-            }
-            return;
+                return;
             }
         }
     } else if runtime_shell.active_script_cursor.is_none()
@@ -1524,7 +1592,10 @@ fn apply_keyboard_input(
                 run_bevy_action(&mut runtime_shell, execute_last_coord_event_script);
             }
             PendingOverworldStepBoundary::PhoneCall => {
-                run_bevy_action(&mut runtime_shell, advance_visible_script_until_player_boundary);
+                run_bevy_action(
+                    &mut runtime_shell,
+                    advance_visible_script_until_player_boundary,
+                );
             }
             PendingOverworldStepBoundary::WildBattle => {
                 run_bevy_action(&mut runtime_shell, settle_visible_battle_after_action);
@@ -1630,8 +1701,8 @@ fn apply_keyboard_input(
         shell_consumes_start,
         shell_consumes_select,
     );
-    let newly_pressed_direction = just_pressed_overworld_direction(&keys)
-        .or(pending_direction_press);
+    let newly_pressed_direction =
+        just_pressed_overworld_direction(&keys).or(pending_direction_press);
     buttons.retain(|button| !is_direction_button(*button));
     if !shell_consumes_direction
         && let Some(direction) = newly_pressed_direction
@@ -2090,10 +2161,8 @@ fn apply_keyboard_input(
                 runtime_shell.player_walk_from = Some(from);
                 advance_player_walk_phase(&mut runtime_shell, frame.snapshot.facing);
                 runtime_shell.player_walk_total_ticks = step_ticks;
-                runtime_shell.player_walk_frame_ticks = visible_new_step_frames_remaining(
-                    step_ticks,
-                    remaining_catch_up_ticks,
-                );
+                runtime_shell.player_walk_frame_ticks =
+                    visible_new_step_frames_remaining(step_ticks, remaining_catch_up_ticks);
                 runtime_shell.overworld_direction_repeat_ticks = step_ticks.saturating_sub(1);
             }
             if let Some(LedgeJumpOutcome::Jumped { from, to, .. }) = frame.ledge_jump {
@@ -2298,7 +2367,10 @@ fn apply_keyboard_input(
     } else if execute_coord_event_script {
         run_bevy_action(&mut runtime_shell, execute_last_coord_event_script);
     } else if execute_phone_call_script {
-        run_bevy_action(&mut runtime_shell, advance_visible_script_until_player_boundary);
+        run_bevy_action(
+            &mut runtime_shell,
+            advance_visible_script_until_player_boundary,
+        );
     } else if execute_interaction_script {
         runtime_shell.overworld_interaction_consumed_a = true;
         run_bevy_action(&mut runtime_shell, execute_last_interaction_script);
@@ -2354,6 +2426,104 @@ fn apply_keyboard_input(
     }
 }
 
+/// Presentation states that install an hVBlank handler other than
+/// VBlank_Normal in the original engine. Those handlers deliberately skip
+/// the two DIV reads which advance hRandomAdd/hRandomSub.
+fn visible_special_vblank_handler_active(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.credits_screen.is_some()
+        || runtime_shell.visible_magnet_train.is_some()
+        || runtime_shell.visible_battle_transition.is_some()
+        || runtime_shell
+            .visible_capture_animation
+            .as_ref()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell
+            .visible_move_animations
+            .front()
+            .is_some_and(|animation| animation.started)
+        || runtime_shell.visible_send_out_animation.is_some()
+}
+
+fn visible_vblank_counter_bit4(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.shell.session().state().vblank_counter & (1 << 4) != 0
+}
+
+fn advance_visible_music_fade(
+    runtime_shell: &mut BevyRuntimeShell,
+    elapsed_vblanks: u32,
+) -> Result<()> {
+    for _ in 0..elapsed_vblanks {
+        let Some(fade) = runtime_shell.music_fade.as_mut() else {
+            break;
+        };
+        if fade.count > 0 {
+            fade.count -= 1;
+            continue;
+        }
+        fade.count = fade.rate;
+        if fade.fading_in {
+            if runtime_shell.music_volume < 7 {
+                runtime_shell.music_volume += 1;
+                continue;
+            }
+            runtime_shell.music_fade = None;
+            runtime_shell.faded_music = None;
+            runtime_shell
+                .last_audio_events
+                .push("completed ASM bicycle music fade-in".to_string());
+            trim_event_log(&mut runtime_shell.last_audio_events);
+            continue;
+        }
+        if runtime_shell.music_volume > 0 {
+            runtime_shell.music_volume -= 1;
+            continue;
+        }
+
+        let target_music = fade.target_music.clone();
+        let bicycle_fade_in = runtime_shell.shell.snapshot()?.overworld.mode == MovementMode::Bike;
+        if bicycle_fade_in {
+            // MusicFadeRestart calls _InitSound, which clears wMusicFade and
+            // wMusicFadeCount. The bicycle branch then sets only bit 7, so
+            // its fade-in always advances at rate zero.
+            fade.rate = 0;
+            fade.count = 0;
+            fade.fading_in = true;
+        } else {
+            runtime_shell.music_fade = None;
+            runtime_shell.faded_music = None;
+            runtime_shell.music_volume = 7;
+        }
+        runtime_shell.pending_music_stop = true;
+        runtime_shell.pending_full_audio_reset = true;
+        clear_pending_music_commands(&mut runtime_shell.pending_audio);
+        runtime_shell.active_music = Some(target_music.clone());
+        if !is_silent_music_id(&target_music) {
+            let playback = runtime_shell
+                .shell
+                .runtime()
+                .audio()
+                .require_playback_entry(AudioKind::Music, &target_music)?;
+            enqueue_bevy_audio_command(
+                &mut runtime_shell.pending_audio,
+                BevyAudioCommand {
+                    audio_id: target_music.clone(),
+                    kind: ModpackAudioKind::Music,
+                    mode: playback.mode,
+                    looped: matches!(
+                        playback.loop_policy,
+                        crate::assets::ModpackAudioLoopPolicy::Loop
+                    ),
+                },
+            );
+        }
+        runtime_shell
+            .last_audio_events
+            .push(format!("loaded ASM music fade target {target_music}"));
+        trim_event_log(&mut runtime_shell.last_audio_events);
+    }
+    Ok(())
+}
+
 fn release_input_on_focus_loss(
     mut focus_events: EventReader<WindowFocused>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -2378,9 +2548,7 @@ fn reset_keyboard_after_focus_loss(keys: &mut ButtonInput<KeyCode>) {
 
 fn overworld_frame_reaches_presentation_boundary(frame: &crate::RuntimeOverworldFrame) -> bool {
     frame.step_events.as_ref().is_some_and(|events| {
-        events.repel_expired.is_some()
-            || events.egg_hatched
-            || events.poison_result.is_some()
+        events.repel_expired.is_some() || events.egg_hatched || events.poison_result.is_some()
     }) || frame.trainer_sight.is_some()
         || frame.coord_event.is_some()
         || frame.phone_call.is_some()
@@ -2619,13 +2787,21 @@ fn advance_visible_walk_timers(runtime_shell: &mut BevyRuntimeShell, elapsed_tic
         .collect::<Vec<_>>();
     let object_landed = !landed_object_ids.is_empty();
     for object_id in landed_object_ids {
-        runtime_shell.object_walk_frame_ticks_by_id.remove(&object_id);
-        runtime_shell.object_walk_total_ticks_by_id.remove(&object_id);
+        runtime_shell
+            .object_walk_frame_ticks_by_id
+            .remove(&object_id);
+        runtime_shell
+            .object_walk_total_ticks_by_id
+            .remove(&object_id);
         runtime_shell.object_walk_from.remove(&object_id);
-        runtime_shell.follower_visible_tile_overrides.remove(&object_id);
+        runtime_shell
+            .follower_visible_tile_overrides
+            .remove(&object_id);
         let overworld = &mut runtime_shell.shell.session_mut().overworld;
         overworld.object_last_runtime_tiles.remove(&object_id);
-        overworld.object_last_tiles_occupied_until_frame.remove(&object_id);
+        overworld
+            .object_last_tiles_occupied_until_frame
+            .remove(&object_id);
     }
     if player_landed || object_landed {
         start_next_queued_follower_walk(runtime_shell);
@@ -2724,8 +2900,7 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
             if let Some(program) = pending {
                 if let Some(movement) = runtime_shell.visible_script_movement.as_ref() {
                     if movement.object_id == "PLAYER" {
-                        runtime_shell.visible_player_sprite_y_offset =
-                            movement.stationary_y_offset;
+                        runtime_shell.visible_player_sprite_y_offset = movement.stationary_y_offset;
                     }
                 }
                 let revealed_object = if !program.previous_hidden && program.object_id != "PLAYER" {
@@ -2932,13 +3107,7 @@ fn start_next_visible_script_movement_phase(runtime_shell: &mut BevyRuntimeShell
                 return Ok(true);
             }
             VisibleScriptMovementPhase::ScreenShake { parameter } => {
-                runtime_shell.visible_earthquake = Some(VisibleEarthquake {
-                    intensity: 1_u16 << ((parameter >> 6) & 0x3),
-                    frames_remaining: crate::core::timing::wrapping_byte_counter_ticks(
-                        (parameter & 0x3f) as u8,
-                    ),
-                    phase: 0,
-                });
+                runtime_shell.visible_earthquake = Some(VisibleEarthquake::screen_shake(parameter));
                 mark_runtime_snapshot_dirty(runtime_shell);
                 continue;
             }
@@ -3090,17 +3259,10 @@ fn log_visible_movement_event(
 }
 
 #[cfg(not(test))]
-fn log_visible_key_presses(
-    _runtime_shell: &mut BevyRuntimeShell,
-    _keys: &ButtonInput<KeyCode>,
-) {
-}
+fn log_visible_key_presses(_runtime_shell: &mut BevyRuntimeShell, _keys: &ButtonInput<KeyCode>) {}
 
 #[cfg(test)]
-fn log_visible_key_presses(
-    runtime_shell: &mut BevyRuntimeShell,
-    keys: &ButtonInput<KeyCode>,
-) {
+fn log_visible_key_presses(runtime_shell: &mut BevyRuntimeShell, keys: &ButtonInput<KeyCode>) {
     let pressed = [
         (KeyCode::ArrowUp, "UP"),
         (KeyCode::ArrowDown, "DOWN"),
@@ -3158,14 +3320,7 @@ fn log_visible_key_presses(
     for key in pressed {
         let event = format!(
             "crystal-bevy input frame={} key={} owner={} map={} tile={:?} dialogue={} page={:?} script={}",
-            runtime_shell.lcd_animation_frame,
-            key,
-            owner,
-            map,
-            tile,
-            dialogue,
-            page,
-            script,
+            runtime_shell.lcd_animation_frame, key, owner, map, tile, dialogue, page, script,
         );
         eprintln!("{event}");
         runtime_shell.input_log_events.push_back(event);
@@ -3202,14 +3357,17 @@ fn advance_visible_script_movement(runtime_shell: &mut BevyRuntimeShell) -> Resu
             runtime_shell.object_walk_frame_ticks,
             &runtime_shell.object_walk_frame_ticks_by_id,
         );
-        let follower_in_flight = movement.follower_object_id.as_deref().is_some_and(|object_id| {
-            visible_actor_walk_in_flight(
-                object_id,
-                runtime_shell.player_walk_frame_ticks,
-                runtime_shell.object_walk_frame_ticks,
-                &runtime_shell.object_walk_frame_ticks_by_id,
-            )
-        });
+        let follower_in_flight = movement
+            .follower_object_id
+            .as_deref()
+            .is_some_and(|object_id| {
+                visible_actor_walk_in_flight(
+                    object_id,
+                    runtime_shell.player_walk_frame_ticks,
+                    runtime_shell.object_walk_frame_ticks,
+                    &runtime_shell.object_walk_frame_ticks_by_id,
+                )
+            });
         let movement_in_flight = leader_in_flight || follower_in_flight;
         if movement_in_flight {
             return Ok(true);
@@ -3556,7 +3714,7 @@ fn apply_runtime_hotkeys(
                 move_visible_time_set_direction(shell, VisibleTimeSetDirection::Right)
             });
         }
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             run_bevy_action(&mut runtime_shell, press_visible_time_set_a_button);
         }
         if keys.just_pressed(KeyCode::KeyX) {
@@ -3577,7 +3735,7 @@ fn apply_runtime_hotkeys(
         return;
     }
     if runtime_shell.pending_oak_intro.is_some() {
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             run_bevy_action(&mut runtime_shell, press_visible_oak_intro_a_button);
         }
         if keys.just_pressed(KeyCode::KeyX) {
@@ -3593,17 +3751,17 @@ fn apply_runtime_hotkeys(
         return;
     }
     if runtime_shell.pending_gender_selection.is_some() {
-        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
+        if keys.just_pressed(KeyCode::ArrowUp) {
             run_bevy_action(&mut runtime_shell, |shell| {
                 move_visible_gender_selection(shell, -1)
             });
         }
-        if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::ArrowRight) {
+        if keys.just_pressed(KeyCode::ArrowDown) {
             run_bevy_action(&mut runtime_shell, |shell| {
                 move_visible_gender_selection(shell, 1)
             });
         }
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             run_bevy_action(&mut runtime_shell, confirm_visible_gender_selection);
         }
         for _ in 0..elapsed_input_ticks {
@@ -3626,7 +3784,7 @@ fn apply_runtime_hotkeys(
                 move_visible_name_choice(shell, 1)
             });
         }
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             run_bevy_action(&mut runtime_shell, confirm_visible_name_choice);
         }
         if keys.just_pressed(KeyCode::KeyX) && runtime_shell.pending_standard_capture.is_some() {
@@ -3635,16 +3793,13 @@ fn apply_runtime_hotkeys(
                 finish_visible_capture_nickname(shell, None)
             });
         }
-        if keys.just_pressed(KeyCode::KeyX)
-            && runtime_shell.pending_egg_hatch_nickname.is_some()
-        {
+        if keys.just_pressed(KeyCode::KeyX) && runtime_shell.pending_egg_hatch_nickname.is_some() {
             run_bevy_action(&mut runtime_shell, |shell| {
                 shell.pending_name_choice = None;
                 finish_visible_egg_hatch_nickname(shell, None)
             });
         }
-        if keys.just_pressed(KeyCode::KeyX)
-            && runtime_shell.pending_gift_pokemon_nickname.is_some()
+        if keys.just_pressed(KeyCode::KeyX) && runtime_shell.pending_gift_pokemon_nickname.is_some()
         {
             run_bevy_action(&mut runtime_shell, |shell| {
                 shell.pending_name_choice = None;
@@ -3707,7 +3862,7 @@ fn apply_runtime_hotkeys(
             {
                 run_bevy_action(&mut runtime_shell, move_visible_delete_save_cursor);
             }
-            if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+            if keys.just_pressed(KeyCode::KeyZ) {
                 run_bevy_action(&mut runtime_shell, confirm_visible_delete_save_screen);
             }
             if keys.just_pressed(KeyCode::KeyX) {
@@ -3730,7 +3885,7 @@ fn apply_runtime_hotkeys(
                     move_visible_clock_reset_cursor(shell, -1)
                 });
             }
-            if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+            if keys.just_pressed(KeyCode::KeyZ) {
                 run_bevy_action(&mut runtime_shell, confirm_visible_clock_reset_screen);
             }
             if keys.just_pressed(KeyCode::KeyX) {
@@ -3743,7 +3898,7 @@ fn apply_runtime_hotkeys(
     }
     if runtime_shell.pending_mystery_gift.is_some() {
         if !alt_pressed && !ctrl_pressed {
-            if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+            if keys.just_pressed(KeyCode::KeyZ) {
                 run_bevy_action(&mut runtime_shell, press_visible_mystery_gift_a_button);
             }
             if keys.just_pressed(KeyCode::KeyX) {
@@ -3785,12 +3940,12 @@ fn apply_runtime_hotkeys(
             runtime_shell.ui_held_direction = None;
             runtime_shell.ui_direction_repeat_ticks = 0;
         }
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
+        if keys.just_pressed(KeyCode::KeyZ) {
             runtime_shell.ui_held_direction = None;
             runtime_shell.ui_direction_repeat_ticks = 0;
             run_bevy_action(&mut runtime_shell, press_visible_a_button);
         }
-        if keys.just_pressed(KeyCode::KeyX) {
+        if keys.just_pressed(KeyCode::KeyX) || keys.just_pressed(KeyCode::Enter) {
             runtime_shell.ui_held_direction = None;
             runtime_shell.ui_direction_repeat_ticks = 0;
             run_bevy_action(&mut runtime_shell, press_visible_b_button);
@@ -3824,64 +3979,18 @@ fn apply_runtime_hotkeys(
         return;
     }
     if runtime_shell.title_menu.is_some() {
-        let select_pressed = keys.pressed(KeyCode::ShiftRight);
-        let select_just_pressed = keys.just_pressed(KeyCode::ShiftRight);
-        let b_just_pressed = keys.just_pressed(KeyCode::KeyX);
-        let delete_save_combo = !alt_pressed
-            && !ctrl_pressed
-            && select_just_pressed
-            && b_just_pressed
-            && keys.just_pressed(KeyCode::ArrowUp);
-        if delete_save_combo {
-            run_bevy_action(&mut runtime_shell, open_visible_delete_save_screen);
+        let Some(title) = runtime_shell.title_menu.as_mut() else {
+            return;
+        };
+        if !matches!(title.phase, VisibleTitlePhase::MainMenu) {
             return;
         }
-        let clock_reset_arm_combo = !alt_pressed
-            && !ctrl_pressed
-            && select_just_pressed
-            && b_just_pressed
-            && keys.just_pressed(KeyCode::ArrowDown);
-        if clock_reset_arm_combo {
-            if let Some(title) = runtime_shell
-                .title_menu
-                .as_mut()
-                .filter(|title| matches!(title.phase, VisibleTitlePhase::PressStart))
-            {
-                title.clock_reset_trigger = true;
-                run_bevy_action(&mut runtime_shell, |shell| {
-                    record_visible_runtime_action(shell, "title:clock_reset:armed")
-                });
+        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowDown) {
+            let delta = if keys.just_pressed(KeyCode::ArrowUp) {
+                -1
             } else {
-                run_bevy_action(&mut runtime_shell, |shell| {
-                    record_visible_runtime_action(shell, "title:clock_reset:ignored")
-                });
-            }
-            return;
-        }
-        let clock_reset_open = !alt_pressed
-            && !ctrl_pressed
-            && !select_pressed
-            && runtime_shell
-                .title_menu
-                .as_ref()
-                .is_some_and(|title| title.clock_reset_trigger)
-            && keys.pressed(KeyCode::ArrowLeft)
-            && keys.pressed(KeyCode::ArrowUp);
-        if clock_reset_open {
-            run_bevy_action(&mut runtime_shell, open_visible_clock_reset_screen);
-            return;
-        }
-        if keys.just_pressed(KeyCode::ArrowUp)
-            || keys.just_pressed(KeyCode::ArrowLeft)
-            || keys.just_pressed(KeyCode::ArrowDown)
-            || keys.just_pressed(KeyCode::ArrowRight)
-        {
-            let delta =
-                if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
-                    -1
-                } else {
-                    1
-                };
+                1
+            };
             let input = if delta < 0 {
                 GameButton::Up
             } else {
@@ -3895,12 +4004,8 @@ fn apply_runtime_hotkeys(
                 }
             }
         }
-        if keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::Enter) {
-            let input = if keys.just_pressed(KeyCode::Enter) {
-                GameButton::Start
-            } else {
-                GameButton::A
-            };
+        if keys.just_pressed(KeyCode::KeyZ) {
+            let input = GameButton::A;
             match press_visible_title_confirm_button(&mut runtime_shell, input) {
                 Ok(()) => runtime_shell.last_error = None,
                 Err(error) => {
@@ -3957,7 +4062,7 @@ fn sync_visible_earthquake_camera(
     };
     let earthquake_offset = runtime_shell
         .visible_earthquake
-        .filter(|earthquake| earthquake.frames_remaining > 0)
+        .filter(|earthquake| earthquake.shake_frames_remaining > 0)
         .map(|earthquake| {
             let distance = f32::from(earthquake.intensity.max(1)) * 4.0;
             match earthquake.phase % 4 {
@@ -4171,34 +4276,6 @@ fn apply_visible_runtime_controls(
         }
     }
     if keys.just_pressed(KeyCode::Enter) && plain_input {
-        // Enter is the Game Boy Start button while a script owns gameplay. It
-        // must not alias A there: doing so let Start acknowledge text, leave
-        // the script, and release NPC movement behind the textbox.
-        let script_or_dialogue_ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
-            visible_script_or_dialogue_owns_start_input(runtime_shell, &snapshot)
-        });
-        let script_or_dialogue_owns_input = fail_closed_visible_input_ownership(
-            runtime_shell,
-            script_or_dialogue_ownership,
-        );
-        if !script_or_dialogue_owns_input {
-            // Retain the desktop Enter-as-confirm convention only for ordinary
-            // menus and field interactions that are not owned by a running
-            // script. This is not reachable from text, yes/no, movement,
-            // emote, delay, or WaitSFX boundaries.
-            match has_visible_shell_a_action(runtime_shell) {
-                Ok(true) => {
-                    run_bevy_action(runtime_shell, press_visible_a_button);
-                    return;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    record_visible_runtime_error(runtime_shell, &error);
-                    runtime_shell.last_error = Some(error.to_string());
-                    return;
-                }
-            }
-        }
         if has_visible_shell_start_action(runtime_shell) {
             run_bevy_nonadvancing_action(runtime_shell, press_visible_start_button);
         }
@@ -4245,7 +4322,7 @@ fn visible_noninteractive_field_animation_owns_input(runtime_shell: &BevyRuntime
         || (runtime_shell.field_notice.is_none()
             && (runtime_shell.visible_field_travel_animation.is_some()
                 || runtime_shell.visible_cut_animation.is_some()
-                || runtime_shell.visible_whirlpool_animation.is_some()
+                || runtime_shell.pending_whirlpool_sound_wait
                 || runtime_shell.visible_headbutt_animation.is_some()))
 }
 
@@ -4439,8 +4516,8 @@ fn visible_non_text_player_boundary(
     snapshot: &RuntimeShellSnapshot,
 ) -> bool {
     runtime_shell
-            .visible_script_delay_frames
-            .is_some_and(|frames| frames > 0)
+        .visible_script_delay_frames
+        .is_some_and(|frames| frames > 0)
         || runtime_shell
             .visible_earthquake
             .as_ref()
@@ -4625,6 +4702,7 @@ fn finish_visible_empty_battle_reward_presentation(
         && snapshot.battle.as_ref().is_some_and(|battle| {
             matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. })
                 && battle.enemy_pokemon.hp == 0
+                && !battle.enemy_spikes_zero_hp_unchecked
         });
     if resume_trainer_settlement {
         runtime_shell.battle_message_scene = None;
@@ -5268,21 +5346,6 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
-        let resume_enemy_after_capture = runtime_shell
-            .pending_enemy_response_after_capture
-            .as_ref()
-            .is_some_and(|(_, trigger_message)| {
-                dismissed_battle_message.as_deref() == Some(trigger_message.as_str())
-            });
-        if resume_enemy_after_capture {
-            let (item_id, _) = runtime_shell
-                .pending_enemy_response_after_capture
-                .take()
-                .unwrap();
-            resolve_visible_battle_enemy_response_after_player_item(runtime_shell, &item_id)?;
-            mark_runtime_snapshot_dirty(runtime_shell);
-            return Ok(());
-        }
         if runtime_shell.battle_messages.is_empty() {
             runtime_shell.battle_message_scenes.clear();
             if runtime_shell.visible_blackout_phase == Some(VisibleBlackoutPhase::AwaitText) {
@@ -5362,6 +5425,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                     .is_some_and(|battle| {
                         matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. })
                             && battle.enemy_pokemon.hp == 0
+                            && !battle.enemy_spikes_zero_hp_unchecked
                     });
             if terminal_scene {
                 runtime_shell.battle_hp_tween = None;
@@ -5517,21 +5581,36 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         if runtime_shell.pending_trainer_intro.is_some() {
             return finish_visible_map_trainer_intro(runtime_shell);
         }
-        let item_ball_phase = runtime_shell
-            .visible_item_ball_notice
+        let field_item_phase = runtime_shell
+            .visible_field_item_notice
             .as_ref()
             .map(|notice| notice.phase.clone());
-        match item_ball_phase {
-            Some(VisibleItemBallPhase::PocketText | VisibleItemBallPhase::BagFullText) => {
-                runtime_shell.visible_item_ball_notice = None;
+        match field_item_phase {
+            Some(VisibleFieldItemPhase::PocketText | VisibleFieldItemPhase::BagFullText) => {
+                runtime_shell.visible_field_item_notice = None;
             }
-            Some(VisibleItemBallPhase::BagFullFoundText) => {
+            Some(VisibleFieldItemPhase::AwaitingPrompt) => {
                 let notice = runtime_shell
-                    .visible_item_ball_notice
+                    .visible_field_item_notice
                     .as_mut()
-                    .expect("bag-full item-ball phase retains its notice");
+                    .expect("prompted verbose-item phase retains its notice");
                 runtime_shell.field_notice = Some(notice.pocket_text.clone());
-                notice.phase = VisibleItemBallPhase::BagFullText;
+                notice.phase = VisibleFieldItemPhase::PocketText;
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
+            Some(VisibleFieldItemPhase::PromptEachQueuedPage)
+                if runtime_shell.field_notice_queue.is_empty() =>
+            {
+                runtime_shell.visible_field_item_notice = None;
+            }
+            Some(VisibleFieldItemPhase::BagFullFoundText) => {
+                let notice = runtime_shell
+                    .visible_field_item_notice
+                    .as_mut()
+                    .expect("bag-full field-item phase retains its notice");
+                runtime_shell.field_notice = Some(notice.pocket_text.clone());
+                notice.phase = VisibleFieldItemPhase::BagFullText;
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(());
             }
@@ -5550,8 +5629,7 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 .visible_egg_hatch
                 .take()
                 .context("egg hatch text lost its presentation state")?;
-            let default_name =
-                crate::core::models::pokemon_species_display_name(&hatch.species_id);
+            let default_name = crate::core::models::pokemon_species_display_name(&hatch.species_id);
             runtime_shell.pending_egg_hatch_nickname = Some(PendingEggHatchNickname {
                 party_index: hatch.party_index,
                 default_name,
@@ -6560,9 +6638,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 category,
                 item_cursor_index,
                 ..
-            } => {
-                return_visible_decoration_to_items(runtime_shell, category, item_cursor_index)
-            }
+            } => return_visible_decoration_to_items(runtime_shell, category, item_cursor_index),
         };
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
@@ -6933,9 +7009,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 category,
                 item_cursor_index,
                 ..
-            } => {
-                return_visible_decoration_to_items(runtime_shell, category, item_cursor_index)
-            }
+            } => return_visible_decoration_to_items(runtime_shell, category, item_cursor_index),
         };
     }
     if runtime_shell.player_pc_action_cursor.is_some() {
@@ -7626,7 +7700,7 @@ fn press_visible_start_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         return press_visible_oak_intro_a_button(runtime_shell);
     }
     if runtime_shell.pending_gender_selection.is_some() {
-        return confirm_visible_gender_selection(runtime_shell);
+        return Ok(());
     }
     if runtime_shell.options_menu_open {
         record_visible_runtime_action(runtime_shell, "options:close:start")?;
@@ -7754,37 +7828,37 @@ fn has_visible_shell_b_action(runtime_shell: &mut BevyRuntimeShell) -> bool {
         return true;
     }
     let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
-            snapshot.ui.pending_yes_no.is_some()
-                || runtime_shell.pending_phone_prompt.is_some()
-                || runtime_shell.pending_remember_password.is_some()
-                || snapshot.ui.pending_text_wait.is_some()
-                || snapshot.pending_move_learn.is_some()
-                || snapshot.pending_shop.is_some()
-                || snapshot.ui.text_window_open
-                || snapshot.ui.window_open
-                || visible_menu_has_selectable_options(&snapshot)
-                || snapshot.ui.active_pokemon_picture.is_some()
-                || runtime_shell.party_menu_open
-                || runtime_shell.pokedex_menu_open
-                || runtime_shell.pokegear_menu_open
-                || runtime_shell.trainer_card_open
-                || runtime_shell.options_menu_open
-                || runtime_shell.save_menu_open
-                || runtime_shell.special_boundary.is_some()
-                || runtime_shell.start_menu_cursor.is_some()
-                || runtime_shell.storage_cursor.is_some()
-                || runtime_shell.pc_item_cursor.is_some()
-                || (snapshot.battle.is_none() && visible_field_pack_is_open(runtime_shell))
-                || (snapshot.battle.is_some()
-                    && (runtime_shell.ball_cursor.is_some()
-                        || runtime_shell.bag_cursor.is_some()
-                        || runtime_shell.key_item_cursor.is_some()
-                        || runtime_shell.tmhm_cursor.is_some()))
-                || (snapshot.battle.is_some()
-                    && (runtime_shell.battle_move_cursor.is_some()
-                        || runtime_shell.battle_switch_cursor.is_some()))
-                || snapshot.battle.is_some()
-        });
+        snapshot.ui.pending_yes_no.is_some()
+            || runtime_shell.pending_phone_prompt.is_some()
+            || runtime_shell.pending_remember_password.is_some()
+            || snapshot.ui.pending_text_wait.is_some()
+            || snapshot.pending_move_learn.is_some()
+            || snapshot.pending_shop.is_some()
+            || snapshot.ui.text_window_open
+            || snapshot.ui.window_open
+            || visible_menu_has_selectable_options(&snapshot)
+            || snapshot.ui.active_pokemon_picture.is_some()
+            || runtime_shell.party_menu_open
+            || runtime_shell.pokedex_menu_open
+            || runtime_shell.pokegear_menu_open
+            || runtime_shell.trainer_card_open
+            || runtime_shell.options_menu_open
+            || runtime_shell.save_menu_open
+            || runtime_shell.special_boundary.is_some()
+            || runtime_shell.start_menu_cursor.is_some()
+            || runtime_shell.storage_cursor.is_some()
+            || runtime_shell.pc_item_cursor.is_some()
+            || (snapshot.battle.is_none() && visible_field_pack_is_open(runtime_shell))
+            || (snapshot.battle.is_some()
+                && (runtime_shell.ball_cursor.is_some()
+                    || runtime_shell.bag_cursor.is_some()
+                    || runtime_shell.key_item_cursor.is_some()
+                    || runtime_shell.tmhm_cursor.is_some()))
+            || (snapshot.battle.is_some()
+                && (runtime_shell.battle_move_cursor.is_some()
+                    || runtime_shell.battle_switch_cursor.is_some()))
+            || snapshot.battle.is_some()
+    });
     fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
@@ -7836,32 +7910,32 @@ fn has_visible_shell_select_action(runtime_shell: &mut BevyRuntimeShell) -> bool
         return true;
     }
     let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
-            (snapshot.battle.is_some() && runtime_shell.battle_move_cursor.is_some())
-                || (snapshot.battle.is_none()
-                    && snapshot.pending_shop.is_none()
-                    && !snapshot.ui.text_window_open
-                    && !snapshot.ui.window_open
-                    && snapshot.ui.menu.is_none()
-                    && snapshot.ui.active_pokemon_picture.is_none()
-                    && snapshot.ui.pending_yes_no.is_none()
-                    && runtime_shell.pending_phone_prompt.is_none()
-                    && runtime_shell.pending_remember_password.is_none()
-                    && snapshot.ui.pending_text_wait.is_none()
-                    && snapshot.pending_move_learn.is_none()
-                    && runtime_shell.elevator_cursor.is_none()
-                    && runtime_shell.special_boundary.is_none()
-                    && !has_visible_auto_script_action(runtime_shell, &snapshot)
-                    && (runtime_shell.pokegear_menu_open
-                        || runtime_shell.storage_cursor.is_some()
-                        || runtime_shell.bag_cursor.is_some()
-                        || runtime_shell.ball_cursor.is_some()
-                        || matches!(
-                            runtime_shell.field_pack_pocket.as_ref(),
-                            Some(FieldPackPocket::Custom(_))
-                        )
-                        || runtime_shell.key_item_cursor.is_some()
-                        || !visible_field_pack_is_open(runtime_shell)))
-        });
+        (snapshot.battle.is_some() && runtime_shell.battle_move_cursor.is_some())
+            || (snapshot.battle.is_none()
+                && snapshot.pending_shop.is_none()
+                && !snapshot.ui.text_window_open
+                && !snapshot.ui.window_open
+                && snapshot.ui.menu.is_none()
+                && snapshot.ui.active_pokemon_picture.is_none()
+                && snapshot.ui.pending_yes_no.is_none()
+                && runtime_shell.pending_phone_prompt.is_none()
+                && runtime_shell.pending_remember_password.is_none()
+                && snapshot.ui.pending_text_wait.is_none()
+                && snapshot.pending_move_learn.is_none()
+                && runtime_shell.elevator_cursor.is_none()
+                && runtime_shell.special_boundary.is_none()
+                && !has_visible_auto_script_action(runtime_shell, &snapshot)
+                && (runtime_shell.pokegear_menu_open
+                    || runtime_shell.storage_cursor.is_some()
+                    || runtime_shell.bag_cursor.is_some()
+                    || runtime_shell.ball_cursor.is_some()
+                    || matches!(
+                        runtime_shell.field_pack_pocket.as_ref(),
+                        Some(FieldPackPocket::Custom(_))
+                    )
+                    || runtime_shell.key_item_cursor.is_some()
+                    || !visible_field_pack_is_open(runtime_shell)))
+    });
     fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
@@ -7929,29 +8003,29 @@ fn has_visible_shell_start_action(runtime_shell: &mut BevyRuntimeShell) -> bool 
         return false;
     }
     let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
-            runtime_shell.start_menu_cursor.is_some()
-                || (snapshot.battle.is_none()
-                    && snapshot.pending_shop.is_none()
-                    && !snapshot.ui.text_window_open
-                    && !snapshot.ui.window_open
-                    && snapshot.ui.menu.is_none()
-                    && snapshot.ui.active_pokemon_picture.is_none()
-                    && snapshot.ui.pending_yes_no.is_none()
-                    && runtime_shell.pending_phone_prompt.is_none()
-                    && runtime_shell.pending_remember_password.is_none()
-                    && snapshot.ui.pending_text_wait.is_none()
-                    && snapshot.pending_move_learn.is_none()
-                    && runtime_shell.elevator_cursor.is_none()
-                    && !runtime_shell.party_menu_open
-                    && !runtime_shell.pokedex_menu_open
-                    && !runtime_shell.pokegear_menu_open
-                    && !runtime_shell.trainer_card_open
-                    && !runtime_shell.options_menu_open
-                    && !runtime_shell.save_menu_open
-                    && runtime_shell.special_boundary.is_none()
-                    && !visible_field_pack_is_open(runtime_shell)
-                    && !has_visible_auto_script_action(runtime_shell, &snapshot))
-        });
+        runtime_shell.start_menu_cursor.is_some()
+            || (snapshot.battle.is_none()
+                && snapshot.pending_shop.is_none()
+                && !snapshot.ui.text_window_open
+                && !snapshot.ui.window_open
+                && snapshot.ui.menu.is_none()
+                && snapshot.ui.active_pokemon_picture.is_none()
+                && snapshot.ui.pending_yes_no.is_none()
+                && runtime_shell.pending_phone_prompt.is_none()
+                && runtime_shell.pending_remember_password.is_none()
+                && snapshot.ui.pending_text_wait.is_none()
+                && snapshot.pending_move_learn.is_none()
+                && runtime_shell.elevator_cursor.is_none()
+                && !runtime_shell.party_menu_open
+                && !runtime_shell.pokedex_menu_open
+                && !runtime_shell.pokegear_menu_open
+                && !runtime_shell.trainer_card_open
+                && !runtime_shell.options_menu_open
+                && !runtime_shell.save_menu_open
+                && runtime_shell.special_boundary.is_none()
+                && !visible_field_pack_is_open(runtime_shell)
+                && !has_visible_auto_script_action(runtime_shell, &snapshot))
+    });
     fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
@@ -8040,30 +8114,30 @@ fn has_visible_shell_direction_action(runtime_shell: &mut BevyRuntimeShell) -> b
         return true;
     }
     let ownership = cached_runtime_snapshot(runtime_shell).map(|snapshot| {
-            runtime_shell.start_menu_cursor.is_some()
-                || snapshot.ui.pending_yes_no.is_some()
-                || runtime_shell.pending_phone_prompt.is_some()
-                || runtime_shell.pending_remember_password.is_some()
-                || snapshot.ui.pending_text_wait.is_some()
-                || snapshot.pending_move_learn.is_some()
-                || snapshot.ui.text_window_open
-                || snapshot.ui.active_pokemon_picture.is_some()
-                || runtime_shell.party_menu_open
-                || runtime_shell.pokedex_menu_open
-                || runtime_shell.pokegear_menu_open
-                || runtime_shell.trainer_card_open
-                || runtime_shell.options_menu_open
-                || runtime_shell.save_menu_open
-                || runtime_shell.special_boundary.is_some()
-                || runtime_shell.storage_cursor.is_some()
-                || runtime_shell.pc_item_cursor.is_some()
-                || visible_field_pack_is_open(runtime_shell)
-                || snapshot.pending_shop.is_some()
-                || has_visible_direction_blocking_script_work(runtime_shell, &snapshot)
-                || visible_menu_has_selectable_options(&snapshot)
-                || snapshot.battle.is_some()
-                || runtime_shell.elevator_cursor.is_some()
-        });
+        runtime_shell.start_menu_cursor.is_some()
+            || snapshot.ui.pending_yes_no.is_some()
+            || runtime_shell.pending_phone_prompt.is_some()
+            || runtime_shell.pending_remember_password.is_some()
+            || snapshot.ui.pending_text_wait.is_some()
+            || snapshot.pending_move_learn.is_some()
+            || snapshot.ui.text_window_open
+            || snapshot.ui.active_pokemon_picture.is_some()
+            || runtime_shell.party_menu_open
+            || runtime_shell.pokedex_menu_open
+            || runtime_shell.pokegear_menu_open
+            || runtime_shell.trainer_card_open
+            || runtime_shell.options_menu_open
+            || runtime_shell.save_menu_open
+            || runtime_shell.special_boundary.is_some()
+            || runtime_shell.storage_cursor.is_some()
+            || runtime_shell.pc_item_cursor.is_some()
+            || visible_field_pack_is_open(runtime_shell)
+            || snapshot.pending_shop.is_some()
+            || has_visible_direction_blocking_script_work(runtime_shell, &snapshot)
+            || visible_menu_has_selectable_options(&snapshot)
+            || snapshot.battle.is_some()
+            || runtime_shell.elevator_cursor.is_some()
+    });
     fail_closed_visible_input_ownership(runtime_shell, ownership)
 }
 
@@ -8131,34 +8205,31 @@ fn visible_field_shortcut_allowed(runtime_shell: &BevyRuntimeShell) -> Result<bo
     {
         return Ok(false);
     }
-    runtime_shell
-        .shell
-        .snapshot()
-        .map(|snapshot| {
-            snapshot.battle.is_none()
-                && snapshot.pending_shop.is_none()
-                && !snapshot.ui.text_window_open
-                && !snapshot.ui.window_open
-                && snapshot.ui.menu.is_none()
-                && snapshot.ui.active_pokemon_picture.is_none()
-                && snapshot.ui.pending_yes_no.is_none()
-                && runtime_shell.pending_phone_prompt.is_none()
-                && runtime_shell.pending_remember_password.is_none()
-                && snapshot.ui.pending_text_wait.is_none()
-                && snapshot.pending_move_learn.is_none()
-                && runtime_shell.elevator_cursor.is_none()
-                && runtime_shell.start_menu_cursor.is_none()
-                && !runtime_shell.party_menu_open
-                && !runtime_shell.pokedex_menu_open
-                && !runtime_shell.pokegear_menu_open
-                && !runtime_shell.trainer_card_open
-                && !runtime_shell.options_menu_open
-                && !runtime_shell.save_menu_open
-                && !visible_field_pack_is_open(runtime_shell)
-                && runtime_shell.storage_cursor.is_none()
-                && runtime_shell.pc_item_cursor.is_none()
-                && !has_visible_auto_script_action(runtime_shell, &snapshot)
-        })
+    runtime_shell.shell.snapshot().map(|snapshot| {
+        snapshot.battle.is_none()
+            && snapshot.pending_shop.is_none()
+            && !snapshot.ui.text_window_open
+            && !snapshot.ui.window_open
+            && snapshot.ui.menu.is_none()
+            && snapshot.ui.active_pokemon_picture.is_none()
+            && snapshot.ui.pending_yes_no.is_none()
+            && runtime_shell.pending_phone_prompt.is_none()
+            && runtime_shell.pending_remember_password.is_none()
+            && snapshot.ui.pending_text_wait.is_none()
+            && snapshot.pending_move_learn.is_none()
+            && runtime_shell.elevator_cursor.is_none()
+            && runtime_shell.start_menu_cursor.is_none()
+            && !runtime_shell.party_menu_open
+            && !runtime_shell.pokedex_menu_open
+            && !runtime_shell.pokegear_menu_open
+            && !runtime_shell.trainer_card_open
+            && !runtime_shell.options_menu_open
+            && !runtime_shell.save_menu_open
+            && !visible_field_pack_is_open(runtime_shell)
+            && runtime_shell.storage_cursor.is_none()
+            && runtime_shell.pc_item_cursor.is_none()
+            && !has_visible_auto_script_action(runtime_shell, &snapshot)
+    })
 }
 
 fn advance_visible_pending_text_wait(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -8239,13 +8310,10 @@ fn decline_visible_phone_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<
 }
 
 fn confirm_visible_remember_password_prompt(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let accepted = strict_readonly_cursor_index(
-        &runtime_shell.yes_no_cursor,
-        "script:remember-password",
-        2,
-    )
-    .context("remember-password prompt is active without a valid cursor")?
-        == 0;
+    let accepted =
+        strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "script:remember-password", 2)
+            .context("remember-password prompt is active without a valid cursor")?
+            == 0;
     begin_closing_visible_remember_password_prompt(runtime_shell, accepted)
 }
 
@@ -8290,14 +8358,13 @@ fn advance_visible_remember_password_prompt(runtime_shell: &mut BevyRuntimeShell
         mark_runtime_presentation_dirty(runtime_shell);
         return Ok(true);
     }
-    let accepted = strict_readonly_cursor_index(
-        &runtime_shell.yes_no_cursor,
-        "script:remember-password",
-        2,
-    )
-    .context("closing remember-password prompt has no valid selection")?
-        == 0;
-    let used = runtime_shell.shell.ask_remember_password_special(accepted)?;
+    let accepted =
+        strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "script:remember-password", 2)
+            .context("closing remember-password prompt has no valid selection")?
+            == 0;
+    let used = runtime_shell
+        .shell
+        .ask_remember_password_special(accepted)?;
     anyhow::ensure!(
         matches!(
             used.outcome.effect,
@@ -8647,6 +8714,18 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> Re
     if runtime_shell.visible_waterfall_animation.is_some() {
         return Ok(true);
     }
+    if runtime_shell.pending_whirlpool_sound_wait {
+        // DisappearWhirlpool writes and redraws replacement block $36 before
+        // PlayWhirlpoolSound. There is no authored 32-frame overlay: the
+        // routine blocks until the complete SFX_SURF program has finished.
+        commit_visible_pending_block_field_move(runtime_shell)?;
+        runtime_shell.field_notice_scene = None;
+        runtime_shell.pending_whirlpool_sound_wait = false;
+        runtime_shell.visible_wait_sfx_boundary = true;
+        runtime_shell.wait_play_sfx_completion =
+            Some(VisibleWaitPlaySfxCompletion::WhirlpoolFieldMove);
+        return Ok(true);
+    }
     if runtime_shell.pending_field_notice_effect_frames.is_none() {
         return Ok(false);
     }
@@ -8664,21 +8743,20 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> Re
         runtime_shell.player_walk_mirror_stride = false;
     } else if runtime_shell.visible_flash_animation.is_some() {
         commit_visible_pending_flash_field_move(runtime_shell)?;
-    } else if runtime_shell.visible_cut_animation.is_some()
-        || runtime_shell.visible_whirlpool_animation.is_some()
-    {
+    } else if runtime_shell.visible_cut_animation.is_some() {
         // The source callasm owns the block write. Commit it only after the
         // use text closes, immediately before its OAM draws over the cleared
         // tilemap.
         commit_visible_pending_block_field_move(runtime_shell)?;
         runtime_shell.field_notice_scene = None;
-    } else if runtime_shell.visible_whirlpool_animation.is_none()
+    } else if !runtime_shell.pending_whirlpool_sound_wait
         && runtime_shell.visible_headbutt_animation.is_none()
         && runtime_shell.visible_flash_animation.is_none()
     {
         runtime_shell.visible_earthquake = Some(VisibleEarthquake {
             intensity: 2,
             frames_remaining: 20,
+            shake_frames_remaining: 20,
             phase: 0,
         });
     }
@@ -8686,20 +8764,44 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> Re
 }
 
 fn visible_field_notice_uses_prompt_arrow(runtime_shell: &BevyRuntimeShell) -> bool {
+    let fruit_tree_page_has_prompt = runtime_shell
+        .visible_field_item_notice
+        .as_ref()
+        .is_some_and(|notice| {
+            matches!(
+                notice.presentation,
+                VisibleFieldItemPresentation::FruitTree { .. }
+            ) && match notice.phase {
+                VisibleFieldItemPhase::FoundText => {
+                    runtime_shell.field_notice.as_deref()
+                        != Some(notice.sound_trigger_text.as_str())
+                }
+                VisibleFieldItemPhase::PromptEachQueuedPage => true,
+                _ => false,
+            }
+        });
     runtime_shell.pending_field_travel_delay_frames.is_none()
         && runtime_shell.visible_field_travel_animation.is_none()
         && runtime_shell.pending_surf_start_from.is_none()
         && runtime_shell.visible_waterfall_animation.is_none()
         && runtime_shell.visible_flash_animation.is_none()
         && runtime_shell.visible_cut_animation.is_none()
-        && runtime_shell.visible_whirlpool_animation.is_none()
+        && !runtime_shell.pending_whirlpool_sound_wait
         && runtime_shell.visible_headbutt_animation.is_none()
         && !runtime_shell.pending_field_battle_entry
-        && runtime_shell.field_notice_queue.is_empty()
+        && (runtime_shell.field_notice_queue.is_empty() || fruit_tree_page_has_prompt)
         && !runtime_shell
-            .visible_item_ball_notice
+            .visible_field_item_notice
             .as_ref()
-            .is_some_and(|notice| notice.phase == VisibleItemBallPhase::FoundText)
+            .is_some_and(|notice| match notice.phase {
+                VisibleFieldItemPhase::FoundText => {
+                    runtime_shell.field_notice.as_deref()
+                        == Some(notice.sound_trigger_text.as_str())
+                }
+                VisibleFieldItemPhase::FanfarePause { .. }
+                | VisibleFieldItemPhase::SpecialSoundWait => true,
+                _ => false,
+            })
 }
 
 fn settle_pending_field_battle_entry_after_notice(
@@ -8813,6 +8915,19 @@ fn queue_visible_heal_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
 }
 
 fn queue_visible_magnet_train_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    // `InitMagnetTrain` calls PlayMusic2, whose first half invokes
+    // `_PlayMusic(MUSIC_NONE)` and then blocks in DelayFrame. This is not the
+    // full `_InitSound` reset used by PlayMusic(MUSIC_NONE), so channels 5-8
+    // must survive. Phase zero queues the replacement after that retained
+    // frame has elapsed.
+    runtime_shell.pending_music_stop = true;
+    clear_pending_music_commands(&mut runtime_shell.pending_audio);
+    runtime_shell.active_music = None;
+    runtime_shell.faded_music = None;
+    Ok(())
+}
+
+fn queue_visible_magnet_train_track(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     const MUSIC_ID: &str = "MUSIC_MAGNET_TRAIN";
     let playback = runtime_shell
         .shell
@@ -8831,7 +8946,6 @@ fn queue_visible_magnet_train_music(runtime_shell: &mut BevyRuntimeShell) -> Res
             ),
         },
     );
-    runtime_shell.pending_music_stop = true;
     runtime_shell.active_music = Some(MUSIC_ID.to_string());
     runtime_shell.faded_music = None;
     Ok(())
@@ -8847,10 +8961,30 @@ fn advance_visible_magnet_train(runtime_shell: &mut BevyRuntimeShell) -> Result<
         mark_runtime_snapshot_dirty(runtime_shell);
         return continue_visible_script_after_prompt(runtime_shell);
     }
+    let phase = runtime_shell
+        .visible_magnet_train
+        .as_ref()
+        .context("MagnetTrain disappeared during its retained frame")?
+        .phase;
+    if phase == 0 {
+        queue_visible_magnet_train_track(runtime_shell)?;
+    }
     let animation = runtime_shell
         .visible_magnet_train
         .as_mut()
         .context("MagnetTrain disappeared during its retained frame")?;
+    if animation.phase != 0 {
+        if !animation.player_sprite_visible {
+            animation.player_sprite_visible = true;
+            animation.player_sprite_frame = 0;
+            animation.player_sprite_duration = 8;
+        } else if animation.player_sprite_duration > 0 {
+            animation.player_sprite_duration -= 1;
+        } else {
+            animation.player_sprite_frame = (animation.player_sprite_frame + 1) % 4;
+            animation.player_sprite_duration = 8;
+        }
+    }
     match animation.phase {
         0 => {
             animation.wait_counter = 128;
@@ -8869,6 +9003,7 @@ fn advance_visible_magnet_train(runtime_shell: &mut BevyRuntimeShell) -> Result<
                 animation.phase = 3;
             } else {
                 animation.position -= animation.direction;
+                animation.player_x += animation.direction;
             }
         }
         4 => {
@@ -8876,6 +9011,7 @@ fn advance_visible_magnet_train(runtime_shell: &mut BevyRuntimeShell) -> Result<
                 animation.phase = 5;
             } else {
                 animation.position -= animation.direction * 2;
+                animation.player_x += animation.direction * 2;
             }
         }
         6 => animation.phase = 7,
@@ -9083,10 +9219,40 @@ fn advance_visible_wait_sfx_boundary(
                 // noninteractive Pack surface so that cleanup cannot erase it.
                 runtime_shell.field_notice = Some(notice);
             }
+            VisibleWaitPlaySfxCompletion::FieldItemPocketText => {
+                let notice = runtime_shell
+                    .visible_field_item_notice
+                    .as_mut()
+                    .context("field-item specialsound lost its presentation state")?;
+                anyhow::ensure!(
+                    notice.phase == VisibleFieldItemPhase::SpecialSoundWait,
+                    "field-item specialsound completed in phase {:?}",
+                    notice.phase
+                );
+                runtime_shell.field_notice = Some(notice.pocket_text.clone());
+                notice.phase = VisibleFieldItemPhase::PocketText;
+            }
+            VisibleWaitPlaySfxCompletion::VerboseItemPrompt => {
+                let notice = runtime_shell
+                    .visible_field_item_notice
+                    .as_mut()
+                    .context("verbose-item specialsound lost its presentation state")?;
+                anyhow::ensure!(
+                    notice.phase == VisibleFieldItemPhase::SpecialSoundWait,
+                    "verbose-item specialsound completed in phase {:?}",
+                    notice.phase
+                );
+                notice.phase = VisibleFieldItemPhase::AwaitingPrompt;
+            }
             VisibleWaitPlaySfxCompletion::SpecialBoundary(boundary) => {
                 set_shell_action_status(runtime_shell, boundary.label.clone());
                 runtime_shell.special_boundary = Some(boundary);
             }
+            VisibleWaitPlaySfxCompletion::FlashFieldMove => {
+                runtime_shell.pending_field_notice_effect_frames = Some(16);
+                begin_pending_field_notice_effect(runtime_shell)?;
+            }
+            VisibleWaitPlaySfxCompletion::WhirlpoolFieldMove => {}
         }
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(true);
@@ -9247,6 +9413,7 @@ fn toggle_visible_start_menu(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     runtime_shell.special_boundary = None;
     runtime_shell.special_boundary_queue.clear();
     runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.visible_internal_special_delay_frames = None;
     runtime_shell.pending_photo_studio_commit = None;
     runtime_shell.pending_special_cry = None;
     runtime_shell.pending_special_sound = None;

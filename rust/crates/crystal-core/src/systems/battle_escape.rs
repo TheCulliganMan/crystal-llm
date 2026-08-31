@@ -147,8 +147,24 @@ pub fn attempt_wild_battle_escape(
 ) -> Result<BattleEscapeAttempt, BattleEscapeError> {
     let player_speed = escape_speed(EscapeSide::Player, player, stat_multipliers)?;
     let enemy_speed = escape_speed(EscapeSide::Enemy, enemy, stat_multipliers)?;
+    attempt_wild_battle_escape_with_loaded_speeds(
+        player_speed,
+        enemy_speed,
+        rules,
+        attempts_before,
+        rng,
+    )
+}
+
+pub(crate) fn attempt_wild_battle_escape_with_loaded_speeds(
+    player_speed: u16,
+    enemy_speed: u16,
+    rules: &BattleEscapeRules,
+    attempts_before: u8,
+    rng: &mut dyn BattleRandomSource,
+) -> Result<BattleEscapeAttempt, BattleEscapeError> {
     let chance = escape_chance(player_speed, enemy_speed, attempts_before, rules)?;
-    let attempts_after = attempts_before.saturating_add(1);
+    let attempts_after = attempts_before.wrapping_add(1);
     if player_speed >= enemy_speed || chance >= rules.rng_roll_values {
         return Ok(BattleEscapeAttempt {
             escaped: true,
@@ -184,9 +200,28 @@ where
         .map_err(ExactBattleEscapeError::Escape)?;
     let enemy_speed = escape_speed(EscapeSide::Enemy, enemy, stat_multipliers)
         .map_err(ExactBattleEscapeError::Escape)?;
+    attempt_wild_battle_escape_exact_with_loaded_speeds(
+        player_speed,
+        enemy_speed,
+        rules,
+        attempts_before,
+        rng,
+    )
+}
+
+pub fn attempt_wild_battle_escape_exact_with_loaded_speeds<S>(
+    player_speed: u16,
+    enemy_speed: u16,
+    rules: &BattleEscapeRules,
+    attempts_before: u8,
+    rng: &mut CrystalRandom<&mut S>,
+) -> Result<BattleEscapeAttempt, ExactBattleEscapeError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
     let chance = escape_chance(player_speed, enemy_speed, attempts_before, rules)
         .map_err(ExactBattleEscapeError::Escape)?;
-    let attempts_after = attempts_before.saturating_add(1);
+    let attempts_after = attempts_before.wrapping_add(1);
     if player_speed >= enemy_speed || chance >= rules.rng_roll_values {
         return Ok(BattleEscapeAttempt {
             escaped: true,
@@ -375,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn faster_player_escapes_without_rng_or_attempt_increment() {
+    fn faster_player_escapes_without_rng_after_attempt_increment() {
         let player = pokemon("RATTATA", 120);
         let enemy = pokemon("GEODUDE", 20);
         let mut rng = Random::new(7);
@@ -416,6 +451,44 @@ mod tests {
         assert!(outcome.escaped);
         assert_eq!(outcome.roll, None);
         assert_eq!(rng.seed(), 7);
+    }
+
+    #[test]
+    fn flee_attempt_counter_wraps_as_the_cartridge_byte_before_a_fast_escape() {
+        let player = pokemon("RATTATA", 120);
+        let enemy = pokemon("GEODUDE", 20);
+        let mut rng = Random::new(7);
+
+        let outcome = attempt_wild_battle_escape(
+            &player,
+            &enemy,
+            &stat_multipliers(),
+            &escape_rules(),
+            u8::MAX,
+            &mut rng,
+        )
+        .expect("fast escape resolves");
+
+        assert!(outcome.escaped);
+        assert_eq!(outcome.roll, None);
+        assert_eq!(outcome.attempts_before, u8::MAX);
+        assert_eq!(outcome.attempts_after, 0);
+        assert_eq!(rng.seed(), 7);
+
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut exact_rng =
+            CrystalRandom::new(crate::random::CrystalRandomState::default(), &mut divider);
+        let exact = attempt_wild_battle_escape_exact(
+            &player,
+            &enemy,
+            &stat_multipliers(),
+            &escape_rules(),
+            u8::MAX,
+            &mut exact_rng,
+        )
+        .expect("exact fast escape resolves");
+        assert_eq!(exact.attempts_after, 0);
+        assert_eq!(divider.consumed(), 0);
     }
 
     #[test]

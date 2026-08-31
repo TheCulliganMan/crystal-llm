@@ -250,19 +250,21 @@
             id: "MUSIC_ROUTE_29".to_string(),
             path: "content-packs/test/music/MUSIC_ROUTE_29.mp3".to_string(),
             kind: ModpackAudioKind::Music,
-            source: ModpackAudioSource::Midi,
+            source: ModpackAudioSource::Pcm,
+            sfx_priority: None,
             pcm_format: None,
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         }];
         let error = data.audio[0]
             .validate()
             .expect_err("runtime must reject mp3 audio declarations")
             .to_string();
 
-        assert!(error.contains("must use a .mid file"));
+        assert!(error.contains("must use a .pcm file"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -270,16 +272,18 @@
     fn runtime_bootstrap_rejects_missing_embedded_audio_payloads() {
         let root = temp_repository_root("missing-embedded-audio");
         let asset_root = AssetRoot::new(&root);
-        let mut data = minimal_runtime_data();
-        data.audio = vec![
-            ModpackAudioAsset::music(
-                "MUSIC_ROUTE_29",
-                "content-packs/test/music/MUSIC_ROUTE_29.mid",
-            )
-            .expect("music asset"),
-        ];
-        let pack =
-            CompiledGamePack::new_unchecked_with_audio_for_tests(data, BTreeMap::new(), report());
+        let data = minimal_runtime_data();
+        let compiled_audio = data
+            .audio
+            .iter()
+            .filter(|asset| asset.id != "MUSIC_ROUTE_29")
+            .map(|asset| (asset.id.clone(), vec![0_u8; 4]))
+            .collect();
+        let pack = CompiledGamePack::new_unchecked_with_audio_for_tests(
+            data,
+            compiled_audio,
+            report(),
+        );
 
         let error = CrystalRuntime::from_compiled_pack(&asset_root, pack, identity())
             .expect_err("runtime must not synthesize missing embedded audio");
@@ -287,10 +291,10 @@
 
         assert!(
             error.contains("missing embedded audio payload 'MUSIC_ROUTE_29'")
+                || error.contains("missing embedded PCM audio payload MUSIC_ROUTE_29")
                 || error.contains("missing compiled audio payload MUSIC_ROUTE_29")
                 || error.contains("missing embedded payload")
-                || error.contains("missing payload for definitive asset 'MUSIC_ROUTE_29'")
-                || error.contains("compiled audio manifest missing payload for definitive MIDI asset 'MUSIC_ROUTE_29'"),
+                || error.contains("missing payload for definitive asset 'MUSIC_ROUTE_29'"),
             "{error}"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -304,18 +308,18 @@
         data.audio = vec![
             ModpackAudioAsset::music(
                 "MUSIC_ROUTE_29",
-                "content-packs/test/music/MUSIC_ROUTE_29.mid",
+                "content-packs/test/music/MUSIC_ROUTE_29.pcm",
             )
             .expect("music asset"),
         ];
         let compiled_audio = [
             (
                 "MUSIC_ROUTE_29".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
+                vec![0_u8; 4],
             ),
             (
                 "MUSIC_UNDECLARED".to_string(),
-                b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x40\x00\xff\x2f\x00".to_vec(),
+                vec![0_u8; 4],
             ),
         ]
         .into_iter()

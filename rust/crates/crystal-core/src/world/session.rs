@@ -9,7 +9,9 @@ use crate::multiplayer::{
 };
 #[cfg(test)]
 use crate::random::CrystalRandomState;
-use crate::random::{CrystalRandom, DividerSource, Random};
+#[cfg(any(test, feature = "test-fixtures"))]
+use crate::random::Random;
+use crate::random::{CrystalRandom, DividerSource};
 use crate::state::{EventFlagMemory, GameState, RoamingPokemonState};
 use crate::systems::special_routines::BugContestEncounterEntry;
 
@@ -65,7 +67,20 @@ pub struct OverworldSession {
     pub object_pending_random_wait: BTreeSet<String>,
     #[serde(default)]
     pub initialized_fixed_spin_objects: BTreeSet<String>,
+    /// Exact transient OBJECT_FLAGS1 `FIXED_FACING_F` state. This survives
+    /// separate movement programs until `remove_fixed_facing` or map reload.
+    #[serde(default)]
+    pub fixed_facing_object_identifiers: BTreeSet<String>,
+    /// Exact transient OBJECT_FLAGS1 `SLIDING_F` state. Like the cartridge's
+    /// object struct bit, it survives separate movement programs on this map.
+    #[serde(default)]
+    pub sliding_object_identifiers: BTreeSet<String>,
     pub following: Option<OverworldFollowState>,
+    /// `SPRITEMOVEDATA_FOLLOWNOTEXACT` stores the followed object-struct index
+    /// in each follower's OBJECT_RANGE byte. Symbolic ids retain that exact
+    /// per-object relationship without depending on allocator indices.
+    #[serde(default)]
+    pub following_not_exact: BTreeMap<String, String>,
     /// The movement command the follower consumes when its leader completes
     /// the next step. Crystal's follower queue survives separate
     /// `applymovement` programs; retaining it here prevents each program from
@@ -81,6 +96,13 @@ pub struct OverworldSession {
     /// affect which objects are loaded on the next map entry.
     #[serde(default)]
     pub shown_object_identifiers: BTreeSet<String>,
+    /// In-memory visibility differences that preserve Crystal's object roster
+    /// after ordinary event-flag or time changes. These last only until the
+    /// map is reloaded and therefore must never enter map object memory.
+    #[serde(skip)]
+    loaded_roster_hidden_object_identifiers: BTreeSet<String>,
+    #[serde(skip)]
+    loaded_roster_shown_object_identifiers: BTreeSet<String>,
     /// Fresh map sessions apply event/time visibility once; later flag
     /// mutations retain that loaded roster until an explicit object command
     /// or the next map entry.
@@ -313,6 +335,8 @@ pub struct EncounterCheckOptions {
     pub has_cleanse_tag: bool,
     pub active_repel_item: Option<String>,
     pub lead_party_level: Option<u8>,
+    #[serde(default)]
+    pub lead_ability: Option<String>,
     /// CAVE and DUNGEON environments permit encounters on ordinary land,
     /// except ice, without requiring a grass collision byte.
     #[serde(default)]
@@ -327,6 +351,7 @@ impl Default for EncounterCheckOptions {
             has_cleanse_tag: false,
             active_repel_item: None,
             lead_party_level: None,
+            lead_ability: None,
             land_encounters_on_any_land: false,
         }
     }
@@ -397,6 +422,17 @@ pub fn leading_usable_party_level(state: &GameState) -> Option<u8> {
         .map(|pokemon| pokemon.level)
 }
 
+pub fn leading_usable_party_ability(state: &GameState) -> Option<String> {
+    state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .flatten()
+        .find(|pokemon| !pokemon.is_egg && pokemon.hp > 0)
+        .map(|pokemon| pokemon.species.ability.clone())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarpDestination {
@@ -459,7 +495,8 @@ impl OverworldSession {
         tileset: TilesetCollision,
         player_tile: TilePosition,
     ) -> Self {
-        let object_facings = initial_object_facings(&objects);
+        let (object_facings, fixed_facing_object_identifiers, sliding_object_identifiers) =
+            initial_object_runtime_state(&objects);
         Self {
             frame: 0,
             map,
@@ -472,13 +509,18 @@ impl OverworldSession {
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            fixed_facing_object_identifiers,
+            sliding_object_identifiers,
             following: None,
+            following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
+            loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
@@ -496,6 +538,8 @@ impl OverworldSession {
 
     pub fn with_event_flag_memory(mut self, flags: &EventFlagMemory) -> Self {
         self.hidden_event_flags = flags.active_event_flags().cloned().collect();
+        self.loaded_roster_hidden_object_identifiers.clear();
+        self.loaded_roster_shown_object_identifiers.clear();
         self.object_visibility_initialized = true;
         self
     }
@@ -512,14 +556,28 @@ impl OverworldSession {
     }
 
     pub fn hide_loaded_objects_with_event_flag(&mut self, event_flag: &str) {
-        for object_id in self.objects.iter().filter_map(|object| {
-            (object.event_flag == event_flag)
-                .then(|| object.object_identifier.clone())
-                .flatten()
-        }) {
+        let object_ids = self
+            .objects
+            .iter()
+            .filter_map(|object| {
+                (object.event_flag == event_flag)
+                    .then(|| object.object_identifier.clone())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        for object_id in object_ids {
+            self.clear_loaded_roster_visibility_override(&object_id);
             self.shown_object_identifiers.remove(&object_id);
             self.hidden_object_identifiers.insert(object_id);
         }
+    }
+
+    /// Removes the temporary roster retention for an explicit object command.
+    pub fn clear_loaded_roster_visibility_override(&mut self, object_id: &str) {
+        self.loaded_roster_hidden_object_identifiers
+            .remove(object_id);
+        self.loaded_roster_shown_object_identifiers
+            .remove(object_id);
     }
 
     pub fn current_encounter_surface_checked(
@@ -709,6 +767,38 @@ impl OverworldSession {
         from: TilePosition,
         to: TilePosition,
     ) {
+        let loose_followers = self
+            .following_not_exact
+            .iter()
+            .filter(|(_, leader)| leader.as_str() == moved_object_id)
+            .map(|(follower, _)| follower.clone())
+            .collect::<Vec<_>>();
+        for follower in loose_followers {
+            let current = if follower == "PLAYER" {
+                Some(self.player.tile)
+            } else {
+                self.object_runtime_tile_by_id(&follower).ok()
+            };
+            let Some((current, direction)) = current
+                .and_then(|current| direction_between_tiles(current, from).map(|d| (current, d)))
+            else {
+                continue;
+            };
+            let Some(tile) =
+                checked_move_by_stride(current, direction, DEFAULT_RUNTIME_TILE_STRIDE)
+            else {
+                continue;
+            };
+            self.set_follow_entity_tile(&follower, tile);
+            self.set_follow_entity_facing(&follower, direction);
+            if follower != "PLAYER" {
+                self.object_last_runtime_tiles
+                    .insert(follower.clone(), current);
+                self.object_last_tiles_occupied_until_frame
+                    .insert(follower.clone(), self.frame.saturating_add(8));
+                self.object_step_durations.insert(follower, 8);
+            }
+        }
         let Some(following) = self.following.clone() else {
             return;
         };
@@ -1017,6 +1107,18 @@ impl OverworldSession {
         {
             return true;
         }
+        if object.object_identifier.as_ref().is_some_and(|object_id| {
+            self.loaded_roster_hidden_object_identifiers
+                .contains(object_id)
+        }) {
+            return false;
+        }
+        if object.object_identifier.as_ref().is_some_and(|object_id| {
+            self.loaded_roster_shown_object_identifiers
+                .contains(object_id)
+        }) {
+            return true;
+        }
         self.is_object_visible_without_identifier_override(object)
     }
 
@@ -1056,12 +1158,16 @@ impl OverworldSession {
                 .iter()
                 .find(|object| object.object_identifier.as_ref() == Some(object_id))
                 .is_some_and(|object| self.is_object_visible_without_identifier_override(object));
-            self.hidden_object_identifiers.remove(object_id);
-            self.shown_object_identifiers.remove(object_id);
+            self.loaded_roster_hidden_object_identifiers
+                .remove(object_id);
+            self.loaded_roster_shown_object_identifiers
+                .remove(object_id);
             if *was_visible && !raw_visible {
-                self.shown_object_identifiers.insert(object_id.clone());
+                self.loaded_roster_shown_object_identifiers
+                    .insert(object_id.clone());
             } else if !*was_visible && raw_visible {
-                self.hidden_object_identifiers.insert(object_id.clone());
+                self.loaded_roster_hidden_object_identifiers
+                    .insert(object_id.clone());
             }
         }
     }
@@ -1110,10 +1216,7 @@ impl OverworldSession {
     /// Advance the frame-driven movement modes implemented by Crystal's
     /// `SpriteMovementData`. Script-controlled objects are left untouched;
     /// these walkers are the autonomous map-object behaviors.
-    pub fn advance_autonomous_objects(&mut self) -> Result<(), OverworldObjectCoordinateError> {
-        self.advance_autonomous_objects_with_rng(None)
-    }
-
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub fn advance_autonomous_objects_with_rng(
         &mut self,
         mut rng: Option<&mut Random>,
@@ -1219,7 +1322,7 @@ impl OverworldSession {
             let mut direction = *self
                 .object_facings
                 .get(object_id)
-                .unwrap_or(&Direction::Down);
+                .expect("autonomous object facing initialized from SpriteMovementData");
             if movement == "SPRITEMOVEDATA_SPINCLOCKWISE"
                 || movement == "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
             {
@@ -1264,7 +1367,7 @@ impl OverworldSession {
                         == *self
                             .object_facings
                             .get(object_id)
-                            .unwrap_or(&Direction::Down)
+                            .expect("random spinner facing initialized from SpriteMovementData")
                 {
                     direction = match direction {
                         Direction::Down => Direction::Right,
@@ -1328,8 +1431,8 @@ impl OverworldSession {
             }
             let (dx, dy) = direction.delta();
             let target = TilePosition::new(current.x + dx * stride, current.y + dy * stride);
-            let outside_range =
-                target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y;
+            let outside_range = movement != "SPRITEMOVEDATA_SWIM_WANDER"
+                && (target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y);
             let player_occupied = target == self.player.tile
                 || (self.frame < self.player_last_tile_occupied_until_frame
                     && self.player_last_runtime_tile == Some(target));
@@ -1391,6 +1494,8 @@ impl OverworldSession {
                 self.object_step_durations.insert(object_id.to_string(), 8);
                 self.object_pending_random_wait
                     .insert(object_id.to_string());
+                let moved_object_id = object_id.to_string();
+                self.update_follow_after_entity_move(&moved_object_id, current, target);
             } else if let Some(random_add) = random_add.as_mut() {
                 let duration_roll =
                     random_add(false).map_err(AutonomousObjectAdvanceError::Divider)?;
@@ -1896,17 +2001,6 @@ impl OverworldSession {
             return Ok(None);
         };
         let contest_encounter = context.bug_contest_encounters.is_some();
-        let normal_encounters = if contest_encounter {
-            None
-        } else {
-            Some(
-                encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
-                    map_name: self.map.name.clone(),
-                    surface,
-                    time: options.time,
-                })?,
-            )
-        };
         let uncleaned_threshold = if contest_encounter {
             let permission = sample_collision(&self.map, &self.tileset, self.player.tile)
                 .ok_or_else(|| EncounterError::MissingRuntimeCollision {
@@ -1921,20 +2015,27 @@ impl OverworldSession {
                 20.0
             });
             apply_encounter_music_effect(base, options.music_token.as_deref(), music_modifiers)?
-        } else {
-            let base = crate::world::encounters::base_encounter_rate(
-                normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
-                surface,
-                options.time,
-            )?;
+        } else if let Some(encounters) = encounters {
+            let base =
+                crate::world::encounters::base_encounter_rate(encounters, surface, options.time)?;
             let base = percent_to_byte(f64::from(base));
             apply_encounter_music_effect(base, options.music_token.as_deref(), music_modifiers)?
+        } else {
+            // LoadWildMonData stores zero rates when the current map is
+            // absent from the wild table. TryWildEncounter still calls
+            // Random before the zero comparison fails.
+            0
         };
-        let threshold = apply_cleanse_tag_effect(uncleaned_threshold, options.has_cleanse_tag);
+        let ability_threshold = match options.lead_ability.as_deref() {
+            Some("ILLUMINATE") => uncleaned_threshold.saturating_mul(2),
+            Some("STENCH") => uncleaned_threshold / 2,
+            _ => uncleaned_threshold,
+        };
+        let threshold = apply_cleanse_tag_effect(ability_threshold, options.has_cleanse_tag);
         // With no Cleanse Tag, the final failed party scan executes
         // `add hl,de`, whose canonical WRAM range cannot overflow. With a
         // Cleanse Tag, `srl b` supplies bit 0 of the pre-halved rate.
-        let rate_carry = options.has_cleanse_tag && uncleaned_threshold & 1 != 0;
+        let rate_carry = options.has_cleanse_tag && ability_threshold & 1 != 0;
         let rate_output = rng
             .random(rate_carry)
             .map_err(ExactEncounterError::Divider)?;
@@ -2071,8 +2172,10 @@ impl OverworldSession {
         } else {
             None
         };
+        let encounters = encounters
+            .expect("a missing wild table's zero encounter threshold cannot reach selection");
         let resolved = select_wild_encounter(
-            normal_encounters.expect("non-Contest chooser preflight requires a normal table"),
+            encounters,
             slot_tables,
             surface,
             options.time,
@@ -2128,13 +2231,12 @@ impl OverworldSession {
         let normal_encounters = if contest_encounter {
             None
         } else {
-            Some(
-                encounters.ok_or_else(|| EncounterError::EmptyEncounterSlots {
-                    map_name: self.map.name.clone(),
-                    surface,
-                    time: options.time,
-                })?,
-            )
+            let Some(encounters) = encounters else {
+                // SweetScentEncounter reads the zero rate installed by
+                // LoadWildMonData and returns before ChooseWildEncounter.
+                return Ok(None);
+            };
+            Some(encounters)
         };
         let threshold = if contest_encounter {
             u8::MAX
@@ -2414,15 +2516,47 @@ pub fn object_event_initial_facing(spritemovedata: &str) -> Option<Direction> {
     }
 }
 
-fn initial_object_facings(objects: &[ObjectEvent]) -> BTreeMap<String, Direction> {
-    objects
-        .iter()
-        .filter_map(|object| {
-            let object_id = object.object_identifier.as_ref()?;
-            let facing = object_event_initial_facing(&object.spritemovedata)?;
-            Some((object_id.clone(), facing))
-        })
-        .collect()
+fn object_event_starts_fixed_and_sliding(movement: &str) -> bool {
+    matches!(
+        movement,
+        "SPRITEMOVEDATA_STILL"
+            | "SPRITEMOVEDATA_BIGDOLLSYM"
+            | "SPRITEMOVEDATA_POKEMON"
+            | "SPRITEMOVEDATA_SUDOWOODO"
+            | "SPRITEMOVEDATA_SMASHABLE_ROCK"
+            | "SPRITEMOVEDATA_STRENGTH_BOULDER"
+            | "SPRITEMOVEDATA_SHADOW"
+            | "SPRITEMOVEDATA_EMOTE"
+            | "SPRITEMOVEDATA_BIGDOLLASYM"
+            | "SPRITEMOVEDATA_BIGDOLL"
+            | "SPRITEMOVEDATA_BOULDERDUST"
+            | "SPRITEMOVEDATA_GRASS"
+    )
+}
+
+fn initial_object_runtime_state(
+    objects: &[ObjectEvent],
+) -> (
+    BTreeMap<String, Direction>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+) {
+    let mut facings = BTreeMap::new();
+    let mut fixed_facing = BTreeSet::new();
+    let mut sliding = BTreeSet::new();
+    for object in objects {
+        let Some(object_id) = object.object_identifier.as_ref() else {
+            continue;
+        };
+        if let Some(facing) = object_event_initial_facing(&object.spritemovedata) {
+            facings.insert(object_id.clone(), facing);
+        }
+        if object_event_starts_fixed_and_sliding(&object.spritemovedata) {
+            fixed_facing.insert(object_id.clone());
+            sliding.insert(object_id.clone());
+        }
+    }
+    (facings, fixed_facing, sliding)
 }
 
 fn encounter_surface_for_player_tile_checked(
@@ -2576,6 +2710,8 @@ impl WarpTransition {
         frame: u64,
         mode: MovementMode,
     ) -> OverworldSession {
+        let (object_facings, fixed_facing_object_identifiers, sliding_object_identifiers) =
+            initial_object_runtime_state(&objects);
         OverworldSession {
             frame,
             map,
@@ -2584,17 +2720,22 @@ impl WarpTransition {
             object_runtime_tiles: BTreeMap::new(),
             object_last_runtime_tiles: BTreeMap::new(),
             object_last_tiles_occupied_until_frame: BTreeMap::new(),
-            object_facings: BTreeMap::new(),
+            object_facings,
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            fixed_facing_object_identifiers,
+            sliding_object_identifiers,
             following: None,
+            following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
+            loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
@@ -2616,6 +2757,8 @@ impl ConnectionTransition {
         frame: u64,
         mode: MovementMode,
     ) -> OverworldSession {
+        let (object_facings, fixed_facing_object_identifiers, sliding_object_identifiers) =
+            initial_object_runtime_state(&objects);
         OverworldSession {
             frame,
             map,
@@ -2624,17 +2767,22 @@ impl ConnectionTransition {
             object_runtime_tiles: BTreeMap::new(),
             object_last_runtime_tiles: BTreeMap::new(),
             object_last_tiles_occupied_until_frame: BTreeMap::new(),
-            object_facings: BTreeMap::new(),
+            object_facings,
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            fixed_facing_object_identifiers,
+            sliding_object_identifiers,
             following: None,
+            following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
             player_hidden: false,
             hidden_event_flags: BTreeSet::new(),
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
+            loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             time_of_day: default_session_time_of_day(),
             tileset,
@@ -2744,6 +2892,18 @@ mod tests {
             object_event_initial_facing("SPRITEMOVEDATA_WALK_UP_DOWN"),
             Some(Direction::Down)
         );
+
+        let mut still = object("STILL", 1, 1, "-1");
+        still.spritemovedata = "SPRITEMOVEDATA_STILL".to_string();
+        let session = OverworldSession::with_events_and_objects(
+            map(),
+            MapEvents::default(),
+            vec![still],
+            tileset(),
+            TilePosition::new(0, 0),
+        );
+        assert!(session.fixed_facing_object_identifiers.contains("STILL"));
+        assert!(session.sliding_object_identifiers.contains("STILL"));
     }
 
     #[test]
@@ -2795,6 +2955,89 @@ mod tests {
             TilePosition::new(2, 2)
         );
         assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn autonomous_swimmer_ignores_its_declared_movement_range() {
+        let mut swimmer = object("SWIMMER", 1, 1, "-1");
+        swimmer.spritemovedata = "SPRITEMOVEDATA_SWIM_WANDER".to_string();
+        swimmer.move_range_x = 0;
+        swimmer.move_range_y = 0;
+        let water = TilesetCollision {
+            metatiles: vec![MetatileCollision {
+                collision: [permissions::WATER; 4],
+            }],
+        };
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![swimmer],
+            water,
+            TilePosition::new(6, 6),
+        );
+        let mut divider = crate::random::ReplayDivider::new([0, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("swimmer advances");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("SWIMMER").unwrap(),
+            TilePosition::new(1, 2)
+        );
+    }
+
+    #[test]
+    fn autonomous_land_walker_rejects_water_and_every_blocked_leaving_edge() {
+        assert!(!autonomous_walker_moves_once(
+            TilePosition::new(0, 0),
+            TilePosition::new(0, 1),
+            permissions::FLOOR,
+            permissions::WATER,
+            Direction::Down,
+        ));
+
+        for high_nibble in [0xb0, 0xc0] {
+            for (direction, source, target, low_nibble) in [
+                (
+                    Direction::Down,
+                    TilePosition::new(0, 0),
+                    TilePosition::new(0, 1),
+                    3,
+                ),
+                (
+                    Direction::Up,
+                    TilePosition::new(0, 1),
+                    TilePosition::new(0, 0),
+                    2,
+                ),
+                (
+                    Direction::Left,
+                    TilePosition::new(1, 0),
+                    TilePosition::new(0, 0),
+                    1,
+                ),
+                (
+                    Direction::Right,
+                    TilePosition::new(0, 0),
+                    TilePosition::new(1, 0),
+                    0,
+                ),
+            ] {
+                assert!(
+                    !autonomous_walker_moves_once(
+                        source,
+                        target,
+                        high_nibble | low_nibble,
+                        permissions::FLOOR,
+                        direction,
+                    ),
+                    "walker escaped permission {:#04x} toward {direction:?}",
+                    high_nibble | low_nibble,
+                );
+            }
+        }
     }
 
     #[test]
@@ -3088,6 +3331,8 @@ mod tests {
             map_name: "test".to_string(),
             grass_rates: Some([("day".to_string(), 100)].into_iter().collect()),
             water_rate: None,
+            swarm_overrides: BTreeMap::new(),
+            zones: Vec::new(),
             grass: Some(WildEncounterTable {
                 morning: Vec::new(),
                 day: (0..7)
@@ -3121,6 +3366,7 @@ mod tests {
     fn object(identifier: &str, x: u16, y: u16, event_flag: &str) -> ObjectEvent {
         ObjectEvent {
             sprite: "SPRITE_TEACHER".to_string(),
+            sprite_has_facings: true,
             x,
             y,
             spritemovedata: "SPRITEMOVEDATA_STILL".to_string(),
@@ -3137,6 +3383,50 @@ mod tests {
             object_identifier: Some(identifier.to_string()),
             sightline_direction_override: None,
         }
+    }
+
+    fn autonomous_walker_moves_once(
+        source: TilePosition,
+        target: TilePosition,
+        source_permission: u8,
+        target_permission: u8,
+        direction: Direction,
+    ) -> bool {
+        let mut collision = [permissions::WALL; 4];
+        let source_quadrant =
+            usize::from(source.y as u16 % 2) * 2 + usize::from(source.x as u16 % 2);
+        let target_quadrant =
+            usize::from(target.y as u16 % 2) * 2 + usize::from(target.x as u16 % 2);
+        collision[source_quadrant] = source_permission;
+        collision[target_quadrant] = target_permission;
+
+        let mut walker = object("WALKER", source.x as u16, source.y as u16, "-1");
+        walker.spritemovedata = match direction {
+            Direction::Left | Direction::Right => "SPRITEMOVEDATA_WALK_LEFT_RIGHT",
+            Direction::Up | Direction::Down => "SPRITEMOVEDATA_WALK_UP_DOWN",
+        }
+        .to_string();
+        walker.move_range_x = 1;
+        walker.move_range_y = 1;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(1, 1, vec![0]),
+            MapEvents::default(),
+            vec![walker],
+            TilesetCollision {
+                metatiles: vec![MetatileCollision { collision }],
+            },
+            TilePosition::new(9, 9),
+        );
+        let direction_roll = match direction {
+            Direction::Down | Direction::Left => 0,
+            Direction::Up | Direction::Right => 1,
+        };
+        session
+            .advance_autonomous_objects_with_random_add(Some(
+                move |_| -> Result<u8, std::convert::Infallible> { Ok(direction_roll) },
+            ))
+            .expect("autonomous walker fixture advances");
+        session.object_runtime_tile_by_id("WALKER") == Ok(target)
     }
 
     fn background_event(x: u16, y: u16, event_type: &str, script: &str) -> BackgroundEvent {
@@ -3469,6 +3759,11 @@ mod tests {
         assert!(
             !session.is_object_visible(&second),
             "clearevent must not load a replacement object before map reload"
+        );
+        assert!(
+            session.hidden_object_identifiers.is_empty()
+                && session.shown_object_identifiers.is_empty(),
+            "retaining the loaded roster must not create persistent object overrides"
         );
         let reloaded = OverworldSession::with_events_and_objects(
             map(),
@@ -4439,6 +4734,111 @@ mod tests {
     }
 
     #[test]
+    fn missing_wild_table_still_consumes_the_zero_rate_random_call() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState { add: 0xff, sub: 0 }, &mut divider);
+        let roaming = std::array::from_fn(|_| RoamingPokemonState::default());
+
+        let roll = session
+            .check_wild_encounter_exact(
+                None,
+                &encounter_slot_tables(),
+                &encounter_music_modifiers(),
+                &mut rng,
+                EncounterCheckOptions::default(),
+                ExactEncounterContext {
+                    roaming_pokemon: &roaming,
+                    current_map: (1, 1),
+                    bug_contest_encounters: None,
+                    unlocked_unown_sets: u8::MAX,
+                },
+            )
+            .expect("zero-rate missing-table check")
+            .expect("grass reaches TryWildEncounter");
+
+        assert_eq!(roll.threshold, 0);
+        assert_eq!(roll.encounter_roll, 0);
+        assert!(roll.resolved.is_none());
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn sweet_scent_missing_wild_table_fails_without_consuming_random() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        let roaming = std::array::from_fn(|_| RoamingPokemonState::default());
+
+        let roll = session
+            .check_sweet_scent_encounter_exact(
+                None,
+                &encounter_slot_tables(),
+                &mut rng,
+                EncounterCheckOptions::default(),
+                ExactEncounterContext {
+                    roaming_pokemon: &roaming,
+                    current_map: (1, 1),
+                    bug_contest_encounters: None,
+                    unlocked_unown_sets: u8::MAX,
+                },
+            )
+            .expect("missing-table Sweet Scent check");
+
+        assert!(roll.is_none());
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn illuminate_and_stench_modify_the_final_walking_encounter_rate() {
+        let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
+        let mut encounters = encounter_data();
+        for rate in encounters
+            .grass_rates
+            .as_mut()
+            .expect("grass rates")
+            .values_mut()
+        {
+            *rate = 20;
+        }
+        let roaming = std::array::from_fn(|_| RoamingPokemonState::default());
+        let context = ExactEncounterContext {
+            roaming_pokemon: &roaming,
+            current_map: (1, 1),
+            bug_contest_encounters: None,
+            unlocked_unown_sets: u8::MAX,
+        };
+
+        let threshold_for = |ability: &str| {
+            let mut divider = crate::random::ReplayDivider::new([0, 0]);
+            let mut rng = CrystalRandom::new(
+                // Keep the rate roll above both thresholds so this fixture
+                // stops before ChooseWildEncounter's slot/level RNG.
+                CrystalRandomState { add: 0, sub: 0xff },
+                &mut divider,
+            );
+            session
+                .check_wild_encounter_exact(
+                    Some(&encounters),
+                    &encounter_slot_tables(),
+                    &encounter_music_modifiers(),
+                    &mut rng,
+                    EncounterCheckOptions {
+                        lead_ability: Some(ability.to_string()),
+                        ..EncounterCheckOptions::default()
+                    },
+                    context,
+                )
+                .expect("ability encounter roll")
+                .expect("grass encounter check")
+                .threshold
+        };
+
+        assert_eq!(threshold_for("ILLUMINATE"), 102);
+        assert_eq!(threshold_for("STENCH"), 25);
+    }
+
+    #[test]
     fn exact_sweet_scent_skips_rate_and_repel_and_uses_live_collision_surface() {
         let session = OverworldSession::new(map(), grass_tileset(), TilePosition::new(0, 0));
         // selector roll 0 misses roaming; slot roll 0 selects percent 1.
@@ -4513,6 +4913,29 @@ mod tests {
                 .expect("long-grass surface"),
             Some(EncounterSurface::Grass)
         );
+    }
+
+    #[test]
+    fn encounter_surface_rejects_collisions_absent_from_check_grass_collision() {
+        for permission in [permissions::TALL_GRASS_10, permissions::LONG_GRASS_1C] {
+            let session = OverworldSession::new(
+                map(),
+                TilesetCollision {
+                    metatiles: vec![MetatileCollision {
+                        collision: [permission; 4],
+                    }],
+                },
+                TilePosition::new(0, 0),
+            );
+
+            assert_eq!(
+                session
+                    .current_encounter_surface_checked()
+                    .expect("exact ASM grass surface"),
+                None,
+                "collision {permission:#04x} is absent from CheckGrassCollision.blocks"
+            );
+        }
     }
 
     #[test]
@@ -4844,7 +5267,9 @@ mod tests {
             },
         };
 
-        let destination_objects = vec![object("DESTINATION_NPC", 1, 1, "-1")];
+        let mut destination_npc = object("DESTINATION_NPC", 1, 1, "-1");
+        destination_npc.spritemovedata = "SPRITEMOVEDATA_STANDING_UP".to_string();
+        let destination_objects = vec![destination_npc];
         let session = transition.apply_to(
             map(),
             MapEvents::default(),
@@ -4858,6 +5283,10 @@ mod tests {
         assert_eq!(session.player.tile, TilePosition::new(4, 6));
         assert_eq!(session.player.mode, MovementMode::Surf);
         assert_eq!(session.objects, destination_objects);
+        assert_eq!(
+            session.object_facings.get("DESTINATION_NPC"),
+            Some(&Direction::Up)
+        );
     }
 
     #[test]
@@ -5023,7 +5452,9 @@ mod tests {
             },
         };
 
-        let destination_objects = vec![object("CONNECTION_NPC", 1, 1, "-1")];
+        let mut connection_npc = object("CONNECTION_NPC", 1, 1, "-1");
+        connection_npc.spritemovedata = "SPRITEMOVEDATA_STANDING_RIGHT".to_string();
+        let destination_objects = vec![connection_npc];
         let session = transition.apply_to(
             map(),
             MapEvents::default(),
@@ -5037,5 +5468,9 @@ mod tests {
         assert_eq!(session.player.tile, TilePosition::new(0, 2));
         assert_eq!(session.player.mode, MovementMode::Surf);
         assert_eq!(session.objects, destination_objects);
+        assert_eq!(
+            session.object_facings.get("CONNECTION_NPC"),
+            Some(&Direction::Right)
+        );
     }
 }

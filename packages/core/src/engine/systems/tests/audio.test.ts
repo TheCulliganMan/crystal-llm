@@ -549,7 +549,7 @@ describe("AudioEngine unlock", () => {
 
   it("does not restart music when already playing", () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_MOM", "mom.mp3");
+    engine.loadMusic("MUSIC_MOM", "mom.pcm");
     engine.playMusic("MUSIC_MOM", "map");
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
     expect(currentMusic).toBeTruthy();
@@ -570,7 +570,7 @@ describe("AudioEngine unlock", () => {
 
   it("retries play when music is paused without restarting", () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_MOM", "mom.mp3");
+    engine.loadMusic("MUSIC_MOM", "mom.pcm");
     engine.playMusic("MUSIC_MOM", "map");
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
     currentMusic.paused = true;
@@ -587,7 +587,7 @@ describe("AudioEngine unlock", () => {
 
   it("does not resume cleared map music on unlock", () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_MOM", "mom.mp3");
+    engine.loadMusic("MUSIC_MOM", "mom.pcm");
     engine.playMusic("MUSIC_MOM", "map");
     engine.clearMapMusic();
     engine.stopMusic();
@@ -602,7 +602,7 @@ describe("AudioEngine unlock", () => {
 
   it("resumes from the tracked playback frame instead of restarting", () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_MOM", "mom.mp3");
+    engine.loadMusic("MUSIC_MOM", "mom.pcm");
     engine.playMusic("MUSIC_MOM", "map");
     engine.update();
     engine.update();
@@ -639,7 +639,7 @@ describe("AudioEngine priority muting", () => {
 
   it("mutes and restores map music for priority sfx", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -660,7 +660,7 @@ describe("AudioEngine priority muting", () => {
 
   it("mutes and restores map music for cries", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -681,7 +681,7 @@ describe("AudioEngine priority muting", () => {
 
   it("mutes and restores map music for congratulatory fanfares", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -702,7 +702,7 @@ describe("AudioEngine priority muting", () => {
 
   it("mutes and restores map music for dex fanfares", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -723,7 +723,7 @@ describe("AudioEngine priority muting", () => {
 
   it("does not mute map music for non-priority sfx", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -737,8 +737,8 @@ describe("AudioEngine priority muting", () => {
 
   it("mutes custom loaded cries that bypass manifest-backed token lookup", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
-    engine.loadSound("wooper_cry", "wooper.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
+    engine.loadSound("wooper_cry", "wooper.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -759,7 +759,7 @@ describe("AudioEngine priority muting", () => {
 
   it("replaces current SFX when higher-priority SFX starts", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     const currentMusic = (engine as unknown as { currentMusic: FakeAudio }).currentMusic;
@@ -785,7 +785,7 @@ describe("AudioEngine priority muting", () => {
 
   it("skips lower-priority SFX while higher-priority SFX is active", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
 
     engine.playSound("SFX_ITEM");
@@ -880,21 +880,21 @@ describe("AudioEngine priority muting", () => {
 
   it("exposes active channel ownership in playback snapshots", async () => {
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TEST", "test.mp3");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playMusic("MUSIC_TEST", "map");
     engine.playSound("SFX_ITEM");
     await flushPromises();
 
     const snapshot = engine.getPlaybackSnapshot();
     expect(snapshot.musicToken).toBe("MUSIC_TEST");
-    expect(snapshot.musicSource).toBe("test.mp3");
+    expect(snapshot.musicSource).toBe("test.pcm");
     expect(snapshot.activeChannels.some((entry) => entry.category === "music")).toBe(true);
     expect(snapshot.recentEvents).toEqual([
       expect.objectContaining({
         sequence: 1,
         kind: "music",
         token: "MUSIC_TEST",
-        source: "test.mp3",
+        source: "test.pcm",
         role: "map",
         loop: true,
       }),
@@ -923,7 +923,7 @@ describe("AudioEngine manifest failures", () => {
     })) as unknown as typeof globalThis.fetch;
 
     const engine = new AudioEngine();
-    engine.loadMusic("MUSIC_TITLE", "/api/audio/manifests/music/titlescreen.json");
+    engine.loadMusic("MUSIC_TITLE", "/api/audio/pcm/music/titlescreen.json");
     (
       engine as unknown as {
         pendingMusicRequestId: number;
@@ -950,7 +950,7 @@ describe("AudioEngine manifest failures", () => {
           currentMusicName: string | null;
           currentMusicRole: string;
         }
-      )._playMusicManifest("MUSIC_TITLE", "/api/audio/manifests/music/titlescreen.json", "title", 1)
+      )._playMusicManifest("MUSIC_TITLE", "/api/audio/pcm/music/titlescreen.json", "title", 1)
     ).resolves.toBeUndefined();
 
     expect(

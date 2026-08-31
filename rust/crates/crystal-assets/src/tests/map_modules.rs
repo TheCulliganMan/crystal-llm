@@ -276,6 +276,29 @@
     }
 
     #[test]
+    fn writeobjectxy_materializes_as_an_exact_typed_object_command() {
+        let scripts = BTreeMap::from([(
+            "SeenByTrainerScript".to_string(),
+            serde_json::json!([
+                {"command": "applymovementlasttalked", "args": ["wMovementBuffer"]},
+                {"command": "writeobjectxy", "args": ["LAST_TALKED"]},
+                {"command": "end", "args": []}
+            ]),
+        )]);
+
+        let commands = parse_script_object_commands("GlobalScripts", &scripts)
+            .expect("parse writeobjectxy");
+        let command = commands
+            .iter()
+            .find(|command| command.command_index == 1)
+            .expect("typed writeobjectxy command");
+
+        assert_eq!(command.command, "writeobjectxy");
+        assert_eq!(command.object_id.as_deref(), Some("LAST_TALKED"));
+        assert_eq!(command.source_script, "SeenByTrainerScript");
+    }
+
+    #[test]
     fn surf_start_step_materializes_the_exact_dynamic_movement_buffer() {
         let scripts = BTreeMap::from([(
             "UsedSurfScript".to_string(),

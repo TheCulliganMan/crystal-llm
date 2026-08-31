@@ -13,7 +13,8 @@ describe('multiplayer-store', () => {
     expect(state.lastError).toBeNull();
   });
 
-  test('setMatch sets connecting and clears queue', () => {
+  test('setMatch preserves world connection and clears queue', () => {
+    useMultiplayerStore.getState().setConnectionState('connected');
     useMultiplayerStore.getState().setInQueue(true, 'battle');
     useMultiplayerStore
       .getState()
@@ -25,7 +26,7 @@ describe('multiplayer-store', () => {
     expect(state.opponentName).toBe('Opponent');
     expect(state.currentMode).toBe('battle');
     expect(state.isHost).toBe(true);
-    expect(state.connectionState).toBe('connecting');
+    expect(state.connectionState).toBe('connected');
     expect(state.inQueue).toBe(false);
   });
 
@@ -33,12 +34,12 @@ describe('multiplayer-store', () => {
     useMultiplayerStore
       .getState()
       .setMatch('match1', 'opp1', 'Opponent', 'battle', true);
+    useMultiplayerStore.getState().setConnectionState('connected');
     useMultiplayerStore.getState().clearMatch();
 
     const state = useMultiplayerStore.getState();
     expect(state.currentMatchId).toBeNull();
     expect(state.opponentId).toBeNull();
-    expect(state.connectionState).toBe('disconnected');
+    expect(state.connectionState).toBe('connected');
   });
 });
-

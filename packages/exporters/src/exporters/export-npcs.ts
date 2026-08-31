@@ -16,6 +16,53 @@ const TIME_OF_DAY_VALUES: Record<string, number> = {
   DARKNESS: 8,
 };
 
+export function parseSpriteFacings(
+  constantsFilePath: string,
+  spritesFilePath: string
+): Record<string, boolean> {
+  if (!fs.existsSync(constantsFilePath)) {
+    throw new Error(`Missing sprite constants file ${constantsFilePath}.`);
+  }
+  if (!fs.existsSync(spritesFilePath)) {
+    throw new Error(`Missing overworld sprite table ${spritesFilePath}.`);
+  }
+  const constants: string[] = [];
+  let inOverworldSprites = false;
+  for (const rawLine of fs.readFileSync(constantsFilePath, "utf8").split(/\r?\n/)) {
+    const line = stripAsmComment(rawLine);
+    if (line === "const SPRITE_NONE") {
+      inOverworldSprites = true;
+      continue;
+    }
+    if (inOverworldSprites && line.startsWith("const SPRITE_")) {
+      constants.push(line.split(/\s+/)[1]);
+    }
+  }
+  const spriteTypes = fs
+    .readFileSync(spritesFilePath, "utf8")
+    .split(/\r?\n/)
+    .map(stripAsmComment)
+    .filter((line) => line.startsWith("overworld_sprite "))
+    .map((line) => {
+      const args = splitAsmArgs(line.slice("overworld_sprite".length));
+      if (args.length !== 4) {
+        throw new Error(`overworld_sprite requires 4 args, found ${args.length}: ${args.join(", ")}`);
+      }
+      return args[2];
+    });
+  if (constants.length < spriteTypes.length) {
+    throw new Error(
+      `Overworld sprite constant/table length mismatch: ${constants.length} < ${spriteTypes.length}`
+    );
+  }
+  return Object.fromEntries(
+    constants.map((sprite, index) => [
+      sprite,
+      index >= spriteTypes.length || spriteTypes[index] !== "STILL_SPRITE",
+    ])
+  );
+}
+
 const parseConstDefValue = (value: string | undefined): number => {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) {
@@ -114,12 +161,18 @@ const parseObjectEvent = (
   args: string[],
   objectIdentifier: string | null,
   constants: Record<string, number>,
-  trainerEventFlags: Record<string, string> = {}
+  trainerEventFlags: Record<string, string>,
+  spriteFacings: Record<string, boolean>
 ): ExportedNpcEvent => {
   if (args.length !== 13) {
     throw new Error(`object_event requires 13 args, found ${args.length}: ${args.join(", ")}`);
   }
   const objectType = args[9];
+  const sprite = args[2];
+  const spriteHasFacings = spriteFacings[sprite];
+  if (spriteHasFacings === undefined) {
+    throw new Error(`Unknown overworld sprite '${sprite}' in object_event.`);
+  }
   const script = args[11];
   const eventFlag =
     objectType === "OBJECTTYPE_TRAINER" && trainerEventFlags[script]
@@ -128,7 +181,8 @@ const parseObjectEvent = (
   return {
     x: parseNumericExpression(args[0], constants),
     y: parseNumericExpression(args[1], constants),
-    sprite: args[2],
+    sprite,
+    sprite_has_facings: spriteHasFacings,
     spritemovedata: args[3],
     move_range_x: parseNumericExpression(args[4], constants),
     move_range_y: parseNumericExpression(args[5], constants),
@@ -170,7 +224,8 @@ function parseTrainerEventFlags(content: string): Record<string, string> {
 export function parseNpcDataFromMapFile(
   mapName: string,
   filePath: string,
-  constants: Record<string, number>
+  constants: Record<string, number>,
+  spriteFacings: Record<string, boolean>
 ): ExportedNpcEvent[] {
   const content = fs.readFileSync(filePath, "utf8");
   const labels = parseObjectConstantLabels(content);
@@ -183,7 +238,15 @@ export function parseNpcDataFromMapFile(
       continue;
     }
     const args = splitAsmArgs(line.slice("object_event".length));
-    events.push(parseObjectEvent(args, labels[events.length] ?? null, constants, trainerEventFlags));
+    events.push(
+      parseObjectEvent(
+        args,
+        labels[events.length] ?? null,
+        constants,
+        trainerEventFlags,
+        spriteFacings
+      )
+    );
   }
 
   if (labels.length > 0 && labels.length !== events.length) {
@@ -195,11 +258,20 @@ export function parseNpcDataFromMapFile(
   return events;
 }
 
-export function parseNpcData(mapsDir: string, constants: Record<string, number>): NpcData {
+export function parseNpcData(
+  mapsDir: string,
+  constants: Record<string, number>,
+  spriteFacings: Record<string, boolean>
+): NpcData {
   const data: NpcData = {};
   for (const entry of fs.readdirSync(mapsDir).filter((name) => name.endsWith(".asm")).sort()) {
     const mapName = path.basename(entry, ".asm");
-    const events = parseNpcDataFromMapFile(mapName, path.join(mapsDir, entry), constants);
+    const events = parseNpcDataFromMapFile(
+      mapName,
+      path.join(mapsDir, entry),
+      constants,
+      spriteFacings
+    );
     data[mapName] = events;
   }
   return data;
@@ -208,7 +280,11 @@ export function parseNpcData(mapsDir: string, constants: Record<string, number>)
 export function exportNpcData(): NpcData {
   const root = getDisassemblyRoot();
   const constants = parseNpcConstants(path.join(root, "constants", "sprite_data_constants.asm"));
-  const npcData = parseNpcData(path.join(root, "maps"), constants);
+  const spriteFacings = parseSpriteFacings(
+    path.join(root, "constants", "sprite_constants.asm"),
+    path.join(root, "data", "sprites", "sprites.asm")
+  );
+  const npcData = parseNpcData(path.join(root, "maps"), constants, spriteFacings);
   writeJsonToTargets("npcs.json", npcData, { indent: 2 });
   return npcData;
 }

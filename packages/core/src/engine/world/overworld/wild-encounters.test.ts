@@ -172,6 +172,43 @@ describe("Wild encounter data", () => {
     );
   });
 
+  it("uses a biome encounter table only inside its runtime-tile bounds", () => {
+    const gameState = createInitialGameState();
+    const base: WildEncounterData = {
+      map_name: "GENERATED_NEIGHBORHOOD",
+      grass_rates: { morning: 10, day: 10, night: 10 },
+      water_rate: null,
+      grass: {
+        morning: [{ species: "RATTATA", level: 3 }],
+        day: [{ species: "RATTATA", level: 3 }],
+        night: [{ species: "RATTATA", level: 3 }],
+      },
+      water: null,
+      zones: [{
+        id: "ice_surface_1",
+        minX: 20, minY: 30, maxX: 29, maxY: 39,
+        grassRates: { morning: 14, day: 14, night: 14 },
+        grass: {
+          morning: [{ species: "SWINUB", level: 12 }],
+          day: [{ species: "SWINUB", level: 12 }],
+          night: [{ species: "SNEASEL", level: 14 }],
+        },
+      }],
+    };
+    const manager = new WildEncounterManager(gameState as unknown as GameState, {
+      wildEncounterData: new Map([[base.map_name, base]]),
+    }, null);
+    const inside = manager["_encounter_data_at"]({
+      current_map_name: base.map_name, player_x: 24, player_y: 34,
+    } as never);
+    const outside = manager["_encounter_data_at"]({
+      current_map_name: base.map_name, player_x: 4, player_y: 4,
+    } as never);
+    expect(inside?.grass?.day[0].species).toBe("SWINUB");
+    expect(inside?.grass_rates?.day).toBe(14);
+    expect(outside?.grass?.day[0].species).toBe("RATTATA");
+  });
+
   it("does not infer map music when audio state is missing", () => {
     const loader = new DataLoader();
     const gameState = createInitialGameState();

@@ -1,0 +1,39 @@
+services:
+  pokecrystal-multiplayer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crystal-multiplayer:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${POKECRYSTAL_PORT:-3003}:8080"
+    environment:
+      CRYSTAL_SERVER_TOKEN: ${CRYSTAL_SERVER_TOKEN:-}
+      CRYSTAL_AUTH_SECRET: ${CRYSTAL_AUTH_SECRET:-}
+      CRYSTAL_MODPACKS: ${CRYSTAL_MODPACKS:-}
+      CRYSTAL_DATA_DIR: /srv/crystal/data
+      CRYSTAL_MAX_CLIENTS: ${CRYSTAL_MAX_CLIENTS:-20000}
+      RUST_LOG: ${RUST_LOG:-crystal_web_server=info,tower_http=info}
+    volumes:
+      - crystal_multiplayer_data:/srv/crystal/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/crystal-web-server", "--healthcheck", "127.0.0.1:8080"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+volumes:
+  crystal_multiplayer_data:

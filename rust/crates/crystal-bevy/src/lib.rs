@@ -1,3 +1,6 @@
+#[cfg(all(target_arch = "wasm32", feature = "voxel-view"))]
+compile_error!("the voxel-view feature is native-only and cannot be enabled for WASM builds");
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -13,7 +16,7 @@ use crystal_assets::modpack::{
 use crystal_assets::{
     ActiveBattleCommandOutcome, AssetRoot, BlackoutRecoveryOutcome, DecorationActionOutcome,
     DecorationCategory, DecorationDefinition, DecorationSide, OverworldInputFrame,
-    PACK_AUDIO_COMPRESSION_GZIP, PACK_AUDIO_COMPRESSION_GZIP_SIDECAR, PartyRecoveryOutcome,
+    PACK_AUDIO_COMPRESSION_GZIP, PACK_AUDIO_COMPRESSION_MIDI, PartyRecoveryOutcome,
     PokemonCryMetadata, RuntimeBadgeCommand, RuntimeBadgeRegion, RuntimeBagItemDeltaCommand,
     RuntimeBattleEnemyActionCommand, RuntimeBattleEscapeCommand, RuntimeBattleItemCommand,
     RuntimeBattleTowerActionCommand, RuntimeBattleTowerBattleCommand,
@@ -51,12 +54,13 @@ use crystal_assets::{
     RuntimePendingScriptRequestKind, RuntimePendingYesNoResolutionCommand,
     RuntimePhoneCallerCommand, RuntimePhoneRandomSpecial, RuntimePlayerGenderCommand,
     RuntimePlayerPaletteCommand, RuntimePokedexCommand, RuntimePokegearPhoneCallCommand,
-    RuntimePokegearPhoneCallOutcome, RuntimeRandomScriptCommand, RuntimeRandomScriptMapCommand,
-    RuntimeRandomSpecialRoutineCommand, RuntimeRegisteredKeyItemCommand,
-    RuntimeRegisteredKeyItemOutcome, RuntimeRememberPasswordCommand,
-    RuntimeRockMonEncounterCommand, RuntimeScriptCommandRef, RuntimeScriptEventDrainCommand,
-    RuntimeScriptEventDrainResult, RuntimeScriptEventQueue, RuntimeScriptRuntimeFlag,
-    RuntimeScriptRuntimeFlagCommand, RuntimeScriptRuntimeFlagValue,
+    RuntimePokegearPhoneCallOutcome, RuntimePresentationInterpreter, RuntimePresentationProgram,
+    RuntimePresentationSubprogramInterpreter, RuntimeRandomScriptCommand,
+    RuntimeRandomScriptMapCommand, RuntimeRandomSpecialRoutineCommand,
+    RuntimeRegisteredKeyItemCommand, RuntimeRegisteredKeyItemOutcome,
+    RuntimeRememberPasswordCommand, RuntimeRockMonEncounterCommand, RuntimeScriptCommandRef,
+    RuntimeScriptEventDrainCommand, RuntimeScriptEventDrainResult, RuntimeScriptEventQueue,
+    RuntimeScriptRuntimeFlag, RuntimeScriptRuntimeFlagCommand, RuntimeScriptRuntimeFlagValue,
     RuntimeScriptRuntimeMemoryEntry, RuntimeScriptRuntimeMemoryEntryCommand,
     RuntimeScriptRuntimeMemoryEntryRemoved, RuntimeScriptRuntimeMemoryValue,
     RuntimeScriptRuntimeMemoryValueCommand, RuntimeScriptRuntimeMemoryValueTaken,
@@ -65,10 +69,11 @@ use crystal_assets::{
     RuntimeScriptedWildBattleStartCommand, RuntimeShopTransactionCommand, RuntimeShuckieAction,
     RuntimeShuckieCommand, RuntimeSpawnPoint, RuntimeSpecialCryCommand,
     RuntimeStaticWildBattleOrigin, RuntimeStoredPokemonNicknameCommand, RuntimeStoryGateSpecial,
-    RuntimeSweetScentEncounterCommand, RuntimeTmHmCommand, RuntimeTrainerBattleCompletionCommand,
-    RuntimeTrainerIdentityCommand, RuntimeTreeMonEncounterCommand, RuntimeVerticalMenuOpenCommand,
+    RuntimeSweetScentEncounterCommand, RuntimeTitleScreen, RuntimeTmHmCommand,
+    RuntimeTrainerBattleCompletionCommand, RuntimeTrainerIdentityCommand,
+    RuntimeTreeMonEncounterCommand, RuntimeVerticalMenuOpenCommand,
     RuntimeVerticalMenuSelectionCommand, TilesetDefinition, decode_runtime_mutation_command_frame,
-    decode_runtime_mutation_command_payload, pcm_gzip_sidecar_path, runtime_mutation_command_frame,
+    decode_runtime_mutation_command_payload, runtime_mutation_command_frame,
     runtime_mutation_result_frame as assets_runtime_mutation_result_frame,
     runtime_special_routine_requires_divider_trace, validate_compiled_audio_payload,
     validate_compiled_runtime_files,
@@ -78,29 +83,36 @@ use crystal_core::battle::capture::{CaptureCompletion, CaptureOutcome, StoredCap
 use crystal_core::battle::capture::{CaptureRules, CaptureWobbleProbability};
 use crystal_core::battle::damage::{TypeCategories, TypeEffectivenessTable, WeatherModifiers};
 use crystal_core::battle::start::{
-    StaticWildBattleStart, TrainerBattleStartStatus, WildBattleStart,
+    LinkBattleStart, StaticWildBattleStart, TrainerBattleStartStatus, WildBattleStart,
+    activate_link_battle_start, deactivate_battle_after_draw, deactivate_battle_after_loss,
+    deactivate_battle_after_win, switch_active_battle_enemy_party_index,
 };
 use crystal_core::battle::stats::BattleStatMultiplierTables;
-use crystal_core::battle::turn::{BattleAction, BattleTurnOutcome, MovePriorityTable};
-use crystal_core::input::{
-    B_PAD_A, B_PAD_B, B_PAD_DOWN, B_PAD_LEFT, B_PAD_RIGHT, B_PAD_SELECT, B_PAD_START, B_PAD_UP,
-    GameButton, JoypadState,
+use crystal_core::battle::turn::{
+    BattleAction, BattleEvent, BattleSide, BattleTurnOutcome, MovePriorityTable,
 };
+#[cfg(test)]
+use crystal_core::input::{B_PAD_DOWN, B_PAD_RIGHT};
+use crystal_core::input::{GameButton, JoypadState};
 use crystal_core::models::{
     Dv, FrontpicAnimProgram, ITEM_POCKET_TM_HM, Item, LearnedMove, Move, PcBox, PokegearLandmark,
     PokegearLandmarksPayload, Pokemon, PokemonSpecies, RuntimePokedexEntry, Stat, Trainer,
 };
 use crystal_core::multiplayer::{
     DeterministicInputJournal, DeterministicInputJournalFrame, DeterministicReplayBundle,
-    LinkHello, LinkMessage, LinkSessionIdentity, LockstepFrame, MenuChoiceFrame,
-    MenuChoiceResultFrame, PlayerId, PlayerIdentity, RuntimeCommandFrame,
+    LinkHello, LinkMessage, LinkSessionIdentity, LinkTradeTransferMode, LockstepFrame,
+    MenuChoiceFrame, MenuChoiceResultFrame, PlayerId, PlayerIdentity, RuntimeCommandFrame,
     RuntimeCommandResultFrame, SaveCheckpointFrame, SaveResumeReplayBundle,
     SessionRuntimeCommandFrame, SessionRuntimeCommandResultFrame, SessionSaveCheckpointFrame,
-    StateChecksum, StateChecksumFrame, game_state_checksum, validate_link_session_identity,
+    StateChecksum, StateChecksumFrame, TradeOutcome, game_state_checksum,
+    validate_link_session_identity,
 };
 #[cfg(test)]
-use crystal_core::random::{CrystalRandom, ReplayDivider};
-use crystal_core::random::{RecordingDivider, RuntimeDividerSource};
+use crystal_core::random::ReplayDivider;
+use crystal_core::random::{
+    CrystalRandom, DividerSource, LINK_BATTLE_RANDOM_SEED_COUNT, LinkBattleRandomState,
+    RecordingDivider, RuntimeDividerSource,
+};
 use crystal_core::save::{
     SaveGameSummary, SaveModpackIdentity, SaveSlotSummary, list_save_game_summaries_for_modpack,
     read_save_game_for_modpack, read_save_game_summary_for_modpack, write_save_game_for_modpack,
@@ -108,14 +120,14 @@ use crystal_core::save::{
 #[cfg(test)]
 use crystal_core::state::ScriptRuntimeElevatorFloor;
 use crystal_core::state::{
-    Badges, BattleMemory, GameState, ItemUseRuntimeEvent, LinkSerialConnectionStatus, Options,
-    OverworldMemory, PendingFieldTravel, SavedTrainerMetadata, ScriptControlRuntimeEvent,
-    ScriptEndState, ScriptGraphicsRuntimeEvent, ScriptLocation, ScriptMapLoadRequest,
-    ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent, ScriptMusicFade,
-    ScriptReturnFrame, ScriptRuntimeDelay, ScriptRuntimeEarthquake, ScriptRuntimeEmote,
-    ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry, ScriptScreenFade, ScriptShopRequest,
-    ScriptShopRuntimeEvent, ScriptTextRuntimeEvent, ScriptTextWait, ScriptWarpRequest,
-    ScriptYesNoPrompt, is_engine_flag_name, saved_delay_command_payload,
+    Badges, BattleMemory, DayCareInput, GameState, ItemUseRuntimeEvent, LinkSerialConnectionStatus,
+    Options, OverworldMemory, PendingFieldTravel, PendingMoveLearn, SavedTrainerMetadata,
+    ScriptControlRuntimeEvent, ScriptEndState, ScriptGraphicsRuntimeEvent, ScriptLocation,
+    ScriptMapLoadRequest, ScriptMapRefreshRequest, ScriptMapRuntimeEvent, ScriptMoneyRuntimeEvent,
+    ScriptMusicFade, ScriptReturnFrame, ScriptRuntimeDelay, ScriptRuntimeEarthquake,
+    ScriptRuntimeEmote, ScriptRuntimeQueuedCommand, ScriptRuntimeStoneTableEntry, ScriptScreenFade,
+    ScriptShopRequest, ScriptShopRuntimeEvent, ScriptTextRuntimeEvent, ScriptTextWait,
+    ScriptWarpRequest, ScriptYesNoPrompt, is_engine_flag_name, saved_delay_command_payload,
     saved_earthquake_command_payload, saved_emote_command_payload, saved_map_load_command_payload,
     saved_map_refresh_command_payload, saved_music_fade_command_payload, saved_queued_command_args,
     saved_shop_event_command_payload, saved_shop_request_command_payload,
@@ -130,7 +142,9 @@ use crystal_core::systems::battle_rewards::{
     BattleRewardOutcome, BattleRewardRules, PendingMoveLearnResolution,
 };
 use crystal_core::systems::economy::ScriptEconomyOutcome;
-use crystal_core::systems::evolution::EvolutionReport;
+use crystal_core::systems::evolution::{
+    EvolutionContext, EvolutionReport, LinkMode, check_and_evolve,
+};
 use crystal_core::systems::field_items::{
     FieldItemPickupOutcome, ItemfinderHiddenItem as CoreItemfinderHiddenItem,
 };
@@ -250,15 +264,15 @@ pub(crate) fn open_runtime_image(
 pub mod bevy_shell;
 #[cfg(feature = "bevy-shell")]
 pub use bevy_shell::{
-    BevyShellConfig, BevyShellStart, VisibleShellBattleSmoke, VisibleShellBattleSmokeRef,
-    VisibleShellOverworldSmoke, VisibleShellPartySmoke, VisibleShellSmokeItem,
-    VisibleShellSmokePokemon, VisibleShellStartMenuSmoke, VisibleShellTitleNameInputSmoke,
-    VisibleShellTitleSmoke, VisibleShellTrainerBattleSmoke, run_bevy_shell,
-    smoke_visible_shell_overworld, smoke_visible_shell_party, smoke_visible_shell_start_menu,
-    smoke_visible_shell_title, smoke_visible_shell_title_name_input,
-    smoke_visible_shell_trainer_battle, smoke_visible_shell_wild_battle,
+    BevyMultiplayerConfig, BevyShellConfig, BevyShellStart, VisibleShellBattleSmoke,
+    VisibleShellBattleSmokeRef, VisibleShellOverworldSmoke, VisibleShellPartySmoke,
+    VisibleShellSmokeItem, VisibleShellSmokePokemon, VisibleShellStartMenuSmoke,
+    VisibleShellTitleNameInputSmoke, VisibleShellTitleSmoke, VisibleShellTrainerBattleSmoke,
+    run_bevy_shell, smoke_visible_shell_overworld, smoke_visible_shell_party,
+    smoke_visible_shell_start_menu, smoke_visible_shell_title,
+    smoke_visible_shell_title_name_input, smoke_visible_shell_trainer_battle,
+    smoke_visible_shell_wild_battle,
 };
-
 const BATTLE_MOVE_SLOTS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +298,7 @@ pub struct RuntimeAudioCatalog {
     playback: ModpackAudioPlaybackPlan,
     music: BTreeMap<String, AudioProgram>,
     sound_effects: BTreeMap<String, AudioProgram>,
+    sound_effect_priorities: BTreeMap<String, u8>,
     cries: BTreeMap<String, AudioProgram>,
 }
 
@@ -306,6 +321,10 @@ impl RuntimeAudioCatalog {
 
     pub fn sound_effects(&self) -> &BTreeMap<String, AudioProgram> {
         &self.sound_effects
+    }
+
+    pub fn sound_effect_priorities(&self) -> &BTreeMap<String, u8> {
+        &self.sound_effect_priorities
     }
 
     pub fn cries(&self) -> &BTreeMap<String, AudioProgram> {
@@ -454,6 +473,7 @@ pub struct RuntimeShellSnapshot {
     pub trainer: RuntimeTrainerSnapshot,
     pub progression: RuntimeProgressionSnapshot,
     pub roaming_pokemon: [crystal_core::state::RoamingPokemonState; 3],
+    pub map_name_sign: crystal_core::state::MapNameSignMemory,
     pub day_care: crystal_core::state::DayCareState,
     pub bug_contest: crystal_core::state::BugContestState,
     pub magikarp_record: crystal_core::state::MagikarpRecordState,
@@ -506,11 +526,6 @@ pub struct RuntimeLinkSessionSnapshot {
     pub player_link_action: u8,
     pub chosen_cable_club_room: u8,
     pub other_player_link_mode: u8,
-    pub friend_ready: bool,
-    pub last_result: bool,
-    pub failed_link_to_past: bool,
-    pub quick_save_requested: bool,
-    pub active_room: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +564,13 @@ pub struct RuntimeShellAudioState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLinkTradeApply {
+    pub sent: Pokemon,
+    pub received_party_index: usize,
+    pub evolution: EvolutionReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAudioEventDrain {
     pub events: Vec<crystal_core::state::ScriptAudioRuntimeEvent>,
     pub state_checksum: StateChecksum,
@@ -568,6 +590,9 @@ pub struct RuntimeResolvedAudioPlayback {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeResolvedAudioPlaybackKind {
+    StopMusic {
+        audio_id: String,
+    },
     Play {
         audio_id: String,
         playback: ModpackAudioPlaybackEntry,
@@ -575,7 +600,6 @@ pub enum RuntimeResolvedAudioPlaybackKind {
     FadeMusic {
         audio_id: String,
         fade_frames: u16,
-        playback: ModpackAudioPlaybackEntry,
     },
     WaitForSoundEffect,
 }
@@ -597,9 +621,6 @@ pub struct RuntimeAudioProgramSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeAudioProgramSourceSnapshot {
-    Midi {
-        byte_len: usize,
-    },
     Pcm {
         byte_len: usize,
         format: AudioPcmFormat,
@@ -612,8 +633,8 @@ pub enum RuntimeAudioProgramSourceSnapshot {
         loop_start_sample: Option<usize>,
         loop_end_sample: Option<usize>,
     },
-    PcmGzipSidecar {
-        path: String,
+    Midi {
+        midi_base64_len: usize,
         byte_len: usize,
         format: AudioPcmFormat,
         loop_start_sample: Option<usize>,
@@ -637,7 +658,6 @@ pub struct RuntimeTrainerSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProgressionSnapshot {
-    pub rng_seed: u32,
     pub badges: Badges,
     pub pokedex_seen: usize,
     pub pokedex_owned: usize,
@@ -711,7 +731,6 @@ pub struct RuntimeScriptEventsSnapshot {
     pub credits_requested: bool,
     pub reset_requested: bool,
     pub menu_2d_requested: bool,
-    pub version_check_requested: bool,
     pub completed_trades: Vec<String>,
     pub shop_events: Vec<ScriptShopRuntimeEvent>,
     pub item_use_events: Vec<ItemUseRuntimeEvent>,
@@ -919,6 +938,8 @@ pub struct RuntimeBattleSnapshot {
     pub enemy_party: Vec<Pokemon>,
     pub active_player_party_index: Option<usize>,
     pub active_enemy_party_index: Option<usize>,
+    pub player_spikes_zero_hp_unchecked: bool,
+    pub enemy_spikes_zero_hp_unchecked: bool,
     pub player_transformed_species: Option<String>,
     pub enemy_transformed_species: Option<String>,
     pub player_substitute_hp: u16,
@@ -931,6 +952,7 @@ pub struct RuntimeBattleSnapshot {
     pub player_used_moves: Vec<String>,
     pub enemy_last_move: Option<String>,
     pub enemy_toxic_turns: u8,
+    pub player_turns_taken: u8,
     pub enemy_turns_taken: u8,
     pub enemy_switch_locked: bool,
     pub player_cannot_escape: bool,
@@ -2007,6 +2029,7 @@ pub struct RuntimeItemCatalogSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeMoveCatalogSnapshot {
     pub move_id: String,
+    pub source_index: u8,
     pub name: String,
     pub move_type: String,
     pub power: u16,
@@ -2146,6 +2169,7 @@ pub struct RuntimeWorldRuleCatalogSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePresentationCatalogSnapshot {
+    pub title_screen: RuntimeTitleScreen,
     pub pc_strings: BTreeMap<String, String>,
     pub menu_icons: BTreeMap<String, String>,
     pub pokedex_entries: BTreeMap<String, RuntimePokedexEntry>,
@@ -2405,22 +2429,6 @@ pub struct RuntimeScriptedTrainerBattleCompiledScriptRun {
     pub run: RuntimeCompiledScriptRun,
 }
 
-fn buttons_from_joypad_mask(mask: u8) -> Vec<GameButton> {
-    [
-        (B_PAD_A, GameButton::A),
-        (B_PAD_B, GameButton::B),
-        (B_PAD_START, GameButton::Start),
-        (B_PAD_SELECT, GameButton::Select),
-        (B_PAD_RIGHT, GameButton::Right),
-        (B_PAD_LEFT, GameButton::Left),
-        (B_PAD_UP, GameButton::Up),
-        (B_PAD_DOWN, GameButton::Down),
-    ]
-    .into_iter()
-    .filter_map(|(bit, button)| (mask & bit != 0).then_some(button))
-    .collect()
-}
-
 fn compiled_script_boundary(state: &GameState) -> Option<RuntimeCompiledScriptBoundary> {
     if let Some(wait) = &state.script_runtime.pending_text_wait {
         return Some(RuntimeCompiledScriptBoundary::TextWait(wait.clone()));
@@ -2519,6 +2527,45 @@ impl RuntimeGameShell {
             runtime_results: Vec::new(),
             retain_runtime_journal: true,
         })
+    }
+
+    /// Execute NewGame's ResetWRAM against the title session's retained hRandom
+    /// registers, divider source, options, and Lucky-ID SRAM fields, then apply
+    /// the pack-derived world initialization to that exact core state.
+    fn reset_new_game_from_title(&mut self, spawn_identifier: u16) -> Result<()> {
+        let spawn = self.runtime.data.runtime_spawn_point(spawn_identifier)?;
+        let title_state = &self.session.state;
+        let mut divider_after = self.session.divider.clone();
+        let reset_state = GameState::reset_wram_for_new_game_with_hardware(
+            title_state.options.clone(),
+            title_state.random_state,
+            title_state.vblank_counter,
+            title_state.lucky_number_day,
+            title_state.lucky_id_number,
+            &mut divider_after,
+        )?;
+        let (mut state, overworld) = self
+            .runtime
+            .data
+            .start_overworld_session_from_new_game_state(
+                spawn,
+                reset_state,
+                &self.runtime.audio.music_ids(),
+            )?;
+        state.last_spawn_identifier = Some(spawn_identifier);
+
+        self.session = RuntimeOverworldSession {
+            state,
+            overworld,
+            joypad: JoypadState::new(),
+            divider: divider_after,
+        };
+        self.last_frame = None;
+        self.linked_menu_results.clear();
+        self.runtime_command_sequence = 0;
+        self.runtime_commands.clear();
+        self.runtime_results.clear();
+        Ok(())
     }
 
     #[cfg(any(test, feature = "location-tester"))]
@@ -3052,6 +3099,7 @@ impl RuntimeGameShell {
                         &mut self.session.state,
                         &mut self.session.overworld,
                         command.vblanks,
+                        &command.normal_divider_trace,
                         &self.runtime.audio.music_ids(),
                         &self.runtime.audio.sound_effect_ids(),
                         &self.runtime.audio.cry_ids(),
@@ -3591,15 +3639,7 @@ impl RuntimeGameShell {
         source_script: &str,
         command_index: usize,
     ) -> Result<ScriptRuntimeInputs> {
-        let command_name = self
-            .runtime
-            .compiled_script_command_name(source_script, command_index)?;
         let map_name = origin_map_name;
-        let game_version = if command_name == "checkver" {
-            Some("0".to_string())
-        } else {
-            None
-        };
         let (
             gift_original_trainer_name,
             gift_original_trainer_id,
@@ -3627,7 +3667,6 @@ impl RuntimeGameShell {
             (None, None, None, None)
         };
         Ok(ScriptRuntimeInputs {
-            game_version,
             gift_original_trainer_name,
             gift_original_trainer_id,
             gift_nickname_accepted,
@@ -8009,13 +8048,43 @@ impl RuntimeGameShell {
     }
 
     pub fn advance_game_timer_vblanks(&mut self, vblanks: u32) -> Result<RuntimeGameTimerOutcome> {
+        self.advance_vblanks(vblanks, 0)
+    }
+
+    /// Advance one host VBlank batch. `normal_vblanks` identifies the frames
+    /// whose active handler was VBlank_Normal; each consumes exactly two DIV
+    /// samples and performs the handler's carry-cleared Random update.
+    fn advance_vblanks(
+        &mut self,
+        vblanks: u32,
+        normal_vblanks: u32,
+    ) -> Result<RuntimeGameTimerOutcome> {
         if vblanks == 0 {
             anyhow::bail!("game timer advance requires a nonzero VBlank count");
         }
-        let mutation =
-            self.apply_runtime_mutation_command(RuntimeMutationCommand::AdvanceGameTimerVBlanks(
-                RuntimeGameTimerAdvanceCommand { vblanks },
-            ))?;
+        if normal_vblanks > vblanks {
+            anyhow::bail!(
+                "VBlank_Normal count {normal_vblanks} exceeds elapsed VBlank count {vblanks}"
+            );
+        }
+        let mut divider_after = self.session.divider.clone();
+        let mut recording = RecordingDivider::new(&mut divider_after);
+        for _ in 0..normal_vblanks {
+            for _ in 0..2 {
+                recording
+                    .next_divider()
+                    .map_err(|error| anyhow::anyhow!("sample VBlank_Normal DIV: {error}"))?;
+            }
+        }
+        let normal_divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
+        drop(recording);
+        let mutation = self.apply_runtime_mutation_command(
+            RuntimeMutationCommand::AdvanceGameTimerVBlanks(RuntimeGameTimerAdvanceCommand {
+                vblanks,
+                normal_divider_trace,
+            }),
+        )?;
+        self.session.divider = divider_after;
         let RuntimeMutationResult::GameTimerVBlanksAdvanced(outcome) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-game-timer-vblanks result");
         };
@@ -8732,6 +8801,74 @@ impl RuntimeGameShell {
         Ok(start)
     }
 
+    pub fn start_link_battle(&mut self, start: &LinkBattleStart) -> Result<StateChecksum> {
+        activate_link_battle_start(self.session.state_mut(), start)
+            .context("activate Colosseum link battle")?;
+        self.runtime
+            .validate_save_state_for_runtime_pack(self.session.state())
+            .context("validate runtime state after Colosseum link battle start")?;
+        self.state_checksum()
+    }
+
+    pub fn switch_link_battle_enemy_party(
+        &mut self,
+        party_index: usize,
+    ) -> Result<RuntimeBattlePartySwitch> {
+        let outcome = switch_active_battle_enemy_party_index(self.session.state_mut(), party_index)
+            .context("apply peer Colosseum replacement")?;
+        self.runtime
+            .validate_save_state_for_runtime_pack(self.session.state())
+            .context("validate runtime state after peer Colosseum replacement")?;
+        Ok(RuntimeBattlePartySwitch {
+            party_index: outcome.party_index,
+            spikes: outcome.spikes,
+            state_checksum: self.state_checksum()?,
+        })
+    }
+
+    pub fn finish_link_battle(&mut self, result: RuntimeLinkBattleResult) -> Result<StateChecksum> {
+        let is_link_battle = matches!(
+            &self.session.state().battle,
+            crate::core::state::BattleMemory::Trainer { battle_type, .. }
+                if battle_type == "BATTLETYPE_LINK"
+        );
+        anyhow::ensure!(
+            is_link_battle,
+            "finish link battle requires an active link battle"
+        );
+        match result {
+            RuntimeLinkBattleResult::Win => deactivate_battle_after_win(self.session.state_mut()),
+            RuntimeLinkBattleResult::Loss => deactivate_battle_after_loss(self.session.state_mut()),
+            RuntimeLinkBattleResult::Draw => deactivate_battle_after_draw(self.session.state_mut()),
+        }
+        self.runtime
+            .validate_save_state_for_runtime_pack(self.session.state())
+            .context("validate runtime state after link battle completion")?;
+        self.state_checksum()
+    }
+
+    pub fn generate_link_battle_random_state(&mut self) -> Result<LinkBattleRandomState> {
+        const SERIAL_PREAMBLE_BYTE: u8 = 0xfd;
+        let RuntimeOverworldSession { state, divider, .. } = &mut self.session;
+        let mut rng = CrystalRandom::new(state.random_state, divider);
+        let mut seeds = [0_u8; LINK_BATTLE_RANDOM_SEED_COUNT];
+        let mut index = 0;
+        let mut carry = false;
+        while index < seeds.len() {
+            let output = rng
+                .random(carry)
+                .context("sample Colosseum link random seed")?;
+            carry = output.value < SERIAL_PREAMBLE_BYTE;
+            if output.value >= SERIAL_PREAMBLE_BYTE {
+                continue;
+            }
+            seeds[index] = output.value;
+            index += 1;
+        }
+        state.random_state = rng.state();
+        Ok(LinkBattleRandomState { seeds, count: 0 })
+    }
+
     pub fn complete_scripted_wild_battle(
         &mut self,
         origin: RuntimeStaticWildBattleOrigin,
@@ -8844,11 +8981,13 @@ impl RuntimeGameShell {
     where
         F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
     {
-        let (enemy_action, recorded) = self.session.stage_active_battle_turn_with_enemy_selector(
-            &self.runtime,
-            player_action,
-            select_enemy_action,
-        )?;
+        let (enemy_action, _, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selector(
+                &self.runtime,
+                player_action,
+                None,
+                select_enemy_action,
+            )?;
         let mutation = self.apply_recorded_runtime_mutation(recorded)?;
         let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-battle-turn result");
@@ -8860,6 +8999,212 @@ impl RuntimeGameShell {
                 state_checksum: mutation.state_checksum,
             },
         ))
+    }
+
+    pub fn resolve_active_battle_item_turn_with_enemy_selector<F>(
+        &mut self,
+        item_id: &str,
+        select_enemy_action: F,
+    ) -> Result<RuntimeBattleItemTurn>
+    where
+        F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
+    {
+        let player_action = BattleAction::Item {
+            item_id: item_id.to_string(),
+        };
+        let (enemy_action, item_use, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selector(
+                &self.runtime,
+                player_action,
+                Some(item_id),
+                select_enemy_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-battle-turn result");
+        };
+        let item_use = item_use.context("battle item turn did not consume its Bag item")?;
+        let battle_item = player_battle_item_outcome(&outcome)?;
+        Ok(RuntimeBattleItemTurn {
+            item_use,
+            battle_item,
+            enemy_action,
+            turn: RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
+        })
+    }
+
+    pub fn resolve_active_battle_party_item_turn_with_enemy_selector<F>(
+        &mut self,
+        item_id: &str,
+        party_index: usize,
+        move_slot: Option<usize>,
+        select_enemy_action: F,
+    ) -> Result<RuntimeBattleItemTurn>
+    where
+        F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
+    {
+        let player_action = BattleAction::PartyItem {
+            item_id: item_id.to_string(),
+            party_index,
+            move_slot,
+        };
+        let (enemy_action, item_use, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selector(
+                &self.runtime,
+                player_action,
+                Some(item_id),
+                select_enemy_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-battle-turn result");
+        };
+        let item_use = item_use.context("battle party item turn did not consume its Bag item")?;
+        let battle_item = player_battle_item_outcome(&outcome)?;
+        Ok(RuntimeBattleItemTurn {
+            item_use,
+            battle_item,
+            enemy_action,
+            turn: RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
+        })
+    }
+
+    pub fn resolve_active_battle_turn_with_enemy_selectors<FM, FP>(
+        &mut self,
+        player_action: BattleAction,
+        select_enemy_move: FM,
+        select_enemy_post_order_action: FP,
+    ) -> Result<(BattleAction, RuntimeBattleTurn)>
+    where
+        FM: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<usize>,
+        FP: FnMut(
+            usize,
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction, crystal_core::battle::turn::BattleTurnError>,
+    {
+        let (enemy_action, _, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selectors(
+                &self.runtime,
+                player_action,
+                None,
+                select_enemy_move,
+                select_enemy_post_order_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-battle-turn result");
+        };
+        Ok((
+            enemy_action,
+            RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
+        ))
+    }
+
+    pub fn resolve_active_battle_item_turn_with_enemy_selectors<FM, FP>(
+        &mut self,
+        item_id: &str,
+        select_enemy_move: FM,
+        select_enemy_post_order_action: FP,
+    ) -> Result<RuntimeBattleItemTurn>
+    where
+        FM: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<usize>,
+        FP: FnMut(
+            usize,
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction, crystal_core::battle::turn::BattleTurnError>,
+    {
+        let player_action = BattleAction::Item {
+            item_id: item_id.to_string(),
+        };
+        let (enemy_action, item_use, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selectors(
+                &self.runtime,
+                player_action,
+                Some(item_id),
+                select_enemy_move,
+                select_enemy_post_order_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-battle-turn result");
+        };
+        let item_use = item_use.context("battle item turn did not consume its Bag item")?;
+        let battle_item = player_battle_item_outcome(&outcome)?;
+        Ok(RuntimeBattleItemTurn {
+            item_use,
+            battle_item,
+            enemy_action,
+            turn: RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
+        })
+    }
+
+    pub fn resolve_active_battle_party_item_turn_with_enemy_selectors<FM, FP>(
+        &mut self,
+        item_id: &str,
+        party_index: usize,
+        move_slot: Option<usize>,
+        select_enemy_move: FM,
+        select_enemy_post_order_action: FP,
+    ) -> Result<RuntimeBattleItemTurn>
+    where
+        FM: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<usize>,
+        FP: FnMut(
+            usize,
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction, crystal_core::battle::turn::BattleTurnError>,
+    {
+        let player_action = BattleAction::PartyItem {
+            item_id: item_id.to_string(),
+            party_index,
+            move_slot,
+        };
+        let (enemy_action, item_use, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selectors(
+                &self.runtime,
+                player_action,
+                Some(item_id),
+                select_enemy_move,
+                select_enemy_post_order_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-battle-turn result");
+        };
+        let item_use = item_use.context("battle party item turn did not consume its Bag item")?;
+        let battle_item = player_battle_item_outcome(&outcome)?;
+        Ok(RuntimeBattleItemTurn {
+            item_use,
+            battle_item,
+            enemy_action,
+            turn: RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
+        })
     }
 
     pub fn resolve_active_battle_enemy_action(
@@ -8885,7 +9230,10 @@ impl RuntimeGameShell {
         select_enemy_action: F,
     ) -> Result<(BattleAction, RuntimeBattleTurn)>
     where
-        F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
+        F: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction>,
     {
         let (enemy_action, recorded) = self
             .session
@@ -8930,6 +9278,64 @@ impl RuntimeGameShell {
         Ok(RuntimeCaptureAttempt {
             outcome: Some(outcome),
             state_checksum: mutation.state_checksum,
+        })
+    }
+
+    pub fn active_battle_capture_storage_full(&self) -> Result<bool> {
+        self.runtime
+            .data
+            .active_battle_capture_storage_full(&self.session.state)
+    }
+
+    pub fn resolve_active_battle_ball_turn_with_enemy_selectors<FM, FP>(
+        &mut self,
+        ball_id: &str,
+        select_enemy_move: FM,
+        select_enemy_post_order_action: FP,
+    ) -> Result<RuntimeBattleBallTurn>
+    where
+        FM: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<usize>,
+        FP: FnMut(
+            usize,
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction, crystal_core::battle::turn::BattleTurnError>,
+    {
+        let (enemy_action, _, recorded) =
+            self.session.stage_active_battle_turn_with_enemy_selectors(
+                &self.runtime,
+                BattleAction::Ball {
+                    item_id: ball_id.to_string(),
+                },
+                None,
+                select_enemy_move,
+                select_enemy_post_order_action,
+            )?;
+        let mutation = self.apply_recorded_runtime_mutation(recorded)?;
+        let RuntimeMutationResult::ActiveBattleTurnResolved(outcome) = mutation.result else {
+            anyhow::bail!("runtime mutation returned non-Ball battle-turn result");
+        };
+        let capture = outcome
+            .events
+            .iter()
+            .find_map(|event| match event {
+                BattleEvent::BallThrown {
+                    side: BattleSide::Player,
+                    outcome,
+                } => Some(outcome.clone()),
+                _ => None,
+            })
+            .context("Ball battle turn did not record its capture attempt")?;
+        Ok(RuntimeBattleBallTurn {
+            capture,
+            enemy_action,
+            turn: RuntimeBattleTurn {
+                outcome,
+                state_checksum: mutation.state_checksum,
+            },
         })
     }
 
@@ -9019,11 +9425,12 @@ impl RuntimeGameShell {
             self.apply_runtime_mutation_command(RuntimeMutationCommand::SwitchActiveBattleParty(
                 RuntimePartySlotCommand { party_index },
             ))?;
-        let RuntimeMutationResult::ActiveBattlePartySwitched(party_index) = mutation.result else {
+        let RuntimeMutationResult::ActiveBattlePartySwitched(outcome) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-active-battle-party-switch result");
         };
         Ok(RuntimeBattlePartySwitch {
-            party_index,
+            party_index: outcome.party_index,
+            spikes: outcome.spikes,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -9236,6 +9643,7 @@ impl RuntimeGameShell {
         Ok(RuntimeTrainerBattleAdvance {
             next_enemy: outcome.next_enemy,
             trainer_defeated: outcome.trainer_defeated,
+            spikes: outcome.spikes,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -9865,12 +10273,10 @@ impl RuntimeGameShell {
 
     pub fn wait_for_linked_friend_special(
         &mut self,
-        ready: bool,
         serial_connection_status: LinkSerialConnectionStatus,
     ) -> Result<RuntimeSpecialRoutineUse> {
         let mutation = self.apply_runtime_mutation_command(
             RuntimeMutationCommand::WaitForLinkedFriendSpecial(RuntimeLinkFriendReadyCommand {
-                ready,
                 serial_connection_status,
             }),
         )?;
@@ -9888,14 +10294,12 @@ impl RuntimeGameShell {
 
     pub fn check_link_timeout_receptionist_special(
         &mut self,
-        timeout: bool,
         other_player_link_mode: u8,
         serial_connection_status: LinkSerialConnectionStatus,
     ) -> Result<RuntimeSpecialRoutineUse> {
         let mutation = self.apply_runtime_mutation_command(
             RuntimeMutationCommand::CheckLinkTimeoutReceptionistSpecial(
                 RuntimeLinkTimeoutCommand {
-                    timeout,
                     other_player_link_mode,
                     serial_connection_status,
                 },
@@ -10359,13 +10763,24 @@ impl RuntimeGameShell {
     }
 
     pub fn load(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        // Continue loads SRAM-backed WRAM while the title process remains
+        // alive. hRandomAdd/hRandomSub, hVBlankCounter, and the hardware DIV
+        // source are HRAM/hardware state and therefore must not come from the
+        // save payload or restart at this boundary.
+        let random_state = self.session.state.random_state;
+        let vblank_counter = self.session.state.vblank_counter;
+        let divider = self.session.divider.clone();
         let mut state = self.runtime.load_save(path)?;
+        state.random_state = random_state;
+        state.vblank_counter = vblank_counter;
         state.set_game_timer_counting(true);
         state.set_game_logic_paused(false);
-        self.session = self
+        let mut session = self
             .runtime
             .resume_overworld_session(&self.asset_root, state)
             .context("load runtime game shell state")?;
+        session.divider = divider;
+        self.session = session;
         self.last_frame = None;
         self.linked_menu_results.clear();
         self.clear_retained_runtime_commands();
@@ -10440,6 +10855,7 @@ impl RuntimeGameShell {
             trainer: RuntimeTrainerSnapshot::from_state(&self.session.state),
             progression: RuntimeProgressionSnapshot::from_state(&self.session.state),
             roaming_pokemon: self.session.state.roaming_pokemon.clone(),
+            map_name_sign: self.session.state.map_name_sign,
             day_care: self.session.state.day_care.clone(),
             bug_contest: self.session.state.bug_contest.clone(),
             magikarp_record: self.session.state.magikarp_record.clone(),
@@ -10827,6 +11243,86 @@ impl RuntimeGameShell {
         &mut self.session
     }
 
+    pub fn apply_link_trade_outcome(
+        &mut self,
+        outcome: &TradeOutcome,
+        player_id: PlayerId,
+        transfer_mode: LinkTradeTransferMode,
+    ) -> Result<RuntimeLinkTradeApply> {
+        anyhow::ensure!(
+            !outcome.cancelled(),
+            "cancelled link trade has no party outcome"
+        );
+        let received_party_index = self
+            .session
+            .state
+            .storage
+            .party
+            .filled_slots()
+            .checked_sub(1)
+            .context("link trade requires a nonempty party")?;
+        let sent = outcome
+            .apply_to_party_for_mode(
+                player_id,
+                &mut self.session.state.storage.party,
+                transfer_mode,
+            )?
+            .context("completed link trade did not return the sent Pokemon")?;
+        let link_mode = match transfer_mode {
+            LinkTradeTransferMode::TradeCenter => LinkMode::Link,
+            LinkTradeTransferMode::TimeCapsule => LinkMode::TimeCapsule,
+        };
+        let context = EvolutionContext {
+            species: &self.runtime.data.pokemon,
+            moves: &self.runtime.data.moves,
+            learnsets: &self.runtime.data.learnsets,
+            time_of_day: self.session.state.time.time_of_day,
+            current_item: None,
+            force_evolution: true,
+            link_mode,
+        };
+        let evolution = {
+            let received = self.session.state.storage.party.pokemon[received_party_index]
+                .as_mut()
+                .context("received link-trade Pokemon is absent from the appended party slot")?;
+            check_and_evolve(received, &self.runtime.data.evolutions, &context, false)
+                .map_err(|error| anyhow::anyhow!("evolve received link-trade Pokemon: {error:?}"))?
+        };
+        if !evolution.pending_move_learns.is_empty() {
+            anyhow::ensure!(
+                self.session.state.pending_move_learn.is_none()
+                    && self.session.state.pending_move_learn_queue.is_empty(),
+                "link-trade evolution cannot replace an existing pending move learn"
+            );
+            let received = self.session.state.storage.party.pokemon[received_party_index]
+                .as_ref()
+                .context("evolved link-trade Pokemon disappeared")?;
+            let pending = evolution
+                .pending_move_learns
+                .iter()
+                .cloned()
+                .map(|learned_move| PendingMoveLearn {
+                    party_index: received_party_index,
+                    species_id: received.species.id.clone(),
+                    level: received.level,
+                    learned_move,
+                    defer_level_evolution: false,
+                })
+                .collect::<Vec<_>>();
+            self.session.state.pending_move_learn = pending.first().cloned();
+            self.session
+                .state
+                .pending_move_learn_queue
+                .extend(pending.into_iter().skip(1));
+        }
+        self.session.state.sync_party_from_storage();
+        Ok(RuntimeLinkTradeApply {
+            sent,
+            received_party_index,
+            evolution,
+        })
+    }
+
     pub fn last_frame(&self) -> Option<&RuntimeOverworldFrame> {
         self.last_frame.as_ref()
     }
@@ -10885,7 +11381,6 @@ impl RuntimeTrainerSnapshot {
 impl RuntimeProgressionSnapshot {
     fn from_state(state: &GameState) -> Self {
         Self {
-            rng_seed: state.rng_seed,
             badges: state.badges.clone(),
             pokedex_seen: state.pokedex.seen_count(),
             pokedex_owned: state.pokedex.caught_count(),
@@ -10921,11 +11416,6 @@ impl RuntimeLinkSessionSnapshot {
             player_link_action: link.player_link_action,
             chosen_cable_club_room: link.chosen_cable_club_room,
             other_player_link_mode: link.other_player_link_mode,
-            friend_ready: link.friend_ready,
-            last_result: link.last_result,
-            failed_link_to_past: link.failed_link_to_past,
-            quick_save_requested: link.quick_save_requested,
-            active_room: link.active_room.clone(),
         }
     }
 }
@@ -10985,7 +11475,6 @@ impl RuntimeScriptEventsSnapshot {
             credits_requested: runtime.credits_requested,
             reset_requested: runtime.reset_requested,
             menu_2d_requested: runtime.menu_2d_requested,
-            version_check_requested: runtime.version_check_requested,
             completed_trades: runtime.completed_trades.clone(),
             shop_events: runtime.shop_events.clone(),
             item_use_events: runtime.item_use_events.clone(),
@@ -11305,6 +11794,10 @@ impl RuntimeBattleSnapshot {
             enemy_party: enemy_party.to_vec(),
             active_player_party_index: state.battle_active_party_index,
             active_enemy_party_index: state.battle_active_enemy_party_index,
+            player_spikes_zero_hp_unchecked: combat
+                .is_some_and(|combat| combat.player_spikes_zero_hp_unchecked),
+            enemy_spikes_zero_hp_unchecked: combat
+                .is_some_and(|combat| combat.enemy_spikes_zero_hp_unchecked),
             player_transformed_species: combat
                 .and_then(|combat| combat.player_transform.as_ref())
                 .map(|transform| transform.species.id.clone()),
@@ -11325,6 +11818,7 @@ impl RuntimeBattleSnapshot {
                 .unwrap_or_default(),
             enemy_last_move: combat.and_then(|combat| combat.enemy_last_move.clone()),
             enemy_toxic_turns: combat.map_or(0, |combat| combat.enemy_toxic_turns),
+            player_turns_taken: combat.map_or(0, |combat| combat.player_turns_taken),
             enemy_turns_taken: combat.map_or(0, |combat| combat.enemy_turns_taken),
             enemy_switch_locked: combat.is_some_and(|combat| {
                 combat.enemy_recharge_move.is_some()
@@ -11393,7 +11887,7 @@ impl RuntimeBattleCommandSnapshot {
             .active_battle_combat
             .as_ref()
             .is_some_and(|combat| {
-                combat.player.hp > 0
+                (combat.player.hp > 0 || combat.player_spikes_zero_hp_unchecked)
                     && (combat.player_recharge_move.is_some()
                         || combat.player_airborne_move.is_some()
                         || combat.player_charging_move.is_some()
@@ -11404,7 +11898,10 @@ impl RuntimeBattleCommandSnapshot {
             .script_runtime
             .active_battle_combat
             .as_ref()
-            .is_some_and(|combat| combat.player.hp > 0 && combat.player_bide_turns > 0);
+            .is_some_and(|combat| {
+                (combat.player.hp > 0 || combat.player_spikes_zero_hp_unchecked)
+                    && combat.player_bide_turns > 0
+            });
         let player_move_slots = state
             .battle_active_party_index
             .map(|index| {
@@ -11484,10 +11981,6 @@ impl RuntimeBattleCommandSnapshot {
             ),
         })
     }
-}
-
-fn available_move_slots(pokemon: &Pokemon) -> Vec<usize> {
-    available_learned_move_slots(&pokemon.moves, None)
 }
 
 fn available_learned_move_slots(moves: &[LearnedMove], disabled_move: Option<&str>) -> Vec<usize> {
@@ -11760,6 +12253,7 @@ impl RuntimeMoveCatalogSnapshot {
     fn from_move((move_id, move_data): (&String, &Move)) -> Self {
         Self {
             move_id: move_id.clone(),
+            source_index: move_data.source_index,
             name: move_data.name.clone(),
             move_type: move_data.move_type.clone(),
             power: move_data.power,
@@ -11937,6 +12431,7 @@ impl RuntimeWorldRuleCatalogSnapshot {
 impl RuntimePresentationCatalogSnapshot {
     fn from_data(data: &GameDataSet) -> Self {
         Self {
+            title_screen: data.runtime_title_screen.clone(),
             pc_strings: data.pc_strings.clone(),
             menu_icons: data.menu_icons.clone(),
             pokedex_entries: data.pokedex_entries.clone(),
@@ -12040,9 +12535,6 @@ impl RuntimeAudioProgramSnapshot {
 impl RuntimeAudioProgramSourceSnapshot {
     fn from_source(source: &AudioProgramSource) -> Self {
         match source {
-            AudioProgramSource::Midi(bytes) => Self::Midi {
-                byte_len: bytes.len(),
-            },
             AudioProgramSource::Pcm {
                 bytes,
                 format,
@@ -12066,15 +12558,15 @@ impl RuntimeAudioProgramSourceSnapshot {
                 loop_start_sample: *loop_start_sample,
                 loop_end_sample: *loop_end_sample,
             },
-            AudioProgramSource::PcmGzipSidecar {
-                path,
+            AudioProgramSource::Midi {
+                midi_base64,
                 format,
                 byte_len,
                 loop_start_sample,
                 loop_end_sample,
                 ..
-            } => Self::PcmGzipSidecar {
-                path: path.clone(),
+            } => Self::Midi {
+                midi_base64_len: midi_base64.len(),
                 byte_len: *byte_len,
                 format: format.clone(),
                 loop_start_sample: *loop_start_sample,
@@ -12136,6 +12628,40 @@ pub struct RuntimeBattleTurn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeBattleItemTurn {
+    pub item_use: ItemUseOutcome,
+    pub battle_item: BattleItemOutcome,
+    pub enemy_action: BattleAction,
+    pub turn: RuntimeBattleTurn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeBattleBallTurn {
+    pub capture: CaptureOutcome,
+    pub enemy_action: BattleAction,
+    pub turn: RuntimeBattleTurn,
+}
+
+fn player_battle_item_outcome(outcome: &BattleTurnOutcome) -> Result<BattleItemOutcome> {
+    outcome
+        .events
+        .iter()
+        .find_map(|event| match event {
+            crystal_core::battle::turn::BattleEvent::BattleItemEffect {
+                side: crystal_core::battle::turn::BattleSide::Player,
+                outcome,
+            }
+            | crystal_core::battle::turn::BattleEvent::BattlePartyItemEffect {
+                side: crystal_core::battle::turn::BattleSide::Player,
+                outcome,
+                ..
+            } => Some(outcome.clone()),
+            _ => None,
+        })
+        .context("battle item turn emitted no player item effect")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeBattleCommand {
     pub outcome: ActiveBattleCommandOutcome,
     pub state_checksum: StateChecksum,
@@ -12144,6 +12670,7 @@ pub struct RuntimeBattleCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeBattlePartySwitch {
     pub party_index: usize,
+    pub spikes: Option<crystal_core::battle::turn::SwitchInSpikesOutcome>,
     pub state_checksum: StateChecksum,
 }
 
@@ -12179,6 +12706,7 @@ pub struct RuntimeBattleRewards {
 pub struct RuntimeTrainerBattleAdvance {
     pub next_enemy: Option<crystal_core::models::Pokemon>,
     pub trainer_defeated: bool,
+    pub spikes: Option<crystal_core::battle::turn::SwitchInSpikesOutcome>,
     pub state_checksum: StateChecksum,
 }
 
@@ -12746,6 +13274,24 @@ impl CrystalRuntime {
             .title_music
             .as_deref()
             .context("compiled pack title screen missing title music")
+    }
+
+    pub fn title_presentation_program(&self) -> &RuntimePresentationProgram {
+        &self.data.runtime_title_screen.program
+    }
+
+    pub fn start_title_presentation(&self) -> Result<RuntimePresentationInterpreter> {
+        RuntimePresentationInterpreter::new(self.title_presentation_program(), "title")
+    }
+
+    pub fn start_title_screen_subprogram(
+        &self,
+    ) -> Result<RuntimePresentationSubprogramInterpreter> {
+        RuntimePresentationSubprogramInterpreter::new(
+            self.title_presentation_program(),
+            "start_title_screen",
+            "title_screen",
+        )
     }
 
     pub fn title_new_game_spawn_identifier(&self) -> Result<u16> {
@@ -18137,8 +18683,12 @@ impl RuntimeOverworldSession {
         Ok(RecordedRuntimeMutation {
             command: RuntimeMutationCommand::ResolveActiveBattleTurn(RuntimeBattleTurnCommand {
                 player_action,
+                player_bag_item_id: None,
                 enemy_action,
                 enemy_ai_divider_trace: RuntimeDividerTrace::new([]),
+                enemy_ai_selected_move_slot: None,
+                enemy_move_ai_random_calls: 0,
+                enemy_post_order_ai_random_calls: 0,
                 divider_trace,
             }),
             state,
@@ -18152,21 +18702,44 @@ impl RuntimeOverworldSession {
         &mut self,
         runtime: &CrystalRuntime,
         player_action: BattleAction,
+        player_bag_item_id: Option<&str>,
         select_enemy_action: F,
-    ) -> Result<(BattleAction, RecordedRuntimeMutation)>
+    ) -> Result<(
+        BattleAction,
+        Option<ItemUseOutcome>,
+        RecordedRuntimeMutation,
+    )>
     where
         F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
     {
         let mut state = self.state.clone();
         let overworld = self.overworld.clone();
         let mut divider_after = self.divider.clone();
+        let player_bag_item = if let Some(item_id) = player_bag_item_id {
+            anyhow::ensure!(
+                matches!(
+                    &player_action,
+                    BattleAction::Item { item_id: action_item_id }
+                        | BattleAction::PartyItem {
+                            item_id: action_item_id,
+                            ..
+                        }
+                        if action_item_id == item_id
+                ),
+                "player Bag item {item_id} does not match the battle action",
+            );
+            Some(
+                runtime
+                    .data
+                    .use_bag_item(&mut state, item_id, ItemUseContext::Battle)?,
+            )
+        } else {
+            None
+        };
 
         let mut ai_recording = RecordingDivider::new(&mut divider_after);
-        let mut ai_rng = crystal_core::random::ExactBattleRandom::new(
-            state.random_state,
-            state.rng_seed,
-            &mut ai_recording,
-        );
+        let mut ai_rng =
+            crystal_core::random::ExactBattleRandom::new(state.random_state, &mut ai_recording);
         let enemy_action = select_enemy_action(&mut ai_rng)?;
         if let Some(error) = ai_rng.divider_error() {
             anyhow::bail!("select exact enemy battle action: {error}");
@@ -18192,12 +18765,181 @@ impl RuntimeOverworldSession {
         };
         Ok((
             enemy_action.clone(),
+            player_bag_item,
             RecordedRuntimeMutation {
                 command: RuntimeMutationCommand::ResolveActiveBattleTurn(
                     RuntimeBattleTurnCommand {
                         player_action,
+                        player_bag_item_id: player_bag_item_id.map(str::to_string),
                         enemy_action,
                         enemy_ai_divider_trace,
+                        enemy_ai_selected_move_slot: None,
+                        enemy_move_ai_random_calls: 0,
+                        enemy_post_order_ai_random_calls: 0,
+                        divider_trace,
+                    },
+                ),
+                state,
+                overworld,
+                outcome,
+                divider_after: Some(divider_after),
+            },
+        ))
+    }
+
+    fn stage_active_battle_turn_with_enemy_selectors<FM, FP>(
+        &mut self,
+        runtime: &CrystalRuntime,
+        player_action: BattleAction,
+        player_bag_item_id: Option<&str>,
+        select_enemy_move: FM,
+        mut select_enemy_post_order_action: FP,
+    ) -> Result<(
+        BattleAction,
+        Option<ItemUseOutcome>,
+        RecordedRuntimeMutation,
+    )>
+    where
+        FM: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<usize>,
+        FP: FnMut(
+            usize,
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction, crystal_core::battle::turn::BattleTurnError>,
+    {
+        struct CountingBattleRandom<'a> {
+            inner: &'a mut dyn crystal_core::random::BattleRandomSource,
+            calls: &'a mut usize,
+        }
+
+        impl crystal_core::random::BattleRandomSource for CountingBattleRandom<'_> {
+            fn battle_random_byte(&mut self) -> u8 {
+                *self.calls += 1;
+                self.inner.battle_random_byte()
+            }
+        }
+
+        let mut state = self.state.clone();
+        let overworld = self.overworld.clone();
+        let mut divider_after = self.divider.clone();
+        let player_bag_item = if let Some(item_id) = player_bag_item_id {
+            anyhow::ensure!(
+                matches!(
+                    &player_action,
+                    BattleAction::Item { item_id: action_item_id }
+                        | BattleAction::PartyItem {
+                            item_id: action_item_id,
+                            ..
+                        }
+                        if action_item_id == item_id
+                ),
+                "player Bag item {item_id} does not match the battle action",
+            );
+            Some(
+                runtime
+                    .data
+                    .use_bag_item(&mut state, item_id, ItemUseContext::Battle)?,
+            )
+        } else {
+            None
+        };
+
+        let selected_move_slot = std::cell::Cell::new(None);
+        let enemy_action = std::cell::RefCell::new(BattleAction::Move { slot: 0 });
+        let mut select_enemy_move = Some(select_enemy_move);
+        let mut enemy_move_ai_random_calls = 0usize;
+        let mut enemy_post_order_ai_random_calls = 0usize;
+        let mut move_selector =
+            |combat: &crystal_core::battle::turn::BattleCombatState,
+             rng: &mut dyn crystal_core::random::BattleRandomSource| {
+                let mut counting_rng = CountingBattleRandom {
+                    inner: rng,
+                    calls: &mut enemy_move_ai_random_calls,
+                };
+                let slot = select_enemy_move
+                    .take()
+                    .expect("enemy move selector is invoked once")(
+                    combat, &mut counting_rng
+                )
+                .map_err(|error| {
+                    crystal_core::battle::turn::BattleTurnError::EnemyActionSelectionFailed {
+                        error: format!("{error:#}"),
+                    }
+                })?;
+                selected_move_slot.set(Some(slot));
+                *enemy_action.borrow_mut() = BattleAction::Move { slot };
+                Ok(slot)
+            };
+        let mut post_order_selector =
+            |combat: &crystal_core::battle::turn::BattleCombatState,
+             rng: &mut dyn crystal_core::random::BattleRandomSource| {
+                let mut counting_rng = CountingBattleRandom {
+                    inner: rng,
+                    calls: &mut enemy_post_order_ai_random_calls,
+                };
+                let selected = select_enemy_post_order_action(
+                    selected_move_slot
+                        .get()
+                        .expect("enemy move selection precedes trainer action selection"),
+                    combat,
+                    &mut counting_rng,
+                )?;
+                *enemy_action.borrow_mut() = selected.clone();
+                Ok(selected)
+            };
+        let mut turn_recording = RecordingDivider::new(&mut divider_after);
+        let result = if let BattleAction::Ball { item_id } = &player_action {
+            runtime
+                .data
+                .resolve_active_battle_ball_turn_with_enemy_ai_actions_with_divider(
+                    &mut state,
+                    item_id,
+                    BattleAction::Move { slot: 0 },
+                    &mut turn_recording,
+                    Some((&mut move_selector, &mut post_order_selector)),
+                )?
+                .1
+        } else {
+            runtime
+                .data
+                .resolve_active_battle_turn_with_enemy_ai_actions_with_divider(
+                    &mut state,
+                    player_action.clone(),
+                    &mut turn_recording,
+                    &mut move_selector,
+                    &mut post_order_selector,
+                )?
+        };
+        drop(move_selector);
+        drop(post_order_selector);
+        let enemy_ai_selected_move_slot = selected_move_slot.get();
+        let enemy_action = enemy_action.into_inner();
+        let enemy_move_ai_random_calls = u16::try_from(enemy_move_ai_random_calls)
+            .context("enemy move AI consumed more than u16::MAX random calls")?;
+        let enemy_post_order_ai_random_calls = u16::try_from(enemy_post_order_ai_random_calls)
+            .context("enemy post-order AI consumed more than u16::MAX random calls")?;
+        let divider_trace = RuntimeDividerTrace::new(turn_recording.samples().iter().copied());
+        drop(turn_recording);
+        let outcome = RuntimeMutationOutcome {
+            result: RuntimeMutationResult::ActiveBattleTurnResolved(result),
+            state_checksum: game_state_checksum(&state)?,
+        };
+        Ok((
+            enemy_action.clone(),
+            player_bag_item,
+            RecordedRuntimeMutation {
+                command: RuntimeMutationCommand::ResolveActiveBattleTurn(
+                    RuntimeBattleTurnCommand {
+                        player_action,
+                        player_bag_item_id: player_bag_item_id.map(str::to_string),
+                        enemy_action,
+                        enemy_ai_divider_trace: RuntimeDividerTrace::new([]),
+                        enemy_ai_selected_move_slot,
+                        enemy_move_ai_random_calls,
+                        enemy_post_order_ai_random_calls,
                         divider_trace,
                     },
                 ),
@@ -18234,8 +18976,12 @@ impl RuntimeOverworldSession {
         Ok(RecordedRuntimeMutation {
             command: RuntimeMutationCommand::ResolveActiveBattleCommand(RuntimeBattleTurnCommand {
                 player_action,
+                player_bag_item_id: None,
                 enemy_action,
                 enemy_ai_divider_trace: RuntimeDividerTrace::new([]),
+                enemy_ai_selected_move_slot: None,
+                enemy_move_ai_random_calls: 0,
+                enemy_post_order_ai_random_calls: 0,
                 divider_trace,
             }),
             state,
@@ -18288,19 +19034,24 @@ impl RuntimeOverworldSession {
         select_enemy_action: F,
     ) -> Result<(BattleAction, RecordedRuntimeMutation)>
     where
-        F: FnOnce(&mut dyn crystal_core::random::BattleRandomSource) -> Result<BattleAction>,
+        F: FnOnce(
+            &crystal_core::battle::turn::BattleCombatState,
+            &mut dyn crystal_core::random::BattleRandomSource,
+        ) -> Result<BattleAction>,
     {
         let mut state = self.state.clone();
         let overworld = self.overworld.clone();
         let mut divider_after = self.divider.clone();
 
         let mut ai_recording = RecordingDivider::new(&mut divider_after);
-        let mut ai_rng = crystal_core::random::ExactBattleRandom::new(
-            state.random_state,
-            state.rng_seed,
-            &mut ai_recording,
-        );
-        let enemy_action = select_enemy_action(&mut ai_rng)?;
+        let mut ai_rng =
+            crystal_core::random::ExactBattleRandom::new(state.random_state, &mut ai_recording);
+        let combat = state
+            .script_runtime
+            .active_battle_combat
+            .as_ref()
+            .context("enemy-only AI selection requires live core battle state")?;
+        let enemy_action = select_enemy_action(combat, &mut ai_rng)?;
         if let Some(error) = ai_rng.divider_error() {
             anyhow::bail!("select exact enemy battle action: {error}");
         }
@@ -18952,21 +19703,15 @@ impl RuntimeOverworldSession {
         );
         let mut state = self.state.clone();
         let mut overworld = self.overworld.clone();
-        state
-            .script_runtime
-            .variables
-            .insert("_day_care_action".to_string(), action_name.to_string());
-        match party_index {
-            Some(party_index) => {
-                state
-                    .script_runtime
-                    .variables
-                    .insert("_party_slot".to_string(), party_index.to_string());
-            }
-            None => {
-                state.script_runtime.variables.remove("_party_slot");
-            }
-        }
+        state.script_runtime.pending_day_care_input = Some(match action {
+            RuntimeDayCareAction::Open => DayCareInput::Open {},
+            RuntimeDayCareAction::Deposit => DayCareInput::Deposit {
+                party_slot: party_index.expect("validated Day Care deposit party index"),
+            },
+            RuntimeDayCareAction::Withdraw => DayCareInput::Withdraw {},
+            RuntimeDayCareAction::Inspect => DayCareInput::Inspect {},
+            RuntimeDayCareAction::CollectEgg => DayCareInput::CollectEgg {},
+        });
         let mut divider_after = self.divider.clone();
         let mut recording = RecordingDivider::new(&mut divider_after);
         let outcome = runtime.data.apply_random_special_routine(
@@ -19509,11 +20254,6 @@ impl RuntimeOverworldSession {
         RuntimeScriptCommandRef::new(map_name, source_script, command_index)
     }
 
-    fn runtime_time_update(&self, context: &'static str) -> Result<RuntimeTimeUpdate> {
-        let state_checksum = game_state_checksum(&self.state).context(context)?;
-        Ok(self.runtime_time_update_with_checksum(state_checksum))
-    }
-
     fn runtime_time_update_with_checksum(
         &self,
         state_checksum: StateChecksum,
@@ -19792,11 +20532,12 @@ impl RuntimeOverworldSession {
                 party_index,
             }),
         )?;
-        let RuntimeMutationResult::ActiveBattlePartySwitched(party_index) = mutation.result else {
+        let RuntimeMutationResult::ActiveBattlePartySwitched(outcome) = mutation.result else {
             anyhow::bail!("runtime mutation returned non-active-battle-party-switch result");
         };
         Ok(RuntimeBattlePartySwitch {
-            party_index,
+            party_index: outcome.party_index,
+            spikes: outcome.spikes,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -19815,6 +20556,7 @@ impl RuntimeOverworldSession {
         Ok(RuntimeTrainerBattleAdvance {
             next_enemy: outcome.next_enemy,
             trainer_defeated: outcome.trainer_defeated,
+            spikes: outcome.spikes,
             state_checksum: mutation.state_checksum,
         })
     }
@@ -21454,20 +22196,13 @@ impl RuntimeAudioCatalog {
             playback,
             music: BTreeMap::new(),
             sound_effects: BTreeMap::new(),
+            sound_effect_priorities: BTreeMap::new(),
             cries: BTreeMap::new(),
         };
 
         for asset in &data.audio {
             asset.validate()?;
             let source = match (asset.source, compiled_audio.remove(&asset.id)) {
-                (ModpackAudioSource::Midi, Some(bytes)) => {
-                    validate_compiled_audio_payload(asset, &bytes)?;
-                    AudioProgramSource::Midi(bytes)
-                }
-                (ModpackAudioSource::Midi, None) => anyhow::bail!(
-                    "compiled game pack missing embedded MIDI audio payload {}",
-                    asset.id
-                ),
                 (ModpackAudioSource::Pcm, Some(bytes))
                     if audio_compression == Some(PACK_AUDIO_COMPRESSION_GZIP) =>
                 {
@@ -21515,23 +22250,31 @@ impl RuntimeAudioCatalog {
                         loop_end_sample: asset.loop_end_sample,
                     }
                 }
-                (ModpackAudioSource::Pcm, None)
-                    if audio_compression == Some(PACK_AUDIO_COMPRESSION_GZIP_SIDECAR) =>
+                (ModpackAudioSource::Midi, None)
+                    if audio_compression == Some(PACK_AUDIO_COMPRESSION_MIDI) =>
                 {
                     let format = asset.pcm_format.as_ref().with_context(|| {
                         format!(
-                            "sidecar PCM audio asset '{}' missing validated pcm_format",
+                            "MIDI audio asset '{}' missing validated pcm_format",
                             asset.id
                         )
                     })?;
+                    let midi_base64 = asset
+                        .midi_program
+                        .as_ref()
+                        .with_context(|| {
+                            format!("MIDI audio asset '{}' missing program", asset.id)
+                        })?
+                        .midi_base64
+                        .clone();
                     let entry = manifest
                         .music
                         .get(&asset.id)
                         .or_else(|| manifest.sound_effects.get(&asset.id))
                         .or_else(|| manifest.cries.get(&asset.id))
                         .with_context(|| format!("audio manifest missing {}", asset.id))?;
-                    AudioProgramSource::PcmGzipSidecar {
-                        path: pcm_gzip_sidecar_path(&asset.id, &entry.payload_hash),
+                    AudioProgramSource::Midi {
+                        midi_base64,
                         format: AudioPcmFormat {
                             sample_rate_hz: format.sample_rate_hz,
                             channels: format.channels,
@@ -21547,6 +22290,9 @@ impl RuntimeAudioCatalog {
                     "compiled game pack missing embedded PCM audio payload {}",
                     asset.id
                 ),
+                (ModpackAudioSource::Midi, _) => {
+                    anyhow::bail!("MIDI audio asset {} requires a MIDI browser pack", asset.id)
+                }
             };
             let program = AudioProgram {
                 cache_key: format!("{}:{}:{}", asset.kind.runtime_name(), asset.id, asset.path),
@@ -21555,6 +22301,12 @@ impl RuntimeAudioCatalog {
             let previous = match asset.kind {
                 ModpackAudioKind::Music => catalog.music.insert(asset.id.clone(), program),
                 ModpackAudioKind::SoundEffect => {
+                    catalog.sound_effect_priorities.insert(
+                        asset.id.clone(),
+                        asset
+                            .sfx_priority
+                            .expect("validated sound effect has sfx_priority"),
+                    );
                     catalog.sound_effects.insert(asset.id.clone(), program)
                 }
                 ModpackAudioKind::Cry => catalog.cries.insert(asset.id.clone(), program),
@@ -21602,6 +22354,7 @@ impl RuntimeAudioCatalog {
             playback,
             music: BTreeMap::new(),
             sound_effects: BTreeMap::new(),
+            sound_effect_priorities: BTreeMap::new(),
             cries: BTreeMap::new(),
         };
 
@@ -21618,7 +22371,6 @@ impl RuntimeAudioCatalog {
                 .clone();
             validate_compiled_audio_payload(asset, &bytes)?;
             let source = match asset.source {
-                ModpackAudioSource::Midi => AudioProgramSource::Midi(bytes),
                 ModpackAudioSource::Pcm => {
                     let format = asset.pcm_format.as_ref().with_context(|| {
                         format!(
@@ -21637,6 +22389,9 @@ impl RuntimeAudioCatalog {
                         loop_end_sample: asset.loop_end_sample,
                     }
                 }
+                ModpackAudioSource::Midi => {
+                    anyhow::bail!("embedded MIDI audio asset '{}' is unsupported", asset.id)
+                }
             };
             let program = AudioProgram {
                 cache_key: format!("{}:{}:{}", asset.kind.runtime_name(), asset.id, asset.path),
@@ -21645,6 +22400,12 @@ impl RuntimeAudioCatalog {
             let previous = match asset.kind {
                 ModpackAudioKind::Music => catalog.music.insert(asset.id.clone(), program),
                 ModpackAudioKind::SoundEffect => {
+                    catalog.sound_effect_priorities.insert(
+                        asset.id.clone(),
+                        asset
+                            .sfx_priority
+                            .expect("validated sound effect has sfx_priority"),
+                    );
                     catalog.sound_effects.insert(asset.id.clone(), program)
                 }
                 ModpackAudioKind::Cry => catalog.cries.insert(asset.id.clone(), program),
@@ -21708,6 +22469,12 @@ impl RuntimeAudioCatalog {
         let kind = match event.kind {
             crystal_core::state::ScriptAudioRuntimeKind::Music => {
                 let audio_id = required_audio_event_id(&event)?;
+                if audio_id == crystal_core::systems::script_audio::MUSIC_NONE_ID {
+                    return Ok(RuntimeResolvedAudioPlayback {
+                        event,
+                        kind: RuntimeResolvedAudioPlaybackKind::StopMusic { audio_id },
+                    });
+                }
                 self.require_music(&audio_id)?;
                 RuntimeResolvedAudioPlaybackKind::Play {
                     playback: self
@@ -21744,11 +22511,10 @@ impl RuntimeAudioCatalog {
                         event.source_script, event.command_index
                     )
                 })?;
-                self.require_music(&audio_id)?;
+                if audio_id != crystal_core::systems::script_audio::MUSIC_NONE_ID {
+                    self.require_music(&audio_id)?;
+                }
                 RuntimeResolvedAudioPlaybackKind::FadeMusic {
-                    playback: self
-                        .require_playback_entry(AudioKind::Music, &audio_id)?
-                        .clone(),
                     audio_id,
                     fade_frames,
                 }
@@ -21783,6 +22549,13 @@ impl RuntimeAudioCatalog {
 
     pub fn require_sound_effect(&self, id: &str) -> Result<&AudioProgram> {
         self.require_program(AudioKind::SoundEffect, id)
+    }
+
+    pub fn require_sound_effect_priority(&self, id: &str) -> Result<u8> {
+        self.sound_effect_priorities
+            .get(id)
+            .copied()
+            .with_context(|| format!("runtime audio catalog missing SFX priority for {id}"))
     }
 
     pub fn require_cry(&self, id: &str) -> Result<&AudioProgram> {
@@ -21855,10 +22628,7 @@ fn runtime_audio_asset_key(
             )
         })
         .unwrap_or((None, None, None));
-    let source = match entry.source {
-        ModpackAudioSource::Midi => "midi",
-        ModpackAudioSource::Pcm => "pcm",
-    };
+    let source = "pcm";
     RuntimeAudioAssetKey {
         audio_id: entry.id.clone(),
         kind: entry.kind.runtime_name().to_string(),
@@ -21887,7 +22657,6 @@ fn validate_save_references_for_runtime_pack(state: &GameState, data: &GameDataS
     data.validate_saved_blue_card_references(state)?;
     data.validate_saved_buena_password_references(&state.buenas_password)?;
     data.validate_saved_battle_tower_references(&state.battle_tower, &state.storage.party)?;
-    data.validate_saved_link_session_references(&state.link_session)?;
     data.validate_saved_fishing_references(&state.fishing)?;
     data.validate_saved_swarm_references(&state.swarms)?;
     data.validate_saved_pending_special_battle_type(state.pending_special_battle_type.as_deref())?;
@@ -22086,12 +22855,6 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
     if let Some(end) = &runtime.script_ended {
         data.validate_saved_script_end_command(end)?;
     }
-    if let Some(routine) = &runtime.last_special_routine {
-        data.validate_saved_special_routine_reference(
-            "script_runtime.last_special_routine",
-            routine,
-        )?;
-    }
     if let Some(menu) = &runtime.active_menu {
         data.validate_saved_menu_reference("script_runtime.active_menu", menu)?;
     }
@@ -22197,11 +22960,13 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
         )?;
     }
     if let Some(fade) = &runtime.pending_music_fade {
-        data.validate_saved_audio_reference(
-            "script_runtime.pending_music_fade.audio_id",
-            &fade.audio_id,
-            ModpackAudioKind::Music,
-        )?;
+        if fade.audio_id != crystal_core::systems::script_audio::MUSIC_NONE_ID {
+            data.validate_saved_audio_reference(
+                "script_runtime.pending_music_fade.audio_id",
+                &fade.audio_id,
+                ModpackAudioKind::Music,
+            )?;
+        }
         let (command, args) = saved_music_fade_command_payload(fade);
         data.validate_saved_script_command_payload_reference(
             "script_runtime.pending_music_fade.source_script",
@@ -22224,7 +22989,14 @@ fn validate_saved_script_runtime_references(data: &GameDataSet, state: &GameStat
                     ModpackAudioKind::SoundEffect
                 }
             };
-            if event.kind != crystal_core::state::ScriptAudioRuntimeKind::WaitForSoundEffect {
+            let is_music_none = matches!(
+                event.kind,
+                crystal_core::state::ScriptAudioRuntimeKind::Music
+                    | crystal_core::state::ScriptAudioRuntimeKind::FadeMusic
+            ) && audio_id == crystal_core::systems::script_audio::MUSIC_NONE_ID;
+            if event.kind != crystal_core::state::ScriptAudioRuntimeKind::WaitForSoundEffect
+                && !is_music_none
+            {
                 data.validate_saved_audio_reference(
                     &format!("script_runtime.audio_events[{index}].audio_id"),
                     audio_id,
@@ -22559,6 +23331,31 @@ fn validate_saved_battle_references(data: &GameDataSet, state: &GameState) -> Re
             enemy_party,
             ..
         } => {
+            if battle_type == "BATTLETYPE_LINK" {
+                anyhow::ensure!(
+                    state.link_session.link_mode == 3,
+                    "saved link battle is not attached to an active Colosseum session"
+                );
+                data.validate_saved_audio_reference(
+                    "battle.trainer.encounter_music",
+                    encounter_music,
+                    ModpackAudioKind::Music,
+                )?;
+                data.validate_saved_pokemon_reference(
+                    "battle.trainer.enemy_pokemon",
+                    enemy_pokemon,
+                )?;
+                data.validate_saved_pokemon_party_references(
+                    "battle.trainer.enemy_party",
+                    enemy_party,
+                )?;
+                anyhow::ensure!(*reward == 0, "saved link battle cannot award prize money");
+                anyhow::ensure!(
+                    *ai_move_flags == 0 && *ai_item_switch_flags == 0 && ai_layers.is_empty(),
+                    "saved link battle cannot carry trainer AI"
+                );
+                return Ok(());
+            }
             let canonical_battle_tower_trainer =
                 data.battle_tower_rules.as_ref().is_some_and(|rules| {
                     trainer_id

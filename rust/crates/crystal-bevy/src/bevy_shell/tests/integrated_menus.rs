@@ -107,7 +107,7 @@ fn integrated_title_to_overworld_schedule_accepts_name_renders_music_and_movemen
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
 
@@ -1548,7 +1548,7 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
@@ -1604,7 +1604,7 @@ fn integrated_title_to_start_menu_schedule_renders_and_selects_with_live_keys() 
         );
     }
 
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     {
         let runtime_shell = app.world().resource::<BevyRuntimeShell>();
         assert_eq!(runtime_shell.last_error, None);
@@ -1894,7 +1894,7 @@ fn integrated_party_menu_renders_and_confirms_cancel_row() {
     let runtime_shell = core_modular_title_shell_for_test();
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
@@ -2181,7 +2181,7 @@ fn integrated_title_to_options_menu_schedule_renders_and_changes_with_live_keys(
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
@@ -2408,7 +2408,7 @@ fn integrated_title_to_save_menu_schedule_renders_and_writes_with_live_keys() {
 
     let mut app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut app);
-    press_key_for_runtime_hotkey_app(&mut app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut app, KeyCode::ArrowRight);
@@ -2590,7 +2590,7 @@ fn integrated_title_continue_schedule_loads_saved_game_with_live_keys() {
 
     let mut save_app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut save_app);
-    press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut save_app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::ArrowRight);
@@ -2671,13 +2671,13 @@ fn integrated_title_continue_schedule_loads_saved_game_with_live_keys() {
         );
     }
 
-    press_key_for_runtime_hotkey_app(&mut continue_app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut continue_app, KeyCode::KeyZ);
     {
         let runtime_shell = continue_app.world().resource::<BevyRuntimeShell>();
         assert!(runtime_shell.title_menu.is_some());
         assert!(runtime_shell.visible_continue_screen.is_some());
     }
-    press_key_for_runtime_hotkey_app(&mut continue_app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut continue_app, KeyCode::KeyZ);
     {
         let runtime_shell = continue_app.world().resource::<BevyRuntimeShell>();
         assert_eq!(runtime_shell.last_error, None);
@@ -2892,7 +2892,7 @@ fn integrated_title_mystery_gift_entry_requires_unlocked_save() {
 
     let mut save_app = integrated_shell_test_app(runtime_shell);
     open_title_main_menu_for_test(&mut save_app);
-    press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::Enter);
+    press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::KeyZ);
     confirm_gender_for_test(&mut save_app, VisiblePlayerGender::Boy);
     press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::KeyZ);
     press_key_for_runtime_hotkey_app(&mut save_app, KeyCode::ArrowRight);

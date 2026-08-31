@@ -35,9 +35,6 @@ assets or synthesize audio from local ASM sources:
 git clone https://github.com/pret/pokecrystal.git vendor/pokecrystal
 ```
 
-`ffmpeg` is not required for normal TUI startup. It is only needed for legacy
-MP3 bundle generation with `npm run audio:bundle --workspace @pokecrystal/web`.
-
 ## Docker Server Container
 
 The Docker dev server is the `pokecrystal-ts` service in `docker-compose.yml`.
@@ -98,14 +95,6 @@ autosave slot. If you want to keep the container but wipe only the save files,
 remove the saved slot inside the running container under `/data` and then restart
 the service.
 
-The legacy MP3 audio bundle is optional for launching the TUI, but required if
-you want browser or CLI MP3 manifests and assets:
-
-```bash
-npm run audio:bundle --workspace @pokecrystal/web
-node apps/web/scripts/prepare-public.js
-```
-
 ## Disassembly And Generated Assets
 
 The `vendor/pokecrystal/` checkout is a critical local input. It is ignored by Git because it is a separate upstream repo, but fresh development environments need it unless `POKECRYSTAL_DISASSEMBLY_ROOT` points somewhere else.
@@ -130,7 +119,18 @@ The generated data commands read from that checkout:
 node apps/web/scripts/prepare-public.js
 ```
 
-`./export` builds the canonical `.crystalpack` through the Rust `crystal-assets` exporter. The export process does not invoke Node, npm, npx, or the TypeScript exporter. The launcher may be invoked by path from any working directory. `node apps/web/scripts/prepare-public.js` remains a separate web-development asset preparation command. `npm run audio:bundle --workspace @pokecrystal/web` compiles the disassembly audio sources into ignored browser MP3 files and manifests under `apps/web/assets/audio/`.
+`./export` builds the canonical `.crystalpack` through the Rust `crystal-assets` exporter. The export process does not invoke Node, npm, npx, or the TypeScript exporter. The launcher may be invoked by path from any working directory. `node apps/web/scripts/prepare-public.js` remains a separate web-development asset preparation command.
+
+### Generation III Pokemon modpack
+
+Generate the pinned Pokemon Emerald source data once, then build the modpack on top of the canonical core pack:
+
+```bash
+node scripts/generate-gen3-modpack.mjs --source /absolute/path/to/pokeemerald
+./export-gen3
+```
+
+The source checkout must be at the revision recorded in `modpacks/gen3/source.lock.json`. The generated `content-packs/gen3.crystalpack` adds every National Dex species from Treecko through Deoxys, assigns the pinned Emerald primary ability to all 386 Pokemon, and includes graphics, cries, dex data, learnsets, and supported evolutions. See `modpacks/gen3/README.md` for source setup and the few evolution mechanics Crystal cannot represent directly.
 
 Legacy root-level `pokecrystal_disassembly/` checkouts still work, but new clones should use `vendor/pokecrystal/`. If your `pret/pokecrystal` checkout lives outside this repo, leave it there and set:
 

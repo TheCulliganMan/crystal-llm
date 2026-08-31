@@ -28,7 +28,57 @@ type PresenceState = Record<string, PresenceEntry[]>;
 
 const VALID_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 const INTERACTION_KINDS = new Set(['battle', 'trade']);
+const CHAT_CHANNELS = new Set(['local', 'trade', 'whisper']);
+const MAX_CHAT_MESSAGE_LENGTH = 240;
+const CHAT_RATE_WINDOW_MS = 10_000;
+const CHAT_RATE_LIMIT = 5;
 const DEFAULT_REMOTE_STALE_MS = 15_000;
+const PRESENCE_HEARTBEAT_MS = 10_000;
+const DEFAULT_WORLD_ID = 'main';
+const DEFAULT_MODPACK_ID = 'core-modular';
+
+export type MultiplayerWorldOptions = {
+  worldId?: string;
+  modpackId?: string;
+};
+
+const stableTopicHash = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const topicSegment = (value: string, fallback: string): string => {
+  const source = value.trim() || fallback;
+  const readable = source
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32) || fallback;
+  return `${readable}-${stableTopicHash(source)}`;
+};
+
+/** A bounded, deterministic Realtime topic scoped to one world, modpack, and map. */
+export const buildOverworldChannelName = (
+  mapName: string,
+  options: MultiplayerWorldOptions = {},
+): string => [
+  'overworld',
+  topicSegment(options.worldId ?? DEFAULT_WORLD_ID, DEFAULT_WORLD_ID),
+  topicSegment(options.modpackId ?? DEFAULT_MODPACK_ID, DEFAULT_MODPACK_ID),
+  topicSegment(mapName, 'unknown'),
+].join(':');
+
+export const buildChatChannelName = (
+  options: MultiplayerWorldOptions = {},
+): string => [
+  'chat',
+  topicSegment(options.worldId ?? DEFAULT_WORLD_ID, DEFAULT_WORLD_ID),
+  topicSegment(options.modpackId ?? DEFAULT_MODPACK_ID, DEFAULT_MODPACK_ID),
+].join(':');
 
 export type MultiplayerInteractionKind = 'battle' | 'trade';
 
@@ -47,6 +97,19 @@ export type MultiplayerInteractionResponse = {
   toUserId: string;
   kind: MultiplayerInteractionKind;
   accepted: boolean;
+  timestampMs: number;
+};
+
+export type MultiplayerChatChannel = 'local' | 'trade' | 'whisper';
+
+export type MultiplayerChatMessage = {
+  messageId: string;
+  fromUserId: string;
+  fromPlayerName: string;
+  toUserId: string | null;
+  channel: MultiplayerChatChannel;
+  mapName: string;
+  text: string;
   timestampMs: number;
 };
 
@@ -134,8 +197,11 @@ export const extractRemotePlayersFromPresence = (
 export class OverworldPresenceManager {
   private readonly supabase = createMultiplayerClient();
   private channel: MultiplayerRealtimeChannel | null = null;
+  private chatChannel: MultiplayerRealtimeChannel | null = null;
   private localUserId: string | null = null;
   private localState: LocalPresenceState | null = null;
+  private lastPresencePushAtMs = 0;
+  private readonly worldOptions: Required<MultiplayerWorldOptions>;
   private readonly callbacks: Array<(players: RemoteOverworldPlayer[]) => void> = [];
   private readonly interactionRequestCallbacks: Array<
     (request: MultiplayerInteractionRequest) => void
@@ -143,6 +209,16 @@ export class OverworldPresenceManager {
   private readonly interactionResponseCallbacks: Array<
     (response: MultiplayerInteractionResponse) => void
   > = [];
+  private readonly chatMessageCallbacks: Array<(message: MultiplayerChatMessage) => void> = [];
+  private readonly blockedUserIds = new Set<string>();
+  private chatSendTimestamps: number[] = [];
+
+  constructor(options: MultiplayerWorldOptions = {}) {
+    this.worldOptions = {
+      worldId: options.worldId?.trim() || DEFAULT_WORLD_ID,
+      modpackId: options.modpackId?.trim() || DEFAULT_MODPACK_ID,
+    };
+  }
 
   async connect(localState: LocalPresenceState): Promise<void> {
     if (!this.supabase) {
@@ -161,10 +237,20 @@ export class OverworldPresenceManager {
 
     this.localUserId = user.id;
     this.localState = localState;
-    this.channel = this.supabase.channel('overworld:presence', {
+    await this.joinChatChannel();
+    await this.joinMapChannel(localState.mapName);
+    await this.pushLocalState();
+  }
+
+  private async joinMapChannel(mapName: string): Promise<void> {
+    if (!this.supabase || !this.localUserId) {
+      throw new Error('Multiplayer presence is not initialized');
+    }
+
+    this.channel = this.supabase.channel(buildOverworldChannelName(mapName, this.worldOptions), {
       config: {
         broadcast: { ack: true },
-        presence: { key: user.id },
+        presence: { key: this.localUserId },
       },
     });
 
@@ -207,7 +293,46 @@ export class OverworldPresenceManager {
       });
     });
 
-    await this.pushLocalState();
+  }
+
+  private async joinChatChannel(): Promise<void> {
+    if (!this.supabase || !this.localUserId) {
+      throw new Error('Multiplayer chat is not initialized');
+    }
+    this.chatChannel = this.supabase.channel(buildChatChannelName(this.worldOptions), {
+      config: { broadcast: { ack: true } },
+    });
+    this.chatChannel.on('broadcast', { event: 'chat:message' }, ({ payload }) => {
+      const message = this.normalizeChatMessage(payload);
+      if (!message || message.fromUserId === this.localUserId || this.blockedUserIds.has(message.fromUserId)) {
+        return;
+      }
+      if (message.channel === 'whisper' && message.toUserId !== this.localUserId) {
+        return;
+      }
+      if (message.channel === 'local' && message.mapName !== this.localState?.mapName) {
+        return;
+      }
+      for (const callback of this.chatMessageCallbacks) {
+        callback(message);
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      const activeChannel = this.chatChannel;
+      if (!activeChannel) {
+        reject(new Error('Chat channel not initialized'));
+        return;
+      }
+      activeChannel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          resolve();
+          return;
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          reject(new Error(`Chat subscribe failed: ${status}`));
+        }
+      });
+    });
   }
 
   onRemotePlayersChange(callback: (players: RemoteOverworldPlayer[]) => void): void {
@@ -222,8 +347,28 @@ export class OverworldPresenceManager {
   }
 
   async updateLocalState(next: LocalPresenceState): Promise<void> {
+    const changedMap = this.localState?.mapName !== next.mapName;
+    const changedState = !this.localState || (
+      this.localState.playerName !== next.playerName
+      || this.localState.entityType !== next.entityType
+      || this.localState.mapName !== next.mapName
+      || this.localState.tileX !== next.tileX
+      || this.localState.tileY !== next.tileY
+      || this.localState.direction !== next.direction
+    );
     this.localState = next;
     if (!this.channel) {
+      return;
+    }
+    if (changedMap) {
+      if (this.supabase) {
+        await this.supabase.removeChannel(this.channel);
+      }
+      this.channel = null;
+      this.emit([]);
+      await this.joinMapChannel(next.mapName);
+    }
+    if (!changedState && Date.now() - this.lastPresencePushAtMs < PRESENCE_HEARTBEAT_MS) {
       return;
     }
     await this.pushLocalState();
@@ -233,9 +378,15 @@ export class OverworldPresenceManager {
     if (this.supabase && this.channel) {
       await this.supabase.removeChannel(this.channel);
     }
+    if (this.supabase && this.chatChannel) {
+      await this.supabase.removeChannel(this.chatChannel);
+    }
     this.channel = null;
+    this.chatChannel = null;
     this.localUserId = null;
     this.localState = null;
+    this.lastPresencePushAtMs = 0;
+    this.chatSendTimestamps = [];
     this.emit([]);
   }
 
@@ -259,6 +410,73 @@ export class OverworldPresenceManager {
     if (index >= 0) {
       this.interactionResponseCallbacks.splice(index, 1);
     }
+  }
+
+  onChatMessage(callback: (message: MultiplayerChatMessage) => void): void {
+    this.chatMessageCallbacks.push(callback);
+  }
+
+  offChatMessage(callback: (message: MultiplayerChatMessage) => void): void {
+    const index = this.chatMessageCallbacks.indexOf(callback);
+    if (index >= 0) {
+      this.chatMessageCallbacks.splice(index, 1);
+    }
+  }
+
+  setBlockedUserIds(userIds: Iterable<string>): void {
+    this.blockedUserIds.clear();
+    for (const userId of userIds) {
+      if (userId) {
+        this.blockedUserIds.add(userId);
+      }
+    }
+  }
+
+  async sendChatMessage(
+    channel: MultiplayerChatChannel,
+    text: string,
+    toUserId: string | null = null,
+  ): Promise<MultiplayerChatMessage> {
+    if (!this.chatChannel || !this.localUserId || !this.localState) {
+      throw new Error('Not connected to multiplayer chat');
+    }
+    if (!CHAT_CHANNELS.has(channel)) {
+      throw new Error('Unknown chat channel');
+    }
+    const normalizedText = text.trim();
+    if (!normalizedText) {
+      throw new Error('Message cannot be empty');
+    }
+    if (normalizedText.length > MAX_CHAT_MESSAGE_LENGTH) {
+      throw new Error(`Message cannot exceed ${MAX_CHAT_MESSAGE_LENGTH} characters`);
+    }
+    if (channel === 'whisper' && !toUserId) {
+      throw new Error('Whisper requires a recipient');
+    }
+    const nowMs = Date.now();
+    this.chatSendTimestamps = this.chatSendTimestamps.filter(
+      (timestamp) => nowMs - timestamp < CHAT_RATE_WINDOW_MS,
+    );
+    if (this.chatSendTimestamps.length >= CHAT_RATE_LIMIT) {
+      throw new Error('You are sending messages too quickly');
+    }
+    this.chatSendTimestamps.push(nowMs);
+    const message: MultiplayerChatMessage = {
+      messageId: this.createMessageId(),
+      fromUserId: this.localUserId,
+      fromPlayerName: this.localState.playerName,
+      toUserId: channel === 'whisper' ? toUserId : null,
+      channel,
+      mapName: this.localState.mapName,
+      text: normalizedText,
+      timestampMs: nowMs,
+    };
+    await this.chatChannel.send({
+      type: 'broadcast',
+      event: 'chat:message',
+      payload: message,
+    });
+    return message;
   }
 
   async sendInteractionRequest(toUserId: string, kind: MultiplayerInteractionKind): Promise<string> {
@@ -315,8 +533,11 @@ export class OverworldPresenceManager {
       tileX: this.localState.tileX,
       tileY: this.localState.tileY,
       direction: this.localState.direction,
+      worldId: this.worldOptions.worldId,
+      modpackId: this.worldOptions.modpackId,
       updatedAtMs: Date.now(),
     });
+    this.lastPresencePushAtMs = Date.now();
     this.emitRemotePlayers();
   }
 
@@ -343,6 +564,13 @@ export class OverworldPresenceManager {
       return crypto.randomUUID();
     }
     return `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private createMessageId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
   private normalizeInteractionRequest(payload: unknown): MultiplayerInteractionRequest | null {
@@ -404,6 +632,40 @@ export class OverworldPresenceManager {
       toUserId,
       kind: kind as MultiplayerInteractionKind,
       accepted,
+      timestampMs:
+        typeof data.timestampMs === 'number' && Number.isFinite(data.timestampMs)
+          ? Math.trunc(data.timestampMs)
+          : Date.now(),
+    };
+  }
+
+  private normalizeChatMessage(payload: unknown): MultiplayerChatMessage | null {
+    const data = payload as Record<string, unknown> | null;
+    if (!data) {
+      return null;
+    }
+    const { messageId, fromUserId, fromPlayerName, toUserId, channel, mapName } = data;
+    const text = typeof data.text === 'string' ? data.text.trim() : '';
+    if (
+      typeof messageId !== 'string' || !messageId ||
+      typeof fromUserId !== 'string' || !fromUserId ||
+      typeof fromPlayerName !== 'string' || !fromPlayerName ||
+      (toUserId !== null && typeof toUserId !== 'string') ||
+      typeof channel !== 'string' || !CHAT_CHANNELS.has(channel) ||
+      typeof mapName !== 'string' || !mapName ||
+      !text || text.length > MAX_CHAT_MESSAGE_LENGTH ||
+      (channel === 'whisper' && (typeof toUserId !== 'string' || !toUserId))
+    ) {
+      return null;
+    }
+    return {
+      messageId,
+      fromUserId,
+      fromPlayerName,
+      toUserId: typeof toUserId === 'string' ? toUserId : null,
+      channel: channel as MultiplayerChatChannel,
+      mapName,
+      text,
       timestampMs:
         typeof data.timestampMs === 'number' && Number.isFinite(data.timestampMs)
           ? Math.trunc(data.timestampMs)

@@ -1,7 +1,3 @@
-const TITLE_MAIN_MENU_BOX_X: usize = 0;
-const TITLE_MAIN_MENU_BOX_Y: usize = 0;
-const TITLE_MAIN_MENU_BOX_WIDTH: usize = 17;
-const TITLE_MAIN_MENU_BOX_HEIGHT: usize = 8;
 const TITLE_MAIN_MENU_TIME_BOX_X: usize = 0;
 const TITLE_MAIN_MENU_TIME_BOX_Y: usize = 14;
 const TITLE_MAIN_MENU_TIME_BOX_WIDTH: usize = 20;
@@ -560,10 +556,10 @@ fn load_visible_title_main_menu_frame(
 
     draw_time_set_window(
         &frame,
-        TITLE_MAIN_MENU_BOX_X,
-        TITLE_MAIN_MENU_BOX_Y,
-        TITLE_MAIN_MENU_BOX_WIDTH,
-        TITLE_MAIN_MENU_BOX_HEIGHT,
+        title.main_menu.left,
+        title.main_menu.top,
+        title.main_menu.right - title.main_menu.left + 1,
+        title.main_menu.bottom - title.main_menu.top + 1,
         &mut data,
     )?;
     let options = visible_title_menu_options(runtime_shell, title);
@@ -573,20 +569,20 @@ fn load_visible_title_main_menu_frame(
         .min(options.len().saturating_sub(1));
     let cursor_bob = visible_title_main_menu_cursor_bob(title.main_menu_frame);
     for (index, option) in options.iter().enumerate() {
-        let y = (TITLE_MAIN_MENU_BOX_Y + 2 + index) * SOURCE_TILE_SIZE;
+        let y = (title.main_menu.top + 2 + index) * SOURCE_TILE_SIZE;
         if index == selected {
             draw_time_set_text(
                 &font,
                 "▶",
-                (TITLE_MAIN_MENU_BOX_X + 1) * SOURCE_TILE_SIZE,
+                (title.main_menu.left + 1) * SOURCE_TILE_SIZE,
                 y + cursor_bob,
                 &mut data,
             )?;
         }
         draw_time_set_text(
             &font,
-            visible_title_menu_option_label(*option),
-            (TITLE_MAIN_MENU_BOX_X + 2) * SOURCE_TILE_SIZE,
+            visible_title_menu_option_label(option),
+            (title.main_menu.left + 2) * SOURCE_TILE_SIZE,
             y,
             &mut data,
         )?;
@@ -648,13 +644,8 @@ fn load_visible_title_main_menu_frame(
     })
 }
 
-fn visible_title_menu_option_label(option: TitleMenuOption) -> &'static str {
-    match option {
-        TitleMenuOption::Continue => "CONTINUE",
-        TitleMenuOption::NewGame => "NEW GAME",
-        TitleMenuOption::Options => "OPTION",
-        TitleMenuOption::MysteryGift => "MYSTERY GIFT",
-    }
+fn visible_title_menu_option_label(option: &RuntimeTitleMainMenuItem) -> &str {
+    &option.label
 }
 
 fn load_visible_continue_screen_frame(
@@ -2028,8 +2019,13 @@ fn spawn_visible_gender_selection_screen(
     rendered_art: &mut RenderedTilesetArt,
     images: &mut Assets<Image>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        gender.selected_index < gender.definition.items.len(),
+        "gender selection cursor {} is out of range",
+        gender.selected_index
+    );
     let key = GenderArtKey {
-        selected_index: gender.selected_index.min(1),
+        selected_index: gender.selected_index,
         confirmed: gender.confirmed,
         fade_counter: gender.fade_counter,
     };
@@ -2061,10 +2057,6 @@ fn spawn_visible_gender_selection_screen(
 }
 
 const GENDER_QUESTION_TEXT: &str = "ARE YOU A BOY? OR\nARE YOU A GIRL?";
-const GENDER_BOX_X: usize = 6;
-const GENDER_BOX_Y: usize = 4;
-const GENDER_BOX_WIDTH: usize = 7;
-const GENDER_BOX_HEIGHT: usize = 6;
 
 fn load_gender_selection_frame(
     asset_root: &AssetRoot,
@@ -2085,6 +2077,9 @@ fn load_gender_selection_frame(
         pixel.copy_from_slice(&BOOT_UI_WHITE);
     }
 
+    let menu = &gender.definition;
+    let menu_width = menu.right - menu.left + 1;
+    let menu_height = menu.bottom - menu.top + 1;
     draw_time_set_textbox(
         &font,
         &frame,
@@ -2097,27 +2092,22 @@ fn load_gender_selection_frame(
     )?;
     draw_time_set_window(
         &frame,
-        GENDER_BOX_X,
-        GENDER_BOX_Y,
-        GENDER_BOX_WIDTH,
-        GENDER_BOX_HEIGHT,
+        menu.left,
+        menu.top,
+        menu_width,
+        menu_height,
         &mut data,
     )?;
-    let selected = gender.selected_index.min(1);
-    draw_time_set_text(
-        &font,
-        if selected == 0 { "▶BOY" } else { " BOY" },
-        (GENDER_BOX_X + 1) * SOURCE_TILE_SIZE,
-        (GENDER_BOX_Y + 1) * SOURCE_TILE_SIZE,
-        &mut data,
-    )?;
-    draw_time_set_text(
-        &font,
-        if selected == 1 { "▶GIRL" } else { " GIRL" },
-        (GENDER_BOX_X + 1) * SOURCE_TILE_SIZE,
-        (GENDER_BOX_Y + 3) * SOURCE_TILE_SIZE,
-        &mut data,
-    )?;
+    for (index, label) in menu.items.iter().enumerate() {
+        let cursor = if index == gender.selected_index { '▶' } else { ' ' };
+        draw_time_set_text(
+            &font,
+            &format!("{cursor}{}", label.to_uppercase()),
+            (menu.left + 1) * SOURCE_TILE_SIZE,
+            (menu.top + 1 + index * 2) * SOURCE_TILE_SIZE,
+            &mut data,
+        )?;
+    }
     apply_gender_selection_fade(gender.fade_counter, &mut data);
 
     let mut image = Image::new(
@@ -4785,6 +4775,10 @@ fn render_playfield(
     {
         remove_presented_fullscreen_entity(&mut commands, &mut tileset_art);
     }
+    let object_motion_active = runtime_shell.object_walk_frame_ticks > 0
+        || !runtime_shell.object_walk_frame_ticks_by_id.is_empty();
+    let object_motion_just_landed = rendered.object_motion_active && !object_motion_active;
+    rendered.object_motion_active = object_motion_active;
     // Avoid snapshot/checksum work on idle frames. Gameplay actions bump the
     // revision; walking animation and queued audio are the only visual work
     // that can legitimately require a refresh without a new snapshot.
@@ -4794,6 +4788,7 @@ fn render_playfield(
         && runtime_shell.player_walk_frame_ticks == 0
         && runtime_shell.object_walk_frame_ticks == 0
         && runtime_shell.object_walk_frame_ticks_by_id.is_empty()
+        && !object_motion_just_landed
     {
         return;
     }
@@ -4902,6 +4897,36 @@ fn render_playfield(
                 .hash(&mut hasher);
             hasher.finish()
         });
+    if object_motion_just_landed
+        && rendered.map_name.as_ref() == Some(&snapshot.overworld.map_name)
+        && let Some((start_x, start_y)) = rendered.viewport_origin
+    {
+        // Object authority commits the destination tile before Bevy finishes
+        // interpolating the retained transform. The semantic world/position
+        // keys therefore do not change on the landing tick. Reconcile the
+        // transform explicitly before a following dialog-only update records
+        // the new snapshot revision and returns early.
+        let _ = update_overworld_sprite_positions(
+            &snapshot,
+            movement_subframe,
+            runtime_shell.visible_ledge_jump,
+            runtime_shell.player_walk_from,
+            runtime_shell.player_walk_frame_ticks,
+            runtime_shell.player_walk_total_ticks,
+            &runtime_shell.object_walk_from,
+            &runtime_shell.object_walk_frame_ticks_by_id,
+            &runtime_shell.object_walk_total_ticks_by_id,
+            runtime_shell.trainer_walk_from.as_ref(),
+            runtime_shell.object_walk_frame_ticks,
+            runtime_shell.object_walk_total_ticks,
+            visible_overworld_camera_offset(&rendered, &runtime_shell, movement_subframe),
+            start_x,
+            start_y,
+            &mut player_sprites,
+            &mut ledge_shadows,
+            &mut object_sprites,
+        );
+    }
     // Script text advances one character at a time and changes the semantic
     // checksum every frame. Rebuilding the entire 20x18 map (tiles, NPC
     // sprites, and images) for each character was the source of the 100%+
@@ -6695,19 +6720,6 @@ fn render_playfield(
         record_visible_render_error(&mut commands, &mut runtime_shell, error);
         return;
     }
-    if let Err(error) = spawn_visible_whirlpool_animation(
-        &mut commands,
-        &runtime_shell,
-        &snapshot,
-        &mut tileset_art,
-        &mut images,
-        start_x,
-        start_y,
-        effective_time_of_day,
-    ) {
-        record_visible_render_error(&mut commands, &mut runtime_shell, error);
-        return;
-    }
     if let Err(error) = spawn_visible_headbutt_animation(
         &mut commands,
         &runtime_shell,
@@ -7596,22 +7608,44 @@ fn spawn_visible_fly_animation(
     let Some(animation) = runtime_shell.visible_fly_animation else {
         return Ok(());
     };
-    let icon_frames = if let Some(frames) = rendered_art.party_icon_cache.get("ICON_BIRD") {
+    let snapshot = runtime_shell.shell.snapshot()?;
+    let actor = snapshot
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == animation.actor_party_index)
+        .with_context(|| {
+            format!(
+                "FLY actor party index {} is missing from the retained party",
+                animation.actor_party_index
+            )
+        })?;
+    let icon_id = snapshot
+        .presentation
+        .menu_icons
+        .get(&actor.pokemon.species.id)
+        .with_context(|| {
+            format!(
+                "FLY actor species {} has no menu icon mapping",
+                actor.pokemon.species.id
+            )
+        })?;
+    let icon_frames = if let Some(frames) = rendered_art.party_icon_cache.get(icon_id) {
         frames.clone()
     } else {
-        let frames = load_party_icon_frame(&runtime_shell.asset_root, "ICON_BIRD", images)?;
+        let frames = load_party_icon_frame(&runtime_shell.asset_root, icon_id, images)?;
         rendered_art
             .party_icon_cache
-            .insert("ICON_BIRD".to_string(), frames.clone());
+            .insert(icon_id.clone(), frames.clone());
         frames
     };
-    // TypeScript's fly animation deliberately builds one stateless 16x16
-    // surface from the first four icon tiles; it does not run the party-menu
-    // two-frame icon cycle here.
-    let icon = icon_frames[0].clone();
+    // SPRITE_ANIM_OBJ_RED_WALK runs Frameset_RedWalk over the two 16x16 icon
+    // frames: 0, 1, 0, then horizontally flipped 1, eight ticks apiece.
+    let icon_cycle = (animation.frame / 8) & 3;
+    let icon = icon_frames[usize::from(icon_cycle & 1)].clone();
+    let icon_flip_x = icon_cycle == 3;
     let (player_origin_x, player_origin_y) =
         overworld_sprite_position_from_base(player_origin_x, player_origin_y, icon.size);
-    let snapshot = runtime_shell.shell.snapshot()?;
     let (mut player, origin_y) = match animation.phase {
         VisibleFlyAnimationPhase::From => (
             VisibleFlyObjectState {
@@ -7723,6 +7757,7 @@ fn spawn_visible_fly_animation(
             texture: icon.handle,
             sprite: Sprite {
                 custom_size: Some(icon.size),
+                flip_x: icon_flip_x,
                 ..default()
             },
             transform: Transform::from_xyz(x, y, 3.2),
@@ -7731,187 +7766,6 @@ fn spawn_visible_fly_animation(
         ObjectMarker,
     ));
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_visible_whirlpool_animation(
-    commands: &mut Commands,
-    runtime_shell: &BevyRuntimeShell,
-    snapshot: &RuntimeShellSnapshot,
-    rendered_art: &mut RenderedTilesetArt,
-    images: &mut Assets<Image>,
-    start_x: i16,
-    start_y: i16,
-    time_of_day: &str,
-) -> Result<()> {
-    let Some(animation) = runtime_shell
-        .visible_whirlpool_animation
-        .filter(|_| runtime_shell.field_notice.is_none())
-    else {
-        return Ok(());
-    };
-    let Some((origin_x, origin_y)) =
-        runtime_tile_playfield_position(animation.target_tile, start_x, start_y)
-    else {
-        return Ok(());
-    };
-    // TypeScript's WhirlpoolTileAnimation intentionally composes the fixed
-    // Johto metatile $07, independent of the replacement block's tileset.
-    let johto_tileset = snapshot
-        .tilesets
-        .iter()
-        .find(|candidate| candidate.tileset_id.eq_ignore_ascii_case("johto"))
-        .context("WHIRLPOOL requires the exported Johto tileset")?;
-    let key = TilesetArtKey {
-        tileset_id: johto_tileset.tileset_id.clone(),
-        time_of_day: normalize_tileset_time_of_day(time_of_day),
-    };
-    let runtime_tileset = RuntimeTilesetKey {
-        tileset_id: johto_tileset.tileset_id.clone(),
-        collision: johto_tileset.collision.clone(),
-        palette_map: johto_tileset.palette_map.clone(),
-    };
-    if !rendered_art.cache.contains_key(&key) {
-        let art = load_tileset_art(
-            &runtime_shell.asset_root,
-            &key.tileset_id,
-            &key.time_of_day,
-            &johto_tileset.palette_map,
-            images,
-        )?;
-        rendered_art.cache.insert(key.clone(), art);
-    }
-    let art = rendered_art
-        .cache
-        .get(&key)
-        .with_context(|| format!("WHIRLPOOL requires loaded tileset art {}", key.tileset_id))?;
-    let layout_start = 0x07_usize * METATILE_TILE_COUNT;
-    let layout = art
-        .metatile_layout
-        .get(layout_start..layout_start + METATILE_TILE_COUNT)
-        .context("WHIRLPOOL requires Johto metatile $07")?
-        .to_vec();
-    let base_handles = art.tile_handles.clone();
-    let phase = animation.frame & 3;
-    for (index, tile_id) in layout.into_iter().enumerate() {
-        let handle = match tile_id {
-            0x32 | 0x33 | 0x42 | 0x43 => {
-                visible_whirlpool_tile_frame(
-                    rendered_art,
-                    &runtime_shell.asset_root,
-                    images,
-                    &runtime_tileset,
-                    time_of_day,
-                    tile_id,
-                    phase,
-                )?
-                .handle
-            }
-            _ => base_handles
-                .get(usize::from(tile_id))
-                .cloned()
-                .with_context(|| {
-                    format!("WHIRLPOOL metatile references missing tile ${tile_id:02x}")
-                })?,
-        };
-        let sub_x = (index % usize::from(RENDER_METATILE_WIDTH as u16)) as f32;
-        let sub_y = (index / usize::from(RENDER_METATILE_WIDTH as u16)) as f32;
-        commands.spawn((
-            SpriteBundle {
-                texture: handle,
-                sprite: Sprite {
-                    custom_size: Some(Vec2::splat(TILE_SIZE)),
-                    ..default()
-                },
-                transform: Transform::from_xyz(
-                    origin_x + sub_x * TILE_SIZE,
-                    origin_y - sub_y * TILE_SIZE,
-                    2.95,
-                ),
-                ..default()
-            },
-            ObjectMarker,
-        ));
-    }
-    Ok(())
-}
-
-fn visible_whirlpool_tile_frame(
-    rendered_art: &mut RenderedTilesetArt,
-    asset_root: &AssetRoot,
-    images: &mut Assets<Image>,
-    tileset: &RuntimeTilesetKey,
-    time_of_day: &str,
-    tile_id: u8,
-    phase: u8,
-) -> Result<SpriteFrame> {
-    let source_number = match tile_id {
-        0x32 => 1_u8,
-        0x33 => 2,
-        0x42 => 3,
-        0x43 => 4,
-        _ => anyhow::bail!("unsupported WHIRLPOOL animated tile ${tile_id:02x}"),
-    };
-    let time = normalize_tileset_time_of_day(time_of_day);
-    let cache_graphic = format!("whirlpool:{}:{tile_id:02x}:{phase}", tileset.tileset_id);
-    let cache_key = (cache_graphic, time.clone(), 0);
-    if let Some(frame) = rendered_art.field_move_tile_cache.get(&cache_key) {
-        return Ok(frame.clone());
-    }
-    let path = asset_root
-        .runtime_assets()
-        .join("gfx/tilesets/whirlpool")
-        .join(format!("{source_number}.2bpp"));
-    let data = crate::read_runtime_asset(&path)
-        .with_context(|| format!("read WHIRLPOOL animation tile {}", path.display()))?;
-    let offset = usize::from(phase) * 16;
-    let tile = data
-        .get(offset..offset + 16)
-        .with_context(|| format!("WHIRLPOOL source {} lacks phase {phase}", path.display()))?;
-    let palette_value = tileset
-        .palette_map
-        .get(usize::from(tile_id))
-        .copied()
-        .with_context(|| {
-            format!("WHIRLPOOL tile ${tile_id:02x} has no tileset palette-map entry")
-        })?;
-    let palette_index = usize::from(palette_value & 7);
-    let palette_bank = load_tileset_palette_bank(asset_root, &tileset.tileset_id, &time)?
-        .context("WHIRLPOOL requires a tileset palette bank")?;
-    let palette = palette_bank
-        .get(palette_index)
-        .with_context(|| format!("WHIRLPOOL palette {palette_index} is missing"))?;
-    let mut pixels = vec![0_u8; 8 * 8 * 4];
-    for row in 0..8_usize {
-        for column in 0..8_usize {
-            let bit = 1 << (7 - column);
-            let colour = (((tile[row * 2 + 1] & bit != 0) as usize) << 1)
-                | (tile[row * 2] & bit != 0) as usize;
-            let target = (row * 8 + column) * 4;
-            pixels[target..target + 3].copy_from_slice(&palette[colour]);
-            pixels[target + 3] = 255;
-        }
-    }
-    let mut image = Image::new(
-        Extent3d {
-            width: 8,
-            height: 8,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        pixels,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    image.sampler = ImageSampler::nearest();
-    let frame = SpriteFrame {
-        handle: images.add(image),
-        size: Vec2::splat(TILE_SIZE),
-    };
-    rendered_art
-        .field_move_tile_cache
-        .insert(cache_key, frame.clone());
-    Ok(frame)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8033,7 +7887,11 @@ fn spawn_visible_cut_animation(
     };
     let source_origin_x = target_x - TILE_SIZE * 0.5;
     let source_origin_y = target_y + TILE_SIZE * 0.5;
-    let age = animation.frame.saturating_sub(1);
+    // The first loop spawns the objects after DoNextFrameForAllSprites; their
+    // first OAM does not reach the screen until the following loop/frame.
+    let Some(age) = animation.frame.checked_sub(2) else {
+        return Ok(());
+    };
     if animation.variant.eq_ignore_ascii_case("tree") {
         let oam_name = match age {
             0..=1 => Some("SPRITE_ANIM_OAMSET_TREE_1"),
@@ -8140,51 +7998,24 @@ fn spawn_visible_field_move_oam(
     object_y: i32,
 ) -> Result<()> {
     if rendered_art.intro_sprite_bundle_cache.is_none() {
-        rendered_art.intro_sprite_bundle_cache = Some(
-            serde_json::from_str(&snapshot.presentation.sprite_anim_bundle)
-                .context("parse packed sprite animation bundle for CUT")?,
-        );
+        rendered_art.intro_sprite_bundle_cache = Some(load_intro_sprite_anim_bundle(
+            &snapshot.presentation.sprite_anim_bundle,
+        )?);
     }
     let oam_set = rendered_art
         .intro_sprite_bundle_cache
         .as_ref()
-        .and_then(|bundle| bundle.get("oam_sets"))
-        .and_then(|sets| sets.get(oam_name))
+        .and_then(|bundle| bundle.oam_sets.get(oam_name))
         .with_context(|| {
             format!("field-move OAM set {oam_name} is missing from the packed bundle")
-        })?;
-    let tile_offset = oam_set
-        .get("tile_offset")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|offset| u8::try_from(offset).ok())
-        .with_context(|| format!("field-move OAM set {oam_name} has an invalid tile offset"))?;
-    let pieces = oam_set
-        .get("pieces")
-        .and_then(serde_json::Value::as_array)
-        .with_context(|| format!("field-move OAM set {oam_name} has no pieces"))?
+        })?
         .clone();
-    for piece in pieces {
-        let piece_x = piece
-            .get("x")
-            .and_then(serde_json::Value::as_i64)
-            .with_context(|| format!("CUT OAM set {oam_name} has a piece without X"))?
-            as i32;
-        let piece_y = piece
-            .get("y")
-            .and_then(serde_json::Value::as_i64)
-            .with_context(|| format!("CUT OAM set {oam_name} has a piece without Y"))?
-            as i32;
-        let tile = piece
-            .get("tile")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|tile| u8::try_from(tile).ok())
-            .with_context(|| format!("CUT OAM set {oam_name} has an invalid tile"))?
-            .checked_add(tile_offset)
-            .context("field-move OAM tile overflow")?;
-        let attributes = piece
-            .get("attributes")
-            .and_then(serde_json::Value::as_u64)
-            .with_context(|| format!("CUT OAM set {oam_name} has a piece without attributes"))?;
+    for piece in &oam_set.pieces {
+        let piece_x = i32::from(piece.x);
+        let piece_y = i32::from(piece.y);
+        let tile = u8::try_from((piece.tile + oam_set.tile_offset).rem_euclid(256))
+            .context("field-move OAM tile exceeds byte range")?;
+        let attributes = piece.attributes;
         if attributes & 0x7 != 6 {
             anyhow::bail!(
                 "CUT OAM set {oam_name} requires unexpected palette {}",

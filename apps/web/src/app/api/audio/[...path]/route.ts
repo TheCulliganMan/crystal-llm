@@ -21,9 +21,7 @@ const DIRECT_AUDIO_ROOT_CANDIDATES = [
 
 const DIRECT_CONTENT_TYPES: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
-  ".mid": "audio/midi",
-  ".midi": "audio/midi",
-  ".wav": "audio/wav",
+  ".pcm": "application/octet-stream",
 };
 
 const SYNTHESIZED_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -232,9 +230,6 @@ export async function GET(
   { params }: { params: Promise<{ path?: string[] }> },
 ): Promise<Response> {
   const { path: parts = [] } = await params;
-  if (parts.some((part) => path.extname(part).toLowerCase() === ".mp3")) {
-    return new NextResponse("Not found", { status: 404 });
-  }
   if (parts[0] === "pcm") {
     try {
       const pcm = synthesizePcmRoute(parts);
@@ -269,6 +264,10 @@ export async function GET(
     } catch {
       return new NextResponse("Not found", { status: 404 });
     }
+  }
+  const directExtension = path.extname(parts.at(-1) ?? "").toLowerCase();
+  if (!(directExtension in DIRECT_CONTENT_TYPES)) {
+    return new NextResponse("Not found", { status: 404 });
   }
 
   const bundledFile = await findBundledAudioFile(parts);

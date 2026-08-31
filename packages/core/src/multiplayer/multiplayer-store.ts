@@ -20,6 +20,8 @@ export interface MultiplayerState {
 
   // Current match
   currentMatchId: string | null;
+  currentMatchChannelName: string | null;
+  currentModpackId: string | null;
   currentMode: MultiplayerMode;
   opponentId: string | null;
   opponentName: string | null;
@@ -42,7 +44,9 @@ export interface MultiplayerState {
     opponentId: string,
     opponentName: string,
     mode: MultiplayerMode,
-    isHost: boolean
+    isHost: boolean,
+    modpackId?: string,
+    channelName?: string,
   ) => void;
   clearMatch: () => void;
   setInQueue: (inQueue: boolean, mode?: MultiplayerMode) => void;
@@ -57,6 +61,8 @@ const initialState = {
   connectionState: 'disconnected' as ConnectionState,
   isHost: false,
   currentMatchId: null,
+  currentMatchChannelName: null,
+  currentModpackId: null,
   currentMode: null,
   opponentId: null,
   opponentName: null,
@@ -74,14 +80,23 @@ export const useMultiplayerStore = create<MultiplayerState>((set) => ({
 
   setConnectionState: (connectionState) => set({ connectionState }),
 
-  setMatch: (matchId, opponentId, opponentName, mode, isHost) =>
+  setMatch: (
+    matchId,
+    opponentId,
+    opponentName,
+    mode,
+    isHost,
+    modpackId = 'core-modular',
+    channelName = matchId,
+  ) =>
     set({
       currentMatchId: matchId,
+      currentMatchChannelName: channelName,
+      currentModpackId: modpackId,
       opponentId,
       opponentName,
       currentMode: mode,
       isHost,
-      connectionState: 'connecting',
       inQueue: false,
       lastError: null,
     }),
@@ -89,11 +104,12 @@ export const useMultiplayerStore = create<MultiplayerState>((set) => ({
   clearMatch: () =>
     set({
       currentMatchId: null,
+      currentMatchChannelName: null,
+      currentModpackId: null,
       opponentId: null,
       opponentName: null,
       currentMode: null,
       isHost: false,
-      connectionState: 'disconnected',
     }),
 
   setInQueue: (inQueue, mode) =>

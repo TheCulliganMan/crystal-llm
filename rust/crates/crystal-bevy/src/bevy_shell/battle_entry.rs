@@ -2,7 +2,9 @@ fn prepare_visible_battle_entry(runtime_shell: &mut BevyRuntimeShell) -> Result<
     prepare_visible_battle_entry_with_music_reset(runtime_shell, true)
 }
 
-fn prepare_visible_battle_entry_after_visible_step(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+fn prepare_visible_battle_entry_after_visible_step(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
     prepare_visible_battle_entry_with_music_reset(runtime_shell, false)
 }
 
@@ -40,7 +42,6 @@ fn prepare_visible_battle_entry_with_music_reset(
     runtime_shell.battle_player_send_out_pending = false;
     runtime_shell.battle_enemy_hp_at_player_send_out = None;
     runtime_shell.pending_battle_scenes_after_message.clear();
-    runtime_shell.pending_enemy_response_after_capture = None;
     if reset_music {
         reset_visible_music_state(runtime_shell);
     }
@@ -49,98 +50,95 @@ fn prepare_visible_battle_entry_with_music_reset(
         .battle
         .as_ref()
         .context("battle entry requires an active battle snapshot")?;
-            runtime_shell.battle_enemy_hp_at_player_send_out = Some(battle.enemy_pokemon.hp);
-            let active_player = battle
-                .active_player_party_index
-                .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
-                .context("battle entry requires its active party slot in the runtime snapshot")?;
-            let player_level = active_player.pokemon.level;
-            let environment = snapshot
-                .maps
-                .iter()
-                .find(|map| map.map_name == snapshot.overworld.map_name)
-                .with_context(|| {
-                    format!(
-                        "battle entry map {} is absent from the runtime map catalog",
-                        snapshot.overworld.map_name
-                    )
-                })?
-                .attributes
-                .environment
-                .as_deref()
-                .context("battle entry map has no source environment")?;
-            runtime_shell.visible_battle_transition = Some(VisibleBattleTransition {
-                frame: 0,
-                stronger_enemy: player_level.saturating_add(3) < battle.enemy_pokemon.level,
-                cave_environment: ["CAVE", "ENVIRONMENT_5", "DUNGEON"]
-                    .iter()
-                    .any(|candidate| environment.eq_ignore_ascii_case(candidate)),
-                trainer_battle: matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. }),
-                    });
-            let (player_hp, player_max_hp, player_pixels) = (
-                active_player.pokemon.hp,
-                active_player.pokemon.max_hp,
-                battle_hud_hp_pixels(active_player.pokemon.hp, active_player.pokemon.max_hp),
-            );
-            let enemy_pixels =
-                battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp);
-            runtime_shell.battle_hp_tween = Some(VisibleBattleHpTween {
-                player_hp,
-                player_target_hp: player_hp,
-                player_max_hp,
-                player_pixels,
-                player_target_pixels: player_pixels,
-                player_frames_until_step: 0,
-                enemy_pixels,
-                enemy_target_pixels: enemy_pixels,
-                enemy_frames_until_step: 0,
+    runtime_shell.battle_enemy_hp_at_player_send_out = Some(battle.enemy_pokemon.hp);
+    let active_player = battle
+        .active_player_party_index
+        .and_then(|index| snapshot.party.slots.iter().find(|slot| slot.index == index))
+        .context("battle entry requires its active party slot in the runtime snapshot")?;
+    let player_level = active_player.pokemon.level;
+    let environment = snapshot
+        .maps
+        .iter()
+        .find(|map| map.map_name == snapshot.overworld.map_name)
+        .with_context(|| {
+            format!(
+                "battle entry map {} is absent from the runtime map catalog",
+                snapshot.overworld.map_name
+            )
+        })?
+        .attributes
+        .environment
+        .as_deref()
+        .context("battle entry map has no source environment")?;
+    runtime_shell.visible_battle_transition = Some(VisibleBattleTransition {
+        frame: 0,
+        stronger_enemy: player_level.saturating_add(3) < battle.enemy_pokemon.level,
+        cave_environment: ["CAVE", "ENVIRONMENT_5", "DUNGEON"]
+            .iter()
+            .any(|candidate| environment.eq_ignore_ascii_case(candidate)),
+        trainer_battle: matches!(&battle.kind, crate::RuntimeBattleKind::Trainer { .. }),
+    });
+    let (player_hp, player_max_hp, player_pixels) = (
+        active_player.pokemon.hp,
+        active_player.pokemon.max_hp,
+        battle_hud_hp_pixels(active_player.pokemon.hp, active_player.pokemon.max_hp),
+    );
+    let enemy_pixels = battle_hud_hp_pixels(battle.enemy_pokemon.hp, battle.enemy_pokemon.max_hp);
+    runtime_shell.battle_hp_tween = Some(VisibleBattleHpTween {
+        player_hp,
+        player_target_hp: player_hp,
+        player_max_hp,
+        player_pixels,
+        player_target_pixels: player_pixels,
+        player_frames_until_step: 0,
+        enemy_pixels,
+        enemy_target_pixels: enemy_pixels,
+        enemy_frames_until_step: 0,
+    });
+    let player_name = active_player.pokemon.nickname.as_str();
+    match &battle.kind {
+        crate::RuntimeBattleKind::Trainer { trainer_name, .. } => {
+            runtime_shell
+                .battle_messages
+                .push_back(format!("{trainer_name}\nwants to battle!"));
+            runtime_shell.battle_messages.push_back(format!(
+                "{}\nsent out\n{}!",
+                trainer_name, battle.enemy_pokemon.nickname
+            ));
+            runtime_shell
+                .battle_messages
+                .push_back(format!("Go! {player_name}!"));
+        }
+        crate::RuntimeBattleKind::Wild { .. } | crate::RuntimeBattleKind::StaticWild { .. } => {
+            runtime_shell
+                .battle_messages
+                .push_back(format!("Wild {}\nappeared!", battle.enemy_pokemon.nickname));
+            if battle.battle_type != "BATTLETYPE_TUTORIAL" {
+                runtime_shell
+                    .battle_messages
+                    .push_back(format!("Go! {player_name}!"));
+            }
+        }
+    }
+    // Entry narration is already a retained battle presentation.
+    // Keep the exact battle-start snapshot behind those messages so
+    // the renderer never falls back to an absent scene (a blank/error
+    // frame) before the first text page is acknowledged.
+    runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
+    if battle.battle_type == "BATTLETYPE_TUTORIAL" {
+        let actions = visible_battle_action_ids(&snapshot, battle);
+        if let Some(option_index) = actions
+            .iter()
+            .position(|action| *action == VisibleBattleAction::Pack)
+        {
+            // ASM DudeAutoInput_DownA leaves the four-command menu
+            // visible with PACK selected before TutorialPack continues.
+            runtime_shell.battle_action_cursor = Some(MenuCursor {
+                surface_id: "battle:actions".to_string(),
+                option_index,
             });
-            let player_name = active_player.pokemon.nickname.as_str();
-            match &battle.kind {
-                crate::RuntimeBattleKind::Trainer { trainer_name, .. } => {
-                    runtime_shell
-                        .battle_messages
-                        .push_back(format!("{trainer_name}\nwants to battle!"));
-                    runtime_shell.battle_messages.push_back(format!(
-                        "{}\nsent out\n{}!",
-                        trainer_name, battle.enemy_pokemon.nickname
-                    ));
-                    runtime_shell
-                        .battle_messages
-                        .push_back(format!("Go! {player_name}!"));
-                }
-                crate::RuntimeBattleKind::Wild { .. }
-                | crate::RuntimeBattleKind::StaticWild { .. } => {
-                    runtime_shell.battle_messages.push_back(format!(
-                        "Wild {}\nappeared!",
-                        battle.enemy_pokemon.nickname
-                    ));
-                    if battle.battle_type != "BATTLETYPE_TUTORIAL" {
-                        runtime_shell
-                            .battle_messages
-                            .push_back(format!("Go! {player_name}!"));
-                    }
-                }
-            }
-            // Entry narration is already a retained battle presentation.
-            // Keep the exact battle-start snapshot behind those messages so
-            // the renderer never falls back to an absent scene (a blank/error
-            // frame) before the first text page is acknowledged.
-            runtime_shell.battle_message_scene = Some(Box::new(snapshot.clone()));
-            if battle.battle_type == "BATTLETYPE_TUTORIAL" {
-                let actions = visible_battle_action_ids(&snapshot, battle);
-                if let Some(option_index) = actions
-                    .iter()
-                    .position(|action| *action == VisibleBattleAction::Pack)
-                {
-                    // ASM DudeAutoInput_DownA leaves the four-command menu
-                    // visible with PACK selected before TutorialPack continues.
-                    runtime_shell.battle_action_cursor = Some(MenuCursor {
-                        surface_id: "battle:actions".to_string(),
-                        option_index,
-                    });
-                }
-            }
+        }
+    }
     runtime_shell.battle_entry_messages_remaining = runtime_shell.battle_messages.len();
     Ok(())
 }
@@ -172,8 +170,7 @@ fn visible_battle_transition_total_frames(transition: &VisibleBattleTransition) 
 }
 
 fn visible_battle_transition_is_terminal(transition: &VisibleBattleTransition) -> bool {
-    transition.frame.saturating_add(1)
-        >= visible_battle_transition_total_frames(transition)
+    transition.frame.saturating_add(1) >= visible_battle_transition_total_frames(transition)
 }
 
 fn spawn_visible_battle_transition(
@@ -183,10 +180,22 @@ fn spawn_visible_battle_transition(
     priority_texture: Option<Handle<Image>>,
 ) {
     const POKEBALL_PATTERN: [&str; 16] = [
-        "......XXXX......", "....XXXXXXXX....", "..XXXX....XXXX..", "..XX........XX..",
-        ".XX..........XX.", ".XX...XXXX...XX.", "XX...XX..XX...XX", "XXXXXX....XXXXXX",
-        "XXXXXX....XXXXXX", "XX...XX..XX...XX", ".XX...XXXX...XX.", ".XX..........XX.",
-        "..XX........XX..", "..XXXX....XXXX..", "....XXXXXXXX....", "......XXXX......",
+        "......XXXX......",
+        "....XXXXXXXX....",
+        "..XXXX....XXXX..",
+        "..XX........XX..",
+        ".XX..........XX.",
+        ".XX...XXXX...XX.",
+        "XX...XX..XX...XX",
+        "XXXXXX....XXXXXX",
+        "XXXXXX....XXXXXX",
+        "XX...XX..XX...XX",
+        ".XX...XXXX...XX.",
+        ".XX..........XX.",
+        "..XX........XX..",
+        "..XXXX....XXXX..",
+        "....XXXXXXXX....",
+        "......XXXX......",
     ];
     // battle-transition.ts averages the four packed BGP crumbs and converts
     // their distance from shade 3 into a white-overlay alpha.
@@ -232,12 +241,7 @@ fn spawn_visible_battle_transition(
         commands.spawn((
             SpriteBundle {
                 sprite: Sprite {
-                    color: Color::srgba(
-                        248.0 / 255.0,
-                        248.0 / 255.0,
-                        248.0 / 255.0,
-                        alpha,
-                    ),
+                    color: Color::srgba(248.0 / 255.0, 248.0 / 255.0, 248.0 / 255.0, alpha),
                     custom_size: Some(Vec2::new(PLAYFIELD_WIDTH, PLAYFIELD_HEIGHT)),
                     ..default()
                 },
@@ -402,8 +406,7 @@ fn spawn_visible_battle_transition(
                                 },
                                 transform: Transform::from_xyz(
                                     x,
-                                    PLAYFIELD_TOP
-                                        - (source_y as f32 + 0.5) * source_scale,
+                                    PLAYFIELD_TOP - (source_y as f32 + 0.5) * source_scale,
                                     2.65,
                                 ),
                                 ..default()
@@ -428,8 +431,7 @@ fn spawn_visible_battle_transition(
                                     },
                                     transform: Transform::from_xyz(
                                         x,
-                                        PLAYFIELD_TOP
-                                            - (source_y as f32 + 0.5) * source_scale,
+                                        PLAYFIELD_TOP - (source_y as f32 + 0.5) * source_scale,
                                         2.66,
                                     ),
                                     ..default()
@@ -468,13 +470,26 @@ fn spawn_visible_battle_transition_wedge(commands: &mut Commands, wedge_index: u
     const WEDGE_5: &[i8] = &[4, 0, 3, 0, 3, 0, 2, 0, 2, 0, 1, 0, 1, 0, 1];
     // quadrant bits match battle_transition.asm: bit 0 = right, bit 1 = lower.
     const ENTRIES: [(u8, &[i8], i8, i8); 20] = [
-        (0, WEDGE_1, 1, 6), (0, WEDGE_2, 0, 3), (0, WEDGE_3, 1, 0),
-        (0, WEDGE_4, 5, 0), (0, WEDGE_5, 9, 0), (1, WEDGE_5, 10, 0),
-        (1, WEDGE_4, 14, 0), (1, WEDGE_3, 18, 0), (1, WEDGE_2, 19, 3),
-        (1, WEDGE_1, 18, 6), (3, WEDGE_1, 18, 11), (3, WEDGE_2, 19, 14),
-        (3, WEDGE_3, 18, 17), (3, WEDGE_4, 14, 17), (3, WEDGE_5, 10, 17),
-        (2, WEDGE_5, 9, 17), (2, WEDGE_4, 5, 17), (2, WEDGE_3, 1, 17),
-        (2, WEDGE_2, 0, 14), (2, WEDGE_1, 1, 11),
+        (0, WEDGE_1, 1, 6),
+        (0, WEDGE_2, 0, 3),
+        (0, WEDGE_3, 1, 0),
+        (0, WEDGE_4, 5, 0),
+        (0, WEDGE_5, 9, 0),
+        (1, WEDGE_5, 10, 0),
+        (1, WEDGE_4, 14, 0),
+        (1, WEDGE_3, 18, 0),
+        (1, WEDGE_2, 19, 3),
+        (1, WEDGE_1, 18, 6),
+        (3, WEDGE_1, 18, 11),
+        (3, WEDGE_2, 19, 14),
+        (3, WEDGE_3, 18, 17),
+        (3, WEDGE_4, 14, 17),
+        (3, WEDGE_5, 10, 17),
+        (2, WEDGE_5, 9, 17),
+        (2, WEDGE_4, 5, 17),
+        (2, WEDGE_3, 1, 17),
+        (2, WEDGE_2, 0, 14),
+        (2, WEDGE_1, 1, 11),
     ];
     let Some(&(quadrant, data, mut x, mut y)) = ENTRIES.get(wedge_index) else {
         return;
@@ -488,8 +503,7 @@ fn spawn_visible_battle_transition_wedge(commands: &mut Commands, wedge_index: u
         let row_start_x = x;
         for _ in 0..width {
             if (0..20).contains(&x) && (0..18).contains(&y) {
-                let (tile_x, tile_y) =
-                    render_tile_playfield_position(i16::from(x), i16::from(y));
+                let (tile_x, tile_y) = render_tile_playfield_position(i16::from(x), i16::from(y));
                 commands.spawn((
                     SpriteBundle {
                         sprite: Sprite {
@@ -615,19 +629,14 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
         let species = visible_move_animation_user_species(runtime_shell, player_move)
             .context("battle animation cry has no visible user species")?;
         for selector in due_cries {
-            queue_visible_pokemon_animation_cry(
-                runtime_shell,
-                &species,
-                selector,
-            )?;
+            queue_visible_pokemon_animation_cry(runtime_shell, &species, selector)?;
         }
     }
     let finished_trigger = {
         let Some(animation) = runtime_shell.visible_move_animations.front_mut() else {
             return Ok(());
         };
-        (animation.frame >= animation.total_frames)
-            .then(|| animation.trigger_message.clone())
+        (animation.frame >= animation.total_frames).then(|| animation.trigger_message.clone())
     };
     if let Some(trigger_message) = finished_trigger {
         runtime_shell.visible_move_animations.pop_front();
@@ -636,12 +645,13 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
             .front()
             .is_some_and(|message| message == &trigger_message);
         if completed_before_trigger_message {
-            let continues_same_command = runtime_shell
-                .visible_move_animations
-                .front()
-                .is_some_and(|animation| {
-                    !animation.started && animation.trigger_message == trigger_message
-                });
+            let continues_same_command =
+                runtime_shell
+                    .visible_move_animations
+                    .front()
+                    .is_some_and(|animation| {
+                        !animation.started && animation.trigger_message == trigger_message
+                    });
             let mut applied_scene = false;
             if let Some(index) = runtime_shell
                 .pending_battle_scenes_after_message
@@ -667,12 +677,13 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
             mark_runtime_snapshot_dirty(runtime_shell);
             return Ok(());
         }
-        let continues_same_command = runtime_shell
-            .visible_move_animations
-            .front()
-            .is_some_and(|animation| {
-                !animation.started && animation.trigger_message == trigger_message
-            });
+        let continues_same_command =
+            runtime_shell
+                .visible_move_animations
+                .front()
+                .is_some_and(|animation| {
+                    !animation.started && animation.trigger_message == trigger_message
+                });
         if continues_same_command {
             let intermediate_scene = runtime_shell
                 .pending_battle_scenes_after_message
@@ -693,7 +704,11 @@ fn advance_visible_move_animation(runtime_shell: &mut BevyRuntimeShell) -> Resul
                     .unwrap()
                     .waiting_for_hp = true;
             } else {
-                runtime_shell.visible_move_animations.front_mut().unwrap().started = true;
+                runtime_shell
+                    .visible_move_animations
+                    .front_mut()
+                    .unwrap()
+                    .started = true;
             }
         } else {
             runtime_shell.battle_message_scenes.pop_front();
@@ -736,7 +751,11 @@ fn visible_move_animation_user_species(
         );
     }
     let active_index = battle.active_player_party_index?;
-    let slot = scene.party.slots.iter().find(|slot| slot.index == active_index)?;
+    let slot = scene
+        .party
+        .slots
+        .iter()
+        .find(|slot| slot.index == active_index)?;
     Some(
         battle
             .player_transformed_species
@@ -773,8 +792,9 @@ fn advance_visible_send_out_animation(runtime_shell: &mut BevyRuntimeShell) -> R
                 .unwrap_or(0);
             start_visible_enemy_frontpic_animation(runtime_shell, speed)?;
         }
-        if let Some((species_id, reason, _)) =
-            runtime_shell.pending_battle_cries_after_messages.pop_front()
+        if let Some((species_id, reason, _)) = runtime_shell
+            .pending_battle_cries_after_messages
+            .pop_front()
         {
             queue_visible_pokemon_cry(runtime_shell, &species_id, &reason)?;
         }
@@ -797,7 +817,12 @@ fn visible_send_out_side_is_shiny(
             let Some(active_index) = battle.active_player_party_index else {
                 return Ok(false);
             };
-            let Some(slot) = snapshot.party.slots.iter().find(|slot| slot.index == active_index) else {
+            let Some(slot) = snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.index == active_index)
+            else {
                 return Ok(false);
             };
             &slot.pokemon
@@ -845,7 +870,12 @@ fn advance_visible_frontpic_animation(runtime_shell: &mut BevyRuntimeShell) -> R
         .presentation
         .pokemon_frontpic_anim
         .get(&animation.species_id)
-        .with_context(|| format!("missing exported frontpic animation for {}", animation.species_id))?
+        .with_context(|| {
+            format!(
+                "missing exported frontpic animation for {}",
+                animation.species_id
+            )
+        })?
         .clone();
     if animation.wait > 0 {
         animation.wait -= 1;
@@ -878,9 +908,8 @@ fn advance_visible_frontpic_animation(runtime_shell: &mut BevyRuntimeShell) -> R
             "frame" => {
                 animation.frame = command.frame.unwrap_or(0);
                 let duration = command.duration.unwrap_or(0);
-                animation.wait = duration.saturating_add(
-                    duration.saturating_mul(animation.speed) / 16,
-                );
+                animation.wait =
+                    duration.saturating_add(duration.saturating_mul(animation.speed) / 16);
                 runtime_shell.visible_frontpic_animation = Some(animation);
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(());
@@ -1721,7 +1750,10 @@ fn switch_visible_pc_move_container(
         option_index: 0,
     });
     mark_runtime_snapshot_dirty(runtime_shell);
-    set_shell_action_status(runtime_shell, format!("BOX {}", switched.box_index_after + 1));
+    set_shell_action_status(
+        runtime_shell,
+        format!("BOX {}", switched.box_index_after + 1),
+    );
     Ok(())
 }
 
@@ -1843,7 +1875,11 @@ fn deposit_visible_party_pokemon(runtime_shell: &mut BevyRuntimeShell) -> Result
         deposit.state_checksum
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
-    queue_visible_pokemon_cry(runtime_shell, &deposit.pokemon.species.id, "bill_pc_deposit")?;
+    queue_visible_pokemon_cry(
+        runtime_shell,
+        &deposit.pokemon.species.id,
+        "bill_pc_deposit",
+    )?;
     set_shell_action_status(
         runtime_shell,
         format!(
@@ -1926,7 +1962,11 @@ fn withdraw_visible_pc_pokemon(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         withdraw.state_checksum
     ));
     trim_event_log(&mut runtime_shell.last_audio_events);
-    queue_visible_pokemon_cry(runtime_shell, &withdraw.pokemon.species.id, "bill_pc_withdraw")?;
+    queue_visible_pokemon_cry(
+        runtime_shell,
+        &withdraw.pokemon.species.id,
+        "bill_pc_withdraw",
+    )?;
     set_shell_action_status(
         runtime_shell,
         format!(
@@ -1971,9 +2011,11 @@ fn advance_visible_pc_transfer_sequence(
     runtime_shell: &mut BevyRuntimeShell,
     elapsed_frames: u32,
 ) -> Result<()> {
-    if runtime_shell.pc_transfer_sequence.as_ref().is_some_and(|active| {
-        active.phase == VisiblePcTransferPhase::RefusalWaitSfx
-    }) {
+    if runtime_shell
+        .pc_transfer_sequence
+        .as_ref()
+        .is_some_and(|active| active.phase == VisiblePcTransferPhase::RefusalWaitSfx)
+    {
         if !visible_wait_sfx_finished(runtime_shell) {
             return Ok(());
         }
@@ -2358,7 +2400,12 @@ fn request_visible_current_box_pokemon_release(runtime_shell: &mut BevyRuntimeSh
         .find(|slot| slot.index == box_slot)
         .context("selected PC release slot is missing")?;
     if pokemon.pokemon.is_egg
-        || pokemon.pokemon.species.id.trim().eq_ignore_ascii_case("EGG")
+        || pokemon
+            .pokemon
+            .species
+            .id
+            .trim()
+            .eq_ignore_ascii_case("EGG")
     {
         runtime_shell.pc_notice = Some("No releasing EGGS!".to_string());
         mark_runtime_snapshot_dirty(runtime_shell);
@@ -2389,7 +2436,10 @@ fn request_visible_current_box_pokemon_release(runtime_shell: &mut BevyRuntimeSh
 fn open_visible_bill_pc_pokemon_actions(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let snapshot = runtime_shell.shell.snapshot()?;
     let current_box = current_storage_box(&snapshot)?;
-    anyhow::ensure!(!current_box.slots.is_empty(), "current PC box has no Pokemon");
+    anyhow::ensure!(
+        !current_box.slots.is_empty(),
+        "current PC box has no Pokemon"
+    );
     selected_current_box_slot_index(runtime_shell)?;
     runtime_shell.bill_pc_pokemon_action_cursor = Some(MenuCursor {
         surface_id: "pc:pokemon-actions".to_string(),
@@ -2432,12 +2482,9 @@ fn confirm_visible_pc_release_prompt(runtime_shell: &mut BevyRuntimeShell) -> Re
         .pending_pc_release
         .clone()
         .context("PC release confirmation is not active")?;
-    let selected = strict_readonly_cursor_index(
-        &runtime_shell.yes_no_cursor,
-        "pc:release-confirm",
-        2,
-    )
-    .context("PC release confirmation requires a valid cursor")?;
+    let selected =
+        strict_readonly_cursor_index(&runtime_shell.yes_no_cursor, "pc:release-confirm", 2)
+            .context("PC release confirmation requires a valid cursor")?;
     runtime_shell.pending_pc_release = None;
     runtime_shell.yes_no_cursor = None;
     if selected != 0 {
@@ -2715,7 +2762,6 @@ fn commit_visible_blackout_recovery(runtime_shell: &mut BevyRuntimeShell) -> Res
     // the 40-frame white hold. MAPSETUP_WARP then reveals the destination;
     // ordinary scene scripts must not run under the still-white palette.
     reset_visible_navigation_state(runtime_shell);
-    suppress_visible_map_name_sign_for_current_map(runtime_shell)?;
     queue_visible_current_music(runtime_shell)?;
     runtime_shell.battle_message_scene = None;
     mark_runtime_snapshot_dirty(runtime_shell);
@@ -2915,7 +2961,8 @@ fn open_visible_day_care_for_script_command(
     source_script: &str,
     command_index: usize,
 ) -> Result<bool> {
-    let Some(routine) = compiled_special_routine_at(runtime_shell, source_script, command_index)? else {
+    let Some(routine) = compiled_special_routine_at(runtime_shell, source_script, command_index)?
+    else {
         return Ok(false);
     };
     if routine == "DayCareManOutside" {
@@ -2962,7 +3009,11 @@ fn open_visible_day_care_for_script_command(
         _ => return Ok(false),
     };
     let snapshot = runtime_shell.shell.snapshot()?;
-    let resident = if caretaker == "man" { &snapshot.day_care.man } else { &snapshot.day_care.lady };
+    let resident = if caretaker == "man" {
+        &snapshot.day_care.man
+    } else {
+        &snapshot.day_care.lady
+    };
     let owner = if caretaker == "man" { "MAN" } else { "LADY" };
     if let Some(pokemon) = resident.pokemon.as_ref() {
         let nickname = if pokemon.nickname.trim().is_empty() {
@@ -2970,7 +3021,11 @@ fn open_visible_day_care_for_script_command(
         } else {
             pokemon.nickname.clone()
         };
-        let gained = pokemon.level.saturating_sub(resident.initial_level);
+        let current_level = crate::core::systems::special_routines::day_care_level_from_experience(
+            pokemon,
+            runtime_shell.shell.runtime().growth_rates(),
+        )?;
+        let gained = current_level.saturating_sub(pokemon.level);
         let (text_target, confirm_withdrawal) = if gained == 0 {
             ("_BackAlreadyText", true)
         } else {
@@ -3019,11 +3074,10 @@ fn open_visible_day_care_for_script_command(
         } else {
             RuntimeDayCareCaretaker::Lady
         };
-        let opened = runtime_shell.shell.use_day_care(
-            caretaker_kind,
-            RuntimeDayCareAction::Open,
-            None,
-        )?;
+        let opened =
+            runtime_shell
+                .shell
+                .use_day_care(caretaker_kind, RuntimeDayCareAction::Open, None)?;
         runtime_shell.last_audio_events.push(format!(
             "day-care introduction outcome={:?} checksum={:?}",
             opened.outcome.effect, opened.state_checksum
@@ -3109,11 +3163,13 @@ fn open_visible_script_party_selection_for_command(
             Some("OlderHaircutBrother") => PendingScriptPartySelection::OlderHaircutBrother,
             Some("YoungerHaircutBrother") => PendingScriptPartySelection::YoungerHaircutBrother,
             Some("DaisysGrooming") => PendingScriptPartySelection::DaisysGrooming,
-            Some("MoveDeletion") => PendingScriptPartySelection::MoveDeletion {
-                party_index: None,
-            },
+            Some("MoveDeletion") => PendingScriptPartySelection::MoveDeletion { party_index: None },
             Some("MoveTutor") => {
-                let value = runtime_shell.shell.snapshot()?.script_events.script_value
+                let value = runtime_shell
+                    .shell
+                    .snapshot()?
+                    .script_events
+                    .script_value
                     .context("MoveTutor has no setval move selector")?;
                 let move_id = match value.as_str() {
                     "1" | "MOVETUTOR_FLAMETHROWER" => "FLAMETHROWER",
@@ -3135,11 +3191,9 @@ fn open_visible_script_party_selection_for_command(
     )?;
     if let PendingScriptPartySelection::NpcTrade { trade_id, .. } = &pending {
         let snapshot = runtime_shell.shell.snapshot()?;
-        let rule = snapshot
-            .special
-            .npc_trades
-            .get(trade_id)
-            .with_context(|| format!("NPC trade {trade_id} is missing from the runtime snapshot"))?;
+        let rule = snapshot.special.npc_trades.get(trade_id).with_context(|| {
+            format!("NPC trade {trade_id} is missing from the runtime snapshot")
+        })?;
         runtime_shell.pc_notice = Some(visible_npc_trade_intro_text(rule));
         runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::NpcTrade(pending));
         runtime_shell.yes_no_cursor = Some(MenuCursor {
@@ -3156,9 +3210,7 @@ fn open_visible_script_party_selection_for_command(
             | PendingScriptPartySelection::MoveDeletion { party_index: None }
     ) {
         let (label, text_target) = match &pending {
-            PendingScriptPartySelection::NameRater => {
-                ("NameRaterHelloText", "_NameRaterHelloText")
-            }
+            PendingScriptPartySelection::NameRater => ("NameRaterHelloText", "_NameRaterHelloText"),
             PendingScriptPartySelection::MoveDeletion { .. } => {
                 ("DeleterIntroText", "_DeleterIntroText")
             }
@@ -3224,12 +3276,7 @@ fn visible_exported_special_text_boundaries(
     label: &str,
     text_target: &str,
 ) -> Result<VecDeque<SpecialBoundaryDisplay>> {
-    visible_exported_special_text_boundaries_with_buffer(
-        runtime_shell,
-        label,
-        text_target,
-        None,
-    )
+    visible_exported_special_text_boundaries_with_buffer(runtime_shell, label, text_target, None)
 }
 
 fn visible_exported_special_text_boundaries_with_buffer(
@@ -3290,19 +3337,15 @@ fn visible_move_tutor_text_boundaries(
     nickname: &str,
     move_id: &str,
 ) -> Result<VecDeque<SpecialBoundaryDisplay>> {
-    Ok(visible_move_learning_text_pages(
-        runtime_shell,
-        text_target,
-        nickname,
-        nickname,
-        move_id,
-    )?
-    .into_iter()
-    .map(|page| SpecialBoundaryDisplay {
-        label: label.to_string(),
-        details: vec![page],
-    })
-    .collect())
+    Ok(
+        visible_move_learning_text_pages(runtime_shell, text_target, nickname, nickname, move_id)?
+            .into_iter()
+            .map(|page| SpecialBoundaryDisplay {
+                label: label.to_string(),
+                details: vec![page],
+            })
+            .collect(),
+    )
 }
 
 fn visible_move_tutor_forgot_text_boundaries(
@@ -3334,6 +3377,7 @@ fn install_visible_move_learn_result_sequence(
     runtime_shell.special_boundary = None;
     runtime_shell.special_boundary_queue.clear();
     runtime_shell.visible_special_text_pause_frames = None;
+    runtime_shell.visible_internal_special_delay_frames = None;
     if let Some(forgotten_move_id) = forgotten_move_id {
         let mut count = visible_move_tutor_text_boundaries(
             runtime_shell,
@@ -3347,11 +3391,8 @@ fn install_visible_move_learn_result_sequence(
             count.is_empty(),
             "move-learning count rendered multiple source pages"
         );
-        let mut forgot = visible_move_tutor_forgot_text_boundaries(
-            runtime_shell,
-            nickname,
-            forgotten_move_id,
-        )?;
+        let mut forgot =
+            visible_move_tutor_forgot_text_boundaries(runtime_shell, nickname, forgotten_move_id)?;
         forgot
             .front_mut()
             .context("move-learning forgot text rendered no source pages")?
@@ -3474,19 +3515,16 @@ fn visible_buena_prize_choices(snapshot: &RuntimeShellSnapshot) -> Result<Vec<(S
 
 const VISIBLE_SLOT_REELS: [[&str; 15]; 3] = [
     [
-        "SEVEN", "CHERRY", "STARYU", "PIKACHU", "SQUIRTLE", "SEVEN", "CHERRY",
-        "STARYU", "PIKACHU", "SQUIRTLE", "POKEBALL", "CHERRY", "STARYU", "PIKACHU",
-        "SQUIRTLE",
+        "SEVEN", "CHERRY", "STARYU", "PIKACHU", "SQUIRTLE", "SEVEN", "CHERRY", "STARYU", "PIKACHU",
+        "SQUIRTLE", "POKEBALL", "CHERRY", "STARYU", "PIKACHU", "SQUIRTLE",
     ],
     [
-        "SEVEN", "PIKACHU", "CHERRY", "SQUIRTLE", "STARYU", "POKEBALL", "PIKACHU",
-        "CHERRY", "SQUIRTLE", "STARYU", "POKEBALL", "PIKACHU", "CHERRY", "SQUIRTLE",
-        "STARYU",
+        "SEVEN", "PIKACHU", "CHERRY", "SQUIRTLE", "STARYU", "POKEBALL", "PIKACHU", "CHERRY",
+        "SQUIRTLE", "STARYU", "POKEBALL", "PIKACHU", "CHERRY", "SQUIRTLE", "STARYU",
     ],
     [
-        "SEVEN", "PIKACHU", "CHERRY", "SQUIRTLE", "STARYU", "PIKACHU", "CHERRY",
-        "SQUIRTLE", "STARYU", "PIKACHU", "POKEBALL", "CHERRY", "SQUIRTLE", "STARYU",
-        "PIKACHU",
+        "SEVEN", "PIKACHU", "CHERRY", "SQUIRTLE", "STARYU", "PIKACHU", "CHERRY", "SQUIRTLE",
+        "STARYU", "PIKACHU", "POKEBALL", "CHERRY", "SQUIRTLE", "STARYU", "PIKACHU",
     ],
 ];
 
@@ -3499,14 +3537,11 @@ fn visible_slot_windows(offsets: [usize; 3]) -> [[String; 3]; 3] {
 fn visible_slot_has_match(machine: &VisibleSlotMachine) -> bool {
     let windows = &machine.windows;
     let same = |a: (usize, usize), b: (usize, usize), c: (usize, usize)| {
-        windows[a.0][a.1] == windows[b.0][b.1]
-            && windows[b.0][b.1] == windows[c.0][c.1]
+        windows[a.0][a.1] == windows[b.0][b.1] && windows[b.0][b.1] == windows[c.0][c.1]
     };
     same((0, 1), (1, 1), (2, 1))
-        || machine.bet >= 2
-            && (same((0, 0), (1, 0), (2, 0)) || same((0, 2), (1, 2), (2, 2)))
-        || machine.bet >= 3
-            && (same((0, 2), (1, 1), (2, 0)) || same((0, 0), (1, 1), (2, 2)))
+        || machine.bet >= 2 && (same((0, 0), (1, 0), (2, 0)) || same((0, 2), (1, 2), (2, 2)))
+        || machine.bet >= 3 && (same((0, 2), (1, 1), (2, 0)) || same((0, 0), (1, 1), (2, 2)))
 }
 
 fn open_visible_slot_machine_for_script_command(
@@ -3531,11 +3566,37 @@ fn open_visible_slot_machine_for_script_command(
         None
     };
     if let Some((label, details)) = unavailable {
-        runtime_shell.special_boundary = Some(SpecialBoundaryDisplay { label: label.to_string(), details });
+        runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+            label: label.to_string(),
+            details,
+        });
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(true);
     }
     clear_visible_slot_runtime_state(runtime_shell);
+    let lucky = runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .script_value
+        .as_deref()
+        == Some("1");
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .pending_slot_machine_input = Some(SlotMachineInput::Enter { lucky });
+    let entered = runtime_shell
+        .shell
+        .apply_declared_special_routine("SlotMachine")?;
+    if !matches!(
+        entered.outcome.effect,
+        SpecialRoutineEffect::SlotMachineEntered { .. }
+    ) {
+        anyhow::bail!("SlotMachine entry returned a different special effect");
+    }
     let offsets = [14; 3];
     runtime_shell.visible_slot_machine = Some(VisibleSlotMachine {
         phase: VisibleSlotMachinePhase::Betting,
@@ -3560,7 +3621,10 @@ fn open_visible_slot_machine_for_script_command(
 }
 
 fn change_visible_slot_machine_bet(runtime_shell: &mut BevyRuntimeShell, delta: i8) -> Result<()> {
-    let machine = runtime_shell.visible_slot_machine.as_mut().context("no slot machine is open")?;
+    let machine = runtime_shell
+        .visible_slot_machine
+        .as_mut()
+        .context("no slot machine is open")?;
     match machine.phase {
         VisibleSlotMachinePhase::Betting => {
             machine.bet = (machine.bet as i8 + delta).clamp(1, 3) as u8;
@@ -3596,10 +3660,26 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     match phase {
         VisibleSlotMachinePhase::Result => {
             if animation == VisibleSlotMachineAnimation::AwaitResult {
+                runtime_shell
+                    .shell
+                    .session_mut()
+                    .state
+                    .script_runtime
+                    .pending_slot_machine_input = Some(SlotMachineInput::AcknowledgeResult);
+                let result = runtime_shell
+                    .shell
+                    .apply_declared_special_routine("SlotMachine")?;
+                let SpecialRoutineEffect::SlotMachineResultAcknowledged { can_play_again, .. } =
+                    result.outcome.effect
+                else {
+                    anyhow::bail!(
+                        "SlotMachine result acknowledgement returned a different special effect"
+                    );
+                };
                 let machine = runtime_shell.visible_slot_machine.as_mut().unwrap();
                 machine.animation = VisibleSlotMachineAnimation::None;
                 machine.yes_no_index = 0;
-                if coins == 0 {
+                if !can_play_again {
                     machine.phase = VisibleSlotMachinePhase::RanOut;
                     machine.message = "DARN… RAN OUT OF\nCOINS…".to_string();
                 } else {
@@ -3613,6 +3693,21 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         VisibleSlotMachinePhase::PlayAgain => {
             if yes_no_index == 1 {
                 return close_visible_slot_machine(runtime_shell);
+            }
+            runtime_shell
+                .shell
+                .session_mut()
+                .state
+                .script_runtime
+                .pending_slot_machine_input = Some(SlotMachineInput::Continue);
+            let result = runtime_shell
+                .shell
+                .apply_declared_special_routine("SlotMachine")?;
+            if !matches!(
+                result.outcome.effect,
+                SpecialRoutineEffect::SlotMachineReplayAccepted { .. }
+            ) {
+                anyhow::bail!("SlotMachine replay returned a different special effect");
             }
             let machine = runtime_shell.visible_slot_machine.as_mut().unwrap();
             machine.phase = VisibleSlotMachinePhase::Betting;
@@ -3639,10 +3734,13 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         VisibleSlotMachinePhase::Quitting => return Ok(()),
         VisibleSlotMachinePhase::RanOut => {
             if animation == VisibleSlotMachineAnimation::None {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::RanOutDelay {
-                        frames_remaining: 60,
-                    };
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::RanOutDelay {
+                    frames_remaining: 60,
+                };
                 mark_runtime_snapshot_dirty(runtime_shell);
             }
             return Ok(());
@@ -3650,27 +3748,40 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         VisibleSlotMachinePhase::Betting => {}
     }
     if coins < u16::from(bet) {
-        runtime_shell.visible_slot_machine.as_mut().unwrap().message = "NEED MORE COINS".to_string();
+        runtime_shell.visible_slot_machine.as_mut().unwrap().message =
+            "NEED MORE COINS".to_string();
         queue_visible_shell_sound_effect(runtime_shell, "SFX_WRONG")?;
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
     }
+    let lucky = runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .slot_machine
+        .as_ref()
+        .map(|machine| machine.lucky)
+        .unwrap_or_else(|| {
+            runtime_shell
+                .shell
+                .session()
+                .state()
+                .script_runtime
+                .script_value
+                .as_deref()
+                == Some("1")
+        });
     runtime_shell
         .shell
         .session_mut()
         .state
         .script_runtime
-        .variables
-        .insert("slot_action".to_string(), "start".to_string());
-    runtime_shell
-        .shell
-        .session_mut()
-        .state
-        .script_runtime
-        .variables
-        .insert("slot_bet".to_string(), bet.to_string());
+        .pending_slot_machine_input = Some(SlotMachineInput::Start { bet, lucky });
     queue_visible_shell_sound_effect(runtime_shell, "SFX_SLOT_MACHINE_START")?;
-    let result = runtime_shell.shell.apply_declared_special_routine("SlotMachine")?;
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("SlotMachine")?;
     let SpecialRoutineEffect::SlotMachineStarted {
         coins,
         offsets,
@@ -3680,7 +3791,10 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
     else {
         anyhow::bail!("SlotMachine returned a different special effect");
     };
-    let machine = runtime_shell.visible_slot_machine.as_mut().context("slot machine closed during spin")?;
+    let machine = runtime_shell
+        .visible_slot_machine
+        .as_mut()
+        .context("slot machine closed during spin")?;
     machine.coins = coins;
     machine.payout = 0;
     machine.offsets = offsets;
@@ -3699,20 +3813,24 @@ fn spin_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 }
 
 fn resolve_visible_slot_stop(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let (bet, reel, offsets) = runtime_shell
+    let (reel, offsets) = runtime_shell
         .visible_slot_machine
         .as_ref()
-        .map(|machine| (machine.bet, machine.next_reel, machine.offsets))
+        .map(|machine| (machine.next_reel, machine.offsets))
         .context("no slot machine is open")?;
-    let variables = &mut runtime_shell.shell.session_mut().state.script_runtime.variables;
-    variables.insert("slot_action".to_string(), "stop".to_string());
-    variables.insert("slot_bet".to_string(), bet.to_string());
-    variables.insert("slot_reel".to_string(), reel.to_string());
-    variables.insert(
-        "slot_offsets".to_string(),
-        offsets.map(|offset| offset.to_string()).join(","),
-    );
-    let result = runtime_shell.shell.apply_declared_special_routine("SlotMachine")?;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .pending_slot_machine_input = Some(SlotMachineInput::StopReel {
+        reel,
+        offsets: offsets
+            .map(|offset| u8::try_from(offset).expect("visible Slot Machine offset fits byte")),
+    });
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("SlotMachine")?;
     let SpecialRoutineEffect::SlotMachineReelStopped {
         reel,
         mode,
@@ -3754,14 +3872,14 @@ fn resolve_visible_slot_stop(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
                 terminal_delay: 0,
             }
         }
-        VisibleSlotStopMode::Slow
-        | VisibleSlotStopMode::Golem
-        | VisibleSlotStopMode::Chansey => VisibleSlotMachineAnimation::SpecialPrepare {
-            mode,
-            target,
-            start_offset: animation_start_offset,
-            count: animation_count,
-        },
+        VisibleSlotStopMode::Slow | VisibleSlotStopMode::Golem | VisibleSlotStopMode::Chansey => {
+            VisibleSlotMachineAnimation::SpecialPrepare {
+                mode,
+                target,
+                start_offset: animation_start_offset,
+                count: animation_count,
+            }
+        }
     };
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -3853,9 +3971,10 @@ fn resolve_visible_slot_result(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         .session_mut()
         .state
         .script_runtime
-        .variables
-        .insert("slot_action".to_string(), "result".to_string());
-    let result = runtime_shell.shell.apply_declared_special_routine("SlotMachine")?;
+        .pending_slot_machine_input = Some(SlotMachineInput::ResolveResult);
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("SlotMachine")?;
     let SpecialRoutineEffect::SlotMachineResult {
         payout,
         matched_symbol,
@@ -3881,11 +4000,17 @@ fn resolve_visible_slot_result(runtime_shell: &mut BevyRuntimeShell) -> Result<(
     };
     if let Some(sound) = result_sound {
         queue_visible_shell_sound_effect(runtime_shell, sound)?;
-        runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-            VisibleSlotMachineAnimation::WaitResult { payout };
+        runtime_shell
+            .visible_slot_machine
+            .as_mut()
+            .unwrap()
+            .animation = VisibleSlotMachineAnimation::WaitResult { payout };
     } else {
-        runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-            VisibleSlotMachineAnimation::AwaitResult;
+        runtime_shell
+            .visible_slot_machine
+            .as_mut()
+            .unwrap()
+            .animation = VisibleSlotMachineAnimation::AwaitResult;
     }
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -3904,10 +4029,20 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
             requested_stop,
         } => {
             let selected = usize::from(
-                runtime_shell.visible_slot_machine.as_ref().unwrap().next_reel - 1,
+                runtime_shell
+                    .visible_slot_machine
+                    .as_ref()
+                    .unwrap()
+                    .next_reel
+                    - 1,
             );
             if requested_stop
-                && runtime_shell.visible_slot_machine.as_ref().unwrap().spin_ticks[selected] == 0
+                && runtime_shell
+                    .visible_slot_machine
+                    .as_ref()
+                    .unwrap()
+                    .spin_ticks[selected]
+                    == 0
             {
                 resolve_visible_slot_stop(runtime_shell)?;
                 return advance_visible_slot_machine_animation(runtime_shell);
@@ -3957,13 +4092,16 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
             frames_remaining,
         } => {
             if frames_remaining > 1 {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::SpecialWait {
-                        mode,
-                        target,
-                        count,
-                        frames_remaining: frames_remaining - 1,
-                    };
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::SpecialWait {
+                    mode,
+                    target,
+                    count,
+                    frames_remaining: frames_remaining - 1,
+                };
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(());
             }
@@ -4028,10 +4166,7 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
                     frames_until_step: 15,
                 };
                 if remaining > 0 {
-                    queue_visible_shell_sound_effect(
-                        runtime_shell,
-                        "SFX_GOT_SAFARI_BALLS",
-                    )?;
+                    queue_visible_shell_sound_effect(runtime_shell, "SFX_GOT_SAFARI_BALLS")?;
                 }
             }
             mark_runtime_snapshot_dirty(runtime_shell);
@@ -4072,8 +4207,7 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
                         if let Some(VisibleSlotActor::Golem { y_offset, .. }) =
                             machine.actor.as_mut()
                         {
-                            *y_offset =
-                                visible_battle_anim_sine(phase_frame, 14 * 8) as i16;
+                            *y_offset = visible_battle_anim_sine(phase_frame, 14 * 8) as i16;
                         }
                         tick_visible_slot_actor(machine);
                         machine.animation = VisibleSlotMachineAnimation::Golem {
@@ -4196,10 +4330,8 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
                     }
                     tick_visible_slot_actor(machine);
                     if phase_frame >= 8 {
-                        machine.secondary_actor = Some(VisibleSlotActor::Egg {
-                            x: 96,
-                            y_offset: 0,
-                        });
+                        machine.secondary_actor =
+                            Some(VisibleSlotActor::Egg { x: 96, y_offset: 0 });
                         machine.animation = VisibleSlotMachineAnimation::Chansey {
                             target,
                             remaining_eggs,
@@ -4396,10 +4528,13 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
         }
         VisibleSlotMachineAnimation::FlashResult { frames_remaining } => {
             if frames_remaining > 1 {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::FlashResult {
-                        frames_remaining: frames_remaining - 1,
-                    };
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::FlashResult {
+                    frames_remaining: frames_remaining - 1,
+                };
                 mark_runtime_snapshot_dirty(runtime_shell);
                 Ok(())
             } else {
@@ -4411,8 +4546,11 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
                 return Ok(());
             }
             queue_visible_shell_sound_effect(runtime_shell, "SFX_QUIT_SLOTS")?;
-            runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                VisibleSlotMachineAnimation::QuitWaitAfter;
+            runtime_shell
+                .visible_slot_machine
+                .as_mut()
+                .unwrap()
+                .animation = VisibleSlotMachineAnimation::QuitWaitAfter;
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
@@ -4448,11 +4586,17 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
             }
             if let Some(sound) = result_sound {
                 queue_visible_shell_sound_effect(runtime_shell, sound)?;
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::WaitResult { payout };
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::WaitResult { payout };
             } else {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::AwaitResult;
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::AwaitResult;
             }
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
@@ -4461,12 +4605,15 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
             if !visible_wait_sfx_finished(runtime_shell) {
                 return Ok(());
             }
-            runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                VisibleSlotMachineAnimation::Payout {
-                    remaining: payout,
-                    frames_until_coin: 1,
-                    delay_counter: 0,
-                };
+            runtime_shell
+                .visible_slot_machine
+                .as_mut()
+                .unwrap()
+                .animation = VisibleSlotMachineAnimation::Payout {
+                remaining: payout,
+                frames_until_coin: 1,
+                delay_counter: 0,
+            };
             mark_runtime_snapshot_dirty(runtime_shell);
             Ok(())
         }
@@ -4476,24 +4623,31 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
             delay_counter,
         } => {
             if frames_until_coin > 0 {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::Payout {
-                        remaining,
-                        frames_until_coin: frames_until_coin - 1,
-                        delay_counter: delay_counter + 1,
-                    };
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::Payout {
+                    remaining,
+                    frames_until_coin: frames_until_coin - 1,
+                    delay_counter: delay_counter + 1,
+                };
             } else if remaining == 0 {
-                runtime_shell.visible_slot_machine.as_mut().unwrap().animation =
-                    VisibleSlotMachineAnimation::AwaitResult;
+                runtime_shell
+                    .visible_slot_machine
+                    .as_mut()
+                    .unwrap()
+                    .animation = VisibleSlotMachineAnimation::AwaitResult;
             } else {
                 runtime_shell
                     .shell
                     .session_mut()
                     .state
                     .script_runtime
-                    .variables
-                    .insert("slot_action".to_string(), "payout".to_string());
-                let result = runtime_shell.shell.apply_declared_special_routine("SlotMachine")?;
+                    .pending_slot_machine_input = Some(SlotMachineInput::PayoutFrame);
+                let result = runtime_shell
+                    .shell
+                    .apply_declared_special_routine("SlotMachine")?;
                 let SpecialRoutineEffect::SlotMachinePayout {
                     coins_before,
                     payout_remaining,
@@ -4513,10 +4667,7 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
                     delay_counter: next_delay_counter,
                 };
                 if coins > coins_before && next_delay_counter & 7 != 0 {
-                    queue_visible_shell_sound_effect(
-                        runtime_shell,
-                        "SFX_GET_COIN_FROM_SLOTS",
-                    )?;
+                    queue_visible_shell_sound_effect(runtime_shell, "SFX_GET_COIN_FROM_SLOTS")?;
                 }
             }
             mark_runtime_snapshot_dirty(runtime_shell);
@@ -4526,21 +4677,9 @@ fn advance_visible_slot_machine_animation(runtime_shell: &mut BevyRuntimeShell) 
 }
 
 fn clear_visible_slot_runtime_state(runtime_shell: &mut BevyRuntimeShell) {
-    for variable in [
-        "slot_bias",
-        "slot_keep_seven_bias_chance",
-        "slot_offsets",
-        "slot_next_reel",
-        "slot_payout_remaining",
-    ] {
-        runtime_shell
-            .shell
-            .session_mut()
-            .state
-            .script_runtime
-            .variables
-            .remove(variable);
-    }
+    let script_runtime = &mut runtime_shell.shell.session_mut().state.script_runtime;
+    script_runtime.slot_machine = None;
+    script_runtime.pending_slot_machine_input = None;
 }
 
 fn close_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -4563,6 +4702,36 @@ fn close_visible_slot_machine(runtime_shell: &mut BevyRuntimeShell) -> Result<()
         })
     {
         return Ok(());
+    }
+    let core_can_quit = runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .slot_machine
+        .as_ref()
+        .is_some_and(|machine| {
+            matches!(
+                machine.phase,
+                SlotMachinePhase::Betting | SlotMachinePhase::PlayAgain
+            )
+        });
+    if core_can_quit {
+        runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
+            .pending_slot_machine_input = Some(SlotMachineInput::Quit);
+        let result = runtime_shell
+            .shell
+            .apply_declared_special_routine("SlotMachine")?;
+        if !matches!(
+            result.outcome.effect,
+            SpecialRoutineEffect::SlotMachineExited { .. }
+        ) {
+            anyhow::bail!("SlotMachine quit returned a different special effect");
+        }
     }
     let machine = runtime_shell
         .visible_slot_machine
@@ -4587,12 +4756,18 @@ fn open_visible_card_flip_for_script_command(
     }
     let snapshot = runtime_shell.shell.snapshot()?;
     let unavailable = if carried_item_quantity(&snapshot, "COIN_CASE").unwrap_or(0) == 0 {
-        Some(("_NoCoinCaseText", vec!["You don't have a".to_string(), "COIN CASE.".to_string()]))
+        Some((
+            "_NoCoinCaseText",
+            vec!["You don't have a".to_string(), "COIN CASE.".to_string()],
+        ))
     } else {
         None
     };
     if let Some((label, details)) = unavailable {
-        runtime_shell.special_boundary = Some(SpecialBoundaryDisplay { label: label.to_string(), details });
+        runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
+            label: label.to_string(),
+            details,
+        });
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(true);
     }
@@ -4611,23 +4786,23 @@ fn open_visible_card_flip_for_script_command(
         revealed: vec![false; 24],
         message: "PLAY WITH THREE COINS?".to_string(),
     });
-    let variables = &mut runtime_shell
-        .shell
-        .session_mut()
-        .state
-        .script_runtime
-        .variables;
-    variables.remove("card_flip_deck");
-    variables.remove("card_flip_revealed");
-    variables.remove("card_flip_action");
-    variables.insert("card_flip_initialize".to_string(), "1".to_string());
+    let script_runtime = &mut runtime_shell.shell.session_mut().state.script_runtime;
+    script_runtime.card_flip = None;
+    script_runtime.pending_card_flip_input = None;
     set_shell_action_status(runtime_shell, "CARD FLIP");
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(true)
 }
 
-fn move_visible_card_flip_cursor(runtime_shell: &mut BevyRuntimeShell, dx: isize, dy: isize) -> Result<()> {
-    let game = runtime_shell.visible_card_flip.as_mut().context("no Card Flip game is open")?;
+fn move_visible_card_flip_cursor(
+    runtime_shell: &mut BevyRuntimeShell,
+    dx: isize,
+    dy: isize,
+) -> Result<()> {
+    let game = runtime_shell
+        .visible_card_flip
+        .as_mut()
+        .context("no Card Flip game is open")?;
     let sound = match game.phase {
         VisibleCardFlipPhase::AskPlay | VisibleCardFlipPhase::PlayAgain => {
             if dy != 0 {
@@ -4645,32 +4820,48 @@ fn move_visible_card_flip_cursor(runtime_shell: &mut BevyRuntimeShell, dx: isize
             if dx < 0 {
                 if game.bet_y == 0 {
                     game.bet_x &= !1;
-                    if game.bet_x < 3 { game.bet_x = 1; game.bet_y = 2; } else { game.bet_x -= 2; }
+                    if game.bet_x < 3 {
+                        game.bet_x = 1;
+                        game.bet_y = 2;
+                    } else {
+                        game.bet_x -= 2;
+                    }
                 } else if game.bet_y == 1 && game.bet_x < 3 {
-                    game.bet_x = 1; game.bet_y = 2;
+                    game.bet_x = 1;
+                    game.bet_y = 2;
                 } else if game.bet_x > 0 {
                     game.bet_x -= 1;
                 }
             } else if dx > 0 {
                 if game.bet_y == 0 {
                     game.bet_x &= !1;
-                    if game.bet_x < 4 { game.bet_x += 2; }
+                    if game.bet_x < 4 {
+                        game.bet_x += 2;
+                    }
                 } else if game.bet_x < 5 {
                     game.bet_x += 1;
                 }
             } else if dy < 0 {
                 if game.bet_x == 0 {
                     game.bet_y &= !1;
-                    if game.bet_y < 3 { game.bet_x = 2; game.bet_y = 1; } else { game.bet_y -= 2; }
+                    if game.bet_y < 3 {
+                        game.bet_x = 2;
+                        game.bet_y = 1;
+                    } else {
+                        game.bet_y -= 2;
+                    }
                 } else if game.bet_x == 1 && game.bet_y < 3 {
-                    game.bet_x = 2; game.bet_y = 1;
+                    game.bet_x = 2;
+                    game.bet_y = 1;
                 } else if game.bet_y > 0 {
                     game.bet_y -= 1;
                 }
             } else if dy > 0 {
                 if game.bet_x == 0 {
                     game.bet_y &= !1;
-                    if game.bet_y < 6 { game.bet_y += 2; }
+                    if game.bet_y < 6 {
+                        game.bet_y += 2;
+                    }
                 } else if game.bet_y < 7 {
                     game.bet_y += 1;
                 }
@@ -4700,14 +4891,6 @@ fn flip_visible_card(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             return start_visible_card_flip_round(runtime_shell);
         }
         (VisibleCardFlipPhase::PlayAgain, _, _) => {
-            let reshuffle = {
-                let game = runtime_shell.visible_card_flip.as_mut().unwrap();
-                game.round += 1;
-                if game.round == 12 { game.round = 0; true } else { false }
-            };
-            if reshuffle {
-                return shuffle_visible_card_flip_deck(runtime_shell);
-            }
             return start_visible_card_flip_round(runtime_shell);
         }
         (VisibleCardFlipPhase::NotEnoughCoins, _, _) => {
@@ -4741,17 +4924,24 @@ fn flip_visible_card(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
 }
 
 fn reveal_visible_card_flip(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let (index, bet_x, bet_y) = runtime_shell
+    let (which_card, bet_x, bet_y) = runtime_shell
         .visible_card_flip
         .as_ref()
-        .map(|game| (game.round * 2 + game.which_card, game.bet_x, game.bet_y))
+        .map(|game| (game.which_card, game.bet_x, game.bet_y))
         .context("no Card Flip game is open")?;
-    let variables = &mut runtime_shell.shell.session_mut().state.script_runtime.variables;
-    variables.insert("card_flip_action".to_string(), "reveal".to_string());
-    variables.insert("card_flip_index".to_string(), index.to_string());
-    variables.insert("card_flip_bet_x".to_string(), bet_x.to_string());
-    variables.insert("card_flip_bet_y".to_string(), bet_y.to_string());
-    let result = runtime_shell.shell.apply_declared_special_routine("CardFlip")?;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .pending_card_flip_input = Some(CardFlipInput::Reveal {
+        which_card: u8::try_from(which_card).context("Card Flip side fits a byte")?,
+        cursor_x: u8::try_from(bet_x).context("Card Flip bet x fits a byte")?,
+        cursor_y: u8::try_from(bet_y).context("Card Flip bet y fits a byte")?,
+    });
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("CardFlip")?;
     let SpecialRoutineEffect::CardFlipRevealed {
         card_name,
         card_level,
@@ -4764,7 +4954,10 @@ fn reveal_visible_card_flip(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     else {
         anyhow::bail!("CardFlip returned a different special effect");
     };
-    let game = runtime_shell.visible_card_flip.as_mut().context("Card Flip closed during play")?;
+    let game = runtime_shell
+        .visible_card_flip
+        .as_mut()
+        .context("Card Flip closed during play")?;
     game.coins = coins;
     game.payout = payout;
     game.deck = deck;
@@ -4780,20 +4973,41 @@ fn reveal_visible_card_flip(runtime_shell: &mut BevyRuntimeShell) -> Result<()> 
     };
     queue_visible_shell_sound_effect(
         runtime_shell,
-        if payout > 0 { "SFX_2ND_PLACE" } else { "SFX_WRONG" },
+        if payout > 0 {
+            "SFX_2ND_PLACE"
+        } else {
+            "SFX_WRONG"
+        },
     )?;
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
 }
 
 fn acknowledge_visible_card_flip_result(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let game = runtime_shell
+    let animation = runtime_shell
         .visible_card_flip
-        .as_mut()
+        .as_ref()
+        .map(|game| game.animation)
         .context("no Card Flip game is open")?;
-    if game.animation != VisibleCardFlipAnimation::AwaitResult {
+    if animation != VisibleCardFlipAnimation::AwaitResult {
         return Ok(());
     }
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .pending_card_flip_input = Some(CardFlipInput::AcknowledgeResult);
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("CardFlip")?;
+    if !matches!(
+        result.outcome.effect,
+        SpecialRoutineEffect::CardFlipResultAcknowledged { .. }
+    ) {
+        anyhow::bail!("CardFlip result acknowledgement returned a different special effect");
+    }
+    let game = runtime_shell.visible_card_flip.as_mut().unwrap();
     game.phase = VisibleCardFlipPhase::PlayAgain;
     game.animation = VisibleCardFlipAnimation::None;
     game.yes_no_index = 0;
@@ -4803,14 +5017,29 @@ fn acknowledge_visible_card_flip_result(runtime_shell: &mut BevyRuntimeShell) ->
 }
 
 fn start_visible_card_flip_round(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let input = match runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .card_flip
+        .as_ref()
+        .map(|game| game.phase)
+    {
+        None | Some(CardFlipPhase::Quit) => CardFlipInput::Start,
+        Some(CardFlipPhase::PlayAgain) => CardFlipInput::Continue,
+        Some(CardFlipPhase::Shuffled) => CardFlipInput::ResumeAfterShuffle,
+        Some(phase) => anyhow::bail!("CardFlip cannot start a round during phase {phase:?}"),
+    };
     runtime_shell
         .shell
         .session_mut()
         .state
         .script_runtime
-        .variables
-        .insert("card_flip_action".to_string(), "start".to_string());
-    let result = runtime_shell.shell.apply_declared_special_routine("CardFlip")?;
+        .pending_card_flip_input = Some(input);
+    let result = runtime_shell
+        .shell
+        .apply_declared_special_routine("CardFlip")?;
     let (deck, revealed, coins) = match result.outcome.effect {
         SpecialRoutineEffect::CardFlipStarted {
             deck,
@@ -4818,6 +5047,28 @@ fn start_visible_card_flip_round(runtime_shell: &mut BevyRuntimeShell) -> Result
             coins,
             ..
         } => (deck, revealed, coins),
+        SpecialRoutineEffect::CardFlipShuffled {
+            deck,
+            revealed,
+            coins,
+            ..
+        } => {
+            let game = runtime_shell
+                .visible_card_flip
+                .as_mut()
+                .context("Card Flip closed during shuffle")?;
+            game.phase = VisibleCardFlipPhase::Shuffled;
+            game.animation = VisibleCardFlipAnimation::None;
+            game.round = 0;
+            game.face_card = None;
+            game.coins = coins;
+            game.payout = 0;
+            game.deck = deck;
+            game.revealed = revealed;
+            game.message = "THE CARDS HAVE\nBEEN SHUFFLED.".to_string();
+            mark_runtime_snapshot_dirty(runtime_shell);
+            return Ok(());
+        }
         SpecialRoutineEffect::GameCornerGameUnavailable { .. } => {
             let game = runtime_shell
                 .visible_card_flip
@@ -4831,6 +5082,14 @@ fn start_visible_card_flip_round(runtime_shell: &mut BevyRuntimeShell) -> Result
         }
         _ => anyhow::bail!("CardFlip start returned a different special effect"),
     };
+    let round = runtime_shell
+        .shell
+        .session()
+        .state()
+        .script_runtime
+        .card_flip
+        .as_ref()
+        .map_or(0, |state| usize::from(state.num_cards_played));
     let game = runtime_shell
         .visible_card_flip
         .as_mut()
@@ -4841,47 +5100,11 @@ fn start_visible_card_flip_round(runtime_shell: &mut BevyRuntimeShell) -> Result
     game.payout = 0;
     game.face_card = None;
     game.coins = coins;
+    game.round = round;
     game.deck = deck;
     game.revealed = revealed;
     game.message = "CHOOSE A CARD.".to_string();
     queue_visible_shell_sound_effect(runtime_shell, "SFX_TRANSACTION")?;
-    mark_runtime_snapshot_dirty(runtime_shell);
-    Ok(())
-}
-
-fn shuffle_visible_card_flip_deck(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
-    let variables = &mut runtime_shell
-        .shell
-        .session_mut()
-        .state
-        .script_runtime
-        .variables;
-    variables.remove("card_flip_deck");
-    variables.remove("card_flip_revealed");
-    variables.insert("card_flip_initialize".to_string(), "1".to_string());
-    variables.insert("card_flip_action".to_string(), "shuffle".to_string());
-    let result = runtime_shell.shell.apply_declared_special_routine("CardFlip")?;
-    let SpecialRoutineEffect::CardFlipShuffled {
-        deck,
-        revealed,
-        coins,
-        ..
-    } = result.outcome.effect
-    else {
-        anyhow::bail!("CardFlip shuffle returned a different special effect");
-    };
-    let game = runtime_shell
-        .visible_card_flip
-        .as_mut()
-        .context("Card Flip closed during shuffle")?;
-    game.phase = VisibleCardFlipPhase::Shuffled;
-    game.animation = VisibleCardFlipAnimation::None;
-    game.face_card = None;
-    game.coins = coins;
-    game.payout = 0;
-    game.deck = deck;
-    game.revealed = revealed;
-    game.message = "THE CARDS HAVE\nBEEN SHUFFLED.".to_string();
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
 }
@@ -4972,13 +5195,15 @@ fn advance_visible_card_flip_animation(runtime_shell: &mut BevyRuntimeShell) -> 
                 .session_mut()
                 .state
                 .script_runtime
-                .variables
-                .insert("card_flip_action".to_string(), "payout".to_string());
-            let result = runtime_shell.shell.apply_declared_special_routine("CardFlip")?;
+                .pending_card_flip_input = Some(CardFlipInput::PayoutFrame);
+            let result = runtime_shell
+                .shell
+                .apply_declared_special_routine("CardFlip")?;
             let SpecialRoutineEffect::CardFlipPayout {
                 coins_before,
+                payout_remaining,
                 coins,
-                ..
+                random_state_after: _,
             } = result.outcome.effect
             else {
                 anyhow::bail!("CardFlip payout returned a different special effect");
@@ -4986,7 +5211,7 @@ fn advance_visible_card_flip_animation(runtime_shell: &mut BevyRuntimeShell) -> 
             let game = runtime_shell.visible_card_flip.as_mut().unwrap();
             game.coins = coins;
             game.animation = VisibleCardFlipAnimation::Payout {
-                remaining: remaining - 1,
+                remaining: payout_remaining,
                 frames_until_coin: 2,
             };
             if coins > coins_before {
@@ -5048,6 +5273,10 @@ fn advance_visible_card_flip_animation(runtime_shell: &mut BevyRuntimeShell) -> 
 }
 
 fn close_visible_card_flip(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
+    let should_exit_core = runtime_shell
+        .visible_card_flip
+        .as_ref()
+        .is_some_and(|game| game.phase == VisibleCardFlipPhase::PlayAgain);
     if let Some(game) = runtime_shell.visible_card_flip.as_ref() {
         match game.phase {
             VisibleCardFlipPhase::ChooseCard | VisibleCardFlipPhase::PlaceBet => return Ok(()),
@@ -5060,6 +5289,23 @@ fn close_visible_card_flip(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             VisibleCardFlipPhase::AskPlay
             | VisibleCardFlipPhase::PlayAgain
             | VisibleCardFlipPhase::NotEnoughCoins => {}
+        }
+    }
+    if should_exit_core {
+        runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
+            .pending_card_flip_input = Some(CardFlipInput::Quit);
+        let result = runtime_shell
+            .shell
+            .apply_declared_special_routine("CardFlip")?;
+        if !matches!(
+            result.outcome.effect,
+            SpecialRoutineEffect::CardFlipExited { .. }
+        ) {
+            anyhow::bail!("CardFlip quit returned a different special effect");
         }
     }
     if let Some(game) = runtime_shell.visible_card_flip.as_mut() {
@@ -5173,16 +5419,17 @@ fn open_visible_battle_tower_challenge_menu_for_script_command(
     let english = match raw_language {
         "1" | "TRUE" => true,
         "0" | "FALSE" => false,
-        other => anyhow::bail!(
-            "Battle Tower challenge menu has invalid language selector {other}"
-        ),
+        other => anyhow::bail!("Battle Tower challenge menu has invalid language selector {other}"),
     };
     record_visible_runtime_action(runtime_shell, "special:battle_tower_challenge_menu:open")?;
     let used = runtime_shell
         .shell
         .use_battle_tower_challenge_menu(english, None)?;
     let opened = activate_visible_special_routine_boundary(runtime_shell, &used.outcome.effect)?;
-    anyhow::ensure!(opened, "Battle Tower challenge special did not open its source menu");
+    anyhow::ensure!(
+        opened,
+        "Battle Tower challenge special did not open its source menu"
+    );
     runtime_shell.last_audio_events.push(format!(
         "Battle Tower challenge menu outcome={:?} checksum={:?}",
         used.outcome.effect, used.state_checksum
@@ -5207,8 +5454,7 @@ fn resolve_visible_battle_tower_challenge_menu(
             "script:battle-tower-challenge",
             if menu.english { 3 } else { 4 },
         )
-        .context("Battle Tower challenge menu has no valid selection")?
-            as u8
+        .context("Battle Tower challenge menu has no valid selection")? as u8
             + 1
     };
     record_visible_runtime_action(
@@ -5238,9 +5484,14 @@ fn open_visible_battle_tower_room_menu_for_script_command(
         return Ok(false);
     }
     record_visible_runtime_action(runtime_shell, "special:battle_tower_room_menu:open")?;
-    let used = runtime_shell.shell.use_battle_tower_room_menu(None, false)?;
+    let used = runtime_shell
+        .shell
+        .use_battle_tower_room_menu(None, false)?;
     let opened = activate_visible_special_routine_boundary(runtime_shell, &used.outcome.effect)?;
-    anyhow::ensure!(opened, "BattleTowerRoomMenu did not open its source level picker");
+    anyhow::ensure!(
+        opened,
+        "BattleTowerRoomMenu did not open its source level picker"
+    );
     runtime_shell.last_audio_events.push(format!(
         "Battle Tower room menu outcome={:?} checksum={:?}",
         used.outcome.effect, used.state_checksum
@@ -5336,7 +5587,9 @@ fn resolve_visible_buena_password_selection(runtime_shell: &mut BevyRuntimeShell
         runtime_shell,
         format!("special:buena_password:guess:{guess}"),
     )?;
-    let used = runtime_shell.shell.use_buena_password(Some(guess.clone()))?;
+    let used = runtime_shell
+        .shell
+        .use_buena_password(Some(guess.clone()))?;
     let matched = match &used.outcome.effect {
         SpecialRoutineEffect::BuenasPassword { matched, .. } => *matched,
         other => anyhow::bail!("Buena password returned unexpected effect {other:?}"),
@@ -5365,10 +5618,7 @@ fn resolve_visible_buena_prize_selection(
         runtime_shell.buena_prize_cursor = None;
         runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
             label: "BuenaComeAgainText".to_string(),
-            details: vec![
-                "Oh. Please come".to_string(),
-                "back again!".to_string(),
-            ],
+            details: vec!["Oh. Please come".to_string(), "back again!".to_string()],
         });
         mark_runtime_snapshot_dirty(runtime_shell);
         return Ok(());
@@ -5400,7 +5650,12 @@ fn resolve_visible_buena_prize_selection(
 fn visible_kurt_apricorn_choices(snapshot: &RuntimeShellSnapshot) -> Vec<(String, u16)> {
     KURT_APRICORN_ORDER
         .iter()
-        .filter(|item_id| snapshot.special.kurt_apricorn_recipes.contains_key(**item_id))
+        .filter(|item_id| {
+            snapshot
+                .special
+                .kurt_apricorn_recipes
+                .contains_key(**item_id)
+        })
         .filter_map(|item_id| {
             carried_item_quantity(snapshot, item_id)
                 .filter(|quantity| *quantity > 0)
@@ -5450,7 +5705,8 @@ fn resolve_visible_kurt_apricorn_selection(
         &runtime_shell.kurt_apricorn_cursor,
         "script:kurt-apricorn",
         choices.len(),
-    ).context("Kurt Apricorn selection has no valid cursor")?;
+    )
+    .context("Kurt Apricorn selection has no valid cursor")?;
     if cancelled {
         runtime_shell.kurt_apricorn_cursor = None;
         runtime_shell.kurt_apricorn_quantity = None;
@@ -5506,6 +5762,14 @@ fn resolve_visible_script_party_selection(
     let mut resume_immediately = true;
     let mut close_party_menu = true;
     match (pending, party_index) {
+        (PendingScriptPartySelection::LinkTrade, party_index) => {
+            runtime_shell.pending_link_trade_party_slot = Some(party_index);
+            runtime_shell.last_action_status = Some(match party_index {
+                Some(index) => format!("Link trade Pokemon {} selected", index + 1),
+                None => "Link trade selection cancelled".to_string(),
+            });
+            resume_immediately = false;
+        }
         (PendingScriptPartySelection::BillsGrandfather, Some(party_index)) => {
             let used = runtime_shell
                 .shell
@@ -5583,9 +5847,9 @@ fn resolve_visible_script_party_selection(
                 .insert("_selection_cancelled".to_string(), "1".to_string());
             scripts.variables.remove("_selected_party_index");
             scripts.variables.remove("_selected_species");
-            runtime_shell.last_audio_events.push(
-                "script party selection CheckMagikarpLength cancelled".to_string(),
-            );
+            runtime_shell
+                .last_audio_events
+                .push("script party selection CheckMagikarpLength cancelled".to_string());
         }
         (PendingScriptPartySelection::PhotoStudio, Some(party_index)) => {
             let snapshot = runtime_shell.shell.snapshot()?;
@@ -5777,10 +6041,9 @@ fn resolve_visible_script_party_selection(
                     if pokemon.is_egg || pokemon.species.id == "EGG" {
                         set_visible_script_numeric_value(runtime_shell, 1);
                     } else {
-                        let used = runtime_shell.shell.apply_happiness_service(
-                            routine,
-                            party_index,
-                        )?;
+                        let used = runtime_shell
+                            .shell
+                            .apply_happiness_service(routine, party_index)?;
                         runtime_shell.last_audio_events.push(format!(
                             "script party selection {pending_description} outcome={:?} checksum={:?}",
                             used.outcome.effect, used.state_checksum
@@ -5804,31 +6067,47 @@ fn resolve_visible_script_party_selection(
                 )?);
                 runtime_shell.special_boundary = boundaries.pop_front();
                 runtime_shell.special_boundary_queue = boundaries;
-                if close_party_menu { close_visible_party_menu(runtime_shell); }
+                if close_party_menu {
+                    close_visible_party_menu(runtime_shell);
+                }
                 mark_runtime_snapshot_dirty(runtime_shell);
                 return Ok(());
             };
             let snapshot = runtime_shell.shell.snapshot()?;
-            let slot = snapshot.party.slots.iter().find(|slot| slot.index == party_index)
+            let slot = snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.index == party_index)
                 .context("selected Day-Care party slot is empty")?;
             let pokemon = &slot.pokemon;
             let refusal = if snapshot.party.slots.len() < 2 {
                 Some(("OnlyOneMonText", "_OnlyOneMonText"))
             } else if pokemon.is_egg || pokemon.species.id == "EGG" {
                 Some(("CantAcceptEggText", "_CantAcceptEggText"))
-            } else if pokemon.item.as_deref().is_some_and(crate::core::models::item::is_mail_item_id) {
+            } else if pokemon
+                .item
+                .as_deref()
+                .is_some_and(crate::core::models::item::is_mail_item_id)
+            {
                 Some(("RemoveMailText", "_RemoveMailText"))
-            } else if snapshot.party.slots.iter().filter(|other| other.index != party_index && other.pokemon.hp > 0 && !other.pokemon.is_egg).count() == 0 {
+            } else if snapshot
+                .party
+                .slots
+                .iter()
+                .filter(|other| {
+                    other.index != party_index && other.pokemon.hp > 0 && !other.pokemon.is_egg
+                })
+                .count()
+                == 0
+            {
                 Some(("LastHealthyMonText", "_LastHealthyMonText"))
             } else {
                 None
             };
             if let Some((label, text_target)) = refusal {
-                let mut boundaries = visible_exported_special_text_boundaries(
-                    runtime_shell,
-                    label,
-                    text_target,
-                )?;
+                let mut boundaries =
+                    visible_exported_special_text_boundaries(runtime_shell, label, text_target)?;
                 boundaries.extend(visible_exported_special_text_boundaries(
                     runtime_shell,
                     "ComeAgainText",
@@ -5866,12 +6145,18 @@ fn resolve_visible_script_party_selection(
                 runtime_shell.special_boundary = boundaries.pop_front();
                 runtime_shell.special_boundary_queue = boundaries;
                 runtime_shell.pending_special_cry = Some(pokemon.species.id.clone());
-                runtime_shell.last_audio_events.push(format!("day-care deposit outcome={:?}", used.outcome.effect));
+                runtime_shell.last_audio_events.push(format!(
+                    "day-care deposit outcome={:?}",
+                    used.outcome.effect
+                ));
             }
             resume_immediately = false;
         }
         (
-            PendingScriptPartySelection::MoveTutor { move_id, party_index: None },
+            PendingScriptPartySelection::MoveTutor {
+                move_id,
+                party_index: None,
+            },
             party_index,
         ) => {
             if party_index.is_none() {
@@ -5914,12 +6199,11 @@ fn resolve_visible_script_party_selection(
                     )?;
                     runtime_shell.special_boundary = boundaries.pop_front();
                     runtime_shell.special_boundary_queue = boundaries;
-                    runtime_shell.pending_script_party_selection = Some(
-                        PendingScriptPartySelection::MoveTutor {
+                    runtime_shell.pending_script_party_selection =
+                        Some(PendingScriptPartySelection::MoveTutor {
                             move_id,
                             party_index: None,
-                        },
-                    );
+                        });
                     close_party_menu = false;
                     resume_immediately = false;
                 } else if pokemon.moves.len() >= 4 {
@@ -5941,12 +6225,10 @@ fn resolve_visible_script_party_selection(
                     );
                     runtime_shell.special_boundary = boundaries.pop_front();
                     runtime_shell.special_boundary_queue = boundaries;
-                    runtime_shell.pc_confirmation = Some(
-                        VisiblePcConfirmation::MoveTutorForget {
-                            move_id,
-                            party_index,
-                        },
-                    );
+                    runtime_shell.pc_confirmation = Some(VisiblePcConfirmation::MoveTutorForget {
+                        move_id,
+                        party_index,
+                    });
                     runtime_shell.yes_no_cursor = Some(MenuCursor {
                         surface_id: "pc:confirmation".to_string(),
                         option_index: 0,
@@ -5978,11 +6260,18 @@ fn resolve_visible_script_party_selection(
             }
         }
         (
-            PendingScriptPartySelection::MoveTutor { move_id, party_index: Some(party_index) },
+            PendingScriptPartySelection::MoveTutor {
+                move_id,
+                party_index: Some(party_index),
+            },
             Some(_),
         ) => {
             let snapshot = runtime_shell.shell.snapshot()?;
-            let pokemon = snapshot.party.slots.iter().find(|slot| slot.index == party_index)
+            let pokemon = snapshot
+                .party
+                .slots
+                .iter()
+                .find(|slot| slot.index == party_index)
                 .map(|slot| &slot.pokemon)
                 .context("Move Tutor party selection is no longer present")?;
             let nickname = if pokemon.nickname.trim().is_empty() {
@@ -5994,7 +6283,8 @@ fn resolve_visible_script_party_selection(
                 &runtime_shell.party_move_cursor,
                 &party_move_cursor_surface_id(party_index),
                 pokemon.moves.len(),
-            ).context("Move Tutor move list has no valid selection")?;
+            )
+            .context("Move Tutor move list has no valid selection")?;
             let forgotten_move = pokemon
                 .moves
                 .get(move_index)
@@ -6004,12 +6294,11 @@ fn resolve_visible_script_party_selection(
                 !item.consumable && item.tmhm_move.as_deref() == Some(forgotten_move.as_str())
             });
             if is_hm {
-                runtime_shell.pending_script_party_selection = Some(
-                    PendingScriptPartySelection::MoveTutor {
+                runtime_shell.pending_script_party_selection =
+                    Some(PendingScriptPartySelection::MoveTutor {
                         move_id,
                         party_index: Some(party_index),
-                    },
-                );
+                    });
                 let pending_move_id = match runtime_shell.pending_script_party_selection.as_ref() {
                     Some(PendingScriptPartySelection::MoveTutor { move_id, .. }) => move_id.clone(),
                     _ => unreachable!("Move Tutor selection was just retained"),
@@ -6027,10 +6316,17 @@ fn resolve_visible_script_party_selection(
                 return Ok(());
             }
             runtime_shell.pc_notice = None;
-            runtime_shell.shell.delete_party_move_special(party_index, move_index)?;
+            runtime_shell
+                .shell
+                .delete_party_move_special(party_index, move_index)?;
             let learned_move = move_id.replace('_', " ");
-            let used = runtime_shell.shell.teach_party_move_special(party_index, move_id)?;
-            runtime_shell.last_audio_events.push(format!("move tutor replacement outcome={:?}", used.outcome.effect));
+            let used = runtime_shell
+                .shell
+                .teach_party_move_special(party_index, move_id)?;
+            runtime_shell.last_audio_events.push(format!(
+                "move tutor replacement outcome={:?}",
+                used.outcome.effect
+            ));
             runtime_shell.party_move_cursor = None;
             set_visible_script_numeric_value(runtime_shell, 0);
             install_visible_move_learn_result_sequence(
@@ -6042,7 +6338,10 @@ fn resolve_visible_script_party_selection(
             resume_immediately = false;
         }
         (
-            PendingScriptPartySelection::MoveTutor { move_id, party_index: Some(party_index) },
+            PendingScriptPartySelection::MoveTutor {
+                move_id,
+                party_index: Some(party_index),
+            },
             None,
         ) => {
             runtime_shell.party_move_cursor = None;
@@ -6090,10 +6389,7 @@ fn resolve_visible_script_party_selection(
             close_party_menu = false;
             resume_immediately = false;
         }
-        (
-            PendingScriptPartySelection::MoveDeletion { party_index: None },
-            Some(party_index),
-        ) => {
+        (PendingScriptPartySelection::MoveDeletion { party_index: None }, Some(party_index)) => {
             let snapshot = runtime_shell.shell.snapshot()?;
             let pokemon = snapshot
                 .party
@@ -6121,11 +6417,10 @@ fn resolve_visible_script_party_selection(
                 runtime_shell.special_boundary_queue = boundaries;
                 resume_immediately = false;
             } else {
-                runtime_shell.pending_script_party_selection = Some(
-                    PendingScriptPartySelection::MoveDeletion {
+                runtime_shell.pending_script_party_selection =
+                    Some(PendingScriptPartySelection::MoveDeletion {
                         party_index: Some(party_index),
-                    },
-                );
+                    });
                 let mut boundaries = visible_exported_special_text_boundaries(
                     runtime_shell,
                     "DeleterAskWhichMoveText",
@@ -6205,10 +6500,7 @@ fn resolve_visible_script_party_selection(
         ) => {
             runtime_shell.special_boundary = Some(SpecialBoundaryDisplay {
                 label: "DeleterNoComeAgainText".to_string(),
-                details: vec![
-                    "No? Come visit me".to_string(),
-                    "again.".to_string(),
-                ],
+                details: vec!["No? Come visit me".to_string(), "again.".to_string()],
             });
             runtime_shell.party_move_cursor = None;
             resume_immediately = false;
@@ -6227,11 +6519,8 @@ fn resolve_visible_script_party_selection(
                 command_index,
             )?;
             inputs.selected_party_index = party_index;
-            let phone_inputs = explicit_compiled_script_phone_inputs(
-                runtime_shell,
-                &source_script,
-                command_index,
-            );
+            let phone_inputs =
+                explicit_compiled_script_phone_inputs(runtime_shell, &source_script, command_index);
             let stepped = runtime_shell.shell.step_compiled_script_command(
                 &origin_map_name,
                 &source_script,
@@ -6256,11 +6545,9 @@ fn resolve_visible_script_party_selection(
             party_index,
         ) => {
             let stages_trade = match party_index {
-                Some(party_index) => visible_npc_trade_selection_matches(
-                    runtime_shell,
-                    &trade_id,
-                    party_index,
-                )?,
+                Some(party_index) => {
+                    visible_npc_trade_selection_matches(runtime_shell, &trade_id, party_index)?
+                }
                 None => false,
             };
             if stages_trade {
@@ -6316,9 +6603,17 @@ fn set_visible_script_numeric_value(runtime_shell: &mut BevyRuntimeShell, value:
 
 fn visible_unown_layout(layout: &[Vec<u8>]) -> Result<[[u8; 6]; 6]> {
     let mut result = [[0_u8; 6]; 6];
-    anyhow::ensure!(layout.len() == 6, "Unown puzzle layout has {} rows", layout.len());
+    anyhow::ensure!(
+        layout.len() == 6,
+        "Unown puzzle layout has {} rows",
+        layout.len()
+    );
     for (y, row) in layout.iter().enumerate() {
-        anyhow::ensure!(row.len() == 6, "Unown puzzle row {y} has {} cells", row.len());
+        anyhow::ensure!(
+            row.len() == 6,
+            "Unown puzzle row {y} has {} cells",
+            row.len()
+        );
         result[y].copy_from_slice(row);
     }
     Ok(result)
@@ -6331,7 +6626,6 @@ fn update_visible_unown_puzzle_from_effect(
     let SpecialRoutineEffect::UnownPuzzle {
         puzzle_id,
         solved,
-        moves,
         layout,
         holding_piece,
         ..
@@ -6350,12 +6644,15 @@ fn update_visible_unown_puzzle_from_effect(
         holding_piece: *holding_piece,
         cursor_x,
         cursor_y,
-        moves: *moves,
         solved: *solved,
     });
     set_shell_action_status(
         runtime_shell,
-        if *solved { "PUZZLE COMPLETE" } else { "UNOWN PUZZLE" },
+        if *solved {
+            "PUZZLE COMPLETE"
+        } else {
+            "UNOWN PUZZLE"
+        },
     );
     mark_runtime_snapshot_dirty(runtime_shell);
     Ok(())
@@ -6419,7 +6716,12 @@ fn use_visible_unown_puzzle_cell(runtime_shell: &mut BevyRuntimeShell) -> Result
         .clone();
     if puzzle.solved {
         runtime_shell.visible_unown_puzzle = None;
-        runtime_shell.shell.session_mut().state.script_runtime.active_menu = None;
+        runtime_shell
+            .shell
+            .session_mut()
+            .state
+            .script_runtime
+            .active_menu = None;
         return continue_visible_script_after_prompt(runtime_shell);
     }
     let occupied = puzzle.layout[puzzle.cursor_y][puzzle.cursor_x] != 0;
@@ -6450,7 +6752,9 @@ fn use_visible_unown_puzzle_cell(runtime_shell: &mut BevyRuntimeShell) -> Result
             .variables
             .insert("unown_y".to_string(), puzzle.cursor_y.to_string());
     }
-    let used = runtime_shell.shell.apply_declared_special_routine("UnownPuzzle")?;
+    let used = runtime_shell
+        .shell
+        .apply_declared_special_routine("UnownPuzzle")?;
     queue_visible_shell_sound_effect(
         runtime_shell,
         if action == "pickup" {
@@ -6472,7 +6776,12 @@ fn use_visible_unown_puzzle_cell(runtime_shell: &mut BevyRuntimeShell) -> Result
 
 fn close_visible_unown_puzzle(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.visible_unown_puzzle = None;
-    runtime_shell.shell.session_mut().state.script_runtime.active_menu = None;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .active_menu = None;
     set_visible_script_numeric_value(runtime_shell, 0);
     mark_runtime_snapshot_dirty(runtime_shell);
     continue_visible_script_after_prompt(runtime_shell)
@@ -6494,9 +6803,8 @@ fn print_visible_unown_stamp(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
         .as_ref()
         .context("no Unown Printer menu is open")?
         .selected;
-    runtime_shell.pc_notice = Some(
-        "Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.".to_string(),
-    );
+    runtime_shell.pc_notice =
+        Some("Printer Error 2\n\nCheck the Game Boy\nPrinter Manual.".to_string());
     runtime_shell.last_audio_events.push(format!(
         "Unown stamp {} Game Boy Printer link unavailable: source Printer Error 2",
         selected + 1
@@ -6508,7 +6816,12 @@ fn print_visible_unown_stamp(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 
 fn close_visible_unown_printer(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     runtime_shell.visible_unown_printer = None;
-    runtime_shell.shell.session_mut().state.script_runtime.active_menu = None;
+    runtime_shell
+        .shell
+        .session_mut()
+        .state
+        .script_runtime
+        .active_menu = None;
     queue_visible_current_music(runtime_shell)?;
     mark_runtime_snapshot_dirty(runtime_shell);
     continue_visible_script_after_prompt(runtime_shell)
@@ -6522,13 +6835,8 @@ fn visible_poke_seer_messages(
 ) -> Result<Vec<SpecialBoundaryDisplay>> {
     let mut named_buffers = snapshot.script_events.named_buffers.clone();
     named_buffers.insert("wSeerNickname".to_string(), nickname.to_string());
-    named_buffers.insert(
-        "wSeerOT".to_string(),
-        pokemon.original_trainer_name.clone(),
-    );
-    let render = |label: &str,
-                  text_target: &str,
-                  named_buffers: &BTreeMap<String, String>| {
+    named_buffers.insert("wSeerOT".to_string(), pokemon.original_trainer_name.clone());
+    let render = |label: &str, text_target: &str, named_buffers: &BTreeMap<String, String>| {
         visible_exported_special_text_boundaries_with_named_buffers(
             runtime_shell,
             label,
@@ -6637,17 +6945,11 @@ fn apply_visible_npc_trade_selection(
     trade_id: String,
     party_index: Option<usize>,
 ) -> Result<()> {
-    let mut inputs = explicit_compiled_script_runtime_inputs(
-        runtime_shell,
-        &source_script,
-        command_index,
-    )?;
+    let mut inputs =
+        explicit_compiled_script_runtime_inputs(runtime_shell, &source_script, command_index)?;
     inputs.selected_party_index = party_index;
-    let phone_inputs = explicit_compiled_script_phone_inputs(
-        runtime_shell,
-        &source_script,
-        command_index,
-    );
+    let phone_inputs =
+        explicit_compiled_script_phone_inputs(runtime_shell, &source_script, command_index);
     let stepped = runtime_shell.shell.step_compiled_script_command(
         &origin_map_name,
         &source_script,
@@ -6682,11 +6984,10 @@ fn visible_npc_trade_selection_matches(
     party_index: usize,
 ) -> Result<bool> {
     let snapshot = runtime_shell.shell.snapshot()?;
-    let rule = snapshot
-        .special
-        .npc_trades
-        .get(trade_id)
-        .with_context(|| format!("NPC trade {trade_id} is missing from the runtime snapshot"))?;
+    let rule =
+        snapshot.special.npc_trades.get(trade_id).with_context(|| {
+            format!("NPC trade {trade_id} is missing from the runtime snapshot")
+        })?;
     let pokemon = snapshot
         .party
         .slots
@@ -6715,18 +7016,19 @@ fn visible_npc_trade_intro_text(rule: &crystal_assets::NpcTradeRule) -> String {
     let requested = visible_npc_trade_requested_name(rule);
     let offered = rule.offered_species.replace('_', " ");
     if rule.dialog_set.ends_with("GIRL") {
-        format!("{requested}'s cute, but I don't have it.\nDo you have {requested}?\nWant to trade it for my {offered}?")
+        format!(
+            "{requested}'s cute, but I don't have it.\nDo you have {requested}?\nWant to trade it for my {offered}?"
+        )
     } else if rule.dialog_set.ends_with("HAPPY") || rule.dialog_set.ends_with("NEWBIE") {
-        format!("Hi, I'm looking for this POKéMON.\nIf you have {requested}, would you trade it for my {offered}?")
+        format!(
+            "Hi, I'm looking for this POKéMON.\nIf you have {requested}, would you trade it for my {offered}?"
+        )
     } else {
         format!("I collect POKéMON.\nDo you have {requested}?\nWant to trade it for my {offered}?")
     }
 }
 
-fn visible_npc_trade_result_text(
-    rule: &crystal_assets::NpcTradeRule,
-    result: &str,
-) -> String {
+fn visible_npc_trade_result_text(rule: &crystal_assets::NpcTradeRule, result: &str) -> String {
     let requested = visible_npc_trade_requested_name(rule);
     let dialog_set = rule.dialog_set.as_str();
     match (result, dialog_set) {
@@ -7302,7 +7604,10 @@ fn advance_visible_egg_hatch(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
                     .pokemon_frontpic_anim
                     .get(&hatch.species_id)
                     .with_context(|| {
-                        format!("missing exported hatch frontpic animation for {}", hatch.species_id)
+                        format!(
+                            "missing exported hatch frontpic animation for {}",
+                            hatch.species_id
+                        )
                     })?;
                 runtime_shell.visible_frontpic_animation = Some(VisibleFrontpicAnimation {
                     species_id: hatch.species_id.clone(),
@@ -7335,7 +7640,11 @@ fn visible_egg_wobble_x(frame: u16) -> i8 {
     for repetition_count in 1_u16..=8 {
         let wobble_frames = repetition_count * 6;
         if frame < elapsed + wobble_frames {
-            return if ((frame - elapsed) / 3) % 2 == 0 { -2 } else { 2 };
+            return if ((frame - elapsed) / 3) % 2 == 0 {
+                -2
+            } else {
+                2
+            };
         }
         elapsed += wobble_frames + 16;
         if frame < elapsed {
@@ -7356,6 +7665,15 @@ fn apply_pending_audio_action(
     state_checksum: &StateChecksum,
 ) {
     match action {
+        BevyAudioAction::StopMusic { audio_id } => {
+            set_visible_stopped_music_state(runtime_shell, Some(&audio_id));
+            clear_pending_music_commands(pending_audio);
+            set_visible_runtime_action_from_checksum(
+                runtime_shell,
+                format!("audio:stop_music:{audio_id}"),
+                state_checksum,
+            );
+        }
         BevyAudioAction::Play(command) => {
             set_visible_runtime_action_from_checksum(
                 runtime_shell,
@@ -7363,6 +7681,8 @@ fn apply_pending_audio_action(
                 state_checksum,
             );
             if matches!(command.kind, ModpackAudioKind::Music) {
+                runtime_shell.music_fade = None;
+                runtime_shell.music_volume = 7;
                 runtime_shell.pending_music_stop = true;
                 runtime_shell.active_music = Some(command.audio_id.clone());
                 runtime_shell.faded_music = None;
@@ -7379,11 +7699,17 @@ fn apply_pending_audio_action(
             audio_id,
             fade_frames,
         } => {
-            runtime_shell.pending_music_stop = true;
-            runtime_shell.active_music = None;
-            runtime_shell.faded_music = Some(audio_id.clone());
-            clear_pending_music_commands(&mut runtime_shell.pending_audio);
-            clear_pending_music_commands(pending_audio);
+            let effective_rate = u8::try_from(fade_frames).map(|rate| rate & 0x3f);
+            if runtime_shell.music_fade.as_ref().is_none_or(|fade| {
+                effective_rate
+                    .map(|rate| fade.target_music != audio_id || fade.rate != rate)
+                    .unwrap_or(true)
+            }) && let Err(error) =
+                begin_visible_music_fade(runtime_shell, &audio_id, fade_frames)
+            {
+                runtime_shell.last_error = Some(error.to_string());
+                return;
+            }
             set_visible_runtime_action_from_checksum(
                 runtime_shell,
                 format!("audio:fade_music:{audio_id}:{fade_frames}"),
@@ -7489,7 +7815,10 @@ fn stop_visible_silent_music_with_checksum(
 }
 
 fn set_visible_stopped_music_state(runtime_shell: &mut BevyRuntimeShell, marker: Option<&str>) {
+    runtime_shell.music_fade = None;
+    runtime_shell.music_volume = 7;
     runtime_shell.pending_music_stop = true;
+    runtime_shell.pending_full_audio_reset = true;
     runtime_shell.active_music = marker.map(str::to_string);
     runtime_shell.faded_music = None;
     clear_pending_music_commands(&mut runtime_shell.pending_audio);
@@ -7545,7 +7874,6 @@ fn queue_visible_current_music(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         || runtime_shell.visible_egg_hatch.is_some()
         || runtime_shell.pending_egg_hatch_nickname.is_some()
         || runtime_shell.heal_music_active
-        || runtime_shell.field_notice.is_some()
     {
         return Ok(());
     }
@@ -7570,13 +7898,6 @@ fn queue_visible_current_music(runtime_shell: &mut BevyRuntimeShell) -> Result<(
         stop_visible_music_with_checksum(runtime_shell, "audio:music:stop", &state_checksum)?;
         return Ok(());
     };
-    // Audio draining and playback are separate Bevy systems.  A map callback
-    // can therefore run several synchronizer passes before `play_pending_audio`
-    // consumes the queue.  Treat an identical queued command as already active
-    // to prevent duplicate native sinks and the resulting overlapping songs.
-    if pending_music_command_is(&runtime_shell.pending_audio, &music_id) {
-        return Ok(());
-    }
     if is_silent_music_id(&music_id) {
         stop_visible_silent_music_with_checksum(
             runtime_shell,
@@ -7782,7 +8103,11 @@ fn queue_battle_intro_cry(mut runtime_shell: ResMut<BevyRuntimeShell>) {
     let enemy_cry_boundary = match battle.kind {
         RuntimeBattleKind::Trainer { .. } => 1,
         RuntimeBattleKind::Wild { .. } | RuntimeBattleKind::StaticWild { .. } => {
-            if tutorial { 1 } else { 2 }
+            if tutorial {
+                1
+            } else {
+                2
+            }
         }
     };
     let stage = runtime_shell.last_battle_cry_key.as_deref();
@@ -8192,7 +8517,9 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.shop_quantity.hash(&mut hasher);
     runtime_shell.shop_notice.hash(&mut hasher);
     runtime_shell.shop_welcome_seen.hash(&mut hasher);
-    runtime_shell.shop_return_to_top_after_notice.hash(&mut hasher);
+    runtime_shell
+        .shop_return_to_top_after_notice
+        .hash(&mut hasher);
     runtime_shell.shop_close_after_notice.hash(&mut hasher);
     runtime_shell.pending_pc_release.hash(&mut hasher);
     runtime_shell.pc_release_sequence.hash(&mut hasher);
@@ -8202,9 +8529,7 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pc_notice.hash(&mut hasher);
     runtime_shell.field_notice.hash(&mut hasher);
     runtime_shell.field_notice_queue.hash(&mut hasher);
-    runtime_shell
-        .pending_item_notification
-        .hash(&mut hasher);
+    runtime_shell.pending_item_notification.hash(&mut hasher);
     runtime_shell
         .field_notice_scene
         .as_ref()
@@ -8214,13 +8539,17 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell
         .pending_field_travel_delay_frames
         .hash(&mut hasher);
-    runtime_shell.visible_field_travel_animation.hash(&mut hasher);
+    runtime_shell
+        .visible_field_travel_animation
+        .hash(&mut hasher);
     runtime_shell.pending_field_notice_sound.hash(&mut hasher);
     runtime_shell.pending_field_notice_cry.hash(&mut hasher);
     runtime_shell.pending_field_battle_entry.hash(&mut hasher);
-    runtime_shell.pending_field_notice_effect_frames.hash(&mut hasher);
+    runtime_shell
+        .pending_field_notice_effect_frames
+        .hash(&mut hasher);
     runtime_shell.visible_cut_animation.hash(&mut hasher);
-    runtime_shell.visible_whirlpool_animation.hash(&mut hasher);
+    runtime_shell.pending_whirlpool_sound_wait.hash(&mut hasher);
     runtime_shell.visible_headbutt_animation.hash(&mut hasher);
     runtime_shell.visible_flash_animation.hash(&mut hasher);
     runtime_shell.visible_fly_animation.hash(&mut hasher);
@@ -8234,7 +8563,9 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_capture_animation.hash(&mut hasher);
     runtime_shell.visible_move_animations.hash(&mut hasher);
     runtime_shell.visible_send_out_animation.hash(&mut hasher);
-    runtime_shell.visible_trainer_exit_animation.hash(&mut hasher);
+    runtime_shell
+        .visible_trainer_exit_animation
+        .hash(&mut hasher);
     runtime_shell.visible_frontpic_animation.hash(&mut hasher);
     runtime_shell.visible_fishing_animation.hash(&mut hasher);
     runtime_shell.visible_egg_hatch.hash(&mut hasher);
@@ -8242,16 +8573,21 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.pending_poison_blackout.hash(&mut hasher);
     runtime_shell.visible_walk_warp_phase.hash(&mut hasher);
     runtime_shell.battle_text_reveal.hash(&mut hasher);
-    runtime_shell.pending_battle_cries_after_messages.hash(&mut hasher);
-    runtime_shell.battle_enemy_send_out_pending.hash(&mut hasher);
-    runtime_shell.battle_player_send_out_pending.hash(&mut hasher);
+    runtime_shell
+        .pending_battle_cries_after_messages
+        .hash(&mut hasher);
+    runtime_shell
+        .battle_enemy_send_out_pending
+        .hash(&mut hasher);
+    runtime_shell
+        .battle_player_send_out_pending
+        .hash(&mut hasher);
     runtime_shell
         .pending_battle_scenes_after_message
         .iter()
         .map(|(message, scene)| (message, scene.visual_state_hash))
         .collect::<Vec<_>>()
         .hash(&mut hasher);
-    runtime_shell.pending_enemy_response_after_capture.hash(&mut hasher);
     runtime_shell.heal_music_active.hash(&mut hasher);
     runtime_shell.visible_wait_sfx_boundary.hash(&mut hasher);
     runtime_shell.pending_wait_play_sfx.hash(&mut hasher);
@@ -8268,8 +8604,22 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.party_mail_take_stage.hash(&mut hasher);
     runtime_shell.party_held_item_give_target.hash(&mut hasher);
     runtime_shell.held_item_swap_prompt.hash(&mut hasher);
-    runtime_shell.pending_contextual_field_move.hash(&mut hasher);
-    runtime_shell.pending_script_party_selection.hash(&mut hasher);
+    runtime_shell
+        .pending_contextual_field_move
+        .hash(&mut hasher);
+    runtime_shell
+        .pending_script_party_selection
+        .hash(&mut hasher);
+    runtime_shell
+        .pending_link_trade_party_slot
+        .hash(&mut hasher);
+    runtime_shell
+        .pending_link_trade_confirmation
+        .hash(&mut hasher);
+    runtime_shell.pending_link_trade_save.hash(&mut hasher);
+    runtime_shell.pending_link_room_selection.hash(&mut hasher);
+    runtime_shell.pending_linked_friend_wait.hash(&mut hasher);
+    runtime_shell.pending_link_room_session.hash(&mut hasher);
     runtime_shell.pending_npc_trade_commit.hash(&mut hasher);
     runtime_shell.pending_photo_studio_commit.hash(&mut hasher);
     runtime_shell.kurt_apricorn_cursor.hash(&mut hasher);
@@ -8279,7 +8629,9 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell
         .visible_battle_tower_challenge_menu
         .hash(&mut hasher);
-    runtime_shell.visible_battle_tower_room_menu.hash(&mut hasher);
+    runtime_shell
+        .visible_battle_tower_room_menu
+        .hash(&mut hasher);
     runtime_shell.visible_unown_puzzle.hash(&mut hasher);
     runtime_shell.visible_unown_printer.hash(&mut hasher);
     runtime_shell.visible_slot_machine.hash(&mut hasher);
@@ -8335,17 +8687,23 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell
         .pending_gift_pokemon_nickname
         .hash(&mut hasher);
-    runtime_shell.pending_gift_pokemon_pc_notice.hash(&mut hasher);
+    runtime_shell
+        .pending_gift_pokemon_pc_notice
+        .hash(&mut hasher);
     runtime_shell.pending_egg_hatch_nickname.hash(&mut hasher);
-    runtime_shell.visible_item_ball_notice.hash(&mut hasher);
+    runtime_shell.visible_field_item_notice.hash(&mut hasher);
     runtime_shell.party_menu_open.hash(&mut hasher);
     runtime_shell.visible_overworld_emote.hash(&mut hasher);
     runtime_shell.visible_earthquake.hash(&mut hasher);
     runtime_shell.visible_ledge_jump.hash(&mut hasher);
     runtime_shell.visible_script_movement.hash(&mut hasher);
-    runtime_shell.visible_player_sprite_y_offset.hash(&mut hasher);
+    runtime_shell
+        .visible_player_sprite_y_offset
+        .hash(&mut hasher);
     runtime_shell.visible_grass_rustle.hash(&mut hasher);
-    runtime_shell.visible_strength_boulder_dust.hash(&mut hasher);
+    runtime_shell
+        .visible_strength_boulder_dust
+        .hash(&mut hasher);
     runtime_shell.battle_messages.hash(&mut hasher);
     runtime_shell.battle_fanfare_messages.hash(&mut hasher);
     runtime_shell.battle_evolution_cries.hash(&mut hasher);
@@ -8446,6 +8804,35 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
         title.main_menu_frame.hash(&mut hasher);
         title.scx.hash(&mut hasher);
         title.title_timer.hash(&mut hasher);
+        title.crystal_oam_target.hash(&mut hasher);
+        title.crystal_initial_y.hash(&mut hasher);
+        title.suicune_frames.hash(&mut hasher);
+        title.suicune_selector_mask.hash(&mut hasher);
+        title.suicune_selector_shift_left.hash(&mut hasher);
+        title.suicune_selector_swap_nibbles.hash(&mut hasher);
+        title
+            .presentation_machine
+            .interpreter
+            .subprogram
+            .hash(&mut hasher);
+        title
+            .presentation_machine
+            .interpreter
+            .phase
+            .hash(&mut hasher);
+        title
+            .presentation_machine
+            .interpreter
+            .operation_index
+            .hash(&mut hasher);
+        title
+            .presentation_machine
+            .interpreter
+            .current_label
+            .hash(&mut hasher);
+        title.presentation_machine.memory.hash(&mut hasher);
+        title.presentation_machine.values.hash(&mut hasher);
+        title.joypad_mask.hash(&mut hasher);
     } else {
         false.hash(&mut hasher);
     }
@@ -8472,10 +8859,15 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell
         .visible_special_text_pause_frames
         .hash(&mut hasher);
+    runtime_shell
+        .visible_internal_special_delay_frames
+        .hash(&mut hasher);
     runtime_shell.last_error.hash(&mut hasher);
     runtime_shell.last_action_status.hash(&mut hasher);
     runtime_shell.active_music.hash(&mut hasher);
     runtime_shell.faded_music.hash(&mut hasher);
+    runtime_shell.music_volume.hash(&mut hasher);
+    runtime_shell.music_fade.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -8574,8 +8966,7 @@ fn visible_map_block_identity_from_catalog<M: VisibleMapCatalogEntry>(
     if let Some(active) = active {
         for connection in &active.attributes.connections {
             connection.target_map.hash(&mut hasher);
-            maps
-                .iter()
+            maps.iter()
                 .map(VisibleMapCatalogEntry::visible_map)
                 .find(|map| map.map_name == connection.target_map)
                 .map(|map| map.blocks.as_slice())
@@ -8764,14 +9155,15 @@ fn update_overworld_sprite_positions(
         ));
     let Some((player_base_x, player_base_y)) =
         visible_player_playfield_position_for_duration_with_subframe(
-        snapshot.overworld.tile,
-        movement_from,
-        movement_remaining,
-        movement_total,
-        movement_subframe,
-        start_x,
-        start_y,
-    ) else {
+            snapshot.overworld.tile,
+            movement_from,
+            movement_remaining,
+            movement_total,
+            movement_subframe,
+            start_x,
+            start_y,
+        )
+    else {
         return false;
     };
     let Some(player_size) = player_sprite.custom_size else {
@@ -8809,9 +9201,8 @@ fn update_overworld_sprite_positions(
         && let Ok((mut shadow_transform, shadow_sprite)) = ledge_shadows.get_single_mut()
     {
         shadow_transform.translation.x = player_x + camera_offset.x;
-        shadow_transform.translation.y =
-            player_y + camera_offset.y - player_size.y * 0.5
-                + shadow_sprite.custom_size.map_or(0.0, |size| size.y * 0.5);
+        shadow_transform.translation.y = player_y + camera_offset.y - player_size.y * 0.5
+            + shadow_sprite.custom_size.map_or(0.0, |size| size.y * 0.5);
         shadow_transform.translation.z =
             overworld_entity_depth(player_depth_tile, None, (start_x, start_y)) - 0.000_001;
     }
@@ -8864,18 +9255,13 @@ fn update_overworld_sprite_positions(
         };
         let walking_object_id = object.object_identifier.as_ref();
         let trainer_is_walking = walking_object_id.is_some_and(|object_id| {
-            trainer_walk_from
-                .is_some_and(|(walking_id, _)| walking_id == object_id)
+            trainer_walk_from.is_some_and(|(walking_id, _)| walking_id == object_id)
         });
         let walking_from = walking_object_id.and_then(|object_id| {
             trainer_walk_from
                 .filter(|(walking_id, _)| walking_id == object_id)
                 .map(|(_, from)| *from)
-                .or_else(|| {
-                    object_walk_from
-                        .get(object_id)
-                        .copied()
-                })
+                .or_else(|| object_walk_from.get(object_id).copied())
         });
         let destination_visible = overworld_object_in_scroll_region(view_x, view_y);
         let origin_visible = walking_from
@@ -8950,11 +9336,7 @@ fn update_overworld_sprite_positions(
         transform.translation.z = if rendered_object.above_priority {
             2.41
         } else {
-            overworld_entity_depth(
-                object_tile,
-                Some(source_object_slot),
-                (start_x, start_y),
-            )
+            overworld_entity_depth(object_tile, Some(source_object_slot), (start_x, start_y))
         };
     }
     true
@@ -8982,10 +9364,10 @@ fn overworld_entity_depth(
     // rows made ordinary actors on tall stock maps exceed the priority-layer
     // z=2.4 and draw through roofs. Clamp to the one-tile movement margin so
     // even an entering/leaving actor remains strictly below priority tiles.
-    let column = (i32::from(tile.x) - i32::from(viewport_origin.0))
-        .clamp(-1, i32::from(VIEWPORT_TILES_X));
-    let row = (i32::from(tile.y) - i32::from(viewport_origin.1))
-        .clamp(-1, i32::from(VIEWPORT_TILES_Y));
+    let column =
+        (i32::from(tile.x) - i32::from(viewport_origin.0)).clamp(-1, i32::from(VIEWPORT_TILES_X));
+    let row =
+        (i32::from(tile.y) - i32::from(viewport_origin.1)).clamp(-1, i32::from(VIEWPORT_TILES_Y));
     1.0 + row as f32 * Y_UNIT + column as f32 * X_UNIT + object_priority
 }
 
@@ -9011,7 +9393,9 @@ fn connection_composite_viewport_origin(
         };
         let target_width = i32::from(target.attributes.width) * i32::from(RENDER_METATILE_WIDTH);
         let target_height = i32::from(target.attributes.height) * i32::from(RENDER_METATILE_WIDTH);
-        let offset = connection.offset.saturating_mul(i32::from(RENDER_METATILE_WIDTH));
+        let offset = connection
+            .offset
+            .saturating_mul(i32::from(RENDER_METATILE_WIDTH));
         let (x, y) = match connection.direction.to_ascii_lowercase().as_str() {
             "north" => (offset, -target_height),
             "south" => (offset, i32::from(base_height)),
@@ -9123,7 +9507,12 @@ fn visible_object_indices_above_priority(
             let tile = object
                 .object_identifier
                 .as_ref()
-                .and_then(|object_id| snapshot.visible_object_runtime_tiles.get(object_id).copied())
+                .and_then(|object_id| {
+                    snapshot
+                        .visible_object_runtime_tiles
+                        .get(object_id)
+                        .copied()
+                })
                 .or_else(|| object_tile_position_checked(object))?;
             let stride = crate::core::world::map::METATILE_WIDTH;
             let block_x = usize::try_from(tile.x.div_euclid(stride)).ok()?;
@@ -9133,7 +9522,8 @@ fn visible_object_indices_above_priority(
                 .checked_add(block_x)?;
             let block = *map.blocks.get(block_index)?;
             let collision = tileset_collision_tokens(tileset, block)?;
-            let quadrant = usize::try_from(tile.y.rem_euclid(stride)).ok()?
+            let quadrant = usize::try_from(tile.y.rem_euclid(stride))
+                .ok()?
                 .checked_mul(2)?
                 .checked_add(usize::try_from(tile.x.rem_euclid(stride)).ok()?)?;
             let token = collision.get(quadrant)?;
@@ -9145,10 +9535,7 @@ fn visible_object_indices_above_priority(
 /// Offset the already-composed destination viewport back toward the previous
 /// camera origin. This keeps the tile layer, player, and NPCs in the same
 /// coordinate space during a walking scroll.
-fn overworld_walk_camera_offset(
-    rendered: &RenderedViewport,
-    frames_remaining: u8,
-) -> Vec2 {
+fn overworld_walk_camera_offset(rendered: &RenderedViewport, frames_remaining: u8) -> Vec2 {
     overworld_walk_camera_offset_for_duration(rendered, frames_remaining, WALK_FRAME_HOLD_TICKS)
 }
 
@@ -9292,11 +9679,8 @@ fn visible_player_playfield_position_for_duration_with_subframe(
     // Render continuously from the position before this authoritative tick
     // toward the next one. The discrete helper below still preserves
     // TypeScript's exact advance-before-draw samples for scripts and tests.
-    let progress = visible_movement_progress_with_subframe(
-        frames_remaining,
-        total_frames,
-        movement_subframe,
-    );
+    let progress =
+        visible_movement_progress_with_subframe(frames_remaining, total_frames, movement_subframe);
     Some((
         from.0 + (target.0 - from.0) * progress,
         from.1 + (target.1 - from.1) * progress,
@@ -9326,8 +9710,7 @@ fn visible_movement_progress_with_subframe(
     }
     let completed_frames =
         f32::from(total_frames.saturating_sub(frames_remaining.min(total_frames)));
-    ((completed_frames + movement_subframe.clamp(0.0, 1.0)) / f32::from(total_frames))
-        .min(1.0)
+    ((completed_frames + movement_subframe.clamp(0.0, 1.0)) / f32::from(total_frames)).min(1.0)
 }
 
 fn hash_menu_cursor(hasher: &mut impl Hasher, cursor: &Option<MenuCursor>) {

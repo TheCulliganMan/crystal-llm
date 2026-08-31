@@ -3,6 +3,7 @@ import {
   alignRuntimeSpawnPoints,
   exportCoreContentPack,
 } from "./export-content-pack";
+import type { ExportedAudioAsset } from "./export-audio-assets";
 
 const mockWriteJsonToTargets = jest.fn();
 const mockRemoveMatchingOutputs = jest.fn();
@@ -69,6 +70,7 @@ const TEST_CONTENT_PACK_CATEGORIES = [
   "fishing",
   "field_moves",
   "field_box_items",
+  "decorations",
   "runtime_title_screen",
   "fruit_trees",
   "npcs",
@@ -121,7 +123,7 @@ const strictFiles = (
 const testPcmFields = {
   source: "pcm" as const,
   pcm_format: {
-    sample_rate_hz: 44_100,
+    sample_rate_hz: 22_050,
     channels: 2,
     bits_per_sample: 16,
   },
@@ -132,13 +134,40 @@ const testPcmFields = {
 };
 
 const titleMusicAudioAsset = {
-  MUSIC_TITLE: {
-    id: "MUSIC_TITLE",
-    path: "content-packs/core-modular/music/MUSIC_TITLE.pcm",
-    kind: "music" as const,
-    ...testPcmFields,
-  },
-};
+  ...Object.fromEntries(
+    [
+      ["MUSIC_TITLE", "music"],
+      ["MUSIC_MAIN_MENU", "music"],
+      ["MUSIC_CRYSTAL_OPENING", "music"],
+      ["MUSIC_ROUTE_30", "music"],
+      ["MUSIC_MOBILE_ADAPTER_MENU", "music"],
+      ["SFX_TITLE_SCREEN_ENTRANCE", "sound_effect"],
+      ["SFX_GAME_FREAK_PRESENTS", "sound_effect"],
+      ["SFX_DITTO_BOUNCE", "sound_effect"],
+      ["SFX_DITTO_POP_UP", "sound_effect"],
+      ["SFX_DITTO_TRANSFORM", "sound_effect"],
+      ["SFX_INTRO_UNOWN_1", "sound_effect"],
+      ["SFX_INTRO_UNOWN_2", "sound_effect"],
+      ["SFX_INTRO_UNOWN_3", "sound_effect"],
+      ["SFX_INTRO_SUICUNE_2", "sound_effect"],
+      ["SFX_INTRO_SUICUNE_3", "sound_effect"],
+      ["SFX_INTRO_SUICUNE_4", "sound_effect"],
+      ["SFX_INTRO_PICHU", "sound_effect"],
+      ["SFX_INTRO_WHOOSH", "sound_effect"],
+      ["SFX_ESCAPE_ROPE", "sound_effect"],
+      ["CRY_WOOPER", "cry"],
+    ].map(([id, kind]) => [
+      id,
+      {
+        id,
+        path: `content-packs/core-modular/${kind === "music" ? "music" : kind === "cry" ? "cries" : "sfx"}/${id}.pcm`,
+        kind,
+        ...(kind === "sound_effect" ? { sfx_priority: 0 } : {}),
+        ...testPcmFields,
+      },
+    ]),
+  ),
+} as Record<string, ExportedAudioAsset>;
 
 const titleRuntimeSpawnPoints = {
   "0": {
@@ -200,6 +229,8 @@ describe("export-core-content-pack", () => {
   });
 
   beforeEach(() => {
+    const readCanonicalFile =
+      jest.requireActual<typeof import("fs")>("fs").readFileSync;
     mockWriteJsonToTargets.mockReset();
     mockRemoveMatchingOutputs.mockReset();
     mockEnsureDir.mockReset();
@@ -207,12 +238,15 @@ describe("export-core-content-pack", () => {
     jest.restoreAllMocks();
     jest.spyOn(fs, "writeFileSync").mockImplementation(() => undefined);
     jest.spyOn(fs, "rmSync").mockImplementation(() => undefined);
-    jest.spyOn(fs, "existsSync").mockImplementation((pathLike) =>
-      String(pathLike).endsWith(".pcm"),
-    );
+    jest
+      .spyOn(fs, "existsSync")
+      .mockImplementation((pathLike) => String(pathLike).endsWith(".pcm"));
     jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
       if (String(pathLike).endsWith(".pcm")) {
         return Buffer.alloc(4);
+      }
+      if (String(pathLike).includes("/vendor/pokecrystal/")) {
+        return readCanonicalFile(pathLike);
       }
       throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
     });
@@ -318,7 +352,9 @@ describe("export-core-content-pack", () => {
           },
         },
       }),
-    ).toThrow("Audio asset key MUSIC_ROUTE_29 does not match record id MUSIC_ROUTE_30");
+    ).toThrow(
+      "Audio asset key MUSIC_ROUTE_29 does not match record id MUSIC_ROUTE_30",
+    );
   });
 
   it("rejects reserved audio asset ids before writing generated files", () => {
@@ -350,7 +386,9 @@ describe("export-core-content-pack", () => {
           },
         },
       }),
-    ).toThrow("Audio asset id MUSIC_LEGACY_ROUTE_29 must be an exact pack audio id");
+    ).toThrow(
+      "Audio asset id MUSIC_LEGACY_ROUTE_29 must be an exact pack audio id",
+    );
   });
 
   it("rejects audio assets in a directory that does not match their kind", () => {
@@ -460,7 +498,7 @@ describe("export-core-content-pack", () => {
     mockStrictIndexAndEmptyMapBlocks();
     jest.spyOn(fs, "readFileSync").mockImplementation((pathLike) => {
       if (String(pathLike).endsWith(".pcm")) {
-        return Buffer.alloc(2);
+        return Buffer.alloc(1);
       }
       throw new Error(`Unexpected readFileSync ${String(pathLike)}`);
     });
@@ -705,10 +743,22 @@ describe("export-core-content-pack", () => {
         trainer_exp_denominator: 2,
         mom_money_increment: 2300,
         mom_random_items: [
-          { trigger: 0, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+          {
+            trigger: 0,
+            cost: 600,
+            kind: "item",
+            target: "SUPER_POTION",
+            decoration_flag: null,
+          },
         ],
         mom_progression_items: [
-          { trigger: 900, cost: 600, kind: "item", target: "SUPER_POTION", decoration_flag: null },
+          {
+            trigger: 900,
+            cost: 600,
+            kind: "item",
+            target: "SUPER_POTION",
+            decoration_flag: null,
+          },
         ],
       },
       battleEscapeRules: {
@@ -862,342 +912,351 @@ describe("export-core-content-pack", () => {
     const compiledCall = mockWriteJsonToTargets.mock.calls.find(
       (call) => call[0] === "content-packs/core-modular.compiled.json",
     );
-    expect(compiledCall?.[1]).toEqual(
+    const compiledCategories = (
+      compiledCall?.[1] as {
+        categories: Record<string, unknown[]>;
+      }
+    ).categories;
+    expect(compiledCategories.runtime_title_screen).toEqual([
       expect.objectContaining({
-        version: 1,
-        packId: "core-modular",
-        categories: expect.objectContaining({
-          pokemon: [{ TOTODILE: { id: "TOTODILE" } }],
-          moves: [{ SCRATCH: { name: "SCRATCH", type: "NORMAL" } }],
-          learnsets: [
-            { TOTODILE: { species: "TOTODILE", learnset: [[1, "SCRATCH"]] } },
-          ],
-          level_up_moves: [
-            {
-              TOTODILE: {
-                species: "TOTODILE",
-                moves: [{ level: 1, move: "SCRATCH" }],
-              },
-            },
-          ],
-          egg_moves: [{ TOTODILE: { species: "TOTODILE", moves: ["CRUNCH"] } }],
-          evolutions: [{ TOTODILE: { species: "TOTODILE" } }],
-          map_attributes: [
-            { Route1: { environment: "TOWN", map_constant: "ROUTE_1" } },
-          ],
-          map_dimensions: [{ ROUTE_1: { width: 10, height: 8 } }],
-          wild_encounters: [{ Route1: { map_name: "Route1" } }],
-          flee_mons: [
-            { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
-          ],
-          roaming_pokemon: [
-            {
-              slotCount: 3,
-              inactiveMap: { mapGroup: 255, mapNumber: 255 },
-              initWrites: [
-                {
-                  slot: 0,
-                  species: "RAIKOU",
-                  level: 40,
-                  mapGroup: 2,
-                  mapNumber: 5,
-                  hp: 0,
-                },
-              ],
-              routes: [
-                {
-                  mapGroup: 24,
-                  mapNumber: 3,
-                  connections: [{ mapGroup: 26, mapNumber: 1 }],
-                },
-              ],
-              jumpMask: 15,
-            },
-          ],
-          buena_password_categories: [
-            {
-              order: ["HealingItems"],
-              categories: {
-                HealingItems: {
-                  categoryType: "BUENA_ITEM",
-                  points: 12,
-                  options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"],
-                },
-              },
-            },
-          ],
-          buena_prizes: [{ RARE_CANDY: 3 }],
-          kurt_apricorn_recipes: [{ RED_APRICORN: "LEVEL_BALL" }],
-          shuckie_gift: [
-            {
-              species: "SHUCKLE",
-              level: 15,
-              heldItem: "BERRY",
-              nickname: "SHUCKIE",
-              originalTrainerName: "MANIA",
-              originalTrainerId: 518,
-              gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
-            },
-          ],
-          dratini_move_sets: [
-            { "0": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] },
-          ],
-          bug_contest_config: [
-            {
-              parkBalls: 20,
-              timerMinutes: 20,
-              timerSeconds: 0,
-              selectedContestantCount: 5,
-              contestantFlags: [
-                "EVENT_BUG_CATCHING_CONTESTANT_1A",
-                "EVENT_BUG_CATCHING_CONTESTANT_2A",
-              ],
-              encounters: testBugContestEncounters,
-            },
-          ],
-          battle_tower_rules: [
-            {
-              bannedSpecies: {
-                MEWTWO: {},
-                MEW: {},
-                LUGIA: {},
-                HO_OH: {},
-                CELEBI: {},
-              },
-              requiredPartyCount: 3,
-              challengeStreakLength: 7,
-              minimumLevelGroup: 1,
-              maximumLevelGroup: 10,
-              levelGroupSize: 10,
-              partyCountFailureText: "OnlyThreeMonMayBeEnteredText",
-              duplicateSpeciesFailureText: "TheMonMustAllBeDifferentKindsText",
-              duplicateHeldItemFailureText: "TheMonMustNotHoldTheSameItemsText",
-              eggFailureText: "YouCantTakeAnEggText",
-            },
-          ],
-          oak_ratings: [
-            [
-              {
-                caughtCountLimit: 9,
-                fanfare: "SFX_DEX_FANFARE_LESS_THAN_20",
-                textLabel: "OakRating01",
-              },
-            ],
-          ],
-          odd_egg_definitions: [
-            [
-              {
-                species: "CLEFFA",
-                moves: ["POUND", "CHARM", "DIZZY_PUNCH"],
-                originalTrainerId: 768,
-                dvs: [2, 10, 10, 10],
-                probability: 100,
-                level: 5,
-                experience: 125,
-                hatchCycles: 20,
-                nickname: "EGG",
-                originalTrainerName: "ODD",
-              },
-            ],
-          ],
-          magikarp_lengths: [
-            [
-              { threshold: 110, divisor: 1 },
-              { threshold: 310, divisor: 2 },
-            ],
-          ],
-          happiness_data: [
-            {
-              changes: {
-                "18": { code: "HAPPINESS_GROOMING", low: 3, mid: 3, high: 1 },
-              },
-              services: {
-                DaisysGrooming: [
-                  { rollWeight: 255, scriptValue: 2, changeCode: 18 },
-                ],
-              },
-            },
-          ],
-          encounter_slot_tables: [
-            {
-              grass: [{ threshold: 100, slot: 0 }],
-              water: [{ threshold: 100, slot: 0 }],
-            },
-          ],
-          encounter_music_modifiers: [
-            {
-              modifiers: {
-                MUSIC_POKEMON_MARCH: { numerator: 2, denominator: 1 },
-              },
-            },
-          ],
-          battle_stat_multipliers: [
-            {
-              stat: [{ numerator: 1, denominator: 1 }],
-              accuracy: [{ numerator: 1, denominator: 1 }],
-            },
-          ],
-          capture_wobble_probabilities: [[{ catch_rate: 255, chance: 255 }]],
-          capture_rules: [
-            {
-              fast_ball_species: ["MAGNEMITE"],
-              heavy_ball_modifiers: { MAGNEMITE: 0 },
-              ball_rules: {
-                POKE_BALL: {
-                  multiplier_numerator: 1,
-                  multiplier_denominator: 1,
-                  battle_type: "",
-                  skip_hp_calc: false,
-                  use_heavy_ball_weight_modifier: false,
-                  use_level_ball_multiplier: false,
-                  require_same_species: false,
-                  require_same_gender: false,
-                  require_fast_species: false,
-                },
-              },
-              guaranteed_capture_balls: [],
-              status_bonus: { SLEEP: 10, FREEZE: 10 },
-            },
-          ],
-          move_priorities: [
-            {
-              base_priority: 1,
-              effect_priorities: { PRIORITY_HIT: 2 },
-              move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
-            },
-          ],
-          type_categories: [
-            {
-              physical: ["NORMAL", "FIGHTING"],
-              special: ["FIRE", "WATER"],
-            },
-          ],
-          type_effectiveness: [
-            {
-              matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
-              foresight_matchups: {
-                NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
-              },
-            },
-          ],
-          weather_modifiers: [
-            {
-              type_modifiers: [
-                {
-                  weather: "WEATHER_RAIN",
-                  move_type: "WATER",
-                  multiplier: { numerator: 3, denominator: 2 },
-                },
-              ],
-              move_effect_modifiers: [],
-            },
-          ],
-          battle_reward_rules: [
-            {
-              max_level: 100,
-              wild_exp_divisor: 7,
-              trainer_exp_numerator: 3,
-              trainer_exp_denominator: 2,
-            },
-          ],
-          battle_escape_rules: [
-            {
-              player_speed_multiplier: 32,
-              enemy_speed_divisor: 4,
-              failed_attempt_bonus: 30,
-              rng_roll_values: 256,
-            },
-          ],
-          step_event_rules: [
-            {
-              poison_step_interval: 4,
-              egg_step_trigger: 128,
-              hatched_egg_happiness: 120,
-              poison_status: "POISON",
-              egg_nickname: "EGG",
-              happiness_step_counter_mask: 1,
-              happiness_step_counter_target: 0,
-            },
-          ],
-          fishing: [],
-          fruit_trees: [{ FRUITTREE_ROUTE_29: "BERRY" }],
-          currency_constants: [{ MAX_MONEY: 999999, MAX_COINS: 9999 }],
-          npcs: [
-            {
-              Route1: [
-                expect.objectContaining({
-                  script: "Route1YoungsterScript",
-                  object_identifier: "ROUTE1_YOUNGSTER",
-                }),
-              ],
-            },
-          ],
-          pokegear_landmarks: [
-            expect.objectContaining({
-              landmarks: expect.any(Array),
-              map_to_landmark: { NewBarkTown: "LANDMARK_NEW_BARK_TOWN" },
-            }),
-          ],
-          items: [
-            { POTION: { name: "POTION", script_name: "POTION", price: 300 } },
-          ],
-          pc_strings: [{ PCString_ChooseaPKMN: "Choose a PKMN." }],
-          menu_icons: [{ TOTODILE: "ICON_TOTODILE" }],
-          playability: [
-            {
-              start_maps: ["Route1"],
-              start_tiles: [{ map: "Route1", tile: { x: 1, y: 2 } }],
-              initial_events: [],
-              initial_items: [],
-              goal_maps: [],
-              goal_events: ["EVENT_HALL_OF_FAME"],
-              goal_items: [],
-              progression_rules: [],
-              map_access: [],
-              require_all_maps_reachable: false,
-              require_walkable_maps: true,
-            },
-          ],
-          pokedex_entries: [
-            {
-              TOTODILE: {
-                species: "TOTODILE",
-                classification: "BIG_JAW",
-                heightDigits: 200,
-                weightDigits: 210,
-                pages: ["It has sharp fangs."],
-              },
-            },
-          ],
-          pokemon_frontpic_anim: [
-            { TOTODILE: { commands: [{ kind: "endanim" }] } },
-          ],
-          runtime_title_screen: [
-            {
-              title_music: "MUSIC_TITLE",
-            },
-          ],
-          audio: expect.arrayContaining([
-            {
-              MUSIC_TITLE: {
-                id: "MUSIC_TITLE",
-                path: "content-packs/core-modular/music/MUSIC_TITLE.pcm",
-                kind: "music",
-                ...testPcmFields,
-              },
-            },
-            {
-              MUSIC_ROUTE_29: {
-                id: "MUSIC_ROUTE_29",
-                path: "content-packs/core-modular/music/MUSIC_ROUTE_29.pcm",
-                kind: "music",
-                ...testPcmFields,
-              },
-            },
-          ]),
+        title_music: "MUSIC_TITLE",
+        program: expect.objectContaining({
+          schema_version: 1,
+          entrypoints: expect.objectContaining({
+            boot: "GameInit",
+            title: "StartTitleScreen",
+            new_game: "NewGame",
+          }),
         }),
       }),
+    ]);
+    expect(compiledCategories.audio).toEqual(
+      expect.arrayContaining([
+        { MUSIC_TITLE: titleMusicAudioAsset.MUSIC_TITLE },
+        expect.objectContaining({ MUSIC_ROUTE_29: expect.any(Object) }),
+      ]),
     );
+    expect(compiledCall?.[1]).toEqual(
+      expect.objectContaining({ version: 1, packId: "core-modular" }),
+    );
+    const expectedCompiledCategories = {
+      pokemon: [{ TOTODILE: { id: "TOTODILE" } }],
+      moves: [{ SCRATCH: { name: "SCRATCH", type: "NORMAL" } }],
+      learnsets: [
+        { TOTODILE: { species: "TOTODILE", learnset: [[1, "SCRATCH"]] } },
+      ],
+      level_up_moves: [
+        {
+          TOTODILE: {
+            species: "TOTODILE",
+            moves: [{ level: 1, move: "SCRATCH" }],
+          },
+        },
+      ],
+      egg_moves: [{ TOTODILE: { species: "TOTODILE", moves: ["CRUNCH"] } }],
+      evolutions: [{ TOTODILE: { species: "TOTODILE" } }],
+      map_attributes: [
+        { Route1: { environment: "TOWN", map_constant: "ROUTE_1" } },
+      ],
+      map_dimensions: [{ ROUTE_1: { width: 10, height: 8 } }],
+      wild_encounters: [{ Route1: { map_name: "Route1" } }],
+      flee_mons: [
+        { buckets: { always: ["RAIKOU"], often: [], sometimes: [] } },
+      ],
+      roaming_pokemon: [
+        {
+          slotCount: 3,
+          inactiveMap: { mapGroup: 255, mapNumber: 255 },
+          initWrites: [
+            {
+              slot: 0,
+              species: "RAIKOU",
+              level: 40,
+              mapGroup: 2,
+              mapNumber: 5,
+              hp: 0,
+            },
+          ],
+          routes: [
+            {
+              mapGroup: 24,
+              mapNumber: 3,
+              connections: [{ mapGroup: 26, mapNumber: 1 }],
+            },
+          ],
+          jumpMask: 15,
+        },
+      ],
+      buena_password_categories: [
+        {
+          order: ["HealingItems"],
+          categories: {
+            HealingItems: {
+              categoryType: "BUENA_ITEM",
+              points: 12,
+              options: ["POTION", "ANTIDOTE", "PARLYZ_HEAL"],
+            },
+          },
+        },
+      ],
+      buena_prizes: [{ RARE_CANDY: 3 }],
+      kurt_apricorn_recipes: [{ RED_APRICORN: "LEVEL_BALL" }],
+      shuckie_gift: [
+        {
+          species: "SHUCKLE",
+          level: 15,
+          heldItem: "BERRY",
+          nickname: "SHUCKIE",
+          originalTrainerName: "MANIA",
+          originalTrainerId: 518,
+          gotTodayEngineFlag: "ENGINE_GOT_SHUCKIE_TODAY",
+        },
+      ],
+      dratini_move_sets: [
+        { "0": ["WRAP", "THUNDER_WAVE", "TWISTER", "EXTREMESPEED"] },
+      ],
+      bug_contest_config: [
+        {
+          parkBalls: 20,
+          timerMinutes: 20,
+          timerSeconds: 0,
+          selectedContestantCount: 5,
+          contestantFlags: [
+            "EVENT_BUG_CATCHING_CONTESTANT_1A",
+            "EVENT_BUG_CATCHING_CONTESTANT_2A",
+          ],
+          encounters: testBugContestEncounters,
+        },
+      ],
+      battle_tower_rules: [
+        {
+          bannedSpecies: {
+            MEWTWO: {},
+            MEW: {},
+            LUGIA: {},
+            HO_OH: {},
+            CELEBI: {},
+          },
+          requiredPartyCount: 3,
+          challengeStreakLength: 7,
+          minimumLevelGroup: 1,
+          maximumLevelGroup: 10,
+          levelGroupSize: 10,
+          partyCountFailureText: "OnlyThreeMonMayBeEnteredText",
+          duplicateSpeciesFailureText: "TheMonMustAllBeDifferentKindsText",
+          duplicateHeldItemFailureText: "TheMonMustNotHoldTheSameItemsText",
+          eggFailureText: "YouCantTakeAnEggText",
+        },
+      ],
+      oak_ratings: [
+        [
+          {
+            caughtCountLimit: 9,
+            fanfare: "SFX_DEX_FANFARE_LESS_THAN_20",
+            textLabel: "OakRating01",
+          },
+        ],
+      ],
+      odd_egg_definitions: [
+        [
+          {
+            species: "CLEFFA",
+            moves: ["POUND", "CHARM", "DIZZY_PUNCH"],
+            originalTrainerId: 768,
+            dvs: [2, 10, 10, 10],
+            probability: 100,
+            level: 5,
+            experience: 125,
+            hatchCycles: 20,
+            nickname: "EGG",
+            originalTrainerName: "ODD",
+          },
+        ],
+      ],
+      magikarp_lengths: [
+        [
+          { threshold: 110, divisor: 1 },
+          { threshold: 310, divisor: 2 },
+        ],
+      ],
+      happiness_data: [
+        {
+          changes: {
+            "18": { code: "HAPPINESS_GROOMING", low: 3, mid: 3, high: 1 },
+          },
+          services: {
+            DaisysGrooming: [
+              { rollWeight: 255, scriptValue: 2, changeCode: 18 },
+            ],
+          },
+        },
+      ],
+      encounter_slot_tables: [
+        {
+          grass: [{ threshold: 100, slot: 0 }],
+          water: [{ threshold: 100, slot: 0 }],
+        },
+      ],
+      encounter_music_modifiers: [
+        {
+          modifiers: {
+            MUSIC_POKEMON_MARCH: { numerator: 2, denominator: 1 },
+          },
+        },
+      ],
+      battle_stat_multipliers: [
+        {
+          stat: [{ numerator: 1, denominator: 1 }],
+          accuracy: [{ numerator: 1, denominator: 1 }],
+        },
+      ],
+      capture_wobble_probabilities: [[{ catch_rate: 255, chance: 255 }]],
+      capture_rules: [
+        {
+          fast_ball_species: ["MAGNEMITE"],
+          heavy_ball_modifiers: { MAGNEMITE: 0 },
+          ball_rules: {
+            POKE_BALL: {
+              multiplier_numerator: 1,
+              multiplier_denominator: 1,
+              battle_type: "",
+              skip_hp_calc: false,
+              use_heavy_ball_weight_modifier: false,
+              use_level_ball_multiplier: false,
+              require_same_species: false,
+              require_same_gender: false,
+              require_fast_species: false,
+            },
+          },
+          guaranteed_capture_balls: [],
+          status_bonus: { SLEEP: 10, FREEZE: 10 },
+        },
+      ],
+      move_priorities: [
+        {
+          base_priority: 1,
+          effect_priorities: { PRIORITY_HIT: 2 },
+          move_priorities: [{ move: "VITAL_THROW", priority: 0 }],
+        },
+      ],
+      type_categories: [
+        {
+          physical: ["NORMAL", "FIGHTING"],
+          special: ["FIRE", "WATER"],
+        },
+      ],
+      type_effectiveness: [
+        {
+          matchups: { FIRE: { GRASS: { numerator: 2, denominator: 1 } } },
+          foresight_matchups: {
+            NORMAL: { GHOST: { numerator: 0, denominator: 1 } },
+          },
+        },
+      ],
+      weather_modifiers: [
+        {
+          type_modifiers: [
+            {
+              weather: "WEATHER_RAIN",
+              move_type: "WATER",
+              multiplier: { numerator: 3, denominator: 2 },
+            },
+          ],
+          move_effect_modifiers: [],
+        },
+      ],
+      battle_reward_rules: [
+        expect.objectContaining({
+          max_level: 100,
+          wild_exp_divisor: 7,
+          trainer_exp_numerator: 3,
+          trainer_exp_denominator: 2,
+        }),
+      ],
+      battle_escape_rules: [
+        {
+          player_speed_multiplier: 32,
+          enemy_speed_divisor: 4,
+          failed_attempt_bonus: 30,
+          rng_roll_values: 256,
+        },
+      ],
+      step_event_rules: [
+        {
+          poison_step_interval: 4,
+          egg_step_trigger: 128,
+          hatched_egg_happiness: 120,
+          poison_status: "POISON",
+          egg_nickname: "EGG",
+          happiness_step_counter_mask: 1,
+          happiness_step_counter_target: 0,
+        },
+      ],
+      fishing: [],
+      fruit_trees: [{ FRUITTREE_ROUTE_29: "BERRY" }],
+      currency_constants: [{ MAX_MONEY: 999999, MAX_COINS: 9999 }],
+      npcs: [
+        {
+          Route1: [
+            expect.objectContaining({
+              script: "Route1YoungsterScript",
+              object_identifier: "ROUTE1_YOUNGSTER",
+            }),
+          ],
+        },
+      ],
+      pokegear_landmarks: [
+        expect.objectContaining({
+          landmarks: expect.any(Array),
+          map_to_landmark: { NewBarkTown: "LANDMARK_NEW_BARK_TOWN" },
+        }),
+      ],
+      items: [
+        { POTION: { name: "POTION", script_name: "POTION", price: 300 } },
+      ],
+      pc_strings: [{ PCString_ChooseaPKMN: "Choose a PKMN." }],
+      menu_icons: [{ TOTODILE: "ICON_TOTODILE" }],
+      playability: [
+        {
+          start_maps: ["Route1"],
+          start_tiles: [{ map: "Route1", tile: { x: 1, y: 2 } }],
+          initial_events: [],
+          initial_items: [],
+          goal_maps: [],
+          goal_events: ["EVENT_HALL_OF_FAME"],
+          goal_items: [],
+          progression_rules: [],
+          map_access: [],
+          require_all_maps_reachable: false,
+          require_walkable_maps: true,
+        },
+      ],
+      pokedex_entries: [
+        {
+          TOTODILE: {
+            species: "TOTODILE",
+            classification: "BIG_JAW",
+            heightDigits: 200,
+            weightDigits: 210,
+            pages: ["It has sharp fangs."],
+          },
+        },
+      ],
+      pokemon_frontpic_anim: [
+        { TOTODILE: { commands: [{ kind: "endanim" }] } },
+      ],
+    };
+    for (const [category, expected] of Object.entries(
+      expectedCompiledCategories,
+    )) {
+      try {
+        expect(compiledCategories[category]).toEqual(expected);
+      } catch (error) {
+        throw new Error(`compiled category ${category} differs`, {
+          cause: error,
+        });
+      }
+    }
     expect(compiledCall?.[2]).toEqual({ indent: 0 });
     expect(mockWriteJsonToTargets).toHaveBeenCalledWith(
       "content-packs/core-modular.generated.json",

@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
   emptyAgentStreamState,
   parseAgentStreamLine,
@@ -35,7 +32,6 @@ import {
 import {
   createTuiSoundController,
   extractTuiAudioPlaybackSnapshot,
-  resolveTuiAudioSourcePath,
 } from "./tui-sound";
 import {
   KITTY_PLACEHOLDER_CELL,
@@ -1358,40 +1354,6 @@ describe("TUI audio snapshot playback", () => {
         },
       ],
     });
-  });
-
-  it("resolves non-PCM web audio URLs to local asset files before treating paths as absolute", () => {
-    const previousAudioRoot = process.env.POKECRYSTAL_CLI_AUDIO_ROOT;
-    const tempRoot = fs.mkdtempSync(
-      path.join(os.tmpdir(), "pokecrystal-tui-audio-"),
-    );
-    const route29Path = path.join(tempRoot, "route29.wav");
-    const readTextPath = path.join(tempRoot, "sfx", "readtext2.wav");
-    fs.mkdirSync(path.dirname(readTextPath), { recursive: true });
-    fs.writeFileSync(route29Path, "audio");
-    fs.writeFileSync(readTextPath, "audio");
-
-    try {
-      process.env.POKECRYSTAL_CLI_AUDIO_ROOT = tempRoot;
-
-      expect(resolveTuiAudioSourcePath("/api/audio/route29.wav")).toBe(
-        route29Path,
-      );
-      expect(resolveTuiAudioSourcePath("/assets/audio/sfx/readtext2.wav")).toBe(
-        readTextPath,
-      );
-      expect(resolveTuiAudioSourcePath("/audio/sfx/readtext2.wav")).toBe(
-        readTextPath,
-      );
-      expect(resolveTuiAudioSourcePath(route29Path)).toBe(route29Path);
-    } finally {
-      if (previousAudioRoot === undefined) {
-        delete process.env.POKECRYSTAL_CLI_AUDIO_ROOT;
-      } else {
-        process.env.POKECRYSTAL_CLI_AUDIO_ROOT = previousAudioRoot;
-      }
-      fs.rmSync(tempRoot, { force: true, recursive: true });
-    }
   });
 
   it("plays only new AudioEngine events and resumes current web music when enabled", () => {

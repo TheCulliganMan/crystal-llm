@@ -37,10 +37,10 @@ function samplePokemon(speciesKey: string, overrides?: Partial<Pokemon>): Pokemo
     species,
     nickname: pokemonSpeciesDisplayName(species),
     moves: [
-      { name: MoveName.POUND, current_pp: 35 },
-      { name: MoveName.TACKLE, current_pp: 35 },
-      { name: MoveName.GROWL, current_pp: 40 },
-      { name: MoveName.TAIL_WHIP, current_pp: 30 },
+      { name: MoveName.POUND, current_pp: 35, pp_ups: 2 },
+      { name: MoveName.TACKLE, current_pp: 35, pp_ups: 0 },
+      { name: MoveName.GROWL, current_pp: 40, pp_ups: 0 },
+      { name: MoveName.TAIL_WHIP, current_pp: 30, pp_ups: 0 },
     ],
     level: 12,
     hp: 39,
@@ -93,6 +93,7 @@ describe('TradeManager', () => {
     expect(clientResult.receivedPokemon.species.id).toBe(hostMon.species.id);
     expect(clientResult.receivedPokemon.original_trainer_name).toBe('ALICE');
     expect(clientResult.receivedPokemon.original_trainer_id).toBe(0x1111);
+    expect(clientResult.receivedPokemon.moves[0].pp_ups).toBe(2);
   });
 
   test('cancelled if either side does not confirm', async () => {

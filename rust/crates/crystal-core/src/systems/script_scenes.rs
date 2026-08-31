@@ -103,11 +103,13 @@ impl From<SceneError> for ScriptSceneError {
 }
 
 pub const SCRIPT_SCENE_CHECK_COMMANDS: &[&str] = &["checkscene"];
+pub const SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS: &[&str] = &["checkmapscene"];
 pub const SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS: &[&str] = &["setscene"];
 pub const SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS: &[&str] = &["setmapscene"];
 
 pub fn is_known_script_scene_command(command: &str) -> bool {
     SCRIPT_SCENE_CHECK_COMMANDS.contains(&command)
+        || SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS.contains(&command)
         || SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&command)
         || SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&command)
 }
@@ -122,6 +124,17 @@ pub fn script_scene_command_issues(command: &ScriptSceneCommand) -> Vec<ScriptSc
     } else if SCRIPT_SCENE_CHECK_COMMANDS.contains(&command.command.as_str()) {
         if command.map_id.is_some() {
             issues.push(ScriptSceneCommandIssue::UnexpectedTargetMap);
+        }
+        if command.scene_id.is_some() {
+            issues.push(ScriptSceneCommandIssue::UnexpectedSceneId);
+        }
+    } else if SCRIPT_SCENE_TARGET_MAP_CHECK_COMMANDS.contains(&command.command.as_str()) {
+        match command.map_id.as_deref() {
+            Some(map_id) if !is_exact_script_scene_token(map_id) => {
+                issues.push(ScriptSceneCommandIssue::InvalidTargetMap);
+            }
+            Some(_) => {}
+            None => issues.push(ScriptSceneCommandIssue::MissingTargetMap),
         }
         if command.scene_id.is_some() {
             issues.push(ScriptSceneCommandIssue::UnexpectedSceneId);
@@ -180,7 +193,16 @@ pub fn apply_script_scene_command(
             reject_target_map(&command)?;
             reject_scene_id(&command)?;
             let map_name = require_current_map(current_map_name)?;
-            state.scenes.check_scene(map_name, table)?
+            check_scene_or_no_scene(state, map_name, table)?
+        }
+        "checkmapscene" => {
+            require_target_map(&command)?;
+            reject_scene_id(&command)?;
+            let map_name =
+                resolved_target_map_name.ok_or_else(|| ScriptSceneError::MissingTargetMap {
+                    command: command.command.clone(),
+                })?;
+            check_scene_or_no_scene(state, map_name, table)?
         }
         "setscene" => {
             reject_target_map(&command)?;
@@ -206,6 +228,25 @@ pub fn apply_script_scene_command(
         }
     };
     Ok(outcome(command, status))
+}
+
+fn check_scene_or_no_scene(
+    state: &mut GameState,
+    map_name: &str,
+    table: &MapSceneTable,
+) -> Result<SceneStatus, ScriptSceneError> {
+    if table.scenes.is_empty() {
+        return Ok(SceneStatus {
+            map_name: map_name.to_string(),
+            scene_name: "255".to_string(),
+            scene_index: u8::MAX.into(),
+            script_name: None,
+        });
+    }
+    state
+        .scenes
+        .check_scene(map_name, table)
+        .map_err(Into::into)
 }
 
 fn outcome(command: ScriptSceneCommand, status: SceneStatus) -> ScriptSceneOutcome {
@@ -406,6 +447,7 @@ mod tests {
     #[test]
     fn exported_scene_command_sets_are_exact() {
         assert!(SCRIPT_SCENE_CHECK_COMMANDS.contains(&"checkscene"));
+        assert!(is_known_script_scene_command("checkmapscene"));
         assert!(SCRIPT_SCENE_CURRENT_MAP_MUTATION_COMMANDS.contains(&"setscene"));
         assert!(SCRIPT_SCENE_TARGET_MAP_MUTATION_COMMANDS.contains(&"setmapscene"));
         assert!(is_known_script_scene_command("setscene"));
@@ -581,6 +623,64 @@ mod tests {
         assert_eq!(outcome.map_name, "Route43");
         assert_eq!(outcome.scene_id, "1");
         assert_eq!(state.scenes.map_scenes["Route43"], "1");
+    }
+
+    #[test]
+    fn checkmapscene_reads_the_declared_target_map_without_changing_current_scene() {
+        let mut state = GameState::default();
+        state
+            .scenes
+            .enter_map("Route43Gate", &table())
+            .expect("enter current map");
+        state
+            .scenes
+            .set_map_scene("Route43", "SCENE_ROUTE43GATE_NOOP", &table())
+            .expect("seed target map scene");
+
+        let outcome = apply_script_scene_command(
+            &mut state,
+            "Route43Gate",
+            Some("Route43"),
+            &table(),
+            command("checkmapscene", Some("ROUTE_43"), None),
+        )
+        .expect("check target map scene");
+
+        assert_eq!(outcome.map_name, "Route43");
+        assert_eq!(outcome.scene_index, 1);
+        assert_eq!(state.scenes.current_map_name, "Route43Gate");
+        assert_eq!(state.scenes.scene_name, "SCENE_ROUTE43GATE_ROCKETS");
+    }
+
+    #[test]
+    fn scene_checks_return_ff_for_maps_without_scene_scripts() {
+        let mut state = GameState::default();
+        state
+            .scenes
+            .enter_map("Route43Gate", &table())
+            .expect("enter current map");
+        let empty = MapSceneTable::default();
+
+        for (name, map_id, target_map) in [
+            ("checkscene", None, None),
+            ("checkmapscene", Some("ROUTE_43"), Some("Route43")),
+        ] {
+            let outcome = apply_script_scene_command(
+                &mut state,
+                "Route43Gate",
+                target_map,
+                &empty,
+                command(name, map_id, None),
+            )
+            .expect("maps without scene scripts return the ASM sentinel");
+
+            assert_eq!(outcome.scene_id, "255");
+            assert_eq!(outcome.scene_index, usize::from(u8::MAX));
+            assert_eq!(outcome.script_name, None);
+        }
+        assert_eq!(state.scenes.current_map_name, "Route43Gate");
+        assert_eq!(state.scenes.scene_name, "SCENE_ROUTE43GATE_ROCKETS");
+        assert!(!state.scenes.map_scenes.contains_key("Route43"));
     }
 
     #[test]

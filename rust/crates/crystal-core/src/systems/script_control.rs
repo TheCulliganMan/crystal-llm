@@ -146,7 +146,7 @@ pub fn script_control_command_issues(
         issues.push(ScriptControlCommandIssue::InvalidCommand { error });
         return issues;
     }
-    if command.command != "jumpstd" {
+    if !matches!(command.command.as_str(), "jumpstd" | "callstd") {
         if let Some(target_script) = command.resolved_target_script.as_deref() {
             if !is_exact_nonempty_token(target_script) {
                 issues.push(ScriptControlCommandIssue::InvalidTargetScript {
@@ -195,7 +195,7 @@ pub fn resolve_script_control_command(
             let (left, right) = comparison_bytes(state, &command, numeric_constants)?;
             branch(state, &command, left < right)
         }
-        "sjump" | "farsjump" | "scall" | "farscall" | "sdefer" | "jumpstd" => {
+        "sjump" | "farsjump" | "scall" | "farscall" | "sdefer" | "jumpstd" | "callstd" => {
             Ok(jump_action(command)?)
         }
         "end" | "endcallback" => Ok(ScriptControlAction::End {
@@ -366,7 +366,7 @@ pub fn validate_script_control_command(
             require_target(command)?;
             require_resolved_target(command)?;
         }
-        "jumpstd" => {
+        "jumpstd" | "callstd" => {
             reject_compare_value(command)?;
             require_target(command)?;
         }
@@ -418,16 +418,16 @@ fn branch(
 fn jump_action(
     command: ScriptControlCommand,
 ) -> Result<ScriptControlAction, ScriptControlCommandError> {
-    let target_script = if command.command == "jumpstd" {
+    let target_script = if matches!(command.command.as_str(), "jumpstd" | "callstd") {
         require_target(&command)?.to_string()
     } else {
         require_resolved_target(&command)?.to_string()
     };
     Ok(ScriptControlAction::Jump {
         target_script,
-        call: matches!(command.command.as_str(), "scall" | "farscall"),
+        call: matches!(command.command.as_str(), "scall" | "farscall" | "callstd"),
         deferred: command.command == "sdefer",
-        standard: command.command == "jumpstd",
+        standard: matches!(command.command.as_str(), "jumpstd" | "callstd"),
         source_script: command.source_script,
         command_index: command.command_index,
     })
@@ -961,6 +961,20 @@ mod tests {
             ScriptControlAction::Jump {
                 target_script: "PokecenterSignScript".to_string(),
                 call: false,
+                deferred: false,
+                standard: true,
+                source_script: "Script".to_string(),
+                command_index: 6,
+            }
+        );
+
+        let mut callstd = script_control_command("callstd", None, Some("PokecenterNurseScript"));
+        callstd.resolved_target_script = None;
+        assert_eq!(
+            resolve_script_control_command(&state, callstd, &constants).expect("callstd"),
+            ScriptControlAction::Jump {
+                target_script: "PokecenterNurseScript".to_string(),
+                call: true,
                 deferred: false,
                 standard: true,
                 source_script: "Script".to_string(),

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::battle::start::first_available_battle_party_index;
+use crate::models::item::is_mail_item_id;
 use crate::models::pokemon::{CaughtData, StatExperience};
 use crate::models::{
     Dv, Item, LearnedMove, MAX_BOX_MONS, MAX_PC_BOXES, Move, Party, Pokemon, PokemonSpecies,
@@ -11,21 +12,23 @@ use crate::models::{
 };
 use crate::random::{CrystalRandom, CrystalRandomState, DividerSource};
 use crate::state::{
-    BattleMemory, BattleTowerState, BuenasPasswordState, EventFlagError, GameState,
-    LinkSerialConnectionStatus, MagikarpRecordState, MobileBattleTowerRecord, RoamingPokemonState,
-    ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind, ScriptFadeColor, ScriptFadeDirection,
-    ScriptGraphicsRuntimeEvent, ScriptGraphicsRuntimeKind, ScriptMoneyRuntimeEvent,
-    ScriptMoneyRuntimeKind, ScriptMusicFade, ScriptScreenFade,
+    BattleMemory, BattleTowerState, BuenasPasswordState, CardFlipInput, CardFlipPhase,
+    CardFlipState, DayCareInput, EventFlagError, GameState, LinkSerialConnectionStatus,
+    MagikarpRecordState, MemoryGameButton, MemoryGameInput, MemoryGamePhase, MemoryGameState,
+    MobileBattleTowerRecord, RoamingPokemonState, ScriptAudioRuntimeEvent, ScriptAudioRuntimeKind,
+    ScriptFadeColor, ScriptFadeDirection, ScriptGraphicsRuntimeEvent, ScriptGraphicsRuntimeKind,
+    ScriptMoneyRuntimeEvent, ScriptMoneyRuntimeKind, ScriptMusicFade, ScriptScreenFade,
+    SlotMachineInput, SlotMachinePhase, SlotMachineState, SlotSymbol,
 };
 use crate::systems::experience::{ExperienceError, GrowthRateCatalog, calculate_experience};
-use crate::systems::learnsets::SpeciesLearnsets;
+use crate::systems::learnsets::{SpeciesLearnsets, level_up_moves_for_species};
 use crate::systems::phone::PhoneContactCatalog;
 use crate::systems::time::ClockTime;
 use crate::world::encounters::{TimeOfDay, WildEncounter, WildEncounterData};
 use crate::world::map::{METATILE_WIDTH, TilePosition};
 
 fn pokemon_is_egg(pokemon: &Pokemon) -> bool {
-    pokemon.is_egg || pokemon.status.as_deref() == Some("EGG") || pokemon.species.id == "EGG"
+    pokemon.is_egg
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,7 +296,6 @@ pub enum SpecialRoutineEffect {
         new_happiness: u8,
         script_value: u8,
         change_code: u8,
-        rng_seed_after: u32,
     },
     NameRater {
         party_slot: usize,
@@ -384,6 +386,8 @@ pub enum SpecialRoutineEffect {
         action: String,
         success: bool,
         pokemon: Option<String>,
+        level: Option<u8>,
+        reason: Option<String>,
     },
     DayCareMon {
         caretaker: String,
@@ -431,10 +435,21 @@ pub enum SpecialRoutineEffect {
     LinkResult {
         success: bool,
         link_mode: u8,
+        delay_frames: u8,
+    },
+    LinkedFriendResult {
+        success: bool,
+        link_mode: u8,
+        delay_frames: u8,
+    },
+    LinkDelay {
+        link_mode: u8,
+        delay_frames: u8,
     },
     LinkRoom {
         room: String,
         link_mode: u8,
+        session: bool,
     },
     TimeCapsuleCompatibility {
         result_code: u8,
@@ -443,12 +458,13 @@ pub enum SpecialRoutineEffect {
     },
     QuickSave {
         requested: bool,
+        delay_frames: u8,
     },
     AskMobileOrCable {
         selection: String,
     },
     CableClubCheckWhichChris {
-        male_player: bool,
+        external_clock_player: bool,
     },
     BattleTowerAction {
         action: String,
@@ -526,6 +542,10 @@ pub enum SpecialRoutineEffect {
         coins: u16,
         random_state_after: CrystalRandomState,
     },
+    SlotMachineEntered {
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
     SlotMachineReelStopped {
         reel: u8,
         mode: String,
@@ -546,6 +566,19 @@ pub enum SpecialRoutineEffect {
     SlotMachinePayout {
         coins_before: u16,
         payout_remaining: u16,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    SlotMachineResultAcknowledged {
+        can_play_again: bool,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    SlotMachineReplayAccepted {
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    SlotMachineExited {
         coins: u16,
         random_state_after: CrystalRandomState,
     },
@@ -575,13 +608,21 @@ pub enum SpecialRoutineEffect {
     },
     CardFlipPayout {
         coins_before: u16,
+        payout_remaining: u16,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    CardFlipResultAcknowledged {
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    CardFlipExited {
         coins: u16,
         random_state_after: CrystalRandomState,
     },
     UnownPuzzle {
         puzzle_id: String,
         solved: bool,
-        moves: u16,
         layout: Vec<Vec<u8>>,
         holding_piece: Option<u8>,
         random_state_after: CrystalRandomState,
@@ -591,6 +632,79 @@ pub enum SpecialRoutineEffect {
         symbol: Option<String>,
         first_index: usize,
         second_index: usize,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameEntered {
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameStarted {
+        board: Vec<String>,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameCardPlaced {
+        card_index: usize,
+        delay_frames: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameCursorReady {
+        cursor_index: u8,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameFrameAdvanced {
+        phase: MemoryGamePhase,
+        cursor_index: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameTryStarted {
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameRevealReady {
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameFirstCardPicked {
+        card_index: usize,
+        symbol: String,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameCardRejected {
+        pick: u8,
+        card_index: usize,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGamePairRevealed {
+        first_index: usize,
+        first_symbol: String,
+        second_index: usize,
+        second_symbol: String,
+        delay_frames: u8,
+        tries_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameDelayAdvanced {
+        frames_remaining: u8,
+        coins: u16,
+        random_state_after: CrystalRandomState,
+    },
+    UnusedMemoryGameRoundEnded {
+        remaining_cards: Vec<Option<String>>,
+        matched_symbols: Vec<String>,
         coins: u16,
         random_state_after: CrystalRandomState,
     },
@@ -880,6 +994,7 @@ pub enum LuckyNumberWinnerSource {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GameCornerUnavailableReason {
     NoCoins,
+    InsufficientStake,
     MissingCoinCase,
 }
 
@@ -1363,6 +1478,55 @@ impl<'de> Deserialize<'de> for BattleTowerRules {
                 "battle tower Pokemon groups must be present and nonempty",
             ));
         }
+        for (group_index, group) in raw.mon_groups.iter().enumerate() {
+            for (mon_index, mon) in group.iter().enumerate() {
+                for (field, actual, expected) in [
+                    ("moves", mon.moves.len(), 4),
+                    ("statExp", mon.stat_exp.len(), 5),
+                    ("dvs", mon.dvs.len(), 4),
+                    ("pp", mon.pp.len(), 4),
+                    ("pokerus", mon.pokerus.len(), 3),
+                    ("status", mon.status.len(), 2),
+                    ("stats", mon.stats.len(), 7),
+                ] {
+                    if actual != expected {
+                        return Err(serde::de::Error::custom(format!(
+                            "battle tower monGroups[{group_index}][{mon_index}].{field} must contain exactly {expected} ASM record values, found {actual}"
+                        )));
+                    }
+                }
+                if mon.dvs.iter().any(|dv| *dv > 0x0f) {
+                    return Err(serde::de::Error::custom(format!(
+                        "battle tower monGroups[{group_index}][{mon_index}].dvs must contain four nibbles"
+                    )));
+                }
+                require_special_token("battle tower Pokemon species", &mon.species)
+                    .map_err(serde::de::Error::custom)?;
+                if let Some(item_id) = mon.item.as_deref() {
+                    require_special_token("battle tower Pokemon item", item_id)
+                        .map_err(serde::de::Error::custom)?;
+                }
+                for move_id in &mon.moves {
+                    require_special_token("battle tower Pokemon move", move_id)
+                        .map_err(serde::de::Error::custom)?;
+                }
+                if mon.level == 0 || mon.level > 100 {
+                    return Err(serde::de::Error::custom(format!(
+                        "battle tower monGroups[{group_index}][{mon_index}].level must be within the ASM level range 1..=100"
+                    )));
+                }
+                if mon.experience > 0x00ff_ffff {
+                    return Err(serde::de::Error::custom(format!(
+                        "battle tower monGroups[{group_index}][{mon_index}].experience exceeds the ASM three-byte field"
+                    )));
+                }
+                decode_battle_tower_status(&mon.status).map_err(|error| {
+                    serde::de::Error::custom(format!(
+                        "battle tower monGroups[{group_index}][{mon_index}].status {error}"
+                    ))
+                })?;
+            }
+        }
 
         Ok(Self {
             banned_species: raw.banned_species,
@@ -1512,9 +1676,7 @@ pub fn saved_battle_tower_state_is_active(tower: &BattleTowerState) -> bool {
         || tower.record_last_day.is_some()
         || tower.record_reset_counter != 0
         || tower.leaderboard_acknowledged
-        || tower.last_rule_failure.is_some()
         || tower.loaded_trainer_id.is_some()
-        || tower.last_sprite_constant.is_some()
         || !tower.selected_party_indexes.is_empty()
         || !tower.mobile_flags.is_empty()
         || !is_default_battle_tower_trainer_history(&tower.trainer_history)
@@ -3013,7 +3175,7 @@ impl RoamingPokemonCatalog {
 pub enum RoamingPokemonCatalogIssue {
     #[error("roaming Pokemon slotCount must be 3, found {slot_count}")]
     InvalidSlotCount { slot_count: u8 },
-    #[error("roaming Pokemon inactiveMap must not be the pre-init 0/0 location")]
+    #[error("roaming Pokemon inactiveMap must not use the invalid 0/0 location")]
     InvalidInactiveMap,
     #[error("roaming Pokemon inactiveMap collides with a live init, route, or connection map")]
     InactiveMapCollision,
@@ -3796,8 +3958,8 @@ where
         "UnusedMemoryGame" | "MemoryGame" => {
             unused_memory_game(&mut next, context.item_catalog, routine, divider)
         }
-        "DayCareMan" => day_care_interaction(&mut next, routine, "man", divider),
-        "DayCareLady" => day_care_interaction(&mut next, routine, "lady", divider),
+        "DayCareMan" => day_care_interaction(&mut next, context, routine, "man", divider),
+        "DayCareLady" => day_care_interaction(&mut next, context, routine, "lady", divider),
         "DayCareManOutside" => day_care_man_outside(&mut next, routine, divider),
         "GiveShuckle" => give_shuckle(&mut next, context, routine, divider),
         "BuenasPassword" => buenas_password(
@@ -4039,8 +4201,8 @@ pub fn apply_special_routine_with_context(
                 routine: routine.to_string(),
             })
         }
-        "DayCareMon1" => day_care_mon(state, routine, "man"),
-        "DayCareMon2" => day_care_mon(state, routine, "lady"),
+        "DayCareMon1" => day_care_mon(state, context.growth_rates, routine, "man"),
+        "DayCareMon2" => day_care_mon(state, context.growth_rates, routine, "lady"),
         "GiveParkBalls" => give_park_balls(state, context.bug_contest_config, routine),
         "StartBugContestTimer" => start_bug_contest_timer(state, routine),
         "CheckBugContestTimer" => check_bug_contest_timer(state, routine),
@@ -4064,11 +4226,13 @@ pub fn apply_special_routine_with_context(
         "CloseLink" => close_link(state, routine),
         "WaitForOtherPlayerToExit" => wait_for_other_player_to_exit(state, routine),
         "FailedLinkToPast" => failed_link_to_past(state, routine),
-        "TradeCenter" => link_room(state, routine, "TradeCenter", 2),
-        "Colosseum" => link_room(state, routine, "Colosseum", 3),
-        "EnterTimeCapsule" => link_room(state, routine, "TimeCapsule", 1),
+        "TradeCenter" => link_room(state, routine, "TradeCenter", 2, true),
+        "Colosseum" => link_room(state, routine, "Colosseum", 3, true),
+        "EnterTimeCapsule" => link_room(state, routine, "TimeCapsule", 1, false),
         "TimeCapsule" => time_capsule(state, routine),
-        "CheckTimeCapsuleCompatibility" => check_time_capsule_compatibility(state, routine),
+        "CheckTimeCapsuleCompatibility" => {
+            check_time_capsule_compatibility(state, context.move_catalog, routine)
+        }
         "TryQuickSave" => try_quick_save(state, routine),
         "AskMobileOrCable" => ask_mobile_or_cable(state, routine),
         "CableClubCheckWhichChris" => cable_club_check_which_chris(state, routine),
@@ -4179,7 +4343,7 @@ fn heal_party(
         let Some(pokemon) = slot.as_mut() else {
             continue;
         };
-        if pokemon.is_egg || pokemon.species.id == "EGG" {
+        if pokemon.is_egg {
             continue;
         }
         if heal_pokemon(pokemon, move_catalog) {
@@ -4290,7 +4454,6 @@ fn play_map_music(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     state.script_runtime.map_music_requested = true;
-    state.script_runtime.map_music_restart_disabled = false;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -4303,7 +4466,6 @@ fn restart_map_music(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     state.script_runtime.map_music_requested = true;
-    state.script_runtime.map_music_restart_disabled = false;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -4472,9 +4634,15 @@ fn check_first_mon_is_egg(
             .ok_or_else(|| SpecialRoutineError::EmptyParty {
                 routine: routine.to_string(),
             })?;
-    let species = pokemon.species.id.clone();
-    let nickname = pokemon_nickname_or_species(pokemon);
     let is_egg = pokemon_is_egg(pokemon);
+    // The party species list stores the `EGG` sentinel while the party-mon
+    // structure retains the actual hatch species represented by `is_egg`.
+    let species = if is_egg {
+        "EGG".to_string()
+    } else {
+        pokemon.species.id.clone()
+    };
+    let nickname = pokemon_nickname_or_species(pokemon);
     let value = if is_egg { "1" } else { "0" };
     state
         .script_runtime
@@ -5359,10 +5527,10 @@ where
         let second = rng
             .random(first.carry_out)
             .map_err(RandomSpecialRoutineError::Divider)?;
-        let high = u16::from(first.value);
-        let low = u16::from(second.value);
         state.random_state = rng.state();
-        state.lucky_id_number = (high << 8) | low;
+        // Crystal keeps the first result in C, then stores the second Random
+        // result to the high byte and the saved first result to the low byte.
+        state.lucky_id_number = u16::from_be_bytes([second.value, first.value]);
         state.lucky_number_day = Some(current_day);
     }
     Ok(state.lucky_id_number)
@@ -5726,18 +5894,9 @@ fn pokemon_center_pc(
     let party_count = state.storage.party.filled_slots();
     let current_pc_box = state.current_pc_box;
     state.script_runtime.active_menu = Some("PokemonCenterPC".to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_pc_context".to_string(), "PokemonCenterPC".to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_pc_party_count".to_string(), party_count.to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_pc_current_box".to_string(), current_pc_box.to_string());
+    for host_mirror in ["_pc_context", "_pc_party_count", "_pc_current_box"] {
+        state.script_runtime.variables.remove(host_mirror);
+    }
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -5754,14 +5913,9 @@ fn players_house_pc(
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let party_count = state.storage.party.filled_slots();
     state.script_runtime.active_menu = Some("PlayersHousePC".to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_pc_context".to_string(), "PlayersHousePC".to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_pc_party_count".to_string(), party_count.to_string());
+    for host_mirror in ["_pc_context", "_pc_party_count", "_pc_current_box"] {
+        state.script_runtime.variables.remove(host_mirror);
+    }
     // PlayersHousePC clears wScriptVar before the asynchronous PC/menu flow.
     // Only leaving the decoration menu after a real change sets it back to
     // TRUE so PlayersHousePCScript takes its map-reload warp branch.
@@ -5791,18 +5945,9 @@ fn prof_oaks_pc_boot(
         .script_runtime
         .named_buffers
         .insert("STRING_BUFFER_4".to_string(), caught_count.to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_oak_rating_label".to_string(), rating_label.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("_oak_seen_count".to_string(), seen_count.to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_oak_owned_count".to_string(), caught_count.to_string());
+    for host_mirror in ["_oak_rating_label", "_oak_seen_count", "_oak_owned_count"] {
+        state.script_runtime.variables.remove(host_mirror);
+    }
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -5823,12 +5968,10 @@ fn overworld_town_map(
         crate::state::OverworldMemory::Inactive => None,
     };
     state.script_runtime.active_menu = Some("OverworldTownMap".to_string());
-    if let Some(map_name) = &map_name {
-        state
-            .script_runtime
-            .variables
-            .insert("_town_map_current_map".to_string(), map_name.clone());
-    }
+    state
+        .script_runtime
+        .variables
+        .remove("_town_map_current_map");
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -5855,11 +5998,9 @@ fn map_radio(
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let station = required_string_script_variable(state, routine, "_value")?;
     state.script_runtime.active_menu = Some("MapRadio".to_string());
-    state
-        .script_runtime
-        .variables
-        .insert("_map_radio_station".to_string(), station.clone());
     state.script_runtime.script_value = Some(station.clone());
+    state.script_runtime.variables.remove("_value");
+    state.script_runtime.variables.remove("_map_radio_station");
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -6002,7 +6143,6 @@ const UNOWN_START_POSITIONS: [(usize, usize); 16] = [
 struct UnownPuzzleState {
     layout: [[u8; 6]; 6],
     holding_piece: Option<u8>,
-    moves: u16,
 }
 
 fn unown_puzzle_layout_vec(layout: &[[u8; 6]; 6]) -> Vec<Vec<u8>> {
@@ -6021,13 +6161,13 @@ fn normalize_unown_puzzle_id(
     }
     let token = raw_value.trim().to_ascii_uppercase();
     let resolved = match token.as_str() {
-        "UNOWNPUZZLE_KABUTO" => "KABUTO",
-        "UNOWNPUZZLE_OMANYTE" => "OMANYTE",
-        "UNOWNPUZZLE_AERODACTYL" => "AERODACTYL",
-        "UNOWNPUZZLE_HO_OH" => "HOOH",
-        other => other,
+        "UNOWNPUZZLE_KABUTO" => Some("KABUTO"),
+        "UNOWNPUZZLE_OMANYTE" => Some("OMANYTE"),
+        "UNOWNPUZZLE_AERODACTYL" => Some("AERODACTYL"),
+        "UNOWNPUZZLE_HO_OH" => Some("HOOH"),
+        _ => None,
     };
-    if UNOWN_PUZZLE_IDS.contains(&resolved) {
+    if let Some(resolved) = resolved {
         Ok(resolved.to_string())
     } else {
         Err(SpecialRoutineError::InvalidUnownPuzzleState {
@@ -6039,23 +6179,6 @@ fn normalize_unown_puzzle_id(
 
 fn unown_puzzle_variable_key(base_name: &str, puzzle_id: &str) -> String {
     format!("{base_name}_{puzzle_id}")
-}
-
-fn migrate_unown_puzzle_variable(
-    state: &mut GameState,
-    base_name: &str,
-    puzzle_id: &str,
-) -> Option<String> {
-    let full_key = unown_puzzle_variable_key(base_name, puzzle_id);
-    if let Some(value) = state.script_runtime.variables.get(&full_key).cloned() {
-        return Some(value);
-    }
-    let value = state.script_runtime.variables.remove(base_name)?;
-    state
-        .script_runtime
-        .variables
-        .insert(full_key, value.clone());
-    Some(value)
 }
 
 fn encode_unown_layout(layout: &[[u8; 6]; 6]) -> String {
@@ -6155,38 +6278,35 @@ where
     Ok(UnownPuzzleState {
         layout,
         holding_piece: None,
-        moves: 0,
     })
 }
 
 fn load_unown_puzzle_state(
-    state: &mut GameState,
+    state: &GameState,
     routine: &str,
     puzzle_id: &str,
 ) -> Result<UnownPuzzleState, SpecialRoutineError> {
-    let Some(raw_layout) = migrate_unown_puzzle_variable(state, "unown_layout", puzzle_id) else {
+    let Some(raw_layout) = state
+        .script_runtime
+        .variables
+        .get(&unown_puzzle_variable_key("unown_layout", puzzle_id))
+    else {
         return Err(SpecialRoutineError::InvalidUnownPuzzleState {
             routine: routine.to_string(),
             message: format!("puzzle {puzzle_id} has no active layout"),
         });
     };
-    let layout = parse_unown_layout(routine, &raw_layout)?;
-    let holding_piece = migrate_unown_puzzle_variable(state, "unown_holding_piece", puzzle_id)
-        .and_then(|raw| {
-            let trimmed = raw.trim();
-            (!trimmed.is_empty() && trimmed != "null").then(|| trimmed.to_string())
-        })
-        .map(|raw| parse_exact_u8_token(routine, &raw, &raw))
+    let layout = parse_unown_layout(routine, raw_layout)?;
+    let holding_piece = state
+        .script_runtime
+        .variables
+        .get(&unown_puzzle_variable_key("unown_holding_piece", puzzle_id))
+        .map(|raw| parse_exact_u8_token(routine, raw, raw))
         .transpose()?;
-    let moves = migrate_unown_puzzle_variable(state, "unown_moves", puzzle_id)
-        .map(|raw| parse_exact_u16_token(routine, &raw, &raw))
-        .transpose()?
-        .unwrap_or(0);
     validate_unown_puzzle_state(routine, &layout, holding_piece)?;
     Ok(UnownPuzzleState {
         layout,
         holding_piece,
-        moves,
     })
 }
 
@@ -6211,25 +6331,16 @@ fn store_unown_puzzle_state(state: &mut GameState, puzzle_id: &str, puzzle: &Uno
         unown_puzzle_variable_key("unown_layout", puzzle_id),
         encode_unown_layout(&puzzle.layout),
     );
-    state.script_runtime.variables.insert(
-        unown_puzzle_variable_key("unown_holding_piece", puzzle_id),
-        puzzle
-            .holding_piece
-            .map(|piece| piece.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-    );
-    state.script_runtime.variables.insert(
-        unown_puzzle_variable_key("unown_moves", puzzle_id),
-        puzzle.moves.to_string(),
-    );
-    for key in [
-        "unown_layout",
-        "unown_holding_piece",
-        "unown_moves",
-        "unown_action",
-        "unown_x",
-        "unown_y",
-    ] {
+    let holding_piece_key = unown_puzzle_variable_key("unown_holding_piece", puzzle_id);
+    if let Some(piece) = puzzle.holding_piece {
+        state
+            .script_runtime
+            .variables
+            .insert(holding_piece_key, piece.to_string());
+    } else {
+        state.script_runtime.variables.remove(&holding_piece_key);
+    }
+    for key in ["unown_action", "unown_x", "unown_y"] {
         state.script_runtime.variables.remove(key);
     }
 }
@@ -6303,7 +6414,6 @@ where
             }
             puzzle.layout[y][x] = piece;
             puzzle.holding_piece = None;
-            puzzle.moves = puzzle.moves.saturating_add(1);
         }
         Some("noop") | None => {}
         Some(unknown) => {
@@ -6329,7 +6439,6 @@ where
         effect: SpecialRoutineEffect::UnownPuzzle {
             puzzle_id,
             solved,
-            moves: puzzle.moves,
             layout: unown_puzzle_layout_vec(&puzzle.layout),
             holding_piece: puzzle.holding_piece,
             random_state_after: state.random_state,
@@ -6693,7 +6802,6 @@ fn apply_happiness_service(
             new_happiness,
             script_value: selected.script_value,
             change_code: selected.change_code,
-            rng_seed_after: state.rng_seed,
         },
     })
 }
@@ -6837,22 +6945,6 @@ fn bank_of_mom(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-enum GameCornerGame {
-    SlotMachine,
-    UnusedMemoryGame,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotSymbol {
-    Seven,
-    Pokeball,
-    Cherry,
-    Pikachu,
-    Squirtle,
-    Staryu,
-}
-
 const GAME_CORNER_MAX_COINS: u16 = 9999;
 const SLOT_REEL_LENGTH: usize = 15;
 const SLOT_PERCENT_1: u8 = 0x02;
@@ -6970,11 +7062,60 @@ struct CardFlipOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MemoryGameOutcome {
-    matched: bool,
-    symbol: Option<String>,
-    first_index: usize,
-    second_index: usize,
+enum MemoryGameOutcome {
+    Entered,
+    Started {
+        board: Vec<String>,
+        tries_remaining: u8,
+    },
+    CardPlaced {
+        card_index: usize,
+        delay_frames: u8,
+    },
+    CursorReady {
+        cursor_index: u8,
+        tries_remaining: u8,
+    },
+    FrameAdvanced {
+        phase: MemoryGamePhase,
+        cursor_index: u8,
+    },
+    TryStarted {
+        tries_remaining: u8,
+    },
+    RevealReady,
+    FirstCardPicked {
+        card_index: usize,
+        symbol: String,
+        tries_remaining: u8,
+    },
+    CardRejected {
+        pick: u8,
+        card_index: usize,
+        tries_remaining: u8,
+    },
+    PairRevealed {
+        first_index: usize,
+        first_symbol: String,
+        second_index: usize,
+        second_symbol: String,
+        delay_frames: u8,
+        tries_remaining: u8,
+    },
+    DelayAdvanced {
+        frames_remaining: u8,
+    },
+    Pair {
+        matched: bool,
+        symbol: Option<String>,
+        first_index: usize,
+        second_index: usize,
+        tries_remaining: u8,
+    },
+    RoundEnded {
+        remaining_cards: Vec<Option<String>>,
+        matched_symbols: Vec<String>,
+    },
 }
 
 fn slot_machine<S>(
@@ -6986,13 +7127,375 @@ fn slot_machine<S>(
 where
     S: DividerSource + ?Sized,
 {
-    coin_game_service(
-        state,
-        item_catalog,
-        routine,
-        GameCornerGame::SlotMachine,
-        divider,
-    )
+    const COIN_CASE: &str = "COIN_CASE";
+    state.script_runtime.variables.remove("_coin_case_balance");
+    let coin_case =
+        item_catalog
+            .get(COIN_CASE)
+            .ok_or_else(|| SpecialRoutineError::UnknownItem {
+                routine: routine.to_string(),
+                item_id: COIN_CASE.to_string(),
+            })?;
+    let entering_game = matches!(
+        state.script_runtime.pending_slot_machine_input,
+        Some(SlotMachineInput::Enter { .. })
+    );
+    if entering_game && state.coins == 0 {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            },
+        });
+    }
+    if entering_game && !state.bag.has_item(coin_case) {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::MissingCoinCase,
+            },
+        });
+    }
+    state.script_runtime.last_special_routine = Some(routine.to_string());
+    state.script_runtime.active_menu = None;
+    let input = state
+        .script_runtime
+        .pending_slot_machine_input
+        .take()
+        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
+            routine: routine.to_string(),
+            variable: "pending_slot_machine_input".to_string(),
+        })?;
+    if let Some(machine) = &state.script_runtime.slot_machine {
+        machine
+            .validate()
+            .map_err(|message| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message,
+            })?;
+    }
+    let coins_before = state.coins;
+    match input {
+        SlotMachineInput::Enter { lucky } => {
+            if state
+                .script_runtime
+                .slot_machine
+                .as_ref()
+                .is_some_and(|machine| machine.phase != SlotMachinePhase::Quit)
+            {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "SlotMachine entry is only valid on cabinet entry".to_string(),
+                }
+                .into());
+            }
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let keep_seven_bias_chance =
+                slot_next_byte(&mut rng).map_err(RandomSpecialRoutineError::Divider)? & 0x2a == 0;
+            state.random_state = rng.state();
+            state.script_runtime.slot_machine = Some(SlotMachineState {
+                phase: SlotMachinePhase::Betting,
+                lucky,
+                keep_seven_bias_chance,
+                bet: 0,
+                bias: None,
+                offsets: [u8::try_from(SLOT_REEL_LENGTH - 1).expect("reel length fits byte"); 3],
+                next_reel: 1,
+                matched_symbol: None,
+                payout_remaining: 0,
+            });
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineEntered {
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::Start { bet, lucky } => {
+            if !(1..=3).contains(&bet) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!("slot machine bet must be between 1 and 3, found {bet}"),
+                }
+                .into());
+            }
+            if coins_before < u16::from(bet) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "slot machine bet {bet} exceeds the current coin balance {coins_before}"
+                    ),
+                }
+                .into());
+            }
+            let existing = state.script_runtime.slot_machine.take();
+            if existing
+                .as_ref()
+                .is_none_or(|machine| machine.phase != SlotMachinePhase::Betting)
+            {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "SlotMachine start requires the source betting phase".to_string(),
+                }
+                .into());
+            }
+            if existing.as_ref().is_some_and(|machine| {
+                machine.phase == SlotMachinePhase::Betting && machine.lucky != lucky
+            }) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "SlotMachine mode changed during one source session".to_string(),
+                }
+                .into());
+            }
+            let machine = existing.expect("validated active Slot Machine");
+            let offsets = machine.offsets;
+            let keep_seven_bias_chance = machine.keep_seven_bias_chance;
+            let retained_bias =
+                (machine.bias == Some(SlotSymbol::Seven)).then_some(SlotSymbol::Seven);
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let bias = match retained_bias {
+                Some(bias) => Some(bias),
+                None => slot_bias(&mut rng, lucky).map_err(RandomSpecialRoutineError::Divider)?,
+            };
+            state.random_state = rng.state();
+            state.coins -= u16::from(bet);
+            let offsets_usize = offsets.map(usize::from);
+            state.script_runtime.slot_machine = Some(SlotMachineState {
+                phase: SlotMachinePhase::Spinning,
+                lucky,
+                keep_seven_bias_chance,
+                bet,
+                bias,
+                offsets,
+                next_reel: 1,
+                matched_symbol: None,
+                payout_remaining: 0,
+            });
+            let coins = state.coins;
+            set_script_u32_value(state, u32::from(coins));
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineStarted {
+                    coins_before,
+                    bet,
+                    bias: bias.map(slot_symbol_name).map(str::to_string),
+                    offsets: offsets_usize,
+                    windows: slot_windows_named(offsets_usize),
+                    coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::StopReel { reel, offsets } => {
+            if offsets
+                .iter()
+                .any(|offset| usize::from(*offset) >= SLOT_REEL_LENGTH)
+            {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "SlotMachine stop offsets are outside the source reels".to_string(),
+                }
+                .into());
+            }
+            let machine = required_slot_machine_state(state, routine)?;
+            if machine.phase != SlotMachinePhase::Spinning
+                || reel != machine.next_reel
+                || !(1..=3).contains(&reel)
+            {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "slot machine reel must be the next reel {}, found {reel}",
+                        machine.next_reel
+                    ),
+                }
+                .into());
+            }
+            let bet = machine.bet;
+            let bias = machine.bias;
+            let mut resolved_offsets = offsets.map(usize::from);
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let resolution = match reel {
+                1 => {
+                    let animation_start_offset = resolved_offsets[0];
+                    resolved_offsets[0] = slot_stop_reel1(resolved_offsets[0], bias);
+                    SlotStopResolution::normal(animation_start_offset)
+                }
+                2 => slot_stop_reel2(&mut resolved_offsets, bias, bet, &mut rng)
+                    .map_err(RandomSpecialRoutineError::Divider)?,
+                3 => slot_stop_reel3(&mut resolved_offsets, bias, bet, &mut rng)
+                    .map_err(RandomSpecialRoutineError::Divider)?,
+                _ => unreachable!("validated slot reel"),
+            };
+            state.random_state = rng.state();
+            let machine = required_slot_machine_state(state, routine)?;
+            machine.offsets = resolved_offsets
+                .map(|offset| u8::try_from(offset).expect("validated slot offset fits byte"));
+            machine.next_reel = reel + 1;
+            let windows = slot_windows(resolved_offsets);
+            let coins = state.coins;
+            set_script_u32_value(state, u32::from(coins));
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineReelStopped {
+                    reel,
+                    mode: resolution.mode.name().to_string(),
+                    animation_start_offset: resolution.animation_start_offset,
+                    animation_count: resolution.animation_count,
+                    offsets: resolved_offsets,
+                    windows: windows
+                        .map(|window| window.map(|symbol| slot_symbol_name(symbol).to_string())),
+                    coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::ResolveResult => {
+            let (offsets, bet, keep_chance) = {
+                let machine = required_slot_machine_state(state, routine)?;
+                if machine.phase != SlotMachinePhase::Spinning || machine.next_reel != 4 {
+                    return Err(SpecialRoutineError::InvalidState {
+                        routine: routine.to_string(),
+                        message: "slot machine result requires all three reels to be stopped"
+                            .to_string(),
+                    }
+                    .into());
+                }
+                (
+                    machine.offsets.map(usize::from),
+                    machine.bet,
+                    machine.keep_seven_bias_chance,
+                )
+            };
+            let windows = slot_windows(offsets);
+            let (matched_symbol, winning_lines) = slot_check_all_three(&windows, bet);
+            let payout = matched_symbol.map(slot_symbol_payout).unwrap_or(0);
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let clear_seven_bias = matched_symbol == Some(SlotSymbol::Seven)
+                && slot_next_byte(&mut rng).map_err(RandomSpecialRoutineError::Divider)?
+                    & if keep_chance { 0x1c } else { 0x14 }
+                    != 0;
+            state.random_state = rng.state();
+            let machine = required_slot_machine_state(state, routine)?;
+            if clear_seven_bias {
+                machine.bias = None;
+            }
+            machine.phase = SlotMachinePhase::Result;
+            machine.matched_symbol = matched_symbol;
+            machine.payout_remaining = payout;
+            let coins = state.coins;
+            set_script_u32_value(state, u32::from(coins));
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineResult {
+                    payout,
+                    matched_symbol: matched_symbol.map(slot_symbol_name).map(str::to_string),
+                    winning_lines,
+                    coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::PayoutFrame => {
+            let machine = required_slot_machine_state(state, routine)?;
+            if machine.phase != SlotMachinePhase::Result || machine.payout_remaining == 0 {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "slot machine payout frame requires a positive result payout"
+                        .to_string(),
+                }
+                .into());
+            }
+            machine.payout_remaining -= 1;
+            let payout_remaining = machine.payout_remaining;
+            state.coins = state.coins.saturating_add(1).min(GAME_CORNER_MAX_COINS);
+            let coins = state.coins;
+            set_script_u32_value(state, u32::from(coins));
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachinePayout {
+                    coins_before,
+                    payout_remaining,
+                    coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::AcknowledgeResult => {
+            let can_play_again = state.coins != 0;
+            let machine = required_slot_machine_state(state, routine)?;
+            if machine.phase != SlotMachinePhase::Result || machine.payout_remaining != 0 {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "slot machine result cannot be acknowledged before payout completes"
+                        .to_string(),
+                }
+                .into());
+            }
+            machine.phase = if can_play_again {
+                SlotMachinePhase::PlayAgain
+            } else {
+                SlotMachinePhase::Quit
+            };
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineResultAcknowledged {
+                    can_play_again,
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::Continue => {
+            let machine = required_slot_machine_state(state, routine)?;
+            if machine.phase != SlotMachinePhase::PlayAgain {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "SlotMachine continue requires the Play Again prompt".to_string(),
+                }
+                .into());
+            }
+            machine.phase = SlotMachinePhase::Betting;
+            machine.matched_symbol = None;
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineReplayAccepted {
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+        SlotMachineInput::Quit => {
+            let machine = required_slot_machine_state(state, routine)?;
+            if !matches!(
+                machine.phase,
+                SlotMachinePhase::Betting | SlotMachinePhase::PlayAgain | SlotMachinePhase::Quit
+            ) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "SlotMachine quit is invalid during phase {:?}",
+                        machine.phase
+                    ),
+                }
+                .into());
+            }
+            machine.phase = SlotMachinePhase::Quit;
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::SlotMachineExited {
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
+    }
 }
 
 fn card_flip<S>(
@@ -7005,6 +7508,7 @@ where
     S: DividerSource + ?Sized,
 {
     const COIN_CASE: &str = "COIN_CASE";
+    state.script_runtime.variables.remove("_coin_case_balance");
     let coin_case =
         item_catalog
             .get(COIN_CASE)
@@ -7012,7 +7516,21 @@ where
                 routine: routine.to_string(),
                 item_id: COIN_CASE.to_string(),
             })?;
-    if !state.bag.has_item(coin_case) {
+    let entering_game = matches!(
+        state.script_runtime.pending_card_flip_input,
+        Some(CardFlipInput::Start)
+    );
+    if entering_game && state.coins == 0 {
+        state.script_runtime.last_special_routine = Some(routine.to_string());
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::NoCoins,
+            },
+        });
+    }
+    if entering_game && !state.bag.has_item(coin_case) {
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
@@ -7022,63 +7540,119 @@ where
             },
         });
     }
-    state
-        .script_runtime
-        .variables
-        .insert("_coin_case_balance".to_string(), state.coins.to_string());
     state.script_runtime.last_special_routine = Some(routine.to_string());
     state.script_runtime.active_menu = None;
-    let action = state
+    let input = state
         .script_runtime
-        .variables
-        .remove("card_flip_action")
+        .pending_card_flip_input
+        .take()
         .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
-            variable: "card_flip_action".to_string(),
+            variable: "pending_card_flip_input".to_string(),
         })?;
+    if let Some(card_flip) = &state.script_runtime.card_flip {
+        card_flip
+            .validate()
+            .map_err(|message| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message,
+            })?;
+    }
     let coins_before = state.coins;
-    match action.as_str() {
-        "start" => {
-            let (deck, revealed) = start_card_flip_round(state, routine, divider)?;
-            if state.coins < 3 {
+    match input {
+        CardFlipInput::Start => {
+            if state
+                .script_runtime
+                .card_flip
+                .as_ref()
+                .is_some_and(|game| game.phase != CardFlipPhase::Quit)
+            {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "CardFlip start is only valid on entry".to_string(),
+                }
+                .into());
+            }
+            let deck = shuffle_card_flip_deck(state, divider)?;
+            state.script_runtime.card_flip = Some(CardFlipState {
+                deck,
+                discard_pile: vec![false; 24],
+                phase: CardFlipPhase::ChooseCard,
+                num_cards_played: 0,
+                which_card: 0,
+                cursor_x: 2,
+                cursor_y: 2,
+                face_up_card: None,
+                payout_remaining: 0,
+            });
+            Ok(start_typed_card_flip_stake(state, routine, coins_before)?)
+        }
+        CardFlipInput::Continue => {
+            let should_shuffle = {
+                let game = required_card_flip_state(state, routine)?;
+                if game.phase != CardFlipPhase::PlayAgain {
+                    return Err(SpecialRoutineError::InvalidState {
+                        routine: routine.to_string(),
+                        message: format!(
+                            "CardFlip continue is invalid during phase {:?}",
+                            game.phase
+                        ),
+                    }
+                    .into());
+                }
+                game.num_cards_played += 1;
+                game.num_cards_played == 12
+            };
+            if should_shuffle {
+                let deck = shuffle_card_flip_deck(state, divider)?;
+                let (deck, revealed) = {
+                    let game = required_card_flip_state(state, routine)?;
+                    game.deck = deck;
+                    game.discard_pile.fill(false);
+                    game.num_cards_played = 0;
+                    game.phase = CardFlipPhase::Shuffled;
+                    game.payout_remaining = 0;
+                    (card_flip_deck_strings(game), game.discard_pile.clone())
+                };
+                let coins = state.coins;
+                set_script_u32_value(state, u32::from(coins));
                 return Ok(SpecialRoutineOutcome {
                     routine: routine.to_string(),
-                    effect: SpecialRoutineEffect::GameCornerGameUnavailable {
-                        game: routine.to_string(),
-                        reason: GameCornerUnavailableReason::NoCoins,
+                    effect: SpecialRoutineEffect::CardFlipShuffled {
+                        deck,
+                        revealed,
+                        coins,
+                        random_state_after: state.random_state,
                     },
                 });
             }
-            state.coins -= 3;
-            let coins = state.coins;
-            set_script_u32_value(state, u32::from(coins));
-            Ok(SpecialRoutineOutcome {
-                routine: routine.to_string(),
-                effect: SpecialRoutineEffect::CardFlipStarted {
-                    coins_before,
-                    deck,
-                    revealed,
-                    coins,
-                    random_state_after: state.random_state,
-                },
-            })
+            Ok(start_typed_card_flip_stake(state, routine, coins_before)?)
         }
-        "shuffle" => {
-            let (deck, revealed) = start_card_flip_round(state, routine, divider)?;
-            let coins = state.coins;
-            set_script_u32_value(state, u32::from(coins));
-            Ok(SpecialRoutineOutcome {
-                routine: routine.to_string(),
-                effect: SpecialRoutineEffect::CardFlipShuffled {
-                    deck,
-                    revealed,
-                    coins,
-                    random_state_after: state.random_state,
-                },
-            })
+        CardFlipInput::ResumeAfterShuffle => {
+            let game = required_card_flip_state(state, routine)?;
+            if game.phase != CardFlipPhase::Shuffled {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "CardFlip shuffle resume is invalid during phase {:?}",
+                        game.phase
+                    ),
+                }
+                .into());
+            }
+            game.phase = CardFlipPhase::ChooseCard;
+            Ok(start_typed_card_flip_stake(state, routine, coins_before)?)
         }
-        "reveal" => {
-            let flip = flip_card(state, routine)?;
+        CardFlipInput::Reveal {
+            which_card,
+            cursor_x,
+            cursor_y,
+        } => {
+            let flip = flip_typed_card(state, routine, which_card, cursor_x, cursor_y)?;
+            let (deck, revealed) = {
+                let game = required_card_flip_state(state, routine)?;
+                (card_flip_deck_strings(game), game.discard_pile.clone())
+            };
             let coins = state.coins;
             set_script_u32_value(state, u32::from(coins));
             Ok(SpecialRoutineOutcome {
@@ -7089,14 +7663,24 @@ where
                     card_name: flip.card_name,
                     card_level: flip.card_level,
                     payout: flip.payout,
-                    deck: parse_required_comma_tokens(state, routine, "card_flip_deck")?,
-                    revealed: parse_required_bool_tokens(state, routine, "card_flip_revealed", 24)?,
+                    deck,
+                    revealed,
                     coins,
                     random_state_after: state.random_state,
                 },
             })
         }
-        "payout" => {
+        CardFlipInput::PayoutFrame => {
+            let game = required_card_flip_state(state, routine)?;
+            if game.phase != CardFlipPhase::Result || game.payout_remaining == 0 {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "CardFlip payout frame requires a positive result payout".to_string(),
+                }
+                .into());
+            }
+            game.payout_remaining -= 1;
+            let payout_remaining = game.payout_remaining;
             state.coins = state.coins.saturating_add(1).min(GAME_CORNER_MAX_COINS);
             let coins = state.coins;
             set_script_u32_value(state, u32::from(coins));
@@ -7104,18 +7688,49 @@ where
                 routine: routine.to_string(),
                 effect: SpecialRoutineEffect::CardFlipPayout {
                     coins_before,
+                    payout_remaining,
                     coins,
                     random_state_after: state.random_state,
                 },
             })
         }
-        value => Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!(
-                "card_flip_action must be start, shuffle, reveal, or payout, found {value}"
-            ),
+        CardFlipInput::AcknowledgeResult => {
+            let game = required_card_flip_state(state, routine)?;
+            if game.phase != CardFlipPhase::Result || game.payout_remaining != 0 {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "CardFlip result cannot be acknowledged before payout completes"
+                        .to_string(),
+                }
+                .into());
+            }
+            game.phase = CardFlipPhase::PlayAgain;
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::CardFlipResultAcknowledged {
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
         }
-        .into()),
+        CardFlipInput::Quit => {
+            let game = required_card_flip_state(state, routine)?;
+            if !matches!(game.phase, CardFlipPhase::PlayAgain | CardFlipPhase::Quit) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!("CardFlip quit is invalid during phase {:?}", game.phase),
+                }
+                .into());
+            }
+            game.phase = CardFlipPhase::Quit;
+            Ok(SpecialRoutineOutcome {
+                routine: routine.to_string(),
+                effect: SpecialRoutineEffect::CardFlipExited {
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                },
+            })
+        }
     }
 }
 
@@ -7128,13 +7743,7 @@ fn unused_memory_game<S>(
 where
     S: DividerSource + ?Sized,
 {
-    coin_game_service(
-        state,
-        item_catalog,
-        routine,
-        GameCornerGame::UnusedMemoryGame,
-        divider,
-    )
+    coin_game_service(state, item_catalog, routine, divider)
 }
 
 fn slot_symbol_name(symbol: SlotSymbol) -> &'static str {
@@ -7145,19 +7754,6 @@ fn slot_symbol_name(symbol: SlotSymbol) -> &'static str {
         SlotSymbol::Pikachu => "PIKACHU",
         SlotSymbol::Squirtle => "SQUIRTLE",
         SlotSymbol::Staryu => "STARYU",
-    }
-}
-
-fn parse_slot_symbol(value: &str) -> Option<SlotSymbol> {
-    match value {
-        "SEVEN" => Some(SlotSymbol::Seven),
-        "POKEBALL" => Some(SlotSymbol::Pokeball),
-        "CHERRY" => Some(SlotSymbol::Cherry),
-        "PIKACHU" => Some(SlotSymbol::Pikachu),
-        "SQUIRTLE" => Some(SlotSymbol::Squirtle),
-        "STARYU" => Some(SlotSymbol::Staryu),
-        "NONE" => None,
-        _ => None,
     }
 }
 
@@ -7557,144 +8153,16 @@ where
     Ok(resolution)
 }
 
-fn parse_required_comma_tokens(
-    state: &GameState,
+fn required_slot_machine_state<'a>(
+    state: &'a mut GameState,
     routine: &str,
-    variable: &str,
-) -> Result<Vec<String>, SpecialRoutineError> {
-    let raw = state
-        .script_runtime
-        .variables
-        .get(variable)
-        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
+) -> Result<&'a mut SlotMachineState, SpecialRoutineError> {
+    state.script_runtime.slot_machine.as_mut().ok_or_else(|| {
+        SpecialRoutineError::MissingScriptValue {
             routine: routine.to_string(),
-            variable: variable.to_string(),
-        })?;
-    let values = raw
-        .split(',')
-        .map(str::trim)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if values.is_empty() || values.iter().any(String::is_empty) {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!("{variable} must be a nonempty comma-separated list"),
-        });
-    }
-    Ok(values)
-}
-
-fn parse_slot_offsets(state: &GameState, routine: &str) -> Result<[usize; 3], SpecialRoutineError> {
-    let values = parse_required_comma_tokens(state, routine, "slot_offsets")?;
-    if values.len() != 3 {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: "slot_offsets must contain exactly 3 entries".to_string(),
-        });
-    }
-    let mut offsets = [0; 3];
-    for (index, value) in values.into_iter().enumerate() {
-        let offset =
-            value
-                .parse::<usize>()
-                .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-                    routine: routine.to_string(),
-                    value: value.clone(),
-                })?;
-        if offset >= SLOT_REEL_LENGTH {
-            return Err(SpecialRoutineError::InvalidState {
-                routine: routine.to_string(),
-                message: format!("slot offset {offset} must be below {SLOT_REEL_LENGTH}"),
-            });
+            variable: "slot_machine".to_string(),
         }
-        offsets[index] = offset;
-    }
-    Ok(offsets)
-}
-
-fn write_slot_offsets(state: &mut GameState, offsets: [usize; 3]) {
-    state.script_runtime.variables.insert(
-        "slot_offsets".to_string(),
-        offsets.map(|offset| offset.to_string()).join(","),
-    );
-}
-
-fn parse_slot_bias_state(
-    state: &GameState,
-    routine: &str,
-) -> Result<Option<SlotSymbol>, SpecialRoutineError> {
-    let value = state
-        .script_runtime
-        .variables
-        .get("slot_bias")
-        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-            routine: routine.to_string(),
-            variable: "slot_bias".to_string(),
-        })?;
-    if value == "NONE" {
-        return Ok(None);
-    }
-    parse_slot_symbol(value)
-        .ok_or_else(|| SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!("invalid slot_bias {value}"),
-        })
-        .map(Some)
-}
-
-fn parse_required_bool_tokens(
-    state: &GameState,
-    routine: &str,
-    variable: &str,
-    len: usize,
-) -> Result<Vec<bool>, SpecialRoutineError> {
-    let values = parse_required_comma_tokens(state, routine, variable)?;
-    if values.len() != len {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!("{variable} must contain exactly {len} entries"),
-        });
-    }
-    values
-        .into_iter()
-        .map(|value| match value.as_str() {
-            "0" => Ok(false),
-            "1" => Ok(true),
-            _ => Err(SpecialRoutineError::InvalidState {
-                routine: routine.to_string(),
-                message: format!("{variable} entries must be exactly 0 or 1"),
-            }),
-        })
-        .collect()
-}
-
-fn required_game_index(
-    state: &GameState,
-    routine: &str,
-    variable: &str,
-    len: usize,
-) -> Result<usize, SpecialRoutineError> {
-    let raw = state
-        .script_runtime
-        .variables
-        .get(variable)
-        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-            routine: routine.to_string(),
-            variable: variable.to_string(),
-        })?;
-    let index = raw
-        .parse::<usize>()
-        .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-            routine: routine.to_string(),
-            value: raw.clone(),
-        })?;
-    if index >= len {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!("{variable} index {index} is outside board length {len}"),
-        });
-    }
-    Ok(index)
+    })
 }
 
 fn card_flip_identity(face: u8) -> (&'static str, u8) {
@@ -7723,166 +8191,134 @@ fn card_flip_payout(face: u8, cursor_x: usize, cursor_y: usize) -> u16 {
     }
 }
 
-fn start_card_flip_round<S>(
+fn shuffle_card_flip_deck<S>(
     state: &mut GameState,
-    routine: &str,
     divider: &mut S,
-) -> Result<(Vec<String>, Vec<bool>), RandomSpecialRoutineError<S::Error>>
+) -> Result<Vec<u8>, RandomSpecialRoutineError<S::Error>>
 where
     S: DividerSource + ?Sized,
 {
-    let initialize = match state
-        .script_runtime
-        .variables
-        .get("card_flip_initialize")
-        .map(String::as_str)
-    {
-        Some("1") => true,
-        Some(value) => {
-            return Err(SpecialRoutineError::InvalidState {
-                routine: routine.to_string(),
-                message: format!("card_flip_initialize must be exactly 1, found {value}"),
-            }
-            .into());
-        }
-        None => false,
-    };
-    let deck = if initialize {
-        let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
-        let mut deck = vec![0_u8; 24];
-        for face in (1_u8..24).rev() {
-            loop {
-                // ByteFill enters the first call with carry clear. Every
-                // retry follows either AND $1f or an occupancy AND, which
-                // also clears carry.
-                let index = usize::from(
-                    rng.random(false)
-                        .map_err(RandomSpecialRoutineError::Divider)?
-                        .value
-                        & 0x1f,
-                );
-                if index < deck.len() && deck[index] == 0 {
-                    deck[index] = face;
-                    break;
-                }
+    let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
+    let mut deck = vec![0_u8; 24];
+    for face in (1_u8..24).rev() {
+        loop {
+            // ByteFill enters the first call with carry clear. Every retry
+            // follows AND $1f or an occupancy AND, which also clears carry.
+            let index = usize::from(
+                rng.random(false)
+                    .map_err(RandomSpecialRoutineError::Divider)?
+                    .value
+                    & 0x1f,
+            );
+            if index < deck.len() && deck[index] == 0 {
+                deck[index] = face;
+                break;
             }
         }
-        state.random_state = rng.state();
-        deck.into_iter().map(|face| face.to_string()).collect()
-    } else {
-        parse_required_comma_tokens(state, routine, "card_flip_deck")?
-    };
-    validate_card_flip_deck(&deck, routine)?;
-    let revealed = if initialize {
-        vec![false; deck.len()]
-    } else {
-        parse_required_bool_tokens(state, routine, "card_flip_revealed", deck.len())?
-    };
-    state
-        .script_runtime
-        .variables
-        .insert("card_flip_deck".to_string(), deck.join(","));
-    state
-        .script_runtime
-        .variables
-        .remove("card_flip_initialize");
-    store_card_flip_revealed(state, &revealed);
-    Ok((deck, revealed))
+    }
+    state.random_state = rng.state();
+    Ok(deck)
 }
 
-fn validate_card_flip_deck(deck: &[String], routine: &str) -> Result<Vec<u8>, SpecialRoutineError> {
-    if deck.len() != 24 {
+fn card_flip_deck_strings(game: &CardFlipState) -> Vec<String> {
+    game.deck.iter().map(u8::to_string).collect()
+}
+
+fn required_card_flip_state<'a>(
+    state: &'a mut GameState,
+    routine: &str,
+) -> Result<&'a mut CardFlipState, SpecialRoutineError> {
+    state
+        .script_runtime
+        .card_flip
+        .as_mut()
+        .ok_or_else(|| SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "CardFlip has no active WRAM state".to_string(),
+        })
+}
+
+fn start_typed_card_flip_stake(
+    state: &mut GameState,
+    routine: &str,
+    coins_before: u16,
+) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    if state.coins < 3 {
+        required_card_flip_state(state, routine)?.phase = CardFlipPhase::Quit;
+        return Ok(SpecialRoutineOutcome {
+            routine: routine.to_string(),
+            effect: SpecialRoutineEffect::GameCornerGameUnavailable {
+                game: routine.to_string(),
+                reason: GameCornerUnavailableReason::InsufficientStake,
+            },
+        });
+    }
+    state.coins -= 3;
+    let coins = state.coins;
+    set_script_u32_value(state, u32::from(coins));
+    let (deck, revealed) = {
+        let game = required_card_flip_state(state, routine)?;
+        game.phase = CardFlipPhase::ChooseCard;
+        game.payout_remaining = 0;
+        (card_flip_deck_strings(game), game.discard_pile.clone())
+    };
+    Ok(SpecialRoutineOutcome {
+        routine: routine.to_string(),
+        effect: SpecialRoutineEffect::CardFlipStarted {
+            coins_before,
+            deck,
+            revealed,
+            coins,
+            random_state_after: state.random_state,
+        },
+    })
+}
+
+fn flip_typed_card(
+    state: &mut GameState,
+    routine: &str,
+    which_card: u8,
+    cursor_x: u8,
+    cursor_y: u8,
+) -> Result<CardFlipOutcome, SpecialRoutineError> {
+    let game = required_card_flip_state(state, routine)?;
+    if game.phase != CardFlipPhase::ChooseCard {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: format!("CardFlip reveal is invalid during phase {:?}", game.phase),
+        });
+    }
+    if which_card > 1 || cursor_x >= 6 || cursor_y >= 8 {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "CardFlip selection is outside the source card/bet grids".to_string(),
+        });
+    }
+    let card_index = usize::from(game.num_cards_played) * 2 + usize::from(which_card);
+    let face = game.deck[card_index];
+    let discard_index = usize::from(face);
+    if game.discard_pile[discard_index] {
         return Err(SpecialRoutineError::InvalidState {
             routine: routine.to_string(),
             message: format!(
-                "card_flip_deck must contain exactly 24 cards, found {}",
-                deck.len()
+                "CardFlip deck index {card_index} resolves to discarded face {discard_index}"
             ),
         });
     }
-    let encoded_deck = deck
-        .iter()
-        .map(|value| value.parse::<u8>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: "card_flip_deck must contain encoded card identities 0 through 23".to_string(),
-        })?;
-    let mut identities = encoded_deck.clone();
-    identities.sort_unstable();
-    if identities != (0_u8..24).collect::<Vec<_>>() {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: "card_flip_deck must contain each encoded card identity exactly once"
-                .to_string(),
-        });
-    }
-    Ok(encoded_deck)
-}
-
-fn store_card_flip_revealed(state: &mut GameState, revealed: &[bool]) {
-    state.script_runtime.variables.insert(
-        "card_flip_revealed".to_string(),
-        revealed
-            .iter()
-            .map(|flag| if *flag { "1" } else { "0" })
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-}
-
-fn flip_card(state: &mut GameState, routine: &str) -> Result<CardFlipOutcome, SpecialRoutineError> {
-    let deck = parse_required_comma_tokens(state, routine, "card_flip_deck")?;
-    let encoded_deck = validate_card_flip_deck(&deck, routine)?;
-    let mut revealed =
-        parse_required_bool_tokens(state, routine, "card_flip_revealed", deck.len())?;
-    let card_index = required_game_index(state, routine, "card_flip_index", deck.len())?;
-    if revealed[card_index] {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!("card_flip_index {card_index} has already been revealed"),
-        });
-    }
-    revealed[card_index] = true;
-    let face = encoded_deck[card_index];
+    game.discard_pile[discard_index] = true;
+    game.which_card = which_card;
+    game.cursor_x = cursor_x;
+    game.cursor_y = cursor_y;
+    game.face_up_card = Some(face);
     let (card_name, card_level) = card_flip_identity(face);
-    let cursor_x = required_game_index(state, routine, "card_flip_bet_x", 6)?;
-    let cursor_y = required_game_index(state, routine, "card_flip_bet_y", 8)?;
-    let payout = card_flip_payout(face, cursor_x, cursor_y);
-    store_card_flip_revealed(state, &revealed);
+    let payout = card_flip_payout(face, usize::from(cursor_x), usize::from(cursor_y));
+    game.payout_remaining = payout;
+    game.phase = CardFlipPhase::Result;
     Ok(CardFlipOutcome {
         card_index,
         card_name: card_name.to_string(),
         card_level,
         payout,
-    })
-}
-
-fn memory_reveal(
-    board: &[String],
-    revealed: &mut [bool],
-    first_index: usize,
-    second_index: usize,
-) -> Result<MemoryGameOutcome, ()> {
-    if first_index == second_index
-        || first_index >= board.len()
-        || second_index >= board.len()
-        || revealed.get(first_index).copied().unwrap_or(false)
-        || revealed.get(second_index).copied().unwrap_or(false)
-    {
-        return Err(());
-    }
-    let matched = board[first_index] == board[second_index];
-    let symbol = matched.then(|| board[first_index].clone());
-    if matched {
-        revealed[first_index] = true;
-        revealed[second_index] = true;
-    }
-    Ok(MemoryGameOutcome {
-        matched,
-        symbol,
-        first_index,
-        second_index,
     })
 }
 
@@ -7894,101 +8330,480 @@ fn play_memory_game<S>(
 where
     S: DividerSource + ?Sized,
 {
-    const MEMORY_SYMBOLS: [&str; 8] = [
-        "ODDISH",
-        "POLIWAG",
-        "PIKACHU",
-        "JIGGLYPUFF",
-        "RATTATA",
-        "VOLTORB",
-        "DITTO",
-        "ELECTABUZZ",
-    ];
-    let mut rng = CrystalRandom::new(state.random_state, divider);
-    let mut generated_board = MEMORY_SYMBOLS
-        .into_iter()
-        .flat_map(|symbol| [symbol.to_string(), symbol.to_string()])
-        .collect::<Vec<_>>();
-    for index in (1..generated_board.len()).rev() {
-        let swap_index = usize::from(
-            rng.random(false)
-                .map_err(RandomSpecialRoutineError::Divider)?
-                .value,
-        ) % (index + 1);
-        generated_board.swap(index, swap_index);
-    }
-    let board = if state.script_runtime.variables.contains_key("memory_board") {
-        parse_required_comma_tokens(state, routine, "memory_board")?
-    } else {
-        // TypeScript constructs a shuffled MemoryGame and explicitly shuffles
-        // it once more when no serialized board is available.
-        for index in (1..generated_board.len()).rev() {
-            let swap_index = usize::from(
-                rng.random(false)
-                    .map_err(RandomSpecialRoutineError::Divider)?
-                    .value,
-            ) % (index + 1);
-            generated_board.swap(index, swap_index);
-        }
-        generated_board
-    };
-    state.random_state = rng.state();
-    if board.len() != 16 {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!(
-                "memory_board must contain exactly 16 cards, found {}",
-                board.len()
-            ),
-        }
-        .into());
-    }
-    let mut revealed = if state
+    let input = state
         .script_runtime
-        .variables
-        .contains_key("memory_revealed")
-    {
-        parse_required_bool_tokens(state, routine, "memory_revealed", board.len())?
-    } else {
-        vec![false; board.len()]
-    };
-    let requested_first = required_game_index(state, routine, "memory_first", board.len())?;
-    let requested_second = required_game_index(state, routine, "memory_second", board.len())?;
-    let outcome =
-        memory_reveal(&board, &mut revealed, requested_first, requested_second).map_err(|_| {
-            SpecialRoutineError::InvalidState {
-                routine: routine.to_string(),
-                message: "memory selections must be distinct unrevealed cards".to_string(),
-            }
+        .pending_memory_game_input
+        .take()
+        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
+            routine: routine.to_string(),
+            variable: "pending_memory_game_input".to_string(),
         })?;
+    if let Some(memory_game) = &state.script_runtime.memory_game {
+        memory_game
+            .validate()
+            .and_then(|()| {
+                if matches!(
+                    memory_game.phase,
+                    MemoryGamePhase::RestartGame | MemoryGamePhase::ResetBoard
+                ) {
+                    Ok(())
+                } else {
+                    validate_memory_game_distribution(memory_game)
+                }
+            })
+            .map_err(|message| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message,
+            })?;
+    }
 
+    match input {
+        MemoryGameInput::Enter { menu_cursor_y } => {
+            if state.script_runtime.memory_game.is_some() {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: "MemoryGame entry requires inactive source WRAM".to_string(),
+                }
+                .into());
+            }
+            if !(1..=3).contains(&menu_cursor_y) {
+                return Err(SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "MemoryGame wMenuCursorY must select source row 1..=3, found {menu_cursor_y}"
+                    ),
+                }
+                .into());
+            }
+            state.script_runtime.memory_game = Some(MemoryGameState {
+                cards: vec![0; 45],
+                phase: MemoryGamePhase::RestartGame,
+                distribution: menu_cursor_y - 1,
+                counter: 0,
+                number_tries_remaining: 0,
+                last_matches: [0; 5],
+                num_cards_matched: 0,
+                card1: None,
+                card1_location: None,
+                card2: None,
+                card2_location: None,
+                cursor_index: 0,
+                cursor_active: false,
+                card_choice: 0,
+                last_card_picked: 0,
+            });
+            Ok(MemoryGameOutcome::Entered)
+        }
+        MemoryGameInput::AdvanceFrame { button } => {
+            advance_memory_game_frame(state, routine, divider, button)
+        }
+    }
+}
+
+fn advance_memory_game_frame<S>(
+    state: &mut GameState,
+    routine: &str,
+    divider: &mut S,
+    button: Option<MemoryGameButton>,
+) -> Result<MemoryGameOutcome, RandomSpecialRoutineError<S::Error>>
+where
+    S: DividerSource + ?Sized,
+{
+    const MEMORY_PICK_DELAY_FRAMES: u8 = 64;
+    let phase = required_memory_game_state(state, routine)?.phase;
+    let outcome = match phase {
+        MemoryGamePhase::RestartGame => {
+            required_memory_game_state(state, routine)?.phase = MemoryGamePhase::ResetBoard;
+            None
+        }
+        MemoryGamePhase::ResetBoard => {
+            let distribution =
+                usize::from(required_memory_game_state(state, routine)?.distribution);
+            let mut rng = CrystalRandom::new(state.random_state, divider);
+            let cards = initialize_memory_game_board(distribution, &mut rng)
+                .map_err(RandomSpecialRoutineError::Divider)?;
+            state.random_state = rng.state();
+            let game = required_memory_game_state(state, routine)?;
+            game.cards = cards;
+            game.phase = MemoryGamePhase::InitBoardTilemapAndCursor;
+            game.counter = 0;
+            game.number_tries_remaining = 0;
+            game.last_matches = [0; 5];
+            game.num_cards_matched = 0;
+            game.card1 = None;
+            game.card1_location = None;
+            game.card2 = None;
+            game.card2_location = None;
+            game.cursor_index = 0;
+            game.cursor_active = false;
+            game.card_choice = 0;
+            game.last_card_picked = 0;
+            Some(MemoryGameOutcome::Started {
+                board: game
+                    .cards
+                    .iter()
+                    .map(|card| memory_card_name(*card).to_string())
+                    .collect(),
+                tries_remaining: 0,
+            })
+        }
+        MemoryGamePhase::InitBoardTilemapAndCursor => {
+            let game = required_memory_game_state(state, routine)?;
+            if game.counter < 45 {
+                let card_index = usize::from(game.counter);
+                game.counter += 1;
+                game.last_card_picked = 0;
+                Some(MemoryGameOutcome::CardPlaced {
+                    card_index,
+                    delay_frames: 3,
+                })
+            } else {
+                game.cursor_index = 0;
+                game.cursor_active = true;
+                game.number_tries_remaining = 5;
+                game.phase = MemoryGamePhase::CheckTriesRemaining;
+                Some(MemoryGameOutcome::CursorReady {
+                    cursor_index: 0,
+                    tries_remaining: 5,
+                })
+            }
+        }
+        MemoryGamePhase::CheckTriesRemaining => {
+            let game = required_memory_game_state(state, routine)?;
+            if game.number_tries_remaining == 0 {
+                game.phase = MemoryGamePhase::RevealAll;
+                Some(MemoryGameOutcome::RevealReady)
+            } else {
+                game.number_tries_remaining -= 1;
+                game.card_choice = 0;
+                game.phase = MemoryGamePhase::PickCard1;
+                Some(MemoryGameOutcome::TryStarted {
+                    tries_remaining: game.number_tries_remaining,
+                })
+            }
+        }
+        MemoryGamePhase::PickCard1 => {
+            let game = required_memory_game_state(state, routine)?;
+            if game.card_choice == 0 {
+                None
+            } else {
+                let card_index = usize::from(game.card_choice - 1);
+                let symbol = game.cards[card_index];
+                if symbol == u8::MAX {
+                    Some(MemoryGameOutcome::CardRejected {
+                        pick: 1,
+                        card_index,
+                        tries_remaining: game.number_tries_remaining,
+                    })
+                } else {
+                    game.last_card_picked = symbol;
+                    game.card1 = Some(symbol);
+                    game.card1_location =
+                        Some(u8::try_from(card_index).expect("Memory Game index fits byte"));
+                    game.card_choice = 0;
+                    game.phase = MemoryGamePhase::PickCard2;
+                    Some(MemoryGameOutcome::FirstCardPicked {
+                        card_index,
+                        symbol: memory_card_name(symbol).to_string(),
+                        tries_remaining: game.number_tries_remaining,
+                    })
+                }
+            }
+        }
+        MemoryGamePhase::PickCard2 => {
+            let game = required_memory_game_state(state, routine)?;
+            if game.card_choice == 0 {
+                None
+            } else {
+                let card_index = usize::from(game.card_choice - 1);
+                if game.card1_location == Some(game.card_choice - 1)
+                    || game.cards[card_index] == u8::MAX
+                {
+                    Some(MemoryGameOutcome::CardRejected {
+                        pick: 2,
+                        card_index,
+                        tries_remaining: game.number_tries_remaining,
+                    })
+                } else {
+                    let first_index =
+                        usize::from(game.card1_location.expect("PickCard2 has a first location"));
+                    let first_symbol = game.card1.expect("PickCard2 has a first card");
+                    let second_symbol = game.cards[card_index];
+                    game.last_card_picked = second_symbol;
+                    game.card2 = Some(second_symbol);
+                    game.card2_location =
+                        Some(u8::try_from(card_index).expect("Memory Game index fits byte"));
+                    game.counter = MEMORY_PICK_DELAY_FRAMES - 1;
+                    game.phase = MemoryGamePhase::DelayPickAgain;
+                    Some(MemoryGameOutcome::PairRevealed {
+                        first_index,
+                        first_symbol: memory_card_name(first_symbol).to_string(),
+                        second_index: card_index,
+                        second_symbol: memory_card_name(second_symbol).to_string(),
+                        delay_frames: MEMORY_PICK_DELAY_FRAMES - 1,
+                        tries_remaining: game.number_tries_remaining,
+                    })
+                }
+            }
+        }
+        MemoryGamePhase::DelayPickAgain => {
+            let game = required_memory_game_state(state, routine)?;
+            if game.counter != 0 {
+                game.counter -= 1;
+                Some(MemoryGameOutcome::DelayAdvanced {
+                    frames_remaining: game.counter,
+                })
+            } else {
+                Some(resolve_memory_game_pair(game, routine)?)
+            }
+        }
+        MemoryGamePhase::RevealAll => {
+            if button == Some(MemoryGameButton::A) {
+                let game = required_memory_game_state(state, routine)?;
+                game.counter = 45;
+                game.last_card_picked = game
+                    .cards
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|card| *card != u8::MAX)
+                    .unwrap_or(0);
+                game.phase = MemoryGamePhase::RevealAllAcknowledgement;
+                Some(MemoryGameOutcome::RoundEnded {
+                    remaining_cards: game
+                        .cards
+                        .iter()
+                        .map(|card| (*card != u8::MAX).then(|| memory_card_name(*card).to_string()))
+                        .collect(),
+                    matched_symbols: game
+                        .last_matches
+                        .iter()
+                        .copied()
+                        .take_while(|card| *card != 0)
+                        .map(memory_card_name)
+                        .map(str::to_string)
+                        .collect(),
+                })
+            } else {
+                None
+            }
+        }
+        MemoryGamePhase::RevealAllAcknowledgement => {
+            if matches!(button, Some(MemoryGameButton::A | MemoryGameButton::B)) {
+                let game = required_memory_game_state(state, routine)?;
+                game.phase = MemoryGamePhase::RestartGame;
+                None
+            } else {
+                None
+            }
+        }
+    };
+
+    let game = required_memory_game_state(state, routine)?;
+    if game.cursor_active
+        && matches!(
+            game.phase,
+            MemoryGamePhase::RestartGame
+                | MemoryGamePhase::ResetBoard
+                | MemoryGamePhase::InitBoardTilemapAndCursor
+                | MemoryGamePhase::CheckTriesRemaining
+                | MemoryGamePhase::PickCard1
+                | MemoryGamePhase::PickCard2
+                | MemoryGamePhase::DelayPickAgain
+        )
+    {
+        apply_memory_game_cursor_input(game, button);
+    }
+    Ok(outcome.unwrap_or(MemoryGameOutcome::FrameAdvanced {
+        phase: game.phase,
+        cursor_index: game.cursor_index,
+    }))
+}
+
+fn apply_memory_game_cursor_input(game: &mut MemoryGameState, button: Option<MemoryGameButton>) {
+    match button {
+        Some(MemoryGameButton::A) => game.card_choice = game.cursor_index + 1,
+        Some(MemoryGameButton::Left) if game.cursor_index % 9 != 0 => {
+            game.cursor_index -= 1;
+        }
+        Some(MemoryGameButton::Right) if game.cursor_index % 9 != 8 => {
+            game.cursor_index += 1;
+        }
+        Some(MemoryGameButton::Up) if game.cursor_index >= 9 => {
+            game.cursor_index -= 9;
+        }
+        Some(MemoryGameButton::Down) if game.cursor_index < 36 => {
+            game.cursor_index += 9;
+        }
+        Some(
+            MemoryGameButton::B
+            | MemoryGameButton::Left
+            | MemoryGameButton::Right
+            | MemoryGameButton::Up
+            | MemoryGameButton::Down,
+        )
+        | None => {}
+    }
+}
+
+fn required_memory_game_state<'a>(
+    state: &'a mut GameState,
+    routine: &str,
+) -> Result<&'a mut MemoryGameState, SpecialRoutineError> {
     state
         .script_runtime
-        .variables
-        .insert("memory_board".to_string(), board.join(","));
-    state.script_runtime.variables.insert(
-        "memory_revealed".to_string(),
-        revealed
-            .iter()
-            .map(|flag| if *flag { "1" } else { "0" })
-            .collect::<Vec<_>>()
-            .join(","),
+        .memory_game
+        .as_mut()
+        .ok_or_else(|| SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "Memory Game has no active WRAM state".to_string(),
+        })
+}
+
+fn resolve_memory_game_pair(
+    game: &mut MemoryGameState,
+    routine: &str,
+) -> Result<MemoryGameOutcome, SpecialRoutineError> {
+    let first_index = usize::from(
+        game.card1_location
+            .expect("validated DelayPickAgain state has a first location"),
     );
-    Ok(outcome)
+    let second_index = usize::from(
+        game.card2_location
+            .expect("validated DelayPickAgain state has a second location"),
+    );
+    let first_card = game.card1.expect("validated state has a first card");
+    let second_card = game.card2.expect("validated state has a second card");
+    if first_index == second_index
+        || game.cards[first_index] != first_card
+        || game.cards[second_index] != second_card
+        || first_card == u8::MAX
+        || second_card == u8::MAX
+    {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "stored memory pair is not source-valid".to_string(),
+        });
+    }
+    let matched = first_card == second_card;
+    if matched {
+        game.cards[first_index] = u8::MAX;
+        game.cards[second_index] = u8::MAX;
+        let next_match = game
+            .last_matches
+            .iter()
+            .position(|card| *card == 0)
+            .ok_or_else(|| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: "memory match history is full".to_string(),
+            })?;
+        game.last_matches[next_match] = first_card;
+        game.num_cards_matched += 2;
+        game.last_card_picked = first_card;
+    } else {
+        game.last_card_picked = 0;
+    }
+    game.card1 = None;
+    game.card1_location = None;
+    game.card2 = None;
+    game.card2_location = None;
+    game.phase = MemoryGamePhase::CheckTriesRemaining;
+    Ok(MemoryGameOutcome::Pair {
+        matched,
+        symbol: matched.then(|| first_card.to_string()),
+        first_index,
+        second_index,
+        tries_remaining: game.number_tries_remaining,
+    })
+}
+
+fn validate_memory_game_distribution(game: &MemoryGameState) -> Result<(), String> {
+    const DISTRIBUTION_COUNTS_BY_CARD: [[usize; 8]; 3] = [
+        [8, 2, 6, 6, 6, 8, 6, 3],
+        [8, 2, 6, 4, 9, 8, 6, 2],
+        [8, 2, 7, 2, 12, 8, 4, 2],
+    ];
+    let mut counts = [0_usize; 8];
+    for card in game.cards.iter().copied().filter(|card| *card != u8::MAX) {
+        counts[usize::from(card - 1)] += 1;
+    }
+    for card in game
+        .last_matches
+        .iter()
+        .copied()
+        .take_while(|card| *card != 0)
+    {
+        counts[usize::from(card - 1)] += 2;
+    }
+    if !DISTRIBUTION_COUNTS_BY_CARD.contains(&counts) {
+        return Err(format!(
+            "memory board and match history do not reconstruct a source distribution: {counts:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn memory_card_name(card: u8) -> &'static str {
+    match card {
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        _ => unreachable!("validated Memory Game card id"),
+    }
+}
+
+fn initialize_memory_game_board<S>(
+    distribution: usize,
+    rng: &mut CrystalRandom<S>,
+) -> Result<Vec<u8>, S::Error>
+where
+    S: DividerSource,
+{
+    const MEMORY_BOARD_LEN: usize = 9 * 5;
+    const DISTRIBUTIONS: [[u8; 8]; 3] = [
+        [2, 3, 6, 6, 6, 8, 8, 6],
+        [2, 2, 4, 6, 6, 8, 8, 9],
+        [2, 2, 2, 4, 7, 8, 8, 12],
+    ];
+    // MemoryGame_InitBoard samples these seven card ids in this exact order;
+    // every remaining zero becomes card 5 without another Random call.
+    const SAMPLED_CARD_IDS: [u8; 7] = [2, 8, 4, 7, 3, 6, 1];
+    let counts = DISTRIBUTIONS[distribution];
+    let mut board = vec![0_u8; MEMORY_BOARD_LEN];
+    for (card, mut remaining) in SAMPLED_CARD_IDS.into_iter().zip(counts) {
+        while remaining > 0 {
+            let index = usize::from(rng.random(false)?.value & 0x3f);
+            if index >= MEMORY_BOARD_LEN || board[index] != 0 {
+                continue;
+            }
+            board[index] = card;
+            remaining -= 1;
+        }
+    }
+    for card in &mut board {
+        if *card == 0 {
+            *card = 5;
+        }
+    }
+    Ok(board)
 }
 
 fn coin_game_service<S>(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
     routine: &str,
-    game: GameCornerGame,
     divider: &mut S,
 ) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
 where
     S: DividerSource + ?Sized,
 {
     let before = state.clone();
-    match coin_game_service_inner(state, item_catalog, routine, game, divider) {
+    match coin_game_service_inner(state, item_catalog, routine, divider) {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             *state = before;
@@ -8001,13 +8816,13 @@ fn coin_game_service_inner<S>(
     state: &mut GameState,
     item_catalog: &BTreeMap<String, Item>,
     routine: &str,
-    game: GameCornerGame,
     divider: &mut S,
 ) -> Result<SpecialRoutineOutcome, RandomSpecialRoutineError<S::Error>>
 where
     S: DividerSource + ?Sized,
 {
     const COIN_CASE: &str = "COIN_CASE";
+    state.script_runtime.variables.remove("_coin_case_balance");
     let coin_case =
         item_catalog
             .get(COIN_CASE)
@@ -8015,17 +8830,7 @@ where
                 routine: routine.to_string(),
                 item_id: COIN_CASE.to_string(),
             })?;
-    let slot_action = if matches!(game, GameCornerGame::SlotMachine) {
-        state.script_runtime.variables.get("slot_action").cloned()
-    } else {
-        None
-    };
-    if state.coins == 0
-        && (!matches!(game, GameCornerGame::SlotMachine)
-            || slot_action
-                .as_deref()
-                .is_none_or(|action| action == "start"))
-    {
+    if state.coins == 0 {
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
@@ -8045,339 +8850,135 @@ where
             },
         });
     }
-    let slot_action = if matches!(game, GameCornerGame::SlotMachine) {
-        Some(
-            state
-                .script_runtime
-                .variables
-                .remove("slot_action")
-                .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                    routine: routine.to_string(),
-                    variable: "slot_action".to_string(),
-                })?,
-        )
-    } else {
-        None
-    };
-
-    state
-        .script_runtime
-        .variables
-        .insert("_coin_case_balance".to_string(), state.coins.to_string());
     state.script_runtime.last_special_routine = Some(routine.to_string());
     state.script_runtime.active_menu = None;
-    let effect = match game {
-        GameCornerGame::SlotMachine => {
-            let coins_before = state.coins;
-            let action = slot_action
-                .as_deref()
-                .expect("SlotMachine action was required above");
-            if action == "payout" {
-                let raw_remaining = state
-                    .script_runtime
-                    .variables
-                    .get("slot_payout_remaining")
-                    .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                        routine: routine.to_string(),
-                        variable: "slot_payout_remaining".to_string(),
-                    })?;
-                let remaining = raw_remaining.parse::<u16>().map_err(|_| {
-                    SpecialRoutineError::InvalidNumericValue {
-                        routine: routine.to_string(),
-                        value: raw_remaining.clone(),
-                    }
-                })?;
-                if remaining == 0 {
-                    return Err(SpecialRoutineError::InvalidState {
-                        routine: routine.to_string(),
-                        message: "slot_payout_remaining must be positive for payout".to_string(),
-                    }
-                    .into());
-                }
-                let payout_remaining = remaining - 1;
-                state.script_runtime.variables.insert(
-                    "slot_payout_remaining".to_string(),
-                    payout_remaining.to_string(),
-                );
-                state.coins = state.coins.saturating_add(1).min(GAME_CORNER_MAX_COINS);
-                let coins = state.coins;
-                set_script_u32_value(state, u32::from(coins));
-                return Ok(SpecialRoutineOutcome {
-                    routine: routine.to_string(),
-                    effect: SpecialRoutineEffect::SlotMachinePayout {
-                        coins_before,
-                        payout_remaining,
-                        coins,
-                        random_state_after: state.random_state,
-                    },
-                });
-            }
-            let raw_bet = state
-                .script_runtime
-                .variables
-                .get("slot_bet")
-                .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                    routine: routine.to_string(),
-                    variable: "slot_bet".to_string(),
-                })?;
-            let bet =
-                raw_bet
-                    .parse::<u8>()
-                    .map_err(|_| SpecialRoutineError::InvalidNumericValue {
-                        routine: routine.to_string(),
-                        value: raw_bet.clone(),
-                    })?;
-            if !(1..=3).contains(&bet) {
-                return Err(SpecialRoutineError::InvalidState {
-                    routine: routine.to_string(),
-                    message: format!("slot_bet must be between 1 and 3, found {bet}"),
-                }
-                .into());
-            }
-            if action == "start" && coins_before < u16::from(bet) {
-                return Err(SpecialRoutineError::InvalidState {
-                    routine: routine.to_string(),
-                    message: format!(
-                        "slot_bet {bet} exceeds the current coin balance {coins_before}"
-                    ),
-                }
-                .into());
-            }
-            match action {
-                "start" => {
-                    let offsets = if state.script_runtime.variables.contains_key("slot_offsets") {
-                        parse_slot_offsets(state, routine)?
-                    } else {
-                        // Slots_InitReelTiles renders position 14 before storing
-                        // the next position.  This happens once on entry.
-                        [SLOT_REEL_LENGTH - 1; 3]
-                    };
-                    let lucky = state
-                        .script_runtime
-                        .variables
-                        .get("slot_mode")
-                        .is_some_and(|mode| mode.eq_ignore_ascii_case("lucky"))
-                        || matches!(
-                            state.script_runtime.script_value.as_deref(),
-                            Some("1") | Some("TRUE") | Some("true")
-                        );
-                    let retained_bias = state
-                        .script_runtime
-                        .variables
-                        .get("slot_bias")
-                        .filter(|value| value.as_str() == "SEVEN")
-                        .map(|_| SlotSymbol::Seven);
-                    let mut rng = CrystalRandom::new(state.random_state, divider);
-                    if !state
-                        .script_runtime
-                        .variables
-                        .contains_key("slot_keep_seven_bias_chance")
-                    {
-                        let keep_chance = slot_next_byte(&mut rng)
-                            .map_err(RandomSpecialRoutineError::Divider)?
-                            & 0x2a
-                            == 0;
-                        state.script_runtime.variables.insert(
-                            "slot_keep_seven_bias_chance".to_string(),
-                            u8::from(keep_chance).to_string(),
-                        );
-                    }
-                    let bias = if retained_bias.is_some() {
-                        retained_bias
-                    } else {
-                        slot_bias(&mut rng, lucky).map_err(RandomSpecialRoutineError::Divider)?
-                    };
-                    state.random_state = rng.state();
-                    state.coins = coins_before - u16::from(bet);
-                    state.script_runtime.variables.insert(
-                        "slot_bias".to_string(),
-                        bias.map(slot_symbol_name).unwrap_or("NONE").to_string(),
-                    );
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("slot_next_reel".to_string(), "1".to_string());
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("slot_payout_remaining".to_string(), "0".to_string());
-                    write_slot_offsets(state, offsets);
-                    let coins = state.coins;
-                    set_script_u32_value(state, u32::from(coins));
-                    SpecialRoutineEffect::SlotMachineStarted {
-                        coins_before,
-                        bet,
-                        bias: bias.map(slot_symbol_name).map(str::to_string),
-                        offsets,
-                        windows: slot_windows_named(offsets),
-                        coins,
-                        random_state_after: state.random_state,
-                    }
-                }
-                "stop" => {
-                    let raw_reel =
-                        state
-                            .script_runtime
-                            .variables
-                            .get("slot_reel")
-                            .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                                routine: routine.to_string(),
-                                variable: "slot_reel".to_string(),
-                            })?;
-                    let reel = raw_reel.parse::<u8>().map_err(|_| {
-                        SpecialRoutineError::InvalidNumericValue {
-                            routine: routine.to_string(),
-                            value: raw_reel.clone(),
-                        }
-                    })?;
-                    let raw_next = state
-                        .script_runtime
-                        .variables
-                        .get("slot_next_reel")
-                        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                            routine: routine.to_string(),
-                            variable: "slot_next_reel".to_string(),
-                        })?;
-                    let next_reel = raw_next.parse::<u8>().map_err(|_| {
-                        SpecialRoutineError::InvalidNumericValue {
-                            routine: routine.to_string(),
-                            value: raw_next.clone(),
-                        }
-                    })?;
-                    if reel != next_reel || !(1..=3).contains(&reel) {
-                        return Err(SpecialRoutineError::InvalidState {
-                            routine: routine.to_string(),
-                            message: format!(
-                                "slot_reel must be the next reel {next_reel}, found {reel}"
-                            ),
-                        }
-                        .into());
-                    }
-                    let mut offsets = parse_slot_offsets(state, routine)?;
-                    let bias = parse_slot_bias_state(state, routine)?;
-                    let mut rng = CrystalRandom::new(state.random_state, divider);
-                    let resolution = match reel {
-                        1 => {
-                            let animation_start_offset = offsets[0];
-                            offsets[0] = slot_stop_reel1(offsets[0], bias);
-                            SlotStopResolution::normal(animation_start_offset)
-                        }
-                        2 => slot_stop_reel2(&mut offsets, bias, bet, &mut rng)
-                            .map_err(RandomSpecialRoutineError::Divider)?,
-                        3 => slot_stop_reel3(&mut offsets, bias, bet, &mut rng)
-                            .map_err(RandomSpecialRoutineError::Divider)?,
-                        _ => unreachable!("validated slot reel"),
-                    };
-                    state.random_state = rng.state();
-                    write_slot_offsets(state, offsets);
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("slot_next_reel".to_string(), (reel + 1).to_string());
-                    let windows = slot_windows(offsets);
-                    let coins = state.coins;
-                    set_script_u32_value(state, u32::from(coins));
-                    SpecialRoutineEffect::SlotMachineReelStopped {
-                        reel,
-                        mode: resolution.mode.name().to_string(),
-                        animation_start_offset: resolution.animation_start_offset,
-                        animation_count: resolution.animation_count,
-                        offsets,
-                        windows: windows.map(|window| {
-                            window.map(|symbol| slot_symbol_name(symbol).to_string())
-                        }),
-                        coins,
-                        random_state_after: state.random_state,
-                    }
-                }
-                "result" => {
-                    let next_reel = state
-                        .script_runtime
-                        .variables
-                        .get("slot_next_reel")
-                        .and_then(|value| value.parse::<u8>().ok());
-                    if next_reel != Some(4) {
-                        return Err(SpecialRoutineError::InvalidState {
-                            routine: routine.to_string(),
-                            message: "slot result requires all three reels to be stopped"
-                                .to_string(),
-                        }
-                        .into());
-                    }
-                    let offsets = parse_slot_offsets(state, routine)?;
-                    let windows = slot_windows(offsets);
-                    let (matched_symbol, winning_lines) = slot_check_all_three(&windows, bet);
-                    let payout = matched_symbol.map(slot_symbol_payout).unwrap_or(0);
-                    let mut rng = CrystalRandom::new(state.random_state, divider);
-                    if matched_symbol == Some(SlotSymbol::Seven) {
-                        let keep_chance = state
-                            .script_runtime
-                            .variables
-                            .get("slot_keep_seven_bias_chance")
-                            .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
-                                routine: routine.to_string(),
-                                variable: "slot_keep_seven_bias_chance".to_string(),
-                            })?;
-                        let mask = match keep_chance.as_str() {
-                            "0" => 0x14,
-                            "1" => 0x1c,
-                            value => {
-                                return Err(SpecialRoutineError::InvalidState {
-                                    routine: routine.to_string(),
-                                    message: format!(
-                                        "slot_keep_seven_bias_chance must be 0 or 1, found {value}"
-                                    ),
-                                }
-                                .into());
-                            }
-                        };
-                        if slot_next_byte(&mut rng).map_err(RandomSpecialRoutineError::Divider)?
-                            & mask
-                            != 0
-                        {
-                            state
-                                .script_runtime
-                                .variables
-                                .insert("slot_bias".to_string(), "NONE".to_string());
-                        }
-                    }
-                    state.random_state = rng.state();
-                    state
-                        .script_runtime
-                        .variables
-                        .insert("slot_payout_remaining".to_string(), payout.to_string());
-                    let coins = state.coins;
-                    set_script_u32_value(state, u32::from(coins));
-                    SpecialRoutineEffect::SlotMachineResult {
-                        payout,
-                        matched_symbol: matched_symbol.map(slot_symbol_name).map(str::to_string),
-                        winning_lines,
-                        coins,
-                        random_state_after: state.random_state,
-                    }
-                }
-                value => {
-                    return Err(SpecialRoutineError::InvalidState {
-                        routine: routine.to_string(),
-                        message: format!(
-                            "slot_action must be start, stop, result, or payout, found {value}"
-                        ),
-                    }
-                    .into());
-                }
-            }
-        }
-        GameCornerGame::UnusedMemoryGame => {
-            let outcome = play_memory_game(state, routine, divider)?;
-            set_script_bool_value(state, outcome.matched);
-            SpecialRoutineEffect::UnusedMemoryGame {
-                matched: outcome.matched,
-                symbol: outcome.symbol,
-                first_index: outcome.first_index,
-                second_index: outcome.second_index,
+    let effect = {
+        let outcome = play_memory_game(state, routine, divider)?;
+        match outcome {
+            MemoryGameOutcome::Entered => SpecialRoutineEffect::UnusedMemoryGameEntered {
                 coins: state.coins,
                 random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::Started {
+                board,
+                tries_remaining,
+            } => SpecialRoutineEffect::UnusedMemoryGameStarted {
+                board,
+                tries_remaining,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::CardPlaced {
+                card_index,
+                delay_frames,
+            } => SpecialRoutineEffect::UnusedMemoryGameCardPlaced {
+                card_index,
+                delay_frames,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::CursorReady {
+                cursor_index,
+                tries_remaining,
+            } => SpecialRoutineEffect::UnusedMemoryGameCursorReady {
+                cursor_index,
+                tries_remaining,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::FrameAdvanced {
+                phase,
+                cursor_index,
+            } => SpecialRoutineEffect::UnusedMemoryGameFrameAdvanced {
+                phase,
+                cursor_index,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::TryStarted { tries_remaining } => {
+                SpecialRoutineEffect::UnusedMemoryGameTryStarted {
+                    tries_remaining,
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                }
             }
+            MemoryGameOutcome::RevealReady => SpecialRoutineEffect::UnusedMemoryGameRevealReady {
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::FirstCardPicked {
+                card_index,
+                symbol,
+                tries_remaining,
+            } => SpecialRoutineEffect::UnusedMemoryGameFirstCardPicked {
+                card_index,
+                symbol,
+                tries_remaining,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::CardRejected {
+                pick,
+                card_index,
+                tries_remaining,
+            } => SpecialRoutineEffect::UnusedMemoryGameCardRejected {
+                pick,
+                card_index,
+                tries_remaining,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::PairRevealed {
+                first_index,
+                first_symbol,
+                second_index,
+                second_symbol,
+                delay_frames,
+                tries_remaining,
+            } => SpecialRoutineEffect::UnusedMemoryGamePairRevealed {
+                first_index,
+                first_symbol,
+                second_index,
+                second_symbol,
+                delay_frames,
+                tries_remaining,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
+            MemoryGameOutcome::DelayAdvanced { frames_remaining } => {
+                SpecialRoutineEffect::UnusedMemoryGameDelayAdvanced {
+                    frames_remaining,
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                }
+            }
+            MemoryGameOutcome::Pair {
+                matched,
+                symbol,
+                first_index,
+                second_index,
+                tries_remaining,
+            } => {
+                set_script_bool_value(state, matched);
+                SpecialRoutineEffect::UnusedMemoryGame {
+                    matched,
+                    symbol,
+                    first_index,
+                    second_index,
+                    tries_remaining,
+                    coins: state.coins,
+                    random_state_after: state.random_state,
+                }
+            }
+            MemoryGameOutcome::RoundEnded {
+                remaining_cards,
+                matched_symbols,
+            } => SpecialRoutineEffect::UnusedMemoryGameRoundEnded {
+                remaining_cards,
+                matched_symbols,
+                coins: state.coins,
+                random_state_after: state.random_state,
+            },
         }
     };
     Ok(SpecialRoutineOutcome {
@@ -9081,19 +9682,8 @@ where
         }
     }
     let matched = guess.as_deref() == Some(correct.as_str());
+    state.script_runtime.variables.remove("BUENA_PASSWORD");
     set_script_bool_value(state, matched);
-    state
-        .script_runtime
-        .variables
-        .insert("_buena_category".to_string(), category_id.to_string());
-    state.script_runtime.variables.insert(
-        "_buena_category_type".to_string(),
-        category.category_type.clone(),
-    );
-    state
-        .script_runtime
-        .variables
-        .insert("_buena_password".to_string(), correct.to_string());
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -9338,6 +9928,7 @@ fn magikarp_house_sign(
 
 fn day_care_interaction<S>(
     state: &mut GameState,
+    context: SpecialRoutineContext<'_>,
     routine: &str,
     caretaker: &str,
     divider: &mut S,
@@ -9345,10 +9936,18 @@ fn day_care_interaction<S>(
 where
     S: DividerSource + ?Sized,
 {
-    let action = required_string_script_variable(state, routine, "_day_care_action")?;
+    let input = state
+        .script_runtime
+        .pending_day_care_input
+        .take()
+        .ok_or_else(|| SpecialRoutineError::MissingScriptValue {
+            routine: routine.to_string(),
+            variable: "pending_day_care_input".to_string(),
+        })?;
+    let action = input.action_name();
     let mut rng = CrystalRandom::new(state.random_state, divider);
-    let outcome = match action.as_str() {
-        "open" => crate::state::DayCareInteractionState {
+    let outcome = match input {
+        DayCareInput::Open {} => crate::state::DayCareInteractionState {
             caretaker: caretaker.to_string(),
             action: "open".to_string(),
             success: true,
@@ -9356,16 +9955,15 @@ where
             level: None,
             reason: None,
         },
-        "deposit" => day_care_deposit(state, routine, caretaker, &mut rng)?,
-        "withdraw" => day_care_withdraw(state, routine, caretaker, &mut rng)?,
-        "collect_egg" => day_care_collect_egg(state, routine, &mut rng)?,
-        "inspect" => day_care_inspect_interaction(state, routine, caretaker)?,
-        exact => {
-            return Err(SpecialRoutineError::MissingScriptValue {
-                routine: routine.to_string(),
-                variable: format!("unsupported _day_care_action {exact}"),
-            }
-            .into());
+        DayCareInput::Deposit { party_slot } => {
+            day_care_deposit(state, routine, caretaker, party_slot, &mut rng)?
+        }
+        DayCareInput::Withdraw {} => {
+            day_care_withdraw(state, context, routine, caretaker, &mut rng)?
+        }
+        DayCareInput::CollectEgg {} => day_care_collect_egg(state, routine, &mut rng)?,
+        DayCareInput::Inspect {} => {
+            day_care_inspect_interaction(state, context.growth_rates, routine, caretaker)?
         }
     };
     state.random_state = rng.state();
@@ -9376,7 +9974,6 @@ where
     }
     if action != "open" {
         set_script_bool_value(state, outcome.success);
-        state.day_care.last_interaction = Some(outcome.clone());
     }
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -9386,6 +9983,8 @@ where
             action: outcome.action,
             success: outcome.success,
             pokemon: outcome.pokemon,
+            level: outcome.level,
+            reason: outcome.reason,
         },
     })
 }
@@ -9398,7 +9997,12 @@ fn day_care_collect_egg<S>(
 where
     S: DividerSource,
 {
-    let Some(egg) = state.day_care.egg.clone() else {
+    let Some(egg) = state
+        .day_care
+        .egg
+        .clone()
+        .filter(|_| state.day_care.egg_present)
+    else {
         return Ok(crate::state::DayCareInteractionState {
             caretaker: "man".to_string(),
             action: "collect_egg".to_string(),
@@ -9433,7 +10037,6 @@ where
     state.sync_party_from_storage();
     state.day_care.egg = None;
     state.day_care.egg_present = false;
-    state.day_care.steps_since_last_egg = 0;
     // DayCare_GiveEgg immediately calls DayCare_InitBreeding, which always
     // chooses a fresh 150..=255 countdown rather than retaining the egg
     // check's previous random reset byte.
@@ -9457,21 +10060,12 @@ fn day_care_man_outside<S>(
 where
     S: DividerSource + ?Sized,
 {
-    set_day_care_active(state, routine, "man", true)?;
     let mut rng = CrystalRandom::new(state.random_state, divider);
     let outcome = day_care_collect_egg(state, routine, &mut rng)?;
     state.random_state = rng.state();
     let success = outcome.success;
-    state.day_care.last_interaction = Some(outcome.clone());
     state.script_runtime.script_value = Some(if success { "FALSE" } else { "TRUE" }.to_string());
-    state.script_runtime.variables.insert(
-        "_value".to_string(),
-        state
-            .script_runtime
-            .script_value
-            .clone()
-            .expect("script value"),
-    );
+    state.script_runtime.variables.remove("_value");
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -9480,12 +10074,15 @@ where
             action: outcome.action,
             success: outcome.success,
             pokemon: outcome.pokemon,
+            level: outcome.level,
+            reason: outcome.reason,
         },
     })
 }
 
 fn day_care_mon(
     state: &mut GameState,
+    growth_rates: &GrowthRateCatalog,
     routine: &str,
     caretaker: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
@@ -9494,7 +10091,15 @@ fn day_care_mon(
         .pokemon
         .as_ref()
         .map(|pokemon| pokemon.species.id.clone());
-    let level = resident.pokemon.as_ref().map(|pokemon| pokemon.level);
+    let level = resident
+        .pokemon
+        .as_ref()
+        .map(|pokemon| day_care_level_from_experience(pokemon, growth_rates))
+        .transpose()
+        .map_err(|error| SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: format!("day-care level calculation failed: {error}"),
+        })?;
     let occupied = pokemon.is_some();
     state.script_runtime.named_buffers.insert(
         "STRING_BUFFER_1".to_string(),
@@ -9522,15 +10127,11 @@ fn give_park_balls(
     state.bug_contest.park_balls_remaining = config.park_balls;
     state.bug_contest.caught_mon = None;
     state.bug_contest.pending_caught_mon = None;
-    state.bug_contest.caught_species = None;
-    state.bug_contest.caught_level = None;
     state.bug_contest.party_backup.clear();
     state.bug_contest.timer_active = true;
     state.bug_contest.timer_minutes_remaining = config.timer_minutes;
     state.bug_contest.timer_seconds_remaining = config.timer_seconds;
     state.bug_contest.timer_start_time = Some(current_bug_contest_time(state));
-    state.bug_contest.last_rank = None;
-    state.bug_contest.last_result = None;
     state
         .flags
         .set_engine_flag("ENGINE_BUG_CONTEST_TIMER", true)
@@ -9713,7 +10314,7 @@ where
     state
         .script_runtime
         .variables
-        .insert("_bug_contestant_flags".to_string(), flags.join(","));
+        .remove("_bug_contestant_flags");
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -9795,7 +10396,6 @@ fn contest_drop_off_mons(
     let lead = required_party_pokemon(state, routine, 0)?.clone();
     if lead.hp == 0 {
         set_script_numeric_value(state, 1);
-        state.bug_contest.last_result = Some(1);
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
@@ -9819,13 +10419,10 @@ fn contest_drop_off_mons(
     state.bug_contest.second_party_species = second_party_species.clone();
     state.bug_contest.caught_mon = None;
     state.bug_contest.pending_caught_mon = None;
-    state.bug_contest.caught_species = None;
-    state.bug_contest.caught_level = None;
     state.storage.party.pokemon = [const { None }; 6];
     state.storage.party.pokemon[0] = Some(lead);
     state.sync_party_from_storage();
     set_script_numeric_value(state, 0);
-    state.bug_contest.last_result = Some(0);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -9870,10 +10467,7 @@ fn check_party_full_after_contest(
     const NO_CATCH: u8 = 2;
     let Some(contest_mon) = state.bug_contest.caught_mon.take() else {
         state.bug_contest.pending_caught_mon = None;
-        state.bug_contest.caught_species = None;
-        state.bug_contest.caught_level = None;
         set_script_numeric_value(state, NO_CATCH);
-        state.bug_contest.last_result = Some(NO_CATCH);
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
             routine: routine.to_string(),
@@ -9884,9 +10478,11 @@ fn check_party_full_after_contest(
         });
     };
     let species = contest_mon.species.id.clone();
+    let caught_time = state.time.time_of_day;
+    let caught_gender = state.player_gender;
     let result = if state.storage.party.has_space() {
         let mut contest_mon = contest_mon;
-        set_bug_contest_caught_data(&mut contest_mon);
+        set_bug_contest_caught_data(&mut contest_mon, caught_time, caught_gender);
         if !state.storage.party.add_pokemon(contest_mon) {
             return Err(SpecialRoutineError::InvalidState {
                 routine: routine.to_string(),
@@ -9914,11 +10510,11 @@ fn check_party_full_after_contest(
             if let Some(first_boxed_mon) =
                 state.storage.pc_boxes[current_pc_box].pokemon[0].as_mut()
             {
-                set_bug_contest_caught_data(first_boxed_mon);
+                set_bug_contest_caught_data(first_boxed_mon, caught_time, caught_gender);
             }
         } else {
             let mut contest_mon = contest_mon;
-            set_bug_contest_caught_data(&mut contest_mon);
+            set_bug_contest_caught_data(&mut contest_mon, caught_time, caught_gender);
             state
                 .storage
                 .register_capture_in_box(current_pc_box, contest_mon)
@@ -9929,11 +10525,8 @@ fn check_party_full_after_contest(
         }
         BOXED_MON
     };
-    state.bug_contest.caught_species = None;
-    state.bug_contest.caught_level = None;
     state.sync_party_from_storage();
     set_script_numeric_value(state, result);
-    state.bug_contest.last_result = Some(result);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -9944,21 +10537,13 @@ fn check_party_full_after_contest(
     })
 }
 
-fn set_bug_contest_caught_data(pokemon: &mut Pokemon) {
-    match pokemon.caught_data.as_mut() {
-        Some(caught_data) => {
-            caught_data.level = pokemon.level & 0x3f;
-            caught_data.location = 0x13; // LANDMARK_NATIONAL_PARK
-        }
-        None => {
-            pokemon.caught_data = Some(CaughtData {
-                level: pokemon.level & 0x3f,
-                time_of_day: None,
-                original_trainer_gender: 0,
-                location: 0x13,
-            });
-        }
-    }
+fn set_bug_contest_caught_data(pokemon: &mut Pokemon, time_of_day: TimeOfDay, player_gender: u8) {
+    pokemon.caught_data = Some(CaughtData {
+        level: pokemon.level & 0x3f,
+        time_of_day: Some(time_of_day),
+        original_trainer_gender: player_gender,
+        location: 0x13, // LANDMARK_NATIONAL_PARK
+    });
 }
 
 pub fn resolve_bug_contest_caught_mon(
@@ -9973,8 +10558,6 @@ pub fn resolve_bug_contest_caught_mon(
     })?;
     let species = pending.species.id.clone();
     if keep_new {
-        state.bug_contest.caught_species = Some(species.clone());
-        state.bug_contest.caught_level = Some(pending.level);
         state.bug_contest.caught_mon = Some(pending);
     }
     state.script_runtime.pending_yes_no = None;
@@ -10001,6 +10584,23 @@ where
     S: DividerSource + ?Sized,
 {
     let config = require_bug_contest_config(bug_contest_config, routine)?;
+    let active_contestants = BUG_CONTESTANTS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            config
+                .contestant_flags
+                .get(*index)
+                .is_some_and(|flag| !state.bug_contest.selected_contestant_flags.contains(flag))
+        })
+        .count();
+    if active_contestants < 3 {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "Bug Contest judging requires three initialized winner slots".to_string(),
+        }
+        .into());
+    }
     let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
     let mut winners = std::array::from_fn(|_| BugContestCandidate::default());
     for (index, contestant) in BUG_CONTESTANTS.iter().enumerate() {
@@ -10052,7 +10652,7 @@ where
         .caught_mon
         .as_ref()
         .map(|pokemon| pokemon.species.id.clone())
-        .unwrap_or_else(|| "POKEMON".to_string());
+        .unwrap_or_default();
     insert_bug_contest_winner(
         &mut winners,
         BugContestCandidate {
@@ -10061,13 +10661,19 @@ where
             score: player_score,
         },
     );
+    if winners.iter().any(|winner| winner.winner_id == 0) {
+        return Err(SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: "Bug Contest judging requires three initialized winner slots".to_string(),
+        }
+        .into());
+    }
     state.random_state = rng.state();
     let rank = winners
         .iter()
         .position(|winner| winner.winner_id == 1)
         .map(|index| index as u8 + 1)
         .unwrap_or(4);
-    state.bug_contest.last_rank = Some(rank);
     state
         .script_runtime
         .named_buffers
@@ -10175,24 +10781,30 @@ fn bug_contest_trainer_name(winner_id: u8, player_name: &str) -> String {
     BUG_CONTESTANTS
         .get(winner_id.saturating_sub(2) as usize)
         .map(|contestant| contestant.trainer_name.to_string())
-        .unwrap_or_else(|| "TRAINER".to_string())
+        .expect("validated Bug Contest winner id indexes the contestant table")
 }
 
 fn bug_contest_player_score(pokemon: &Pokemon) -> u16 {
     let dv_byte_0 = ((pokemon.dvs.attack & 0xf) << 4) | (pokemon.dvs.defense & 0xf);
     let dv_byte_1 = ((pokemon.dvs.speed & 0xf) << 4) | (pokemon.dvs.special & 0xf);
     let dv_bonus = bug_contest_dv_bonus(dv_byte_0, dv_byte_1);
-    pokemon
-        .max_hp
-        .saturating_mul(4)
-        .saturating_add(pokemon.attack)
-        .saturating_add(pokemon.defense)
-        .saturating_add(pokemon.speed)
-        .saturating_add(pokemon.special_attack)
-        .saturating_add(pokemon.special_defense)
-        .saturating_add(u16::from(dv_bonus))
-        .saturating_add(pokemon.hp / 8)
-        .saturating_add(u16::from(pokemon.item.is_some()))
+    let max_hp_low = pokemon.max_hp as u8;
+    let mut score = 0_u16;
+    for value in [max_hp_low, max_hp_low, max_hp_low, max_hp_low] {
+        score = score.wrapping_add(u16::from(value));
+    }
+    for stat in [
+        pokemon.attack,
+        pokemon.defense,
+        pokemon.speed,
+        pokemon.special_attack,
+        pokemon.special_defense,
+    ] {
+        score = score.wrapping_add(u16::from(stat as u8));
+    }
+    score = score.wrapping_add(u16::from(dv_bonus));
+    score = score.wrapping_add(u16::from((pokemon.hp as u8) >> 3));
+    score.wrapping_add(u16::from(pokemon.item.is_some()))
 }
 
 fn bug_contest_dv_bonus(byte_0: u8, byte_1: u8) -> u8 {
@@ -10215,7 +10827,6 @@ fn set_bits_for_link_request(
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     state.link_session.player_link_action = action;
     state.link_session.chosen_cable_club_room = action;
-    set_script_numeric_value(state, action);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -10230,30 +10841,15 @@ fn wait_for_linked_friend(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let ready = required_bool_script_variable(state, routine, "_link_friend_ready")?;
-    let serial_established = state.link_session.serial_connection_status.is_established();
-    if ready != serial_established {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: format!(
-                "ready={ready} requires matching serial connection status, found {:?}",
-                state.link_session.serial_connection_status
-            ),
-        });
-    }
-    if ready {
-        state.link_session.friend_ready = true;
-    } else {
-        state.link_session.friend_ready = false;
-    }
-    state.link_session.last_result = ready;
+    let ready = state.link_session.serial_connection_status.is_established();
     set_script_bool_value(state, ready);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::LinkResult {
+        effect: SpecialRoutineEffect::LinkedFriendResult {
             success: ready,
             link_mode: state.link_session.link_mode,
+            delay_frames: if ready { 50 } else { 0 },
         },
     })
 }
@@ -10262,18 +10858,8 @@ fn check_link_timeout_receptionist(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let timeout = required_bool_script_variable(state, routine, "_link_timeout")?;
-    if timeout {
-        if state.link_session.serial_connection_status.is_established() {
-            return Err(SpecialRoutineError::InvalidState {
-                routine: routine.to_string(),
-                message: format!(
-                    "timeout requires connection_not_established, found {:?}",
-                    state.link_session.serial_connection_status
-                ),
-            });
-        }
-        reset_link_state(state);
+    if !state.link_session.serial_connection_status.is_established() {
+        state.link_session.serial_connection_status = LinkSerialConnectionStatus::NotEstablished;
         set_script_bool_value(state, false);
         state.script_runtime.last_special_routine = Some(routine.to_string());
         return Ok(SpecialRoutineOutcome {
@@ -10281,19 +10867,13 @@ fn check_link_timeout_receptionist(
             effect: SpecialRoutineEffect::LinkResult {
                 success: false,
                 link_mode: 0,
+                delay_frames: 5,
             },
         });
     }
     let other_mode = required_u8_script_variable(state, routine, "_other_player_link_mode")?;
-    if !state.link_session.serial_connection_status.is_established() {
-        return Err(SpecialRoutineError::InvalidState {
-            routine: routine.to_string(),
-            message: "connected result requires an established serial clock owner".to_string(),
-        });
-    }
-    state.link_session.player_link_action = state.link_session.chosen_cable_club_room;
+    state.link_session.player_link_action = 1;
     state.link_session.other_player_link_mode = other_mode;
-    state.link_session.last_result = true;
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -10301,6 +10881,7 @@ fn check_link_timeout_receptionist(
         effect: SpecialRoutineEffect::LinkResult {
             success: true,
             link_mode: state.link_session.link_mode,
+            delay_frames: 2,
         },
     })
 }
@@ -10314,7 +10895,6 @@ fn check_both_selected_same_room(
     if success {
         state.link_session.link_mode = state.link_session.chosen_cable_club_room.saturating_add(1);
     }
-    state.link_session.last_result = success;
     set_script_bool_value(state, success);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -10322,6 +10902,7 @@ fn check_both_selected_same_room(
         effect: SpecialRoutineEffect::LinkResult {
             success,
             link_mode: state.link_session.link_mode,
+            delay_frames: 1,
         },
     })
 }
@@ -10330,14 +10911,14 @@ fn close_link(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    reset_link_state(state);
-    set_script_bool_value(state, false);
+    state.link_session.link_mode = 0;
+    state.link_session.serial_connection_status = LinkSerialConnectionStatus::NotEstablished;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::LinkResult {
-            success: false,
+        effect: SpecialRoutineEffect::LinkDelay {
             link_mode: 0,
+            delay_frames: 6,
         },
     })
 }
@@ -10346,14 +10927,14 @@ fn wait_for_other_player_to_exit(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    reset_link_state(state);
-    set_script_bool_value(state, true);
+    state.link_session.link_mode = 0;
+    state.link_session.serial_connection_status = LinkSerialConnectionStatus::NotEstablished;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::LinkResult {
-            success: true,
+        effect: SpecialRoutineEffect::LinkDelay {
             link_mode: 0,
+            delay_frames: 12,
         },
     })
 }
@@ -10362,16 +10943,12 @@ fn failed_link_to_past(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    state.link_session.failed_link_to_past = true;
-    state.link_session.link_mode = 1;
-    state.link_session.serial_connection_status = LinkSerialConnectionStatus::NotEstablished;
-    set_script_bool_value(state, false);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::LinkResult {
-            success: false,
+        effect: SpecialRoutineEffect::LinkDelay {
             link_mode: state.link_session.link_mode,
+            delay_frames: 40,
         },
     })
 }
@@ -10381,16 +10958,16 @@ fn link_room(
     routine: &str,
     room: &str,
     link_mode: u8,
+    session: bool,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     state.link_session.link_mode = link_mode;
-    state.link_session.active_room = Some(room.to_string());
-    set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::LinkRoom {
             room: room.to_string(),
             link_mode,
+            session,
         },
     })
 }
@@ -10399,48 +10976,80 @@ fn time_capsule(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    state.link_session.player_link_action = 0;
-    state.link_session.chosen_cable_club_room = 0;
-    state.link_session.active_room = Some("TimeCapsule".to_string());
-    set_script_bool_value(state, true);
+    state.link_session.link_mode = 1;
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
         effect: SpecialRoutineEffect::LinkRoom {
             room: "TimeCapsule".to_string(),
-            link_mode: state.link_session.link_mode,
+            link_mode: 1,
+            session: true,
         },
     })
 }
 
 fn check_time_capsule_compatibility(
     state: &mut GameState,
+    move_catalog: &BTreeMap<String, Move>,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
+    const JOHTO_POKEMON: u16 = 152;
+    const FIRST_GEN_TWO_MOVE_SOURCE_INDEX: u8 = 166;
+
+    let party = state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let mut result_code = 0;
     let mut mon_name = None;
-    let move_name = None;
-    for pokemon in state.storage.party.pokemon.iter().flatten() {
-        if pokemon.species.int_id >= 152 {
-            result_code = 1;
-            mon_name = Some(pokemon.nickname.clone());
-            break;
-        }
-        if pokemon
-            .item
-            .as_deref()
-            .is_some_and(|item| item.contains("MAIL"))
-        {
-            result_code = 3;
-            mon_name = Some(pokemon.nickname.clone());
-            break;
+    let mut move_name = None;
+
+    if let Some(pokemon) = party
+        .iter()
+        .find(|pokemon| pokemon.species.int_id >= JOHTO_POKEMON)
+    {
+        result_code = 1;
+        mon_name = Some(pokemon.species.id.clone());
+    } else if let Some(pokemon) = party
+        .iter()
+        .find(|pokemon| pokemon.item.as_deref().is_some_and(is_mail_item_id))
+    {
+        result_code = 3;
+        mon_name = Some(pokemon.species.id.clone());
+    } else {
+        'party_moves: for (party_slot, pokemon) in party.iter().enumerate() {
+            for learned in &pokemon.moves {
+                let move_data = move_catalog.get(&learned.name).ok_or_else(|| {
+                    SpecialRoutineError::UnknownMove {
+                        routine: routine.to_string(),
+                        party_slot,
+                        move_id: learned.name.clone(),
+                    }
+                })?;
+                if move_data.source_index >= FIRST_GEN_TWO_MOVE_SOURCE_INDEX {
+                    result_code = 2;
+                    mon_name = Some(pokemon.species.id.clone());
+                    move_name = Some(learned.name.clone());
+                    break 'party_moves;
+                }
+            }
         }
     }
+
     if let Some(mon_name) = mon_name.as_ref() {
         state
             .script_runtime
             .named_buffers
-            .insert("STRING_BUFFER_3".to_string(), mon_name.clone());
+            .insert("STRING_BUFFER_1".to_string(), mon_name.clone());
+    }
+    if let Some(move_name) = move_name.as_ref() {
+        state
+            .script_runtime
+            .named_buffers
+            .insert("STRING_BUFFER_2".to_string(), move_name.clone());
     }
     set_script_numeric_value(state, result_code);
     state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -10458,12 +11067,14 @@ fn try_quick_save(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    state.link_session.quick_save_requested = true;
     set_script_bool_value(state, true);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::QuickSave { requested: true },
+        effect: SpecialRoutineEffect::QuickSave {
+            requested: true,
+            delay_frames: 30,
+        },
     })
 }
 
@@ -10490,22 +11101,15 @@ fn cable_club_check_which_chris(
     state: &mut GameState,
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
-    let gender = required_string_script_variable(state, routine, "_player_gender")?;
-    let male_player = match gender.as_str() {
-        "MALE" => true,
-        "FEMALE" => false,
-        _ => {
-            return Err(SpecialRoutineError::InvalidNumericValue {
-                routine: routine.to_string(),
-                value: gender,
-            });
-        }
-    };
-    set_script_bool_value(state, male_player);
+    let external_clock_player = state.link_session.serial_connection_status
+        == LinkSerialConnectionStatus::UsingExternalClock;
+    set_script_bool_value(state, external_clock_player);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
-        effect: SpecialRoutineEffect::CableClubCheckWhichChris { male_player },
+        effect: SpecialRoutineEffect::CableClubCheckWhichChris {
+            external_clock_player,
+        },
     })
 }
 
@@ -10573,10 +11177,6 @@ where
     state.random_state = rng.state();
     state.battle_tower.reward_item = selected.clone();
     state.battle_tower.reward_given = false;
-    state
-        .script_runtime
-        .variables
-        .insert("battle_tower_reward_item".to_string(), selected);
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -10662,13 +11262,7 @@ fn battle_tower_action(
             // representation of that value, so no invented input is needed.
             ("1".to_string(), true)
         }
-        "BATTLETOWERACTION_LOADLEVELGROUP" => {
-            state.script_runtime.variables.insert(
-                "_battle_tower_level_group".to_string(),
-                state.battle_tower.level_group.to_string(),
-            );
-            ("1".to_string(), true)
-        }
+        "BATTLETOWERACTION_LOADLEVELGROUP" => ("1".to_string(), true),
         "BATTLETOWERACTION_SAVEOPTIONS" => {
             // This action calls SaveOptions. Reward selection is the distinct
             // BATTLETOWERACTION_CHOOSEREWARD action executed on entry.
@@ -10867,14 +11461,11 @@ fn battle_tower_action(
         }
     };
     state.script_runtime.script_value = Some(value.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("_value".to_string(), value.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("_truthy".to_string(), u8::from(truthy).to_string());
+    // wScriptVar is the routine's sole accumulator. The generic `_value`
+    // bridge is accepted as an input for host-issued calls, but it must not
+    // become a second durable result channel after the special returns.
+    state.script_runtime.variables.remove("_value");
+    state.script_runtime.variables.remove("_truthy");
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -10917,11 +11508,6 @@ fn check_for_battle_tower_rules(
         rules.required_party_count.to_string(),
     );
     let failures = battle_tower_rule_failures(state, rules);
-    state.battle_tower.last_rule_failure = failures.first().cloned();
-    state.script_runtime.variables.insert(
-        "battle_tower_rule_failure".to_string(),
-        failures.first().cloned().unwrap_or_default(),
-    );
     set_script_bool_value(state, !failures.is_empty());
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
@@ -11108,7 +11694,7 @@ fn battle_tower_battle(
 
 fn heal_battle_tower_party(state: &mut GameState, move_catalog: &BTreeMap<String, Move>) {
     for pokemon in state.storage.party.pokemon.iter_mut().flatten() {
-        if !pokemon.is_egg && pokemon.species.id != "EGG" {
+        if !pokemon.is_egg {
             heal_pokemon(pokemon, move_catalog);
         }
     }
@@ -11170,6 +11756,43 @@ where
             ),
         }
         .into());
+    }
+    for (mon_index, mon) in group.iter().enumerate() {
+        for (field, actual, expected) in [
+            ("moves", mon.moves.len(), 4),
+            ("statExp", mon.stat_exp.len(), 5),
+            ("dvs", mon.dvs.len(), 4),
+            ("pp", mon.pp.len(), 4),
+            ("pokerus", mon.pokerus.len(), 3),
+            ("status", mon.status.len(), 2),
+            ("stats", mon.stats.len(), 7),
+        ] {
+            if actual != expected {
+                return Err(SpecialRoutineError::BattleTowerTrainerBuild {
+                    routine: routine.to_string(),
+                    trainer_id: format!("group_{group_index}"),
+                    error: format!(
+                        "compiled Pokemon entry {mon_index} field {field} must contain exactly {expected} ASM record values, found {actual}"
+                    ),
+                }
+                .into());
+            }
+        }
+        if mon.dvs.iter().any(|dv| *dv > 0x0f) {
+            return Err(SpecialRoutineError::BattleTowerTrainerBuild {
+                routine: routine.to_string(),
+                trainer_id: format!("group_{group_index}"),
+                error: format!("compiled Pokemon entry {mon_index} has a DV outside nibble range"),
+            }
+            .into());
+        }
+        decode_battle_tower_status(&mon.status).map_err(|error| {
+            SpecialRoutineError::BattleTowerTrainerBuild {
+                routine: routine.to_string(),
+                trainer_id: format!("group_{group_index}"),
+                error: format!("compiled Pokemon entry {mon_index} status {error}"),
+            }
+        })?;
     }
 
     let mut rng = CrystalRandom::new(state.random_state, &mut *divider);
@@ -11271,12 +11894,7 @@ where
                 error: format!("unknown Battle Tower species {}", mon.species),
             }
         })?;
-        let dvs = Dv::from_non_hp(
-            mon.dvs.first().copied().unwrap_or(0),
-            mon.dvs.get(1).copied().unwrap_or(0),
-            mon.dvs.get(2).copied().unwrap_or(0),
-            mon.dvs.get(3).copied().unwrap_or(0),
-        );
+        let dvs = Dv::from_non_hp(mon.dvs[0], mon.dvs[1], mon.dvs[2], mon.dvs[3]);
         let mut pokemon = create_pokemon_from_known_dvs(
             species,
             mon.level,
@@ -11296,30 +11914,59 @@ where
         pokemon.original_trainer_id = mon.original_trainer_id;
         pokemon.experience = mon.experience as i32;
         pokemon.happiness = mon.happiness;
-        pokemon.hp_exp = mon.stat_exp.first().copied().unwrap_or(0);
-        pokemon.attack_exp = mon.stat_exp.get(1).copied().unwrap_or(0);
-        pokemon.defense_exp = mon.stat_exp.get(2).copied().unwrap_or(0);
-        pokemon.speed_exp = mon.stat_exp.get(3).copied().unwrap_or(0);
-        pokemon.special_exp = mon.stat_exp.get(4).copied().unwrap_or(0);
-        if mon.stats.len() >= 7 {
-            pokemon.hp = mon.stats[0];
-            pokemon.max_hp = mon.stats[1];
-            pokemon.attack = mon.stats[2];
-            pokemon.defense = mon.stats[3];
-            pokemon.speed = mon.stats[4];
-            pokemon.special_attack = mon.stats[5];
-            pokemon.special_defense = mon.stats[6];
-        }
+        pokemon.pokerus = mon.pokerus[0];
+        pokemon.caught_data = decode_battle_tower_caught_data(mon.pokerus[1], mon.pokerus[2]);
+        let (status, sleep_turns) = decode_battle_tower_status(&mon.status).map_err(|error| {
+            SpecialRoutineError::BattleTowerTrainerBuild {
+                routine: routine.to_string(),
+                trainer_id: trainer.name.clone(),
+                error: format!("Battle Tower status {error}"),
+            }
+        })?;
+        pokemon.status = status;
+        pokemon.sleep_turns = sleep_turns;
+        pokemon.hp_exp = mon.stat_exp[0];
+        pokemon.attack_exp = mon.stat_exp[1];
+        pokemon.defense_exp = mon.stat_exp[2];
+        pokemon.speed_exp = mon.stat_exp[3];
+        pokemon.special_exp = mon.stat_exp[4];
+        pokemon.hp = mon.stats[0];
+        pokemon.max_hp = mon.stats[1];
+        pokemon.attack = mon.stats[2];
+        pokemon.defense = mon.stats[3];
+        pokemon.speed = mon.stats[4];
+        pokemon.special_attack = mon.stats[5];
+        pokemon.special_defense = mon.stats[6];
+        pokemon.moves.clear();
         for (slot, move_name) in mon.moves.iter().enumerate() {
             if move_name == "NO_MOVE" {
                 continue;
             }
-            if let Some(move_data) = context.move_catalog.get(move_name) {
-                if let Some(existing) = pokemon.moves.get_mut(slot) {
-                    existing.name = move_name.clone();
-                    existing.current_pp = mon.pp.get(slot).copied().unwrap_or(move_data.pp);
+            let move_data = context.move_catalog.get(move_name).ok_or_else(|| {
+                SpecialRoutineError::BattleTowerTrainerBuild {
+                    routine: routine.to_string(),
+                    trainer_id: trainer.name.clone(),
+                    error: format!("unknown Battle Tower move {move_name}"),
                 }
+            })?;
+            let packed_pp = mon.pp[slot];
+            let learned = LearnedMove {
+                name: move_name.clone(),
+                current_pp: packed_pp & 0x3f,
+                pp_ups: packed_pp >> 6,
+            };
+            let max_pp = crate::models::max_move_pp(move_data.pp, learned.pp_ups);
+            if learned.current_pp > max_pp {
+                return Err(SpecialRoutineError::BattleTowerTrainerBuild {
+                    routine: routine.to_string(),
+                    trainer_id: trainer.name.clone(),
+                    error: format!(
+                        "Battle Tower move {move_name} has packed PP {packed_pp:#04x} above maximum {max_pp}"
+                    ),
+                }
+                .into());
             }
+            pokemon.moves.push(learned);
         }
         enemy_party.push(pokemon);
         mon_history.push((group_index, index));
@@ -11345,6 +11992,60 @@ where
         trainer.female,
         enemy_party,
     ))
+}
+
+fn decode_battle_tower_caught_data(level_time: u8, gender_location: u8) -> Option<CaughtData> {
+    if level_time == 0 && gender_location == 0 {
+        return None;
+    }
+    let time_of_day = match level_time >> 6 {
+        0 => None,
+        1 => Some(TimeOfDay::Morning),
+        2 => Some(TimeOfDay::Day),
+        3 => Some(TimeOfDay::Night),
+        _ => unreachable!("two-bit caught time is exhaustive"),
+    };
+    Some(CaughtData {
+        level: level_time & 0x3f,
+        time_of_day,
+        original_trainer_gender: gender_location >> 7,
+        location: gender_location & 0x7f,
+    })
+}
+
+fn decode_battle_tower_status(status: &[u8]) -> Result<(Option<String>, u8), String> {
+    if status.len() != 2 {
+        return Err(format!(
+            "must contain exactly two ASM record bytes, found {}",
+            status.len()
+        ));
+    }
+    if status[1] != 0 {
+        return Err(format!(
+            "has nonzero reserved padding byte {:#04x}",
+            status[1]
+        ));
+    }
+    let raw = status[0];
+    let sleep_turns = raw & 0x07;
+    let permanent = raw & 0x78;
+    if raw & 0x80 != 0 || (sleep_turns != 0 && permanent != 0) || permanent.count_ones() > 1 {
+        return Err(format!(
+            "contains invalid status bit combination {raw:#04x}"
+        ));
+    }
+    if sleep_turns != 0 {
+        return Ok((Some("SLEEP".to_string()), sleep_turns));
+    }
+    let status = match permanent {
+        0x00 => None,
+        0x08 => Some("POISON"),
+        0x10 => Some("BURN"),
+        0x20 => Some("FREEZE"),
+        0x40 => Some("PARALYSIS"),
+        _ => unreachable!("single persistent status bit is exhaustive"),
+    };
+    Ok((status.map(str::to_string), 0))
 }
 
 fn load_opponent_trainer_and_pokemon_with_ot_sprite<S>(
@@ -11423,7 +12124,6 @@ where
     })?;
 
     state.battle_tower.loaded_trainer_id = Some(trainer_id.clone());
-    state.battle_tower.last_sprite_constant = Some(sprite_constant.clone());
     // `CopyBTTrainer_FromBT_OT_TowBT_OTTemp` commits these two bytes to SRAM
     // before `StartBattle`. They deliberately make a reset or power loss in
     // the room distinguishable from the resumable save-and-quit state.
@@ -11469,30 +12169,6 @@ where
     state
         .script_runtime
         .variables
-        .insert("other_trainer_class".to_string(), trainer_class.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("other_trainer_id".to_string(), trainer_id.clone());
-    state
-        .script_runtime
-        .variables
-        .insert("other_trainer_name".to_string(), trainer_name.clone());
-    state.script_runtime.variables.insert(
-        "other_trainer_party_count".to_string(),
-        enemy_party.len().to_string(),
-    );
-    state.script_runtime.variables.insert(
-        "battle_tower_sprite_constant".to_string(),
-        sprite_constant.clone(),
-    );
-    state.script_runtime.variables.insert(
-        "battle_tower_target_object".to_string(),
-        target_object.clone(),
-    );
-    state
-        .script_runtime
-        .variables
         .insert("battle_tower_intro_text".to_string(), intro_text);
     state
         .script_runtime
@@ -11523,11 +12199,8 @@ fn ask_remember_password(
     routine: &str,
 ) -> Result<SpecialRoutineOutcome, SpecialRoutineError> {
     let remember = required_bool_script_variable(state, routine, "_yes_no_result")?;
+    state.script_runtime.variables.remove("_yes_no_result");
     set_script_bool_value(state, remember);
-    state.script_runtime.variables.insert(
-        "_remember_password".to_string(),
-        u8::from(remember).to_string(),
-    );
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -11550,18 +12223,7 @@ fn battle_tower_leaderboard(
         state.battle_tower.leaderboard_acknowledged = false;
     }
     state.script_runtime.script_value = Some(if acknowledged { "0" } else { "10" }.to_string());
-    state.script_runtime.variables.insert(
-        "_value".to_string(),
-        state
-            .script_runtime
-            .script_value
-            .clone()
-            .expect("battle tower leaderboard sets script value before mirroring it"),
-    );
-    state.script_runtime.variables.insert(
-        "battle_tower_leaderboard_count".to_string(),
-        records.len().to_string(),
-    );
+    state.script_runtime.variables.remove("_value");
     state.script_runtime.last_special_routine = Some(routine.to_string());
     Ok(SpecialRoutineOutcome {
         routine: routine.to_string(),
@@ -11583,7 +12245,6 @@ fn battle_tower_initialize_challenge_ram(
     state.battle_tower.beaten_trainers = 0;
     state.battle_tower.quick_saved = false;
     state.battle_tower.loaded_trainer_id = None;
-    state.battle_tower.last_sprite_constant = None;
     state.battle_tower.selected_party_indexes.clear();
     state
         .script_runtime
@@ -11696,14 +12357,6 @@ fn record_mobile_handshake(
     state.mobile_link.handshakes = state.mobile_link.handshakes.saturating_add(1);
     state.mobile_link.terminated = false;
     state.mobile_link.leaderboard = battle_tower_mobile_records(state);
-    state.script_runtime.variables.insert(
-        "mobile_handshakes".to_string(),
-        state.mobile_link.handshakes.to_string(),
-    );
-    state.script_runtime.variables.insert(
-        "battle_tower_leaderboard_count".to_string(),
-        state.mobile_link.leaderboard.len().to_string(),
-    );
     Ok(())
 }
 
@@ -12520,6 +13173,7 @@ fn day_care_deposit<S>(
     state: &mut GameState,
     routine: &str,
     caretaker: &str,
+    party_slot: usize,
     rng: &mut CrystalRandom<S>,
 ) -> Result<crate::state::DayCareInteractionState, RandomSpecialRoutineError<S::Error>>
 where
@@ -12538,13 +13192,9 @@ where
             reason: Some("occupied".to_string()),
         });
     }
-    let party_slot = required_usize_script_variable(state, routine, "_party_slot")?;
     let pokemon = required_party_pokemon(state, routine, party_slot)?.clone();
     remove_party_member(state, party_slot);
     let resident = day_care_resident_mut(state, routine, caretaker)?;
-    resident.initial_experience = pokemon.experience;
-    resident.initial_level = pokemon.level;
-    resident.steps = 0;
     resident.pokemon = Some(pokemon.clone());
     update_day_care_compatibility(state, rng).map_err(RandomSpecialRoutineError::Divider)?;
     Ok(crate::state::DayCareInteractionState {
@@ -12559,6 +13209,7 @@ where
 
 fn day_care_withdraw<S>(
     state: &mut GameState,
+    context: SpecialRoutineContext<'_>,
     routine: &str,
     caretaker: &str,
     rng: &mut CrystalRandom<S>,
@@ -12583,7 +13234,7 @@ where
     // Do not remove the resident until the party has accepted it.  Crystal
     // leaves the Day-Care slot intact when withdrawal cannot be completed;
     // taking it first makes a malformed/full party silently delete the mon.
-    let Some(pokemon) = day_care_resident(state, routine, caretaker)?
+    let Some(mut pokemon) = day_care_resident(state, routine, caretaker)?
         .pokemon
         .clone()
     else {
@@ -12597,9 +13248,76 @@ where
         });
     };
     let species = pokemon.species.id.clone();
-    let level = pokemon.level;
-    let gained_levels =
-        level.saturating_sub(day_care_resident(state, routine, caretaker)?.initial_level);
+    let previous_level = pokemon.level;
+    let level =
+        day_care_level_from_experience(&pokemon, context.growth_rates).map_err(|error| {
+            SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: format!("day-care level calculation failed: {error}"),
+            }
+        })?;
+    let minimum_experience =
+        calculate_experience(context.growth_rates, &pokemon.species.growth_rate, level).map_err(
+            |error| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: format!("day-care withdrawal experience failed: {error}"),
+            },
+        )?;
+    let learned = level_up_moves_for_species(context.learnsets, &species).map_err(|error| {
+        SpecialRoutineError::InvalidState {
+            routine: routine.to_string(),
+            message: format!("day-care learnset failed: {error:?}"),
+        }
+    })?;
+    for crate::systems::learnsets::LearnsetEntry(learn_level, move_id) in learned {
+        if *learn_level <= previous_level
+            || *learn_level > level
+            || pokemon.moves.iter().any(|known| known.name == *move_id)
+        {
+            continue;
+        }
+        let move_data =
+            context
+                .move_catalog
+                .get(move_id)
+                .ok_or_else(|| SpecialRoutineError::InvalidState {
+                    routine: routine.to_string(),
+                    message: format!(
+                        "day-care learned move {move_id} is missing from the move catalog"
+                    ),
+                })?;
+        if pokemon.moves.len() == 4 {
+            pokemon.moves.remove(0);
+        }
+        pokemon.moves.push(LearnedMove {
+            name: move_id.clone(),
+            current_pp: move_data.pp,
+            pp_ups: 0,
+        });
+    }
+    pokemon.level = level;
+    pokemon.experience = minimum_experience;
+    let stats = calculate_stats(
+        &pokemon.species,
+        level,
+        pokemon.dvs,
+        StatExperience {
+            hp: pokemon.hp_exp,
+            attack: pokemon.attack_exp,
+            defense: pokemon.defense_exp,
+            speed: pokemon.speed_exp,
+            special: pokemon.special_exp,
+        },
+    );
+    pokemon.max_hp = stats.max_hp;
+    pokemon.attack = stats.attack;
+    pokemon.defense = stats.defense;
+    pokemon.speed = stats.speed;
+    pokemon.special_attack = stats.special_attack;
+    pokemon.special_defense = stats.special_defense;
+    heal_pokemon(&mut pokemon, context.move_catalog);
+    pokemon.sleep_turns = 0;
+    let gained_levels = level.saturating_sub(previous_level);
     let fee = 100u32.saturating_add(u32::from(gained_levels) * 100);
     if state.money < fee {
         return Ok(crate::state::DayCareInteractionState {
@@ -12619,9 +13337,6 @@ where
             .take();
         state.sync_party_from_storage();
         let resident = day_care_resident_mut(state, routine, caretaker)?;
-        resident.initial_experience = 0;
-        resident.initial_level = 0;
-        resident.steps = 0;
         resident.active = false;
         update_day_care_compatibility(state, rng).map_err(RandomSpecialRoutineError::Divider)?;
     }
@@ -12637,6 +13352,7 @@ where
 
 fn day_care_inspect_interaction(
     state: &GameState,
+    growth_rates: &GrowthRateCatalog,
     routine: &str,
     caretaker: &str,
 ) -> Result<crate::state::DayCareInteractionState, SpecialRoutineError> {
@@ -12649,9 +13365,31 @@ fn day_care_inspect_interaction(
             .pokemon
             .as_ref()
             .map(|pokemon| pokemon.species.id.clone()),
-        level: resident.pokemon.as_ref().map(|pokemon| pokemon.level),
+        level: resident
+            .pokemon
+            .as_ref()
+            .map(|pokemon| day_care_level_from_experience(pokemon, growth_rates))
+            .transpose()
+            .map_err(|error| SpecialRoutineError::InvalidState {
+                routine: routine.to_string(),
+                message: format!("day-care level calculation failed: {error}"),
+            })?,
         reason: resident.pokemon.is_none().then(|| "empty".to_string()),
     })
+}
+
+pub fn day_care_level_from_experience(
+    pokemon: &Pokemon,
+    growth_rates: &GrowthRateCatalog,
+) -> Result<u8, ExperienceError> {
+    for level in 2..=100 {
+        if pokemon.experience
+            < calculate_experience(growth_rates, &pokemon.species.growth_rate, level)?
+        {
+            return Ok(level - 1);
+        }
+    }
+    Ok(100)
 }
 
 fn update_day_care_compatibility<S>(
@@ -12676,13 +13414,137 @@ where
         let steps = loop {
             let sample = rng.random(carry_in)?.value;
             if sample >= 150 {
-                break u16::from(sample);
+                break sample;
             }
             // The rejected `cp 150; jr c` feeds carry into the retry.
             carry_in = true;
         };
         state.day_care.steps_until_next_egg = steps;
+        initialize_day_care_egg(state, rng)?;
     }
+    Ok(())
+}
+
+/// Materialize Crystal's `wEggMon` during `DayCare_InitBreeding`. The ready
+/// flag remains clear until `DayCareStep` wins its compatibility roll.
+fn initialize_day_care_egg<S>(
+    state: &mut GameState,
+    rng: &mut CrystalRandom<S>,
+) -> Result<(), S::Error>
+where
+    S: DividerSource,
+{
+    let parents = (
+        state.day_care.man.pokemon.as_ref(),
+        state.day_care.lady.pokemon.as_ref(),
+    );
+    let parent = match parents {
+        (Some(man), Some(lady)) if man.species.id == "DITTO" => lady,
+        (Some(man), Some(lady)) if lady.species.id == "DITTO" => man,
+        (Some(man), Some(_)) if pokemon_gender_code(man) == Some(true) => man,
+        (Some(_), Some(lady)) => lady,
+        _ => unreachable!("compatible Day Care residents must identify an egg parent"),
+    };
+    let move_donor = match parents {
+        (Some(man), Some(lady)) if man.species.id == "DITTO" => {
+            if pokemon_gender_code(lady) != Some(true) {
+                lady
+            } else {
+                man
+            }
+        }
+        (Some(man), Some(lady)) if lady.species.id == "DITTO" => {
+            if pokemon_gender_code(man) != Some(true) {
+                man
+            } else {
+                lady
+            }
+        }
+        (Some(man), Some(_)) if pokemon_gender_code(man) == Some(false) => man,
+        (Some(_), Some(lady)) => lady,
+        _ => parent,
+    };
+    let mut egg_species_id = parent.species.id.clone();
+    // The source performs two pre-evolution lookups before its Nidoran
+    // special case, so every stage of the female line consumes this roll.
+    let maternal_nidoran = matches!(
+        parent.species.id.as_str(),
+        "NIDORAN_F" | "NIDORINA" | "NIDOQUEEN"
+    );
+    if maternal_nidoran {
+        egg_species_id = if rng.random(false)?.value >= 129 {
+            "NIDORAN_M".to_string()
+        } else {
+            "NIDORAN_F".to_string()
+        };
+    }
+    let random_dv_1 = rng.random(false)?;
+    let random_dv_2 = rng.random(random_dv_1.carry_out)?.value;
+    let random_dv_1 = random_dv_1.value;
+    let mut dvs = Dv::from_non_hp(
+        random_dv_1 >> 4,
+        random_dv_1 & 0x0f,
+        random_dv_2 >> 4,
+        random_dv_2 & 0x0f,
+    );
+    let dv_donor = match parents {
+        (Some(man), Some(_)) if man.species.id == "DITTO" => Some(man),
+        (Some(_), Some(lady)) if lady.species.id == "DITTO" => Some(lady),
+        (Some(man), Some(lady)) => {
+            let egg_gender_ratio = match egg_species_id.as_str() {
+                "NIDORAN_F" => 254,
+                "NIDORAN_M" => 0,
+                _ => parent.species.gender_ratio,
+            };
+            match pokemon_gender_from_ratio(egg_gender_ratio, dvs) {
+                // A male child inherits from its mother.
+                Some(false) => Some(parent),
+                // A female child inherits from its father.
+                Some(true) if std::ptr::eq(parent, man) => Some(lady),
+                Some(true) => Some(man),
+                // The source skips DV inheritance for a genderless child.
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(dv_donor) = dv_donor {
+        dvs.defense = dv_donor.dvs.defense & 0x0f;
+        dvs.special = dv_donor.dvs.special & 0x07;
+    }
+    let mut egg = parent.clone();
+    egg.species.id = egg_species_id;
+    egg.dvs = dvs;
+    egg.nickname = "EGG".to_string();
+    egg.item = None;
+    egg.moves = move_donor.moves.clone();
+    egg.moves.truncate(4);
+    egg.status = None;
+    egg.is_egg = true;
+    egg.level = 5;
+    egg.original_trainer_name = state.player_name.clone();
+    egg.original_trainer_id = state.player_id;
+    egg.caught_data = None;
+    egg.mail = None;
+    egg.experience = 0;
+    let stats = calculate_stats(&egg.species, egg.level, egg.dvs, StatExperience::default());
+    egg.hp = stats.max_hp;
+    egg.max_hp = stats.max_hp;
+    egg.attack = stats.attack;
+    egg.defense = stats.defense;
+    egg.speed = stats.speed;
+    egg.special_attack = stats.special_attack;
+    egg.special_defense = stats.special_defense;
+    egg.happiness = egg.species.step_cycles_to_hatch;
+    egg.sleep_turns = 0;
+    egg.flinching = false;
+    egg.rampage_turns = 0;
+    egg.confusion_turns = 0;
+    egg.perish_song_turns = 0;
+    egg.focus_energy = false;
+    egg.turns_in_battle = 0;
+    egg.stat_boosts.clear();
+    state.day_care.egg = Some(egg);
     Ok(())
 }
 
@@ -12699,83 +13561,30 @@ pub enum DayCareStepError<E> {
 
 pub fn advance_day_care_step<S>(
     state: &mut GameState,
-    growth_rates: &GrowthRateCatalog,
+    _growth_rates: &GrowthRateCatalog,
     rng: &mut CrystalRandom<S>,
 ) -> Result<(), DayCareStepError<S::Error>>
 where
     S: DividerSource,
 {
-    // Validate every curve that can be consumed on this step before changing
-    // either resident. A malformed pack must not partially advance Day Care.
-    for resident in [&state.day_care.man, &state.day_care.lady] {
-        let Some(pokemon) = resident.pokemon.as_ref() else {
-            continue;
-        };
-        if resident.steps >= 255 && pokemon.level < 100 {
-            calculate_experience(
-                growth_rates,
-                &pokemon.species.growth_rate,
-                pokemon.level + 1,
-            )?;
-        }
-    }
-    for resident in [&mut state.day_care.man, &mut state.day_care.lady] {
-        let Some(pokemon) = resident.pokemon.as_mut() else {
-            continue;
-        };
-        resident.steps = resident.steps.saturating_add(1);
-        // The Day-Care overworld loop awards one level per 256 steps.  Keep
-        // the counter as a remainder and refresh the resident's persistent
-        // stats so withdrawing the Pokémon reflects the levels gained while
-        // it was stored.
-        while resident.steps >= 256 && pokemon.level < 100 {
-            resident.steps -= 256;
-            pokemon.level = pokemon.level.saturating_add(1);
-            pokemon.experience = pokemon.experience.max(calculate_experience(
-                growth_rates,
-                &pokemon.species.growth_rate,
-                pokemon.level,
-            )?);
-            let stats = calculate_stats(
-                &pokemon.species,
-                pokemon.level,
-                pokemon.dvs,
-                StatExperience {
-                    hp: pokemon.hp_exp,
-                    attack: pokemon.attack_exp,
-                    defense: pokemon.defense_exp,
-                    speed: pokemon.speed_exp,
-                    special: pokemon.special_exp,
-                },
-            );
-            pokemon.max_hp = stats.max_hp;
-            pokemon.hp = stats.max_hp;
-        }
-    }
+    advance_day_care_resident_step(&mut state.day_care.man);
+    let countdown_carry = advance_day_care_resident_step(&mut state.day_care.lady);
     if matches!(state.day_care.compatibility_score, 0 | 255) || state.day_care.egg_present {
         return Ok(());
     }
-    state.day_care.steps_since_last_egg = state.day_care.steps_since_last_egg.wrapping_add(1);
-    let countdown = (state.day_care.steps_until_next_egg as u8).wrapping_sub(1);
-    state.day_care.steps_until_next_egg = u16::from(countdown);
+    let countdown = state.day_care.steps_until_next_egg.wrapping_sub(1);
+    state.day_care.steps_until_next_egg = countdown;
     if countdown != 0 {
         return Ok(());
     }
 
-    // With both breeding residents present, DayCareStep's lady level `cp`
-    // is the last carry-writing instruction on the ordinary path into this
-    // Random call. A level below MAX_LEVEL therefore enters carry-set.
-    let countdown_carry = state
-        .day_care
-        .lady
-        .pokemon
-        .as_ref()
-        .is_some_and(|pokemon| pokemon.level < 100);
-    state.day_care.steps_until_next_egg = u16::from(
-        rng.random(countdown_carry)
-            .map_err(DayCareStepError::Divider)?
-            .value,
-    );
+    // With both breeding residents present, the lady branch owns the carry
+    // entering this Random call. The level `cp` leaves it set on ordinary
+    // sub-level-100 increments; the rare high-byte cap comparison can clear it.
+    state.day_care.steps_until_next_egg = rng
+        .random(countdown_carry)
+        .map_err(DayCareStepError::Divider)?
+        .value;
     let compatibility = state.day_care.compatibility_score;
     let egg_threshold = match compatibility {
         255 | 0 => 0,
@@ -12796,115 +13605,37 @@ where
         return Ok(());
     }
 
-    {
-        // Crystal materializes the egg before setting the daycare-man flag.
-        // Keep the generated record in SRAM so pickup does not depend on a
-        // second, lossy reconstruction pass.  The female species is used
-        // unless one parent is Ditto; inherited DVs/moves are refined by the
-        // battle/data layer when the egg is built from a full catalog.
-        let parents = (
-            state.day_care.man.pokemon.as_ref(),
-            state.day_care.lady.pokemon.as_ref(),
-        );
-        let parent = match parents {
-            (Some(man), Some(lady)) if man.species.id == "DITTO" => Some(lady),
-            (Some(man), Some(lady)) if lady.species.id == "DITTO" => Some(man),
-            (Some(man), Some(_)) if pokemon_gender_code(man) == Some(true) => Some(man),
-            (Some(_), Some(lady)) => Some(lady),
-            _ => None,
-        };
-        if let Some(parent) = parent {
-            let move_and_dv_donor = match parents {
-                (Some(man), Some(lady)) if man.species.id == "DITTO" => {
-                    if pokemon_gender_code(lady) != Some(true) {
-                        lady
-                    } else {
-                        man
-                    }
-                }
-                (Some(man), Some(lady)) if lady.species.id == "DITTO" => {
-                    if pokemon_gender_code(man) != Some(true) {
-                        man
-                    } else {
-                        lady
-                    }
-                }
-                (Some(man), Some(_lady)) if pokemon_gender_code(man) == Some(false) => man,
-                (Some(_man), Some(lady)) => lady,
-                _ => parent,
-            };
-            // DayCare_InitBreeding chooses the Nidoran egg species before it
-            // rolls the two fresh DV bytes.  Keep that byte in the exact RNG
-            // position; the pack layer replaces the cloned species record
-            // with the canonical Nidoran data after this core-only hook.
-            let mut egg_species_id = parent.species.id.clone();
-            let maternal_nidoran = matches!(parent.species.id.as_str(), "NIDORAN_F" | "NIDORINA");
-            if maternal_nidoran {
-                let species_roll = rng.random(false).map_err(DayCareStepError::Divider)?.value;
-                if species_roll >= 129 {
-                    egg_species_id = "NIDORAN_M".to_string();
-                } else {
-                    egg_species_id = "NIDORAN_F".to_string();
-                }
-            }
-            let random_dv_1 = rng.random(false).map_err(DayCareStepError::Divider)?;
-            let random_dv_2 = rng
-                .random(random_dv_1.carry_out)
-                .map_err(DayCareStepError::Divider)?
-                .value;
-            let random_dv_1 = random_dv_1.value;
-            let mut dvs = Dv::from_non_hp(
-                random_dv_1 >> 4,
-                random_dv_1 & 0x0f,
-                random_dv_2 >> 4,
-                random_dv_2 & 0x0f,
-            );
-            dvs.defense = move_and_dv_donor.dvs.defense & 0x0f;
-            dvs.special = move_and_dv_donor.dvs.special & 0x07;
-            let mut egg = parent.clone();
-            egg.species.id = egg_species_id;
-            egg.dvs = dvs;
-            egg.nickname = "EGG".to_string();
-            egg.item = None;
-            // Preserve the non-maternal parent's moves as candidates for
-            // InitEggMoves.  The pack layer filters these against the
-            // species' canonical egg-move table and combines them with the
-            // level-five moves; keeping the candidates here prevents the
-            // core-only step hook from losing them before that pass.
-            egg.moves = move_and_dv_donor.moves.clone();
-            egg.moves.truncate(4);
-            egg.status = None;
-            egg.is_egg = true;
-            egg.level = 5;
-            egg.original_trainer_name = state.player_name.clone();
-            egg.original_trainer_id = state.player_id;
-            egg.caught_data = None;
-            egg.mail = None;
-            egg.experience = 0;
-            let stats =
-                calculate_stats(&egg.species, egg.level, egg.dvs, StatExperience::default());
-            egg.hp = stats.max_hp;
-            egg.max_hp = stats.max_hp;
-            egg.attack = stats.attack;
-            egg.defense = stats.defense;
-            egg.speed = stats.speed;
-            egg.special_attack = stats.special_attack;
-            egg.special_defense = stats.special_defense;
-            egg.happiness = egg.species.step_cycles_to_hatch;
-            egg.sleep_turns = 0;
-            egg.flinching = false;
-            egg.rampage_turns = 0;
-            egg.confusion_turns = 0;
-            egg.perish_song_turns = 0;
-            egg.focus_energy = false;
-            egg.turns_in_battle = 0;
-            egg.stat_boosts.clear();
-            state.day_care.egg = Some(egg);
-        }
-        state.day_care.egg_present = true;
-        state.day_care.steps_since_last_egg = 0;
-    }
+    debug_assert!(state.day_care.egg.is_some());
+    state.day_care.egg_present = true;
     Ok(())
+}
+
+/// Execute the bytewise EXP portion of one `DayCareStep` resident branch and
+/// return the carry flag left for subsequent instructions. `INC` preserves
+/// carry on the ordinary paths; only the high-byte cap comparison rewrites it.
+fn advance_day_care_resident_step(resident: &mut crate::state::DayCareResidentState) -> bool {
+    let Some(pokemon) = resident.pokemon.as_mut() else {
+        return false;
+    };
+    if pokemon.level >= 100 {
+        return false;
+    }
+
+    let experience = pokemon.experience as u32 & 0x00ff_ffff;
+    if experience & 0xff != 0xff {
+        pokemon.experience = experience.wrapping_add(1) as i32;
+        return true;
+    }
+    if experience & 0xffff != 0xffff {
+        pokemon.experience = experience.wrapping_add(1) as i32;
+        return true;
+    }
+
+    let incremented_high = ((experience >> 16) as u8).wrapping_add(1);
+    let carry = incremented_high < 0x50;
+    let stored_high = if carry { incremented_high } else { 0x50 };
+    pokemon.experience = i32::from(stored_high) << 16;
+    carry
 }
 
 fn day_care_compatibility_score(first: Option<&Pokemon>, second: Option<&Pokemon>) -> u8 {
@@ -12958,23 +13689,16 @@ fn day_care_compatibility_score(first: Option<&Pokemon>, second: Option<&Pokemon
 }
 
 fn pokemon_gender_code(pokemon: &Pokemon) -> Option<bool> {
-    match pokemon.species.gender_ratio {
+    pokemon_gender_from_ratio(pokemon.species.gender_ratio, pokemon.dvs)
+}
+
+fn pokemon_gender_from_ratio(gender_ratio: u8, dvs: Dv) -> Option<bool> {
+    match gender_ratio {
         255 => None,
         254 => Some(true),
         0 => Some(false),
-        ratio => Some(pokemon.dvs.attack.saturating_mul(17) < ratio),
+        ratio => Some(dvs.attack.saturating_mul(17) < ratio),
     }
-}
-
-fn reset_link_state(state: &mut GameState) {
-    state.link_session.link_mode = 0;
-    state.link_session.player_link_action = 0;
-    state.link_session.chosen_cable_club_room = 0;
-    state.link_session.other_player_link_mode = 0;
-    state.link_session.serial_connection_status = LinkSerialConnectionStatus::NotEstablished;
-    state.link_session.friend_ready = false;
-    state.link_session.last_result = false;
-    state.link_session.active_room = None;
 }
 
 fn optional_bool_script_variable(

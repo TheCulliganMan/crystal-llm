@@ -1,0 +1,12 @@
+*
+!rust/
+!rust/**
+rust/target
+rust/target-*
+rust/output
+rust/web-dist
+!content-packs/
+!content-packs/core-modular.browser.crystalpack
+!docker/
+!docker/runtime-data/
+!docker/runtime-data/**

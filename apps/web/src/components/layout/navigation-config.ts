@@ -36,6 +36,5 @@ export const resolveTopBarLabel = (pathname: string): string => {
 
 export const GAME_CORNER_SUBNAV_ITEMS = [
   { label: "Game Corner", href: "/game-corner?tab=slot-machine" },
-  { label: "Audio Generation", href: "/game-corner?tab=audio-generation" },
   { label: "Arena MCP/Skill", href: "/game-corner?tab=arena-mcp-skill" },
 ] as const;

@@ -208,7 +208,6 @@ fn resolve_active_battle_capture_or_escape_item(
                 item_id: item_id.to_string(),
             })?
         };
-        state.rng_seed = rng.seed();
         let completion = if capture.caught && !capture.blocked {
             complete_active_wild_capture_result(state, &capture)
                 .map_err(ActiveBattleFlowError::CaptureComplete)?
@@ -346,7 +345,7 @@ pub fn force_end_active_battle_to_overworld(state: &mut GameState) -> ActiveBatt
         .pokemon
         .iter()
         .flatten()
-        .any(|pokemon| !pokemon.is_egg && pokemon.species.id != "EGG" && pokemon.hp > 0);
+        .any(|pokemon| !pokemon.is_egg && pokemon.hp > 0);
     let end = match &state.battle {
         BattleMemory::Inactive => ActiveBattleFlowEnd::Ongoing,
         BattleMemory::Wild { enemy_pokemon, .. }

@@ -1,6 +1,6 @@
 const COMPILED_GAME_PACK_MAGIC: &[u8; 12] = b"CRYSTALPACK\0";
 pub const COMPILED_GAME_PACK_EXTENSION: &str = "crystalpack";
-pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 7;
+pub const COMPILED_GAME_PACK_FORMAT_VERSION: u16 = 13;
 const COMPILED_GAME_PACK_VERSION_OFFSET: usize = COMPILED_GAME_PACK_MAGIC.len();
 const COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET: usize = COMPILED_GAME_PACK_VERSION_OFFSET + 2;
 const COMPILED_GAME_PACK_PAYLOAD_HASH_OFFSET: usize = COMPILED_GAME_PACK_PAYLOAD_LENGTH_OFFSET + 4;
@@ -1055,6 +1055,1175 @@ pub struct PokemonCryMetadata {
 pub struct RuntimeTitleScreen {
     #[serde(deserialize_with = "required_nullable_audio_reference_token")]
     pub title_music: Option<String>,
+    pub program: RuntimePresentationProgram,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationProgram {
+    pub schema_version: u16,
+    pub entrypoints: BTreeMap<String, String>,
+    pub blocks: BTreeMap<String, RuntimePresentationBlock>,
+    pub resources: Vec<RuntimePresentationResource>,
+    pub audio: Vec<RuntimePresentationAudio>,
+    pub text: Vec<RuntimePresentationText>,
+    pub host_effects: Vec<Value>,
+    pub subprograms: Vec<RuntimePresentationSubprogram>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationSubprogram {
+    pub id: String,
+    pub source_entry: String,
+    pub accepted_call_forms: Vec<String>,
+    pub result: Value,
+    pub phases: Vec<RuntimePresentationPhase>,
+    #[serde(rename = "loop")]
+    pub loop_: Value,
+    pub resource_transfers: Vec<Value>,
+    pub tilemap_writes: Vec<Value>,
+    pub resources: Vec<RuntimePresentationSubprogramResource>,
+    pub audio: Vec<RuntimePresentationAudio>,
+    pub sprite_operations: Vec<Value>,
+    pub sprite_programs: Vec<Value>,
+    pub required_consumer: Value,
+    pub source_span: RuntimePresentationSourceSpan,
+    pub implementation_source_spans: Vec<RuntimePresentationSourceSpan>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationPhase {
+    pub id: String,
+    pub source_span: RuntimePresentationSourceSpan,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, usize>,
+    pub operations: Vec<RuntimePresentationOperation>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationSubprogramResource {
+    pub path: String,
+    pub kind: String,
+    pub include_source_span: RuntimePresentationSourceSpan,
+    pub data_source_span: RuntimePresentationSourceSpan,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationBlock {
+    pub source_span: RuntimePresentationSourceSpan,
+    pub operations: Vec<RuntimePresentationOperation>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePresentationOperation {
+    pub op: String,
+    pub source_span: RuntimePresentationSourceSpan,
+    #[serde(flatten)]
+    pub fields: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationSourceSpan {
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationResource {
+    pub path: String,
+    pub kind: String,
+    pub source_span: RuntimePresentationSourceSpan,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationAudio {
+    pub id: String,
+    pub kind: String,
+    pub source_span: RuntimePresentationSourceSpan,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePresentationText {
+    pub id: String,
+    pub source_span: RuntimePresentationSourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePresentationInterpreter {
+    pub entrypoint: String,
+    pub block: String,
+    pub operation_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimePresentationStep {
+    Operation(RuntimePresentationOperation),
+    Jump { from: String, to: String },
+    BlockComplete { block: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePresentationSubprogramInterpreter {
+    pub subprogram: String,
+    pub phase: String,
+    pub operation_index: usize,
+    pub current_label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePresentationPhaseMachine {
+    pub interpreter: RuntimePresentationSubprogramInterpreter,
+    pub memory: BTreeMap<String, u16>,
+    pub values: BTreeMap<String, u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePresentationPhaseRun {
+    pub effects: Vec<RuntimePresentationOperation>,
+    pub returned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTitleMainMenuItem {
+    pub label: String,
+    pub dispatch_target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTitleMainMenuDefinition {
+    pub variants: Vec<Vec<RuntimeTitleMainMenuItem>>,
+    pub new_game_variant: usize,
+    pub continue_variant: usize,
+    pub mystery_variant: usize,
+    pub left: usize,
+    pub top: usize,
+    pub right: usize,
+    pub bottom: usize,
+    pub default_option: usize,
+}
+
+impl RuntimeTitleMainMenuDefinition {
+    pub fn from_program(program: &RuntimePresentationProgram) -> Result<Self> {
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|subprogram| subprogram.id == "main_menu")
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == "main_menu")
+            })
+            .context("runtime presentation main_menu phase is missing")?;
+        let load_menu = phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "load_menu")
+            .context("runtime presentation main_menu load_menu operation is missing")?;
+        let select_variant = phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "select_main_menu_variant")
+            .context("runtime presentation main_menu variant selection is missing")?;
+        let dispatch = phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "dispatch_table"
+                    && operation.fields.get("dispatcher").and_then(Value::as_str)
+                        == Some("MainMenu selection")
+            })
+            .context("runtime presentation MainMenu selection dispatch is missing")?;
+        let strings = load_menu
+            .fields
+            .get("strings")
+            .and_then(Value::as_array)
+            .context("runtime presentation main_menu strings are missing")?;
+        let entries = dispatch
+            .fields
+            .get("entries")
+            .and_then(Value::as_array)
+            .context("runtime presentation MainMenu selection entries are missing")?;
+        anyhow::ensure!(
+            !strings.is_empty() && strings.len() == entries.len(),
+            "runtime presentation main_menu strings do not match dispatch entries"
+        );
+        let items = strings
+            .iter()
+            .zip(entries)
+            .map(|(label, dispatch_target)| {
+                Ok(RuntimeTitleMainMenuItem {
+                    label: label
+                        .as_str()
+                        .filter(|label| !label.is_empty())
+                        .context("runtime presentation main_menu has an invalid string")?
+                        .to_string(),
+                    dispatch_target: dispatch_target
+                        .as_str()
+                        .filter(|target| !target.is_empty())
+                        .context("runtime presentation main_menu has an invalid dispatch target")?
+                        .to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let variants = load_menu
+            .fields
+            .get("item_sets")
+            .and_then(Value::as_array)
+            .context("runtime presentation main_menu item_sets are missing")?
+            .iter()
+            .map(|variant| {
+                let indexes = variant
+                    .as_array()
+                    .filter(|indexes| !indexes.is_empty())
+                    .context("runtime presentation main_menu has an empty item set")?;
+                indexes
+                    .iter()
+                    .map(|index| {
+                        let index = index
+                            .as_u64()
+                            .and_then(|index| usize::try_from(index).ok())
+                            .context("runtime presentation main_menu has an invalid item index")?;
+                        items.get(index).cloned().with_context(|| {
+                            format!(
+                                "runtime presentation main_menu item index {index} is out of range"
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let coordinates = load_menu
+            .fields
+            .get("coordinates")
+            .and_then(Value::as_object)
+            .context("runtime presentation main_menu coordinates are missing")?;
+        let coordinate = |field: &str| -> Result<usize> {
+            coordinates
+                .get(field)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .with_context(|| {
+                    format!("runtime presentation main_menu coordinate {field} is invalid")
+                })
+        };
+        let left = coordinate("left")?;
+        let top = coordinate("top")?;
+        let right = coordinate("right")?;
+        let bottom = coordinate("bottom")?;
+        anyhow::ensure!(
+            left <= right && top <= bottom,
+            "runtime presentation main_menu coordinates are inverted"
+        );
+        let default_option = load_menu
+            .fields
+            .get("default_option")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("runtime presentation main_menu default option is invalid")?;
+        let variant_index = |id: &str| -> Result<usize> {
+            let value = select_variant
+                .fields
+                .get("variants")
+                .and_then(Value::as_array)
+                .and_then(|variants| {
+                    variants
+                        .iter()
+                        .find(|variant| variant.get("id").and_then(Value::as_str) == Some(id))
+                })
+                .and_then(|variant| variant.get("value"))
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .with_context(|| {
+                    format!("runtime presentation main_menu variant {id} is missing")
+                })?;
+            anyhow::ensure!(
+                variants.get(value).is_some(),
+                "runtime presentation main_menu variant {id} index {value} is out of range"
+            );
+            Ok(value)
+        };
+        Ok(Self {
+            new_game_variant: variant_index("new_game")?,
+            continue_variant: variant_index("continue")?,
+            mystery_variant: variant_index("mystery")?,
+            left,
+            top,
+            right,
+            bottom,
+            default_option,
+            variants,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeGenderMenuDefinition {
+    pub items: Vec<String>,
+    pub values: Vec<u8>,
+    pub left: usize,
+    pub top: usize,
+    pub right: usize,
+    pub bottom: usize,
+    pub default_option: usize,
+    pub confirm_delay_frames: u8,
+}
+
+impl RuntimeGenderMenuDefinition {
+    pub fn from_program(program: &RuntimePresentationProgram) -> Result<Self> {
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|subprogram| subprogram.id == "player_profile_setup")
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == "gender_selection")
+            })
+            .context("runtime presentation gender_selection phase is missing")?;
+        let operation = |name: &str| -> Result<&RuntimePresentationOperation> {
+            let mut matches = phase
+                .operations
+                .iter()
+                .filter(|operation| operation.op == name);
+            let operation = matches.next().with_context(|| {
+                format!("runtime presentation gender_selection {name} operation is missing")
+            })?;
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "runtime presentation gender_selection has duplicate {name} operations"
+            );
+            Ok(operation)
+        };
+        let load_menu = operation("load_menu")?;
+        let selection = operation("select_player_gender")?;
+        let wait = operation("wait_frames")?;
+        let items = load_menu
+            .fields
+            .get("items")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty())
+            .context("runtime presentation gender_selection items are missing")?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .context("runtime presentation gender_selection has an invalid item")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            items.len() == 2,
+            "runtime presentation gender_selection must contain exactly two items"
+        );
+        let domain = selection
+            .fields
+            .get("domain")
+            .and_then(Value::as_array)
+            .context("runtime presentation gender_selection domain is missing")?;
+        anyhow::ensure!(
+            domain.len() == items.len(),
+            "runtime presentation gender_selection domain does not match its items"
+        );
+        let values = domain
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let cursor = entry
+                    .get("cursor")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .context("runtime presentation gender_selection cursor is invalid")?;
+                anyhow::ensure!(
+                    cursor == index + 1,
+                    "runtime presentation gender_selection cursor {cursor} is out of order"
+                );
+                let label = entry
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .context("runtime presentation gender_selection label is invalid")?;
+                anyhow::ensure!(
+                    label == items[index],
+                    "runtime presentation gender_selection label does not match its menu item"
+                );
+                entry
+                    .get("value")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .context("runtime presentation gender_selection value is invalid")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            values.as_slice() == [0, 1],
+            "runtime presentation gender_selection has unsupported player-gender values"
+        );
+        let coordinates = load_menu
+            .fields
+            .get("coordinates")
+            .and_then(Value::as_object)
+            .context("runtime presentation gender_selection coordinates are missing")?;
+        let coordinate = |field: &str| -> Result<usize> {
+            coordinates
+                .get(field)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .with_context(|| {
+                    format!("runtime presentation gender_selection coordinate {field} is invalid")
+                })
+        };
+        let left = coordinate("left")?;
+        let top = coordinate("top")?;
+        let right = coordinate("right")?;
+        let bottom = coordinate("bottom")?;
+        anyhow::ensure!(
+            left <= right && top <= bottom && right < 20 && bottom < 18,
+            "runtime presentation gender_selection coordinates are outside the LCD"
+        );
+        let default_option = load_menu
+            .fields
+            .get("default_option")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (1..=items.len()).contains(value))
+            .context("runtime presentation gender_selection default option is invalid")?;
+        let confirm_delay_frames = wait
+            .fields
+            .get("frames")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("runtime presentation gender_selection wait is invalid")?;
+        Ok(Self {
+            items,
+            values,
+            left,
+            top,
+            right,
+            bottom,
+            default_option,
+            confirm_delay_frames,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTitlePresentationParameters {
+    pub entrance_start_scx: u8,
+    pub entrance_scroll_step: u8,
+    pub timeout_frames: u16,
+    pub timeout_fade_frames: u16,
+    pub crystal_oam_target: String,
+    pub crystal_initial_y: u8,
+    pub suicune_frames: Vec<u8>,
+    pub suicune_selector_mask: u8,
+    pub suicune_selector_shift_left: u8,
+    pub suicune_selector_swap_nibbles: bool,
+    pub delete_save_mask: u8,
+    pub clock_reset_arm_mask: u8,
+    pub clock_reset_finish_mask: u8,
+    pub start_mask: u8,
+}
+
+impl RuntimeTitlePresentationParameters {
+    pub fn from_program(program: &RuntimePresentationProgram) -> Result<Self> {
+        let title_phase = program
+            .subprograms
+            .iter()
+            .find(|subprogram| subprogram.id == "start_title_screen")
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == "title_screen")
+            })
+            .context("runtime presentation start_title_screen title_screen phase is missing")?;
+        let numeric_field = |operation: &RuntimePresentationOperation, field: &str| {
+            operation.fields.get(field).and_then(Value::as_u64)
+        };
+        let entrance_start_scx = title_phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "write_memory_byte"
+                    && operation.fields.get("target").and_then(Value::as_str) == Some("hSCX")
+            })
+            .and_then(|operation| numeric_field(operation, "value"))
+            .and_then(|value| u8::try_from(value).ok())
+            .context("runtime presentation title phase has no exact initial hSCX write")?;
+        let entrance_scroll_step = title_phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "subtract_memory_byte"
+                    && operation.fields.get("target").and_then(Value::as_str) == Some("hSCX")
+            })
+            .and_then(|operation| numeric_field(operation, "delta"))
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("runtime presentation title phase has no exact hSCX decrement")?;
+        let timeout_frames = title_phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "write_memory_word"
+                    && operation.fields.get("target").and_then(Value::as_str)
+                        == Some("wTitleScreenTimer")
+            })
+            .and_then(|operation| numeric_field(operation, "value"))
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("runtime presentation title phase has no exact title timer write")?;
+        let input_mask_for_target = |target: &str| {
+            title_phase
+                .operations
+                .iter()
+                .find(|operation| {
+                    operation.op == "input_chord_branch"
+                        && operation.fields.get("target").and_then(Value::as_str) == Some(target)
+                })
+                .and_then(|operation| numeric_field(operation, "mask"))
+                .and_then(|value| u8::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .with_context(|| {
+                    format!("runtime presentation title phase has no input mask for {target}")
+                })
+        };
+        let timeout_fade_frames = title_phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "fade_audio")
+            .and_then(|operation| numeric_field(operation, "frames"))
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .context("runtime presentation title phase has no exact timeout audio fade")?;
+        let crystal_oam = title_phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "initialize_title_crystal_oam")
+            .context("runtime presentation title phase has no exact crystal OAM initialization")?;
+        let _crystal_oam_base = crystal_oam
+            .fields
+            .get("target")
+            .and_then(Value::as_str)
+            .filter(|target| !target.is_empty())
+            .context("runtime presentation title crystal OAM initialization has no target")?;
+        let crystal_initial_y = crystal_oam
+            .fields
+            .get("initial_y")
+            .and_then(Value::as_i64)
+            .filter(|value| (-128..=255).contains(value))
+            .map(|value| value.rem_euclid(256) as u8)
+            .context("runtime presentation title crystal OAM initialization has no byte Y")?;
+        let crystal_animation = title_phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "animate_title_crystal")
+            .context("runtime presentation title phase has no exact crystal OAM animation")?;
+        let crystal_oam_target = crystal_animation
+            .fields
+            .get("target")
+            .and_then(Value::as_str)
+            .filter(|target| !target.is_empty())
+            .context("runtime presentation title crystal OAM animation has no target")?
+            .to_string();
+        anyhow::ensure!(
+            crystal_animation
+                .fields
+                .get("stop_at")
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .is_some()
+                && crystal_animation
+                    .fields
+                    .get("y_delta")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .is_some_and(|value| value > 0),
+            "runtime presentation title crystal OAM animation has invalid bounds"
+        );
+        let suicune_animation = title_phase
+            .operations
+            .iter()
+            .find(|operation| operation.op == "draw_indexed_title_suicune_frame")
+            .context("runtime presentation title phase has no indexed Suicune animation")?;
+        let suicune_frames = suicune_animation
+            .fields
+            .get("frames")
+            .and_then(Value::as_array)
+            .filter(|frames| !frames.is_empty())
+            .context("runtime presentation title Suicune animation has no frames")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .context("runtime presentation title Suicune frame exceeds one byte")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let suicune_selector = suicune_animation
+            .fields
+            .get("selector")
+            .and_then(Value::as_object)
+            .context("runtime presentation title Suicune animation has no selector")?;
+        let suicune_selector_mask = suicune_selector
+            .get("mask")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .context("runtime presentation title Suicune selector has no byte mask")?;
+        let suicune_selector_shift_left = suicune_selector
+            .get("shift_left")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value < 8)
+            .context("runtime presentation title Suicune selector has invalid shift")?;
+        let suicune_selector_swap_nibbles = suicune_selector
+            .get("swap_nibbles")
+            .and_then(Value::as_bool)
+            .context("runtime presentation title Suicune selector has no swap flag")?;
+        for counter in 0_u8..=u8::MAX {
+            let mut selector = (counter & suicune_selector_mask)
+                .wrapping_shl(u32::from(suicune_selector_shift_left));
+            if suicune_selector_swap_nibbles {
+                selector = selector.rotate_left(4);
+            }
+            anyhow::ensure!(
+                usize::from(selector) < suicune_frames.len(),
+                "runtime presentation title Suicune selector produces missing frame {selector}"
+            );
+        }
+        anyhow::ensure!(
+            entrance_start_scx % entrance_scroll_step == 0,
+            "runtime presentation title entrance SCX {entrance_start_scx} is not divisible by its scroll step {entrance_scroll_step}"
+        );
+        Ok(Self {
+            entrance_start_scx,
+            entrance_scroll_step,
+            timeout_frames,
+            timeout_fade_frames,
+            crystal_oam_target,
+            crystal_initial_y,
+            suicune_frames,
+            suicune_selector_mask,
+            suicune_selector_shift_left,
+            suicune_selector_swap_nibbles,
+            delete_save_mask: input_mask_for_target(".delete_save_data@TitleScreenMain")?,
+            clock_reset_arm_mask: input_mask_for_target(".check_start@TitleScreenMain")?,
+            clock_reset_finish_mask: input_mask_for_target(".reset_clock@TitleScreenMain")?,
+            start_mask: input_mask_for_target(".incave@TitleScreenMain")?,
+        })
+    }
+}
+
+impl RuntimePresentationSubprogramInterpreter {
+    pub fn new(
+        program: &RuntimePresentationProgram,
+        subprogram_id: &str,
+        phase_id: &str,
+    ) -> Result<Self> {
+        let subprogram = program
+            .subprograms
+            .iter()
+            .find(|candidate| candidate.id == subprogram_id)
+            .with_context(|| {
+                format!("runtime presentation subprogram {subprogram_id} is missing")
+            })?;
+        anyhow::ensure!(
+            subprogram.phases.iter().any(|phase| phase.id == phase_id),
+            "runtime presentation subprogram {subprogram_id} phase {phase_id} is missing"
+        );
+        Ok(Self {
+            subprogram: subprogram_id.to_string(),
+            phase: phase_id.to_string(),
+            operation_index: 0,
+            current_label: None,
+        })
+    }
+
+    pub fn jump_to_label(
+        &mut self,
+        program: &RuntimePresentationProgram,
+        target: &str,
+    ) -> Result<()> {
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|candidate| candidate.id == self.subprogram)
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == self.phase)
+            })
+            .with_context(|| {
+                format!(
+                    "runtime presentation subprogram {} phase {} is missing",
+                    self.subprogram, self.phase
+                )
+            })?;
+        let operation_index = phase.labels.get(target).copied().with_context(|| {
+            format!(
+                "runtime presentation subprogram {} phase {} label {target} is missing",
+                self.subprogram, self.phase
+            )
+        })?;
+        self.operation_index = operation_index;
+        self.current_label = Some(target.to_string());
+        Ok(())
+    }
+
+    pub fn step(
+        &mut self,
+        program: &RuntimePresentationProgram,
+    ) -> Result<Option<RuntimePresentationOperation>> {
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|candidate| candidate.id == self.subprogram)
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == self.phase)
+            })
+            .with_context(|| {
+                format!(
+                    "runtime presentation subprogram {} phase {} is missing",
+                    self.subprogram, self.phase
+                )
+            })?;
+        let operation = phase.operations.get(self.operation_index).cloned();
+        if operation.is_some() {
+            self.operation_index += 1;
+        }
+        Ok(operation)
+    }
+}
+
+impl RuntimePresentationPhaseMachine {
+    pub fn new(
+        program: &RuntimePresentationProgram,
+        subprogram_id: &str,
+        phase_id: &str,
+    ) -> Result<Self> {
+        Ok(Self {
+            interpreter: RuntimePresentationSubprogramInterpreter::new(
+                program,
+                subprogram_id,
+                phase_id,
+            )?,
+            memory: BTreeMap::new(),
+            values: BTreeMap::new(),
+        })
+    }
+
+    pub fn run_from_label(
+        &mut self,
+        program: &RuntimePresentationProgram,
+        label: &str,
+        input: u8,
+    ) -> Result<RuntimePresentationPhaseRun> {
+        self.interpreter.jump_to_label(program, label)?;
+        let mut effects = Vec::new();
+        for _ in 0..1_024 {
+            let operation = self
+                .interpreter
+                .step(program)?
+                .context("runtime presentation source label reached the end without returning")?;
+            let numeric = |field: &str| {
+                operation
+                    .fields
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .with_context(|| {
+                        format!(
+                            "runtime presentation operation {} has no exact numeric {field}",
+                            operation.op
+                        )
+                    })
+            };
+            let string = |field: &str| {
+                operation
+                    .fields
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!(
+                            "runtime presentation operation {} has no exact string {field}",
+                            operation.op
+                        )
+                    })
+            };
+            match operation.op.as_str() {
+                "return" | "return_with_carry" => {
+                    return Ok(RuntimePresentationPhaseRun {
+                        effects,
+                        returned: true,
+                    });
+                }
+                "jump" => self.interpreter.jump_to_label(program, string("target")?)?,
+                "branch_memory_compare" => {
+                    let source = string("source")?;
+                    let operand = numeric("operand")?;
+                    let value = self.memory.get(source).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {source} was read before initialization"
+                        )
+                    })?;
+                    let matches = match string("predicate")? {
+                        "equal" => value == operand,
+                        "not_equal" => value != operand,
+                        predicate => anyhow::bail!(
+                            "runtime presentation branch_memory_compare has unsupported predicate {predicate}"
+                        ),
+                    };
+                    if matches {
+                        self.interpreter.jump_to_label(program, string("target")?)?;
+                    }
+                }
+                "input_chord_branch" => {
+                    let sample = string("sample")?;
+                    let sampled = u8::try_from(
+                        self.memory.get(sample).copied().with_context(|| {
+                            format!("runtime presentation memory {sample} was read before initialization")
+                        })?,
+                    )
+                    .context("runtime presentation input sample exceeds one byte")?;
+                    let mask = u8::try_from(numeric("mask")?)
+                        .context("runtime presentation input mask exceeds one byte")?;
+                    let matches = match string("predicate")? {
+                        "masked_equals" => {
+                            let operand = u8::try_from(numeric("operand")?)
+                                .context("runtime presentation input operand exceeds one byte")?;
+                            sampled & mask == operand
+                        }
+                        "masked_not_equal" => {
+                            let operand = u8::try_from(numeric("operand")?)
+                                .context("runtime presentation input operand exceeds one byte")?;
+                            sampled & mask != operand
+                        }
+                        "masked_nonzero" => sampled & mask != 0,
+                        predicate => anyhow::bail!(
+                            "runtime presentation input_chord_branch has unsupported predicate {predicate}"
+                        ),
+                    };
+                    if matches {
+                        self.interpreter.jump_to_label(program, string("target")?)?;
+                    }
+                }
+                "input_bit_branch" => {
+                    let sample = string("sample")?;
+                    let sampled = u8::try_from(
+                        self.memory.get(sample).copied().with_context(|| {
+                            format!("runtime presentation memory {sample} was read before initialization")
+                        })?,
+                    )
+                    .context("runtime presentation input sample exceeds one byte")?;
+                    let bit = u8::try_from(numeric("bit")?)
+                        .context("runtime presentation input bit exceeds one byte")?;
+                    anyhow::ensure!(bit < 8, "runtime presentation input bit is out of range");
+                    let set = sampled & (1_u8 << bit) != 0;
+                    let matches = match string("predicate")? {
+                        "set" => set,
+                        "clear" => !set,
+                        predicate => anyhow::bail!(
+                            "runtime presentation input_bit_branch has unsupported predicate {predicate}"
+                        ),
+                    };
+                    if matches {
+                        self.interpreter.jump_to_label(program, string("target")?)?;
+                    }
+                }
+                "sample_input" => {
+                    self.memory
+                        .insert(string("result")?.to_string(), u16::from(input));
+                }
+                "write_memory_byte" | "write_memory_word" => {
+                    let value = numeric("value")?;
+                    self.memory.insert(string("target")?.to_string(), value);
+                    effects.push(operation);
+                }
+                "subtract_memory_byte" => {
+                    let target = string("target")?.to_string();
+                    let value = self.memory.get(&target).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {target} was read before initialization"
+                        )
+                    })? as u8;
+                    let delta = u8::try_from(numeric("delta")?)
+                        .context("runtime presentation byte subtraction exceeds one byte")?;
+                    let result = value.wrapping_sub(delta);
+                    self.memory.insert(target, u16::from(result));
+                    if let Some(name) = operation.fields.get("result").and_then(Value::as_str) {
+                        self.values.insert(name.to_string(), u16::from(result));
+                    }
+                    effects.push(operation);
+                }
+                "increment_memory_byte" => {
+                    let target = string("target")?.to_string();
+                    let value = self.memory.get(&target).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {target} was read before initialization"
+                        )
+                    })? as u8;
+                    let delta = u8::try_from(numeric("delta")?)
+                        .context("runtime presentation byte increment exceeds one byte")?;
+                    self.memory
+                        .insert(target, u16::from(value.wrapping_add(delta)));
+                }
+                "postincrement_memory_byte" => {
+                    let target = string("target")?.to_string();
+                    let value = self.memory.get(&target).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {target} was read before initialization"
+                        )
+                    })? as u8;
+                    self.values
+                        .insert(string("result")?.to_string(), u16::from(value));
+                    let delta = u8::try_from(numeric("delta")?)
+                        .context("runtime presentation byte increment exceeds one byte")?;
+                    self.memory
+                        .insert(target, u16::from(value.wrapping_add(delta)));
+                }
+                "decrement_memory_word_unless_zero" => {
+                    let target = string("target")?.to_string();
+                    let value = self.memory.get(&target).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {target} was read before initialization"
+                        )
+                    })?;
+                    if value == 0 {
+                        self.interpreter
+                            .jump_to_label(program, string("zero_target")?)?;
+                    } else {
+                        self.memory.insert(target, value - 1);
+                    }
+                }
+                "set_memory_bit" => {
+                    let target = string("target")?.to_string();
+                    let bit = u8::try_from(numeric("bit")?)
+                        .context("runtime presentation memory bit exceeds one byte")?;
+                    anyhow::ensure!(bit < 16, "runtime presentation memory bit is out of range");
+                    let value = self.memory.get(&target).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {target} was read before initialization"
+                        )
+                    })? | (1_u16 << bit);
+                    self.memory.insert(target, value);
+                }
+                "select_title_option" => {
+                    let current_label = self.interpreter.current_label.as_deref().context(
+                        "runtime presentation select_title_option has no incoming source label",
+                    )?;
+                    let options = operation
+                        .fields
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .context("runtime presentation select_title_option has no options")?;
+                    let selected = options.iter().find_map(|candidate| {
+                        let candidate = candidate.as_object()?;
+                        (candidate.get("source")?.as_str()? == current_label)
+                            .then(|| candidate.get("value")?.as_u64())
+                            .flatten()
+                    });
+                    let selected = selected.with_context(|| {
+                        format!(
+                            "runtime presentation select_title_option has no value for {current_label}"
+                        )
+                    })?;
+                    self.memory.insert(
+                        string("target")?.to_string(),
+                        u16::try_from(selected)
+                            .context("runtime presentation title option exceeds two bytes")?,
+                    );
+                }
+                "return_if_memory_nonzero" => {
+                    let source = string("source")?;
+                    let value = self.memory.get(source).copied().with_context(|| {
+                        format!(
+                            "runtime presentation memory {source} was read before initialization"
+                        )
+                    })?;
+                    if value != 0 {
+                        return Ok(RuntimePresentationPhaseRun {
+                            effects,
+                            returned: true,
+                        });
+                    }
+                }
+                "return_unless_masked_zero" => {
+                    let name = string("value")?;
+                    let value = self.values.get(name).copied().with_context(|| {
+                        format!("runtime presentation result {name} was read before initialization")
+                    })?;
+                    if value & numeric("mask")? != 0 {
+                        return Ok(RuntimePresentationPhaseRun {
+                            effects,
+                            returned: true,
+                        });
+                    }
+                }
+                "fade_audio" => {
+                    let frames = numeric("frames")?;
+                    if let Some(target) = operation
+                        .fields
+                        .get("fade_register")
+                        .and_then(Value::as_object)
+                        .and_then(|register| register.get("target"))
+                        .and_then(Value::as_str)
+                    {
+                        self.memory.insert(target.to_string(), frames);
+                    }
+                    effects.push(operation);
+                }
+                "animate_title_crystal" => {
+                    let target = string("target")?.to_string();
+                    let current = u8::try_from(
+                        self.memory.get(&target).copied().with_context(|| {
+                            format!(
+                                "runtime presentation memory {target} was read before initialization"
+                            )
+                        })?,
+                    )
+                    .context("runtime presentation title crystal Y exceeds one byte")?;
+                    let stop_at = u8::try_from(numeric("stop_at")?)
+                        .context("runtime presentation title crystal stop exceeds one byte")?;
+                    if current != stop_at {
+                        let delta = u8::try_from(numeric("y_delta")?)
+                            .context("runtime presentation title crystal delta exceeds one byte")?;
+                        self.memory
+                            .insert(target, u16::from(current.wrapping_add(delta)));
+                    }
+                }
+                "fill_memory_from_result"
+                | "fill_strided_memory_from_transformed_result"
+                | "play_audio" => effects.push(operation),
+                op => anyhow::bail!(
+                    "runtime presentation phase machine cannot execute source operation {op}"
+                ),
+            }
+        }
+        anyhow::bail!("runtime presentation source phase exceeded its operation limit")
+    }
+
+    pub fn dispatch_label(
+        &self,
+        program: &RuntimePresentationProgram,
+        dispatcher: &str,
+        index: usize,
+    ) -> Result<String> {
+        let phase = program
+            .subprograms
+            .iter()
+            .find(|candidate| candidate.id == self.interpreter.subprogram)
+            .and_then(|subprogram| {
+                subprogram
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id == self.interpreter.phase)
+            })
+            .with_context(|| {
+                format!(
+                    "runtime presentation subprogram {} phase {} is missing",
+                    self.interpreter.subprogram, self.interpreter.phase
+                )
+            })?;
+        let operation = phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "dispatch_table"
+                    && operation.fields.get("dispatcher").and_then(Value::as_str)
+                        == Some(dispatcher)
+            })
+            .with_context(|| {
+                format!(
+                    "runtime presentation subprogram {} phase {} dispatcher {dispatcher} is missing",
+                    self.interpreter.subprogram, self.interpreter.phase
+                )
+            })?;
+        let label = operation
+            .fields
+            .get("entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.get(index))
+            .and_then(Value::as_str)
+            .with_context(|| {
+                format!("runtime presentation dispatcher {dispatcher} has no entry {index}")
+            })?;
+        anyhow::ensure!(
+            phase.labels.contains_key(label),
+            "runtime presentation dispatcher {dispatcher} entry {index} targets missing label {label}"
+        );
+        Ok(label.to_string())
+    }
+}
+
+impl RuntimePresentationInterpreter {
+    pub fn new(program: &RuntimePresentationProgram, entrypoint: &str) -> Result<Self> {
+        let block = program
+            .entrypoints
+            .get(entrypoint)
+            .with_context(|| format!("runtime presentation entrypoint {entrypoint} is missing"))?;
+        anyhow::ensure!(
+            program.blocks.contains_key(block),
+            "runtime presentation entrypoint {entrypoint} targets missing block {block}"
+        );
+        Ok(Self {
+            entrypoint: entrypoint.to_string(),
+            block: block.clone(),
+            operation_index: 0,
+        })
+    }
+
+    pub fn jump(&mut self, program: &RuntimePresentationProgram, target: &str) -> Result<()> {
+        anyhow::ensure!(
+            program.blocks.contains_key(target),
+            "runtime presentation jump targets missing block {target}"
+        );
+        self.block = target.to_string();
+        self.operation_index = 0;
+        Ok(())
+    }
+
+    pub fn step(
+        &mut self,
+        program: &RuntimePresentationProgram,
+    ) -> Result<RuntimePresentationStep> {
+        let block = program
+            .blocks
+            .get(&self.block)
+            .with_context(|| format!("runtime presentation block {} is missing", self.block))?;
+        let Some(operation) = block.operations.get(self.operation_index).cloned() else {
+            return Ok(RuntimePresentationStep::BlockComplete {
+                block: self.block.clone(),
+            });
+        };
+        self.operation_index += 1;
+        if operation.op == "jump" {
+            let target = operation
+                .fields
+                .get("target")
+                .and_then(Value::as_str)
+                .context("runtime presentation jump operation is missing target")?
+                .to_string();
+            let from = self.block.clone();
+            self.jump(program, &target)?;
+            return Ok(RuntimePresentationStep::Jump { from, to: target });
+        }
+        Ok(RuntimePresentationStep::Operation(operation))
+    }
 }
 
 fn required_audio_reference_token<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -1136,14 +2305,13 @@ impl ModpackAudioKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModpackAudioSource {
-    Midi,
     Pcm,
+    Midi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModpackAudioPlaybackMode {
-    SequencedMidi,
     RawPcm,
 }
 
@@ -1240,10 +2408,7 @@ impl ModpackAudioPlaybackPlan {
             plan.insert(ModpackAudioPlaybackEntry {
                 id: entry.id.clone(),
                 kind: entry.kind,
-                mode: match entry.source {
-                    ModpackAudioSource::Midi => ModpackAudioPlaybackMode::SequencedMidi,
-                    ModpackAudioSource::Pcm => ModpackAudioPlaybackMode::RawPcm,
-                },
+                mode: ModpackAudioPlaybackMode::RawPcm,
                 loop_policy: match entry.kind {
                     ModpackAudioKind::Music => ModpackAudioLoopPolicy::Loop,
                     ModpackAudioKind::SoundEffect | ModpackAudioKind::Cry => {
@@ -1336,10 +2501,7 @@ fn validate_audio_playback_entries(
                 "audio playback plan {label} entry {id} does not match manifest identity"
             );
         }
-        let expected_mode = match manifest_entry.source {
-            ModpackAudioSource::Midi => ModpackAudioPlaybackMode::SequencedMidi,
-            ModpackAudioSource::Pcm => ModpackAudioPlaybackMode::RawPcm,
-        };
+        let expected_mode = ModpackAudioPlaybackMode::RawPcm;
         if entry.mode != expected_mode {
             anyhow::bail!(
                 "audio playback plan {label} entry {id} mode does not match manifest source"
@@ -1366,16 +2528,38 @@ pub struct ModpackPcmAudioFormat {
     pub bits_per_sample: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModpackMidiAudioProgram {
+    pub profile: String,
+    pub midi_base64: String,
+}
+
+impl ModpackMidiAudioProgram {
+    pub(crate) fn validate(&self, id: &str) -> Result<()> {
+        if self.profile != "pokecrystal-midi-v1" {
+            anyhow::bail!(
+                "audio asset '{id}' has unsupported MIDI profile '{}'",
+                self.profile
+            );
+        }
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.midi_base64)
+            .with_context(|| format!("decode audio asset '{id}' MIDI payload"))?;
+        if bytes.len() < 22 || !bytes.starts_with(b"MThd") || &bytes[14..18] != b"MTrk" {
+            anyhow::bail!("audio asset '{id}' does not contain a valid MIDI file");
+        }
+        Ok(())
+    }
+}
+
 impl ModpackPcmAudioFormat {
     fn validate(&self, id: &str) -> Result<()> {
-        if self.sample_rate_hz == 0 {
-            anyhow::bail!("PCM audio asset '{id}' must declare a positive sample_rate_hz");
-        }
-        if self.channels == 0 {
-            anyhow::bail!("PCM audio asset '{id}' must declare at least one channel");
-        }
-        if self.bits_per_sample != 8 && self.bits_per_sample != 16 {
-            anyhow::bail!("PCM audio asset '{id}' bits_per_sample must be 8 or 16");
+        if self.sample_rate_hz != 22_050 || self.channels != 2 || self.bits_per_sample != 16 {
+            anyhow::bail!(
+                "PCM audio asset '{id}' must use canonical 22050 Hz stereo signed 16-bit format"
+            );
         }
         Ok(())
     }
@@ -1393,6 +2577,14 @@ impl ModpackPcmAudioFormat {
     }
 }
 
+fn canonical_pcm_format() -> ModpackPcmAudioFormat {
+    ModpackPcmAudioFormat {
+        sample_rate_hz: 22_050,
+        channels: 2,
+        bits_per_sample: 16,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModpackAudioAsset {
@@ -1400,6 +2592,8 @@ pub struct ModpackAudioAsset {
     pub path: String,
     pub kind: ModpackAudioKind,
     pub source: ModpackAudioSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfx_priority: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_format: Option<ModpackPcmAudioFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1410,6 +2604,8 @@ pub struct ModpackAudioAsset {
     pub loop_start_sample: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loop_end_sample: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_program: Option<ModpackMidiAudioProgram>,
 }
 
 impl<'de> Deserialize<'de> for ModpackAudioAsset {
@@ -1424,11 +2620,13 @@ impl<'de> Deserialize<'de> for ModpackAudioAsset {
             path: String,
             kind: ModpackAudioKind,
             source: ModpackAudioSource,
+            sfx_priority: Option<u8>,
             pcm_format: Option<ModpackPcmAudioFormat>,
             pcm_frame_count: Option<usize>,
             payload_hash: Option<String>,
             loop_start_sample: Option<usize>,
             loop_end_sample: Option<usize>,
+            midi_program: Option<ModpackMidiAudioProgram>,
         }
 
         let raw = RawModpackAudioAsset::deserialize(deserializer)?;
@@ -1437,11 +2635,13 @@ impl<'de> Deserialize<'de> for ModpackAudioAsset {
             path: raw.path,
             kind: raw.kind,
             source: raw.source,
+            sfx_priority: raw.sfx_priority,
             pcm_format: raw.pcm_format,
             pcm_frame_count: raw.pcm_frame_count,
             payload_hash: raw.payload_hash,
             loop_start_sample: raw.loop_start_sample,
             loop_end_sample: raw.loop_end_sample,
+            midi_program: raw.midi_program,
         };
         asset.validate().map_err(serde::de::Error::custom)?;
         Ok(asset)
@@ -1454,12 +2654,14 @@ impl ModpackAudioAsset {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::Music,
-            source: ModpackAudioSource::Midi,
-            pcm_format: None,
+            source: ModpackAudioSource::Pcm,
+            sfx_priority: None,
+            pcm_format: Some(canonical_pcm_format()),
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1470,28 +2672,36 @@ impl ModpackAudioAsset {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::Cry,
-            source: ModpackAudioSource::Midi,
-            pcm_format: None,
+            source: ModpackAudioSource::Pcm,
+            sfx_priority: None,
+            pcm_format: Some(canonical_pcm_format()),
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         };
         asset.validate()?;
         Ok(asset)
     }
 
-    pub fn sound_effect(id: impl Into<String>, path: impl Into<String>) -> Result<Self> {
+    pub fn sound_effect(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        sfx_priority: u8,
+    ) -> Result<Self> {
         let asset = Self {
             id: id.into(),
             path: path.into(),
             kind: ModpackAudioKind::SoundEffect,
-            source: ModpackAudioSource::Midi,
-            pcm_format: None,
+            source: ModpackAudioSource::Pcm,
+            sfx_priority: Some(sfx_priority),
+            pcm_format: Some(canonical_pcm_format()),
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1508,11 +2718,13 @@ impl ModpackAudioAsset {
             path: path.into(),
             kind,
             source: ModpackAudioSource::Pcm,
+            sfx_priority: None,
             pcm_format: Some(pcm_format),
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         };
         asset.validate()?;
         Ok(asset)
@@ -1523,7 +2735,20 @@ impl ModpackAudioAsset {
             anyhow::bail!("audio asset id is required");
         }
         validate_modpack_audio_id(self.kind, &self.id)?;
+        match (self.kind, self.sfx_priority) {
+            (ModpackAudioKind::SoundEffect, None) => {
+                anyhow::bail!("sound-effect audio asset '{}' must declare sfx_priority", self.id)
+            }
+            (ModpackAudioKind::Music | ModpackAudioKind::Cry, Some(_)) => anyhow::bail!(
+                "non-SFX audio asset '{}' must not declare sfx_priority",
+                self.id
+            ),
+            _ => {}
+        }
         let path = Path::new(&self.path);
+        if let Some(program) = &self.midi_program {
+            program.validate(&self.id)?;
+        }
         validate_modpack_audio_asset_path(&self.id, path)?;
         validate_modpack_audio_asset_directory(&self.id, self.kind, path)?;
         let stem = path
@@ -1546,34 +2771,6 @@ impl ModpackAudioAsset {
                 anyhow::anyhow!("audio asset '{}' path must have a file extension", self.id)
             })?;
         match self.source {
-            ModpackAudioSource::Midi if extension == "mid" => {
-                if self.pcm_format.is_some()
-                    || self.pcm_frame_count.is_some()
-                    || self.payload_hash.is_some()
-                    || self.loop_start_sample.is_some()
-                    || self.loop_end_sample.is_some()
-                {
-                    anyhow::bail!(
-                        "MIDI audio asset '{}' must not declare PCM metadata",
-                        self.id
-                    );
-                }
-                Ok(())
-            }
-            ModpackAudioSource::Midi => {
-                if self.pcm_format.is_some()
-                    || self.pcm_frame_count.is_some()
-                    || self.payload_hash.is_some()
-                    || self.loop_start_sample.is_some()
-                    || self.loop_end_sample.is_some()
-                {
-                    anyhow::bail!(
-                        "MIDI audio asset '{}' must not declare PCM metadata",
-                        self.id
-                    );
-                }
-                anyhow::bail!("MIDI audio asset '{}' must use a .mid file", self.id)
-            }
             ModpackAudioSource::Pcm if extension == "pcm" => {
                 let Some(format) = &self.pcm_format else {
                     anyhow::bail!("PCM audio asset '{}' must declare pcm_format", self.id);
@@ -1592,10 +2789,27 @@ impl ModpackAudioAsset {
                 )
             }
             ModpackAudioSource::Pcm => {
-                if self.pcm_format.is_none() {
-                    anyhow::bail!("PCM audio asset '{}' must declare pcm_format", self.id);
-                }
                 anyhow::bail!("PCM audio asset '{}' must use a .pcm file", self.id)
+            }
+            ModpackAudioSource::Midi if extension == "mid" => {
+                let Some(format) = &self.pcm_format else {
+                    anyhow::bail!("MIDI audio asset '{}' must declare output pcm_format", self.id);
+                };
+                format.validate(&self.id)?;
+                validate_optional_pcm_payload_metadata(
+                    &self.id,
+                    self.pcm_frame_count,
+                    self.payload_hash.as_deref(),
+                )?;
+                validate_pcm_loop_metadata(
+                    &self.id,
+                    self.pcm_frame_count,
+                    self.loop_start_sample,
+                    self.loop_end_sample,
+                )
+            }
+            ModpackAudioSource::Midi => {
+                anyhow::bail!("MIDI audio asset '{}' must use a .mid file", self.id)
             }
         }
     }
@@ -1662,6 +2876,8 @@ pub struct ModpackAudioManifestEntry {
     pub kind: ModpackAudioKind,
     pub source: ModpackAudioSource,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfx_priority: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pcm_format: Option<ModpackPcmAudioFormat>,
     pub byte_len: usize,
     pub payload_hash: String,
@@ -1685,6 +2901,7 @@ impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
             path: String,
             kind: ModpackAudioKind,
             source: ModpackAudioSource,
+            sfx_priority: Option<u8>,
             pcm_format: Option<ModpackPcmAudioFormat>,
             byte_len: usize,
             payload_hash: String,
@@ -1699,6 +2916,7 @@ impl<'de> Deserialize<'de> for ModpackAudioManifestEntry {
             path: raw.path,
             kind: raw.kind,
             source: raw.source,
+            sfx_priority: raw.sfx_priority,
             pcm_format: raw.pcm_format,
             byte_len: raw.byte_len,
             payload_hash: raw.payload_hash,
@@ -1718,11 +2936,13 @@ impl ModpackAudioManifestEntry {
             path: self.path.clone(),
             kind: self.kind,
             source: self.source,
+            sfx_priority: self.sfx_priority,
             pcm_format: self.pcm_format.clone(),
             pcm_frame_count: None,
             payload_hash: None,
             loop_start_sample: None,
             loop_end_sample: None,
+            midi_program: None,
         };
         asset.validate()?;
         if self.byte_len == 0 {
@@ -1743,18 +2963,7 @@ impl ModpackAudioManifestEntry {
             );
         }
         match self.source {
-            ModpackAudioSource::Midi => {
-                if self.pcm_frame_count.is_some()
-                    || self.loop_start_sample.is_some()
-                    || self.loop_end_sample.is_some()
-                {
-                    anyhow::bail!(
-                        "MIDI audio manifest entry '{}' must not declare pcm_frame_count",
-                        self.id
-                    );
-                }
-            }
-            ModpackAudioSource::Pcm => {
+            ModpackAudioSource::Pcm | ModpackAudioSource::Midi => {
                 let frame_count = self.pcm_frame_count.with_context(|| {
                     format!(
                         "PCM audio manifest entry '{}' must declare pcm_frame_count",
@@ -1833,25 +3042,20 @@ impl ModpackAudioManifest {
             let (byte_len, payload_hash, pcm_frame_count) = match (asset.source, embedded) {
                 (_, Some(bytes)) => {
                     validate_compiled_audio_payload(asset, bytes)?;
-                    let frame_count = match asset.source {
-                        ModpackAudioSource::Midi => None,
-                        ModpackAudioSource::Pcm => {
-                            let format = asset.pcm_format.as_ref().with_context(|| {
-                                format!(
-                                    "PCM audio asset '{}' missing validated pcm_format",
-                                    asset.id
-                                )
-                            })?;
-                            Some(bytes.len() / format.frame_size_bytes(&asset.id)?)
-                        }
-                    };
+                    let format = asset.pcm_format.as_ref().with_context(|| {
+                        format!(
+                            "PCM audio asset '{}' missing validated pcm_format",
+                            asset.id
+                        )
+                    })?;
+                    let frame_count = Some(bytes.len() / format.frame_size_bytes(&asset.id)?);
                     (
                         bytes.len(),
                         format!("{:08x}", fnv1a32_bytes(bytes)),
                         frame_count,
                     )
                 }
-                (ModpackAudioSource::Pcm, None) => {
+                (ModpackAudioSource::Pcm | ModpackAudioSource::Midi, None) => {
                     let frame_count = asset.pcm_frame_count.with_context(|| {
                         format!(
                             "external PCM audio asset '{}' missing pcm_frame_count",
@@ -1872,16 +3076,13 @@ impl ModpackAudioManifest {
                         .context("external PCM byte length overflow")?;
                     (byte_len, payload_hash, Some(frame_count))
                 }
-                (ModpackAudioSource::Midi, None) => anyhow::bail!(
-                    "compiled audio manifest missing payload for definitive MIDI asset '{}'",
-                    asset.id
-                ),
             };
             let entry = ModpackAudioManifestEntry {
                 id: asset.id.clone(),
                 path: asset.path.clone(),
                 kind: asset.kind,
                 source: asset.source,
+                sfx_priority: asset.sfx_priority,
                 pcm_format: asset.pcm_format.clone(),
                 byte_len,
                 payload_hash,

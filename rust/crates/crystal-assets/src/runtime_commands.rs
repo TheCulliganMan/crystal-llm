@@ -738,12 +738,9 @@ fn runtime_module_script_subset<'a>(
             continue;
         };
         scripts.insert(label.clone(), payload.clone());
-        for reference in script_payload_references(
-            &label,
-            payload,
-            all_scripts,
-            follow_callasm_definitions,
-        ) {
+        for reference in
+            script_payload_references(&label, payload, all_scripts, follow_callasm_definitions)
+        {
             if !scripts.contains_key(&reference) {
                 pending.push(reference);
             }
@@ -1043,10 +1040,19 @@ pub enum DecorationSide {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DecorationActionOutcome {
-    SetUp { decoration: String },
-    Replaced { decoration: String, previous: String },
-    PutAway { decoration: String },
-    AlreadySetUp { decoration: String },
+    SetUp {
+        decoration: String,
+    },
+    Replaced {
+        decoration: String,
+        previous: String,
+    },
+    PutAway {
+        decoration: String,
+    },
+    AlreadySetUp {
+        decoration: String,
+    },
     NothingToPutAway,
 }
 
@@ -1076,6 +1082,8 @@ impl DecorationActionOutcome {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataSet {
+    #[serde(default, skip_serializing_if = "crate::NuzlockeRules::is_disabled")]
+    pub nuzlocke_rules: crate::NuzlockeRules,
     pub pokemon: BTreeMap<String, PokemonSpecies>,
     pub moves: BTreeMap<String, Move>,
     pub growth_rates: crystal_core::systems::experience::GrowthRateCatalog,
@@ -1178,6 +1186,13 @@ fn wild_encounter_data_has(encounters: &WildEncounterData, species: &str, level:
         wild_encounter_table_has_reachable_level(table, EncounterSurface::Grass, species, level)
     }) || encounters.water.as_ref().is_some_and(|table| {
         wild_encounter_table_has_reachable_level(table, EncounterSurface::Water, species, level)
+    }) || encounters.swarm_overrides.values().any(|swarm| {
+        wild_encounter_table_has_reachable_level(
+            &swarm.grass,
+            EncounterSurface::Grass,
+            species,
+            level,
+        )
     })
 }
 
@@ -1353,8 +1368,14 @@ pub struct RuntimeFlyCommand {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBattleTurnCommand {
     pub player_action: BattleAction,
+    /// Bag inventory consumption paired atomically with a player Item action.
+    /// The core turn owns the battle effect; this field owns only the bag use.
+    pub player_bag_item_id: Option<String>,
     pub enemy_action: BattleAction,
     pub enemy_ai_divider_trace: RuntimeDividerTrace,
+    pub enemy_ai_selected_move_slot: Option<usize>,
+    pub enemy_move_ai_random_calls: u16,
+    pub enemy_post_order_ai_random_calls: u16,
     pub divider_trace: RuntimeDividerTrace,
 }
 
@@ -1600,10 +1621,13 @@ pub struct RuntimeManualClockCommand {
     pub divider_trace: RuntimeDividerTrace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeGameTimerAdvanceCommand {
     pub vblanks: u32,
+    /// Exact DIV samples consumed by VBlank_Normal within this batch. Each
+    /// normal handler reads DIV twice; special handlers contribute no sample.
+    pub normal_divider_trace: RuntimeDividerTrace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1714,9 +1738,7 @@ pub struct RuntimeGameCornerCommand {
     pub divider_trace: RuntimeDividerTrace,
 }
 
-fn runtime_game_corner_divider_trace(
-    command: &RuntimeGameCornerCommand,
-) -> &RuntimeDividerTrace {
+fn runtime_game_corner_divider_trace(command: &RuntimeGameCornerCommand) -> &RuntimeDividerTrace {
     &command.divider_trace
 }
 
@@ -1916,6 +1938,19 @@ fn runtime_day_care_party_slot(command: &RuntimeDayCareCommand) -> Result<Option
     }
 }
 
+fn runtime_day_care_input(command: &RuntimeDayCareCommand) -> Result<DayCareInput> {
+    let party_slot = runtime_day_care_party_slot(command)?;
+    Ok(match command.action {
+        RuntimeDayCareAction::Open => DayCareInput::Open {},
+        RuntimeDayCareAction::Deposit => DayCareInput::Deposit {
+            party_slot: party_slot.expect("validated deposit party slot"),
+        },
+        RuntimeDayCareAction::Withdraw => DayCareInput::Withdraw {},
+        RuntimeDayCareAction::Inspect => DayCareInput::Inspect {},
+        RuntimeDayCareAction::CollectEgg => DayCareInput::CollectEgg {},
+    })
+}
+
 fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
     match action {
         RuntimeDayCareAction::Open => "open",
@@ -1930,15 +1965,11 @@ fn runtime_day_care_action_name(action: RuntimeDayCareAction) -> &'static str {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeBugContestCommand {
     GiveParkBalls {},
-    SelectContestants {
-        divider_trace: RuntimeDividerTrace,
-    },
+    SelectContestants { divider_trace: RuntimeDividerTrace },
     DropOffMons {},
     ReturnMons {},
     CheckPartyFull {},
-    Judge {
-        divider_trace: RuntimeDividerTrace,
-    },
+    Judge { divider_trace: RuntimeDividerTrace },
 }
 
 impl RuntimeBugContestCommand {
@@ -2001,12 +2032,8 @@ pub struct RuntimeBuenaPrizeCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeShuckieCommand {
-    Give {
-        divider_trace: RuntimeDividerTrace,
-    },
-    Return {
-        party_index: Option<usize>,
-    },
+    Give { divider_trace: RuntimeDividerTrace },
+    Return { party_index: Option<usize> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2080,14 +2107,12 @@ pub struct RuntimeLinkBattleRecordCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLinkFriendReadyCommand {
-    pub ready: bool,
     pub serial_connection_status: LinkSerialConnectionStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLinkTimeoutCommand {
-    pub timeout: bool,
     pub other_player_link_mode: u8,
     pub serial_connection_status: LinkSerialConnectionStatus,
 }
@@ -2470,7 +2495,9 @@ pub enum RuntimeMutationCommand {
     ApplyScriptMap(RuntimeScriptCommandRef),
     ApplyRandomScriptMap(RuntimeRandomScriptMapCommand),
     TransitionPendingScriptWarp,
-    ApplyMapSetupCallbacks { map_setup: String },
+    ApplyMapSetupCallbacks {
+        map_setup: String,
+    },
     ApplyScriptText(RuntimeScriptCommandRef),
     ApplyScriptVariableNow(RuntimeScriptCommandRef),
     ApplyScriptControl(RuntimeScriptCommandRef),
@@ -2806,7 +2833,6 @@ pub enum RuntimeScriptRuntimeFlag {
     CreditsRequested,
     ResetRequested,
     Menu2dRequested,
-    VersionCheckRequested,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2819,7 +2845,6 @@ pub struct RuntimeScriptRuntimeFlagCommand {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeScriptRuntimeMemoryValue {
     ScriptValue,
-    LastSpecialRoutine,
     LastTalkedObject,
 }
 
@@ -2940,14 +2965,12 @@ pub enum RuntimeScriptRuntimeFlagValue {
     CreditsRequested,
     ResetRequested,
     Menu2dRequested,
-    VersionCheckRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeScriptRuntimeMemoryValueTaken {
     ScriptValue(String),
-    LastSpecialRoutine(String),
     LastTalkedObject(String),
 }
 
@@ -2961,7 +2984,7 @@ pub enum RuntimeScriptRuntimeMemoryEntryRemoved {
     PhoneNumber { key: String },
 }
 
-pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v47";
+pub const RUNTIME_MUTATION_COMMAND_SCHEMA: &str = "crystal_runtime_mutation_command_v49";
 
 pub fn encode_runtime_mutation_command_payload(
     command: &RuntimeMutationCommand,
@@ -3238,6 +3261,7 @@ fn full_heal_party_slot(
     state: &mut GameState,
     moves: &BTreeMap<String, Move>,
     party_index: usize,
+    nuzlocke_rules: crate::NuzlockeRules,
 ) -> Result<PartyRecoveryOutcome> {
     let pokemon = state
         .storage
@@ -3262,7 +3286,9 @@ fn full_heal_party_slot(
         learned.current_pp = after_pp;
         pp_restored.push((learned.name.clone(), before_pp, after_pp));
     }
-    pokemon.hp = pokemon.max_hp;
+    if !nuzlocke_rules.permadeath || hp_before > 0 {
+        pokemon.hp = pokemon.max_hp;
+    }
     pokemon.status = None;
     let outcome = PartyRecoveryOutcome {
         party_index,
@@ -3609,7 +3635,7 @@ pub enum RuntimeMutationResult {
     BattlePartyMoveItemUsed(ItemUseOutcome, BattleItemOutcome),
     BallThrown(CaptureOutcome),
     ActiveWildCaptureCompleted(CaptureCompletion),
-    ActiveBattlePartySwitched(usize),
+    ActiveBattlePartySwitched(ActiveBattlePartySwitchOutcome),
     ActiveBattleTurnResolved(BattleTurnOutcome),
     ActiveBattleCommandResolved(ActiveBattleCommandOutcome),
     ActiveBattleEnemyActionResolved(BattleTurnOutcome),
@@ -4041,6 +4067,12 @@ fn initialize_loaded_object_roster(session: &mut OverworldSession, state: &GameS
 
 fn reset_map_bike_flags(state: &mut GameState) -> Result<()> {
     state.script_runtime.stone_table_entries.clear();
+    for queue_slot in 0..4 {
+        state
+            .script_runtime
+            .memory
+            .insert(format!("wCmdQueueType{queue_slot}"), "0".to_string());
+    }
     for flag in [
         "ENGINE_STRENGTH_ACTIVE",
         "ENGINE_ALWAYS_ON_BIKE",
@@ -4305,19 +4337,17 @@ fn player_event_execution_path(
         ("callasm", &["OverworldBGMap"]),
         ("sjump", &["Script_Whiteout"]),
     ];
-    const HATCH_EGG: &[(&str, &[&str])] =
-        &[("callasm", &["OverworldHatchEgg"]), ("end", &[])];
+    const HATCH_EGG: &[(&str, &[&str])] = &[("callasm", &["OverworldHatchEgg"]), ("end", &[])];
 
     let (expected, path) = match label {
         "InvalidEventScript" => (INVALID, PlayerEventExecutionPath::CommonInterpreter),
         "EdgeWarpScript" => (EDGE_WARP, PlayerEventExecutionPath::CommonInterpreter),
-        "WarpToNewMapScript" => {
-            (WARP_TO_NEW_MAP, PlayerEventExecutionPath::CommonInterpreter)
-        }
+        "WarpToNewMapScript" => (WARP_TO_NEW_MAP, PlayerEventExecutionPath::CommonInterpreter),
         "FallIntoMapScript" => (FALL_INTO_MAP, PlayerEventExecutionPath::CommonInterpreter),
-        "ChangeDirectionScript" => {
-            (CHANGE_DIRECTION, PlayerEventExecutionPath::CommonInterpreter)
-        }
+        "ChangeDirectionScript" => (
+            CHANGE_DIRECTION,
+            PlayerEventExecutionPath::CommonInterpreter,
+        ),
         "SeenByTrainerScript" => (SEEN_BY_TRAINER, PlayerEventExecutionPath::TypedConsumer),
         "TalkToTrainerScript" => (TALK_TO_TRAINER, PlayerEventExecutionPath::TypedConsumer),
         "FindItemInBallScript" => (FIND_ITEM, PlayerEventExecutionPath::TypedConsumer),
@@ -4353,10 +4383,7 @@ fn player_event_execution_path(
     if label == "ChangeDirectionScript" {
         const ENABLE_WILD_ENCOUNTERS: &[(&str, &[&str])] = &[
             ("ld", &["hl", "wEnabledPlayerEvents"]),
-            (
-                "set",
-                &["PLAYEREVENTS_WILD_ENCOUNTERS", "[hl]"],
-            ),
+            ("set", &["PLAYEREVENTS_WILD_ENCOUNTERS", "[hl]"]),
             ("ret", &[]),
         ];
         certify_exact_callasm_body(
@@ -4395,7 +4422,9 @@ fn validate_compiled_overworld_event_catalog(data: &GameDataSet) -> Result<()> {
             .get(&label)
             .or_else(|| standard_catalog.get(&label))
             .and_then(Value::as_array)
-            .with_context(|| format!("compiled player-event pointer {label} has no command body"))?;
+            .with_context(|| {
+                format!("compiled player-event pointer {label} has no command body")
+            })?;
         if body.is_empty() {
             anyhow::bail!("compiled player-event pointer {label} has an empty command body");
         }

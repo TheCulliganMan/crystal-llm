@@ -5,6 +5,7 @@ use crate::models::{Party, Pokemon, calculate_stats, pokemon_species_display_nam
 use crate::random::{CrystalRandom, DividerSource};
 use crate::state::GameState;
 use crate::systems::experience::{ExperienceError, GrowthRateCatalog};
+use crate::world::movement::MovementMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +154,17 @@ pub struct StepEventCounters {
     pub step_count: u8,
     pub poison_step_count: u8,
     pub happiness_step_count: u8,
+    /// Exact persisted big-endian `wBikeStep` word, represented as its
+    /// numeric 16-bit value.
+    pub bike_step_count: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverworldStepContext {
+    pub movement_mode: MovementMode,
+    /// Packed map palette byte returned by `GetPhoneServiceTimeOfDayByte`.
+    /// Its high nibble is the `GetMapPhoneService` result.
+    pub map_phone_service: u8,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +242,7 @@ pub fn process_overworld_step<S>(
     rules: &StepEventRules,
     growth_rates: &GrowthRateCatalog,
     caught_location: Option<u16>,
+    context: OverworldStepContext,
     rng: &mut CrystalRandom<S>,
 ) -> Result<StepEventResult, StepEventError>
 where
@@ -321,6 +334,12 @@ where
     )?;
     let poison_result =
         process_poison_step(rules, &mut state.step_events, &mut state.storage.party);
+    let poison_fainted = poison_result
+        .as_ref()
+        .is_some_and(|result| !result.fainted_names.is_empty());
+    if !poison_fainted {
+        process_bike_step(state, context);
+    }
     let result = StepEventResult {
         repel_expired: None,
         egg_hatched: false,
@@ -333,11 +352,39 @@ where
     Ok(result)
 }
 
+fn process_bike_step(state: &mut GameState, context: OverworldStepContext) {
+    let bike_shop_call_enabled = state
+        .flags
+        .is_engine_flag_set("STATUSFLAGS2_BIKE_SHOP_CALL_F")
+        .expect("canonical Bike Shop status flag is valid");
+    if !bike_shop_call_enabled
+        || context.movement_mode != MovementMode::Bike
+        || context.map_phone_service >> 4 != 0
+    {
+        return;
+    }
+
+    // The source treats wBikeStep as a big-endian word, increments it unless
+    // both bytes are $ff, then tests whether its high byte reached $04.
+    state.step_events.bike_step_count = state.step_events.bike_step_count.saturating_add(1);
+    if state.step_events.bike_step_count < 1024 || state.script_runtime.special_phone_call.is_some()
+    {
+        return;
+    }
+
+    state.script_runtime.special_phone_call = Some("SPECIALCALL_BIKESHOP".to_string());
+    state
+        .flags
+        .clear_engine_flag("STATUSFLAGS2_BIKE_SHOP_CALL_F")
+        .expect("canonical Bike Shop status flag is valid");
+}
+
 pub fn process_overworld_step_checked<S>(
     state: &mut GameState,
     rules: &StepEventRules,
     growth_rates: &GrowthRateCatalog,
     caught_location: Option<u16>,
+    context: OverworldStepContext,
     rng: &mut CrystalRandom<S>,
 ) -> Result<StepEventResult, StepEventError>
 where
@@ -345,7 +392,7 @@ where
     S::Error: std::fmt::Display,
 {
     require_step_event_rules(rules)?;
-    process_overworld_step(state, rules, growth_rates, caught_location, rng)
+    process_overworld_step(state, rules, growth_rates, caught_location, context, rng)
 }
 
 pub fn apply_happiness_step(
@@ -471,7 +518,7 @@ pub fn is_poisoned(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
 
 pub fn is_egg(rules: &StepEventRules, pokemon: &Pokemon) -> bool {
     let _ = rules;
-    pokemon.is_egg || pokemon.status.as_deref() == Some("EGG") || pokemon.species.id == "EGG"
+    pokemon.is_egg
 }
 
 fn apply_poison_faint_happiness(party: &mut Party, poisoned_before_step: Vec<usize>) {
@@ -518,6 +565,145 @@ mod tests {
         }
     }
 
+    fn normal_overworld_context() -> OverworldStepContext {
+        OverworldStepContext {
+            movement_mode: MovementMode::Normal,
+            map_phone_service: 0,
+        }
+    }
+
+    fn run_overworld_step(state: &mut GameState, context: OverworldStepContext) -> StepEventResult {
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(state.random_state, &mut divider);
+        process_overworld_step(
+            state,
+            &rules(),
+            &crystal_growth_rate_catalog_for_tests(),
+            Some(0),
+            context,
+            &mut rng,
+        )
+        .expect("overworld step")
+    }
+
+    #[test]
+    fn bike_step_queues_shop_call_at_1024_and_clears_the_enable_flag() {
+        let mut state = GameState::default();
+        state.step_events.bike_step_count = 1023;
+        state
+            .flags
+            .set_engine_flag("STATUSFLAGS2_BIKE_SHOP_CALL_F", true)
+            .expect("canonical engine flag");
+
+        let result = run_overworld_step(
+            &mut state,
+            OverworldStepContext {
+                movement_mode: MovementMode::Bike,
+                map_phone_service: 0,
+            },
+        );
+
+        assert_eq!(result, StepEventResult::default());
+        assert_eq!(state.step_events.bike_step_count, 1024);
+        assert_eq!(
+            state.script_runtime.special_phone_call.as_deref(),
+            Some("SPECIALCALL_BIKESHOP")
+        );
+        assert!(
+            !state
+                .flags
+                .is_engine_flag_set("STATUSFLAGS2_BIKE_SHOP_CALL_F")
+                .expect("canonical engine flag")
+        );
+    }
+
+    #[test]
+    fn bike_step_requires_enable_flag_exact_bike_state_and_phone_service() {
+        for (flag, movement_mode, map_phone_service) in [
+            (false, MovementMode::Bike, 0),
+            (true, MovementMode::Normal, 0),
+            (true, MovementMode::Skate, 0),
+            (true, MovementMode::Bike, 0x10),
+        ] {
+            let mut state = GameState::default();
+            state.step_events.bike_step_count = 99;
+            state
+                .flags
+                .set_engine_flag("STATUSFLAGS2_BIKE_SHOP_CALL_F", flag)
+                .expect("canonical engine flag");
+
+            run_overworld_step(
+                &mut state,
+                OverworldStepContext {
+                    movement_mode,
+                    map_phone_service,
+                },
+            );
+
+            assert_eq!(state.step_events.bike_step_count, 99);
+            assert!(state.script_runtime.special_phone_call.is_none());
+        }
+    }
+
+    #[test]
+    fn bike_step_saturates_and_does_not_replace_an_existing_special_call() {
+        let mut state = GameState::default();
+        state.step_events.bike_step_count = u16::MAX;
+        state.script_runtime.special_phone_call = Some("SPECIALCALL_POKERUS".to_string());
+        state
+            .flags
+            .set_engine_flag("STATUSFLAGS2_BIKE_SHOP_CALL_F", true)
+            .expect("canonical engine flag");
+
+        run_overworld_step(
+            &mut state,
+            OverworldStepContext {
+                movement_mode: MovementMode::Bike,
+                map_phone_service: 0,
+            },
+        );
+
+        assert_eq!(state.step_events.bike_step_count, u16::MAX);
+        assert_eq!(
+            state.script_runtime.special_phone_call.as_deref(),
+            Some("SPECIALCALL_POKERUS")
+        );
+        assert!(
+            state
+                .flags
+                .is_engine_flag_set("STATUSFLAGS2_BIKE_SHOP_CALL_F")
+                .expect("canonical engine flag")
+        );
+    }
+
+    #[test]
+    fn poison_faint_skips_bike_step_but_nonfatal_damage_does_not() {
+        for (hp, expected_count) in [(1, 1023), (2, 1024)] {
+            let mut state = GameState::default();
+            let mut oddish = pokemon("ODDISH");
+            oddish.hp = hp;
+            oddish.status = Some(rules().poison_status);
+            state.storage.party.pokemon[0] = Some(oddish);
+            state.step_events.poison_step_count = 3;
+            state.step_events.bike_step_count = 1023;
+            state
+                .flags
+                .set_engine_flag("STATUSFLAGS2_BIKE_SHOP_CALL_F", true)
+                .expect("canonical engine flag");
+
+            let result = run_overworld_step(
+                &mut state,
+                OverworldStepContext {
+                    movement_mode: MovementMode::Bike,
+                    map_phone_service: 0,
+                },
+            );
+
+            assert!(result.poison_result.is_some());
+            assert_eq!(state.step_events.bike_step_count, expected_count);
+        }
+    }
+
     #[test]
     fn step_event_rules_issues_validate_exact_pack_tokens() {
         assert_eq!(
@@ -555,6 +741,22 @@ mod tests {
                 StepEventRulesIssue::HappinessTargetOutsideMask { target: 2, mask: 1 },
             ],
         );
+    }
+
+    #[test]
+    fn bike_step_count_is_required_persisted_state() {
+        let mut encoded =
+            serde_json::to_value(StepEventCounters::default()).expect("serialize step counters");
+        encoded
+            .as_object_mut()
+            .expect("step counters object")
+            .remove("bike_step_count");
+
+        let error = serde_json::from_value::<StepEventCounters>(encoded)
+            .expect_err("wBikeStep must not be defaulted while loading a save")
+            .to_string();
+
+        assert!(error.contains("missing field `bike_step_count`"), "{error}");
     }
 
     #[test]
@@ -699,7 +901,7 @@ mod tests {
     fn egg_step_hatches_only_when_counter_decrements_to_zero() {
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
-        egg.status = Some("EGG".to_string());
+        egg.is_egg = true;
         egg.happiness = 1;
         let mut party = party_with(vec![(0, egg)]);
         let mut counters = StepEventCounters {
@@ -716,6 +918,25 @@ mod tests {
         assert_eq!(pokemon.happiness, rules().hatched_egg_happiness);
         assert_eq!(pokemon.status, None);
         pokemon.validate_saved_state().expect("exact hatch stats");
+    }
+
+    #[test]
+    fn abilities_do_not_change_crystals_one_byte_egg_cycle_decrement() {
+        for ability in ["FLAME_BODY", "MAGMA_ARMOR"] {
+            let mut egg = pokemon("TOGEPI");
+            egg.is_egg = true;
+            egg.nickname = rules().egg_nickname;
+            egg.happiness = 2;
+            let mut accelerator = pokemon("MAGCARGO");
+            accelerator.species.ability = ability.to_string();
+            let mut party = party_with(vec![(0, egg), (1, accelerator)]);
+
+            let hatch = process_egg_step(&rules(), &mut party);
+
+            assert_eq!(hatch, None, "{ability} is not consulted by DoEggStep");
+            assert_eq!(party.pokemon[0].as_ref().unwrap().happiness, 1);
+            assert!(party.pokemon[0].as_ref().unwrap().is_egg);
+        }
     }
 
     #[test]
@@ -743,11 +964,11 @@ mod tests {
     fn egg_step_wraps_counter_and_processes_all_eggs() {
         let mut first = pokemon("TOGEPI");
         first.nickname = rules().egg_nickname;
-        first.status = Some("EGG".to_string());
+        first.is_egg = true;
         first.happiness = 0;
         let mut second = pokemon("PICHU");
         second.nickname = rules().egg_nickname;
-        second.status = Some("EGG".to_string());
+        second.is_egg = true;
         second.happiness = 2;
         let mut party = party_with(vec![(0, first), (1, second)]);
         let mut counters = StepEventCounters {
@@ -770,18 +991,22 @@ mod tests {
     }
 
     #[test]
-    fn egg_status_is_authoritative_even_with_a_custom_nickname() {
+    fn egg_status_alias_is_rejected_instead_of_becoming_a_second_authority() {
         let mut egg = pokemon("TOGEPI");
         egg.nickname = "HATCHLING".to_string();
         egg.status = Some("EGG".to_string());
-        assert!(is_egg(&rules(), &egg));
+        assert!(!is_egg(&rules(), &egg));
+        assert_eq!(
+            egg.validate_saved_state(),
+            Err("pokemon.status cannot encode egg identity; use pokemon.is_egg".to_string())
+        );
     }
 
     #[test]
     fn egg_hatch_skips_poison_in_count_step_ordering() {
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
-        egg.status = Some("EGG".to_string());
+        egg.is_egg = true;
         egg.happiness = 1;
         let mut oddish = pokemon("ODDISH");
         oddish.hp = 3;
@@ -806,7 +1031,7 @@ mod tests {
         chikorita.happiness = 70;
         let mut egg = pokemon("TOGEPI");
         egg.nickname = rules().egg_nickname;
-        egg.status = Some("EGG".to_string());
+        egg.is_egg = true;
         egg.happiness = 70;
         let mut party = party_with(vec![(0, chikorita), (1, egg)]);
         let mut counters = StepEventCounters {
@@ -839,6 +1064,7 @@ mod tests {
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
             Some(0),
+            normal_overworld_context(),
             &mut rng,
         )
         .expect("overworld step");
@@ -855,6 +1081,7 @@ mod tests {
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
             Some(0),
+            normal_overworld_context(),
             &mut rng,
         )
         .expect("overworld step");
@@ -873,7 +1100,7 @@ mod tests {
         let mut egg = pokemon("TOGEPI");
         egg.is_egg = true;
         egg.nickname = rules().egg_nickname;
-        egg.status = Some("EGG".to_string());
+        egg.status = None;
         egg.sleep_turns = 5;
         egg.happiness = 1;
         egg.original_trainer_name = "DAY_CARE".to_string();
@@ -887,6 +1114,7 @@ mod tests {
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
             Some(0x2a),
+            normal_overworld_context(),
             &mut rng,
         )
         .expect("overworld hatch");
@@ -937,6 +1165,7 @@ mod tests {
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
             Some(0x80),
+            normal_overworld_context(),
             &mut rng,
         )
         .expect_err("seven-bit caught location must be enforced");
@@ -965,6 +1194,7 @@ mod tests {
             &rules(),
             &crystal_growth_rate_catalog_for_tests(),
             None,
+            normal_overworld_context(),
             &mut rng,
         )
         .expect_err("hatch must not invent a caught landmark");

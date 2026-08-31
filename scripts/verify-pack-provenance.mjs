@@ -9,7 +9,7 @@ const lock = JSON.parse(readFileSync(resolve(root, "asm-source.lock.json"), "utf
 const provenance = JSON.parse(readFileSync(provenancePath, "utf8"));
 const packBytes = readFileSync(packPath);
 const digest = createHash("sha256").update(packBytes).digest("hex");
-const expectedPackFormat = 6;
+const expectedPackFormat = 12;
 const magic = Buffer.from("CRYSTALPACK\0", "ascii");
 const headerFormat = packBytes.length >= 14 ? packBytes.readUInt16BE(magic.length) : null;
 

@@ -90,7 +90,7 @@ describe("AudioEngine", () => {
 
   it("plays sounds immediately when allowed", async () => {
     const engine = new AudioEngine();
-    engine.loadSound("SFX_MENU", "/audio/sfx/menu.mp3");
+    engine.loadSound("SFX_MENU", "menu.pcm");
     engine.playSound("SFX_MENU");
     await flushPromises();
 
@@ -105,7 +105,7 @@ describe("AudioEngine", () => {
     playQueue.push(() => Promise.resolve());
 
     const engine = new AudioEngine();
-    engine.loadSound("SFX_MENU", "/audio/sfx/menu.mp3");
+    engine.loadSound("SFX_MENU", "menu.pcm");
     engine.playSound("SFX_MENU");
     await flushPromises();
 
@@ -126,7 +126,7 @@ describe("AudioEngine", () => {
     playQueue.push(() => Promise.resolve());
 
     const engine = new AudioEngine();
-    engine.loadSound("SFX_MENU", "/audio/sfx/menu.mp3");
+    engine.loadSound("SFX_MENU", "menu.pcm");
     engine.playSound("SFX_MENU", { panning: "left" });
     await flushPromises();
 
@@ -141,8 +141,8 @@ describe("AudioEngine", () => {
 
   it("resumes a suspended audio context before replaying paused music", async () => {
     const engine = new AudioEngine();
-    engine.loadSound("SFX_MENU", "/audio/sfx/menu.mp3");
-    engine.loadMusic("MUSIC_TEST", "/audio/music/test.mp3");
+    engine.loadSound("SFX_MENU", "menu.pcm");
+    engine.loadMusic("MUSIC_TEST", "test.pcm");
     engine.playSound("SFX_MENU", { panning: "left" });
     await flushPromises();
     engine.playMusic("MUSIC_TEST");
@@ -155,5 +155,18 @@ describe("AudioEngine", () => {
 
     expect(mockAudioContext?.resume).toHaveBeenCalledTimes(1);
     expect(audioInstances[1].play).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects alternate encoded audio sources at the public registration boundary", () => {
+    const engine = new AudioEngine();
+
+    for (const source of ["menu.mp3", "menu.wav", "menu.ogg", "menu.flac", "menu.mid"]) {
+      expect(() => engine.loadSound("SFX_MENU", source)).toThrow(
+        "must be raw PCM or a canonical",
+      );
+      expect(() => engine.loadMusic("MUSIC_TEST", source)).toThrow(
+        "must be raw PCM or a canonical",
+      );
+    }
   });
 });

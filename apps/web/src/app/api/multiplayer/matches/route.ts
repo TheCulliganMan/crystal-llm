@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { applyEloRating, DEFAULT_ARENA_ELO, type EloOutcome } from "@/arena/elo";
+import { DEFAULT_ARENA_ELO } from "@/arena/elo";
 import { createSupabaseServerClient, createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured, isSupabaseServiceRoleConfigured } from "@/lib/supabase/env";
-import type { Database, Json, Tables, TablesInsert, TablesUpdate } from "@/lib/supabase/types";
+import type { Database, Json, Tables, TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +19,7 @@ type CompleteMatchPayload = {
   channelName?: string;
   peerUserId?: string;
   mode?: MatchMode;
+  modpackId?: string;
   outcome?: MatchOutcome;
   metadata?: Record<string, Json>;
 };
@@ -93,78 +94,6 @@ const ensureProfile = async (
   return created as ArenaProfile;
 };
 
-const updateProfile = async (
-  supabase: NonNullable<ReturnType<typeof createSupabaseServiceRoleClient>>,
-  userId: string,
-  patch: TablesUpdate<"arena_profiles">,
-) => {
-  const { error } = await supabase.from("arena_profiles").update(patch).eq("id", userId);
-  if (error) {
-    throw new Error(error.message);
-  }
-};
-
-const resolveEloOutcome = (outcome: MatchOutcome): EloOutcome | null => {
-  if (outcome === "local") return "a";
-  if (outcome === "remote") return "b";
-  if (outcome === "draw") return "draw";
-  return null;
-};
-
-const applyRankedStats = async (
-  supabase: NonNullable<ReturnType<typeof createSupabaseServiceRoleClient>>,
-  localProfile: ArenaProfile,
-  peerProfile: ArenaProfile,
-  mode: MatchMode,
-  outcome: MatchOutcome,
-) => {
-  if (mode === "trade") {
-    if (outcome !== "cancelled") {
-      await Promise.all([
-        updateProfile(supabase, localProfile.id, {
-          total_trades: (localProfile.total_trades ?? 0) + 1,
-        }),
-        updateProfile(supabase, peerProfile.id, {
-          total_trades: (peerProfile.total_trades ?? 0) + 1,
-        }),
-      ]);
-    }
-    return null;
-  }
-
-  if (mode !== "battle") {
-    return null;
-  }
-
-  const eloOutcome = resolveEloOutcome(outcome);
-  if (!eloOutcome) {
-    return null;
-  }
-
-  const elo = applyEloRating(
-    localProfile.link_battle_rating ?? DEFAULT_ARENA_ELO,
-    peerProfile.link_battle_rating ?? DEFAULT_ARENA_ELO,
-    eloOutcome,
-  );
-
-  const localWon = outcome === "local";
-  const peerWon = outcome === "remote";
-  await Promise.all([
-    updateProfile(supabase, localProfile.id, {
-      link_battle_wins: (localProfile.link_battle_wins ?? 0) + (localWon ? 1 : 0),
-      link_battle_losses: (localProfile.link_battle_losses ?? 0) + (peerWon ? 1 : 0),
-      link_battle_rating: elo.nextRatingA,
-    }),
-    updateProfile(supabase, peerProfile.id, {
-      link_battle_wins: (peerProfile.link_battle_wins ?? 0) + (peerWon ? 1 : 0),
-      link_battle_losses: (peerProfile.link_battle_losses ?? 0) + (localWon ? 1 : 0),
-      link_battle_rating: elo.nextRatingB,
-    }),
-  ]);
-
-  return elo;
-};
-
 export async function GET(request: Request) {
   if (!isSupabaseServiceRoleConfigured()) {
     return jsonError(503, "Supabase service role is not configured.");
@@ -217,6 +146,7 @@ export async function POST(request: Request) {
   const channelName = readString(payload.channelName);
   const peerUserId = readString(payload.peerUserId);
   const mode = payload.mode;
+  const modpackId = readString(payload.modpackId) || "core-modular";
   const outcome = payload.outcome;
   if (!channelName) {
     return jsonError(400, "Missing channelName.");
@@ -232,93 +162,29 @@ export async function POST(request: Request) {
   }
 
   try {
-    const [localProfile, peerProfile] = await Promise.all([
+    await Promise.all([
       ensureProfile(supabase, user.id),
       ensureProfile(supabase, peerUserId),
     ]);
-    const { data: existing, error: existingError } = await supabase
-      .from("matches")
-      .select("id, status, player1_id, player2_id, started_at")
-      .eq("channel_name", channelName)
-      .maybeSingle();
-    if (existingError) {
-      throw new Error(existingError.message);
+    const { data: settlement, error: settlementError } = await supabase.rpc(
+      "report_multiplayer_match",
+      {
+        report_channel_name: channelName,
+        report_user_id: user.id,
+        report_peer_user_id: peerUserId,
+        report_mode: mode,
+        report_modpack_id: modpackId,
+        report_outcome: outcome,
+        report_metadata: readMetadata(payload.metadata),
+      },
+    );
+    if (settlementError) {
+      const lower = settlementError.message.toLowerCase();
+      const status = lower.includes("participants") ? 403 : lower.includes("mismatch") || lower.includes("conflict") ? 409 : 500;
+      return jsonError(status, settlementError.message);
     }
 
-    if (existing?.status === "completed") {
-      return NextResponse.json(
-        { ok: true, match: existing, duplicate: true },
-        { headers: noStoreHeaders },
-      );
-    }
-
-    const elo = await applyRankedStats(supabase, localProfile, peerProfile, mode, outcome);
-    const winner =
-      outcome === "local"
-        ? user.id
-        : outcome === "remote"
-          ? peerUserId
-          : null;
-    const now = new Date().toISOString();
-    const result: Record<string, Json> = {
-      outcome,
-      winner,
-      reported_by: user.id,
-      peer_user_id: peerUserId,
-      metadata: readMetadata(payload.metadata),
-    };
-    if (elo) {
-      result.rating = {
-        localBefore: elo.ratingA,
-        localAfter: elo.nextRatingA,
-        peerBefore: elo.ratingB,
-        peerAfter: elo.nextRatingB,
-      };
-    }
-
-    const matchPatch: TablesUpdate<"matches"> = {
-      status: outcome === "cancelled" ? "cancelled" : "completed",
-      result: result as Json,
-      completed_at: now,
-      started_at: existing?.started_at ?? now,
-    };
-
-    let match: Tables<"matches"> | null = null;
-    if (existing) {
-      const participantIds = [existing.player1_id, existing.player2_id];
-      if (!participantIds.includes(user.id) || !participantIds.includes(peerUserId)) {
-        return jsonError(403, "Only match participants can complete this match.");
-      }
-      const { data: updated, error: updateError } = await supabase
-        .from("matches")
-        .update(matchPatch)
-        .eq("id", existing.id)
-        .select("*")
-        .single();
-      if (updateError) {
-        throw new Error(updateError.message);
-      }
-      match = updated as Tables<"matches">;
-    } else {
-      const insertPayload: TablesInsert<"matches"> = {
-        player1_id: user.id,
-        player2_id: peerUserId,
-        mode,
-        channel_name: channelName,
-        ...matchPatch,
-      };
-      const { data: created, error: insertError } = await supabase
-        .from("matches")
-        .insert(insertPayload)
-        .select("*")
-        .single();
-      if (insertError) {
-        throw new Error(insertError.message);
-      }
-      match = created as Tables<"matches">;
-    }
-
-    return NextResponse.json({ ok: true, match, result }, { headers: noStoreHeaders });
+    return NextResponse.json({ ok: true, settlement }, { headers: noStoreHeaders });
   } catch (error) {
     return jsonError(500, error instanceof Error ? error.message : "Failed to complete match.");
   }

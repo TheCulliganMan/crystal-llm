@@ -19,7 +19,8 @@ export interface WebRTCMessage {
 export interface WebRTCConfig {
   matchId: string;
   isHost: boolean;
-  stunServers?: string[];
+  /** STUN and TURN servers. Production should include short-lived TURN credentials. */
+  iceServers?: RTCIceServer[];
 }
 
 function isSimplePeerSignalData(value: unknown): value is SimplePeer.SignalData {
@@ -45,6 +46,7 @@ export class WebRTCConnection {
   private realtimeManager: RealtimeManager;
   private isHost: boolean;
   private connected = false;
+  private initializationError: Error | null = null;
   private dataCallbacks: ((msg: WebRTCMessage) => void)[] = [];
   private statusCallbacks: {
     onConnect?: () => void;
@@ -70,7 +72,11 @@ export class WebRTCConnection {
     });
 
     // Initialize connection
-    this.init(config);
+    void this.init(config).catch((error: unknown) => {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.initializationError = normalized;
+      this.statusCallbacks.onError?.(normalized);
+    });
   }
 
   /**
@@ -80,9 +86,8 @@ export class WebRTCConnection {
     // Join Supabase Realtime channel for signaling
     await this.realtimeManager.joinMatchChannel(config.matchId);
 
-    // STUN servers for NAT traversal
-    const iceServers = config.stunServers
-      ? config.stunServers.map((url) => ({ urls: url }))
+    const iceServers = config.iceServers?.length
+      ? config.iceServers
       : [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
@@ -229,6 +234,9 @@ export class WebRTCConnection {
     onError?: (error: Error) => void;
   }): void {
     this.statusCallbacks = callbacks;
+    if (this.initializationError) {
+      callbacks.onError?.(this.initializationError);
+    }
   }
 
   /**

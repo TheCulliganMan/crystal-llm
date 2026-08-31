@@ -75,6 +75,7 @@ export type RoamingPokemon = z.infer<typeof RoamingPokemon>;
 
 export const ObjectEvent = z.object({
   sprite: z.string(),
+  sprite_has_facings: z.boolean(),
   x: z.number(),
   y: z.number(),
   spritemovedata: z.string(),

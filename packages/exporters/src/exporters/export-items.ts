@@ -236,7 +236,8 @@ const SPECIAL_ITEM_OVERRIDES: Record<number, ExportedItem> = {
   },
 };
 
-const ITEM_SLOT_COUNT = 0x100;
+const ITEM_ATTRIBUTE_SLOT_COUNT = 0x100;
+const ITEM_CATALOG_COUNT = 0xff;
 
 const EXACT_FIELD_USABLE_EFFECTS = new Set(["TOWN_MAP"]);
 
@@ -1025,15 +1026,17 @@ export function exportItems(): ExportedItem[] {
   const sacredAshPath = path.join(root, "engine", "events", "sacred_ash.asm");
   const itemEffectsPath = path.join(root, "engine", "items", "item_effects.asm");
   const attributes = parseAttributes(fs.readFileSync(attributesPath, "utf8"));
-  if (attributes.length !== ITEM_SLOT_COUNT) {
-    throw new Error(`Item attribute table must contain exactly ${ITEM_SLOT_COUNT} rows, found ${attributes.length}.`);
+  if (attributes.length !== ITEM_ATTRIBUTE_SLOT_COUNT) {
+    throw new Error(
+      `Item attribute table must contain exactly ${ITEM_ATTRIBUTE_SLOT_COUNT} rows, found ${attributes.length}.`,
+    );
   }
   const descriptionContent = fs.readFileSync(descriptionsPath, "utf8");
   const descriptions = parseDescriptions(descriptionContent);
   const descriptionPointers = parseDescriptionPointers(descriptionContent);
-  if (descriptionPointers.length !== ITEM_SLOT_COUNT - 1) {
+  if (descriptionPointers.length !== ITEM_CATALOG_COUNT) {
     throw new Error(
-      `Item description pointer table must contain exactly ${ITEM_SLOT_COUNT - 1} rows, found ${descriptionPointers.length}.`
+      `Item description pointer table must contain exactly ${ITEM_CATALOG_COUNT} rows, found ${descriptionPointers.length}.`,
     );
   }
   const asmConstants = parseAsmConstants(fs.readFileSync(battleConstantsPath, "utf8"));
@@ -1062,7 +1065,7 @@ export function exportItems(): ExportedItem[] {
   const rareCandyLevelGain = parseRareCandyLevelGain(itemEffectsContent);
   const items: ExportedItem[] = [];
 
-  for (let index = 0; index < ITEM_SLOT_COUNT; index += 1) {
+  for (let index = 0; index < ITEM_CATALOG_COUNT; index += 1) {
     const override = SPECIAL_ITEM_OVERRIDES[index];
     if (override) {
       items.push(override);
@@ -1080,7 +1083,7 @@ export function exportItems(): ExportedItem[] {
     }
     const descriptionLabel = descriptionPointers[index];
     const description = descriptionLabel ? descriptions[descriptionLabel] : "";
-    if (index < ITEM_SLOT_COUNT - 1 && description === undefined) {
+    if (description === undefined) {
       throw new Error(`missing item description label ${descriptionLabel} for item slot ${index}`);
     }
     const tmhmSymbol =

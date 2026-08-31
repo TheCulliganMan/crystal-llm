@@ -1,6 +1,5 @@
 export const GAME_CORNER_TABS = [
   { id: "slot-machine", label: "Game Corner" },
-  { id: "audio-generation", label: "Audio Generation" },
   { id: "arena-mcp-skill", label: "Arena MCP/Skill" },
   { id: "progress-tracker", label: "Progress Tracker" },
 ] as const;

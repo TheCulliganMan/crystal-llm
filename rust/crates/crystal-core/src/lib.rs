@@ -10,4 +10,5 @@ pub mod systems;
 pub mod timing;
 pub mod world;
 
+#[cfg(any(test, feature = "test-fixtures"))]
 pub use random::Random;

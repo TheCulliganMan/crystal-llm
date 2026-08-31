@@ -879,7 +879,7 @@
             audio: vec![
                 ModpackAudioAsset::music(
                     "MUSIC_DUPLICATE",
-                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                    "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                 )
                 .expect("valid base audio asset"),
             ],
@@ -891,7 +891,7 @@
                     "MUSIC_DUPLICATE".to_string(),
                     ModpackAudioAsset::music(
                         "MUSIC_DUPLICATE",
-                        "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                        "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                     )
                     .expect("valid manifest audio asset"),
                 )]
@@ -1288,7 +1288,7 @@
                     .collect(),
             ),
             audio: vec![
-                ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.mid")
+                ModpackAudioAsset::music("MUSIC_ROUTE_29", "mods/new/music/MUSIC_ROUTE_29.pcm")
                     .expect("music asset"),
             ],
             tilesets: [("johto".to_string(), test_tileset_definition())]
@@ -1539,6 +1539,8 @@
                             .collect(),
                         ),
                         water_rate: Some(15),
+                        swarm_overrides: BTreeMap::new(),
+                        zones: Vec::new(),
                         grass: Some(WildEncounterTable {
                             morning: vec![WildEncounter {
                                 level: 3,
@@ -1609,6 +1611,8 @@
                     map_name: "Start".to_string(),
                     grass_rates: None,
                     water_rate: None,
+                    swarm_overrides: BTreeMap::new(),
+                    zones: Vec::new(),
                     grass: Some(WildEncounterTable::default()),
                     water: Some(WildEncounterTable::default()),
                 },
@@ -1827,14 +1831,14 @@
     }
 
     #[test]
-    fn verifier_rejects_missing_midi_asset_files() {
+    fn verifier_rejects_missing_pcm_asset_files() {
         let data = GameDataSet {
             audio: vec![
                 ModpackAudioAsset::music(
                     "MUSIC_MISSING_THEME",
-                    "content-packs/test/music/MUSIC_MISSING_THEME.mid",
+                    "content-packs/test/music/MUSIC_MISSING_THEME.pcm",
                 )
-                .expect("valid MIDI asset shape"),
+                .expect("valid PCM asset shape"),
             ],
             ..GameDataSet::default()
         };
@@ -1856,12 +1860,12 @@
             audio: vec![
                 ModpackAudioAsset::music(
                     "MUSIC_DUPLICATE",
-                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                    "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                 )
                 .expect("valid music asset shape"),
                 ModpackAudioAsset::music(
                     "MUSIC_DUPLICATE",
-                    "content-packs/test/music/MUSIC_DUPLICATE.mid",
+                    "content-packs/test/music/MUSIC_DUPLICATE.pcm",
                 )
                 .expect("valid duplicate music asset shape"),
             ],
@@ -1885,36 +1889,42 @@
             audio: vec![
                 ModpackAudioAsset {
                     id: "MUSIC_BAD".to_string(),
-                    path: "content-packs/test/music/MUSIC_BAD.mid".to_string(),
+                    path: "content-packs/test/music/MUSIC_BAD.pcm".to_string(),
                     kind: ModpackAudioKind::Music,
                     source: ModpackAudioSource::Pcm,
+                    sfx_priority: None,
                     pcm_format: None,
                     pcm_frame_count: None,
                     payload_hash: None,
                     loop_start_sample: None,
                     loop_end_sample: None,
+                    midi_program: None,
                 },
                 ModpackAudioAsset {
                     id: "SFX_BAD".to_string(),
-                    path: "content-packs/test/sfx/SFX_BAD.mid".to_string(),
+                    path: "content-packs/test/sfx/SFX_BAD.pcm".to_string(),
                     kind: ModpackAudioKind::SoundEffect,
                     source: ModpackAudioSource::Pcm,
+                    sfx_priority: Some(0x41),
                     pcm_format: None,
                     pcm_frame_count: None,
                     payload_hash: None,
                     loop_start_sample: None,
                     loop_end_sample: None,
+                    midi_program: None,
                 },
                 ModpackAudioAsset {
                     id: "CRY_BAD".to_string(),
-                    path: "content-packs/test/cries/CRY_BAD.mid".to_string(),
+                    path: "content-packs/test/cries/CRY_BAD.pcm".to_string(),
                     kind: ModpackAudioKind::Cry,
                     source: ModpackAudioSource::Pcm,
+                    sfx_priority: None,
                     pcm_format: None,
                     pcm_frame_count: None,
                     payload_hash: None,
                     loop_start_sample: None,
                     loop_end_sample: None,
+                    midi_program: None,
                 },
             ],
             ..GameDataSet::default()
@@ -1944,15 +1954,15 @@
     }
 
     #[test]
-    fn verifier_rejects_invalid_midi_asset_bytes() {
-        let root = temp_test_path("invalid-midi-root");
-        let midi_path = root.join("apps/web/assets/data/content-packs/test/music/MUSIC_BAD.mid");
-        std::fs::create_dir_all(midi_path.parent().expect("midi parent")).expect("create midi dir");
-        std::fs::write(&midi_path, b"not midi").expect("write invalid midi");
+    fn verifier_rejects_invalid_pcm_asset_bytes() {
+        let root = temp_test_path("invalid-pcm-root");
+        let pcm_path = root.join("apps/web/assets/data/content-packs/test/music/MUSIC_BAD.pcm");
+        std::fs::create_dir_all(pcm_path.parent().expect("pcm parent")).expect("create pcm dir");
+        std::fs::write(&pcm_path, [0_u8, 1, 2]).expect("write partial PCM frame");
         let data = GameDataSet {
             audio: vec![
-                ModpackAudioAsset::music("MUSIC_BAD", "content-packs/test/music/MUSIC_BAD.mid")
-                    .expect("valid MIDI asset shape"),
+                ModpackAudioAsset::music("MUSIC_BAD", "content-packs/test/music/MUSIC_BAD.pcm")
+                    .expect("valid PCM asset shape"),
             ],
             ..GameDataSet::default()
         };
@@ -1960,7 +1970,7 @@
         let report = verify_game_data(&AssetRoot::new(&root), &data, &PlayabilityRules::default());
 
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_midi_file" && diagnostic.subject == "MUSIC_BAD"
+            diagnostic.code == "invalid_pcm_file" && diagnostic.subject == "MUSIC_BAD"
         }));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1978,8 +1988,8 @@
                     "content-packs/test/cries/CRY_EMPTY.pcm",
                     ModpackAudioKind::Cry,
                     ModpackPcmAudioFormat {
-                        sample_rate_hz: 32768,
-                        channels: 1,
+                        sample_rate_hz: 22_050,
+                        channels: 2,
                         bits_per_sample: 16,
                     },
                 )
@@ -2009,8 +2019,8 @@
                     "content-packs/test/cries/CRY_UNALIGNED.pcm",
                     ModpackAudioKind::Cry,
                     ModpackPcmAudioFormat {
-                        sample_rate_hz: 32768,
-                        channels: 1,
+                        sample_rate_hz: 22_050,
+                        channels: 2,
                         bits_per_sample: 16,
                     },
                 )
@@ -2026,7 +2036,7 @@
                 && diagnostic.subject == "CRY_UNALIGNED"
                 && diagnostic
                     .message
-                    .contains("not a whole number of 2-byte PCM frames")
+                    .contains("not a whole number of 4-byte PCM frames")
         }));
         let _ = std::fs::remove_dir_all(root);
     }
