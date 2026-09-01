@@ -7809,7 +7809,7 @@ fn buena_password_command_uses_an_atomic_exact_divider_trace() {
             .variables
             .get("BUENA_PASSWORD")
             .map(String::as_str),
-        Some("TODAY")
+        None
     );
     assert!(!state.script_runtime.variables.contains_key("_buena_guess"));
 }

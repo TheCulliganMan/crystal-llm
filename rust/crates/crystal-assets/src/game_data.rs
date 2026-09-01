@@ -190,6 +190,19 @@ fn runtime_game_timer_outcome(state: &GameState, counted: bool) -> RuntimeGameTi
     }
 }
 
+fn grass_rustle_duration_for_speed(speed_multiplier: u8) -> Result<u8> {
+    let source_step_duration = match speed_multiplier {
+        1 => 8_u8,
+        2 => 4_u8,
+        speed => anyhow::bail!(
+            "player grass step has unsupported source speed multiplier {speed}"
+        ),
+    };
+    source_step_duration
+        .checked_sub(2)
+        .context("player grass step is too short for same-frame tracking-object decrements")
+}
+
 fn crystal_days_since(previous_day: u8, current_day: u8) -> u8 {
     let (elapsed, borrowed) = current_day.overflowing_sub(previous_day);
     if borrowed {
@@ -928,45 +941,52 @@ impl GameDataSet {
         &self,
         state: &mut GameState,
         session: &OverworldSession,
-        object_id: &str,
     ) -> Result<bool> {
-        let object_tile = session
-            .object_runtime_tile_by_id(object_id)
-            .map_err(|error| {
-                anyhow::anyhow!("resolve pushed Strength boulder {object_id} runtime tile: {error}")
-            })?;
-        let landing_warp = session
-            .map_events
-            .warps
-            .iter()
-            .enumerate()
-            .find_map(|(index, warp)| {
-                (warp_tile_position_checked(warp) == Some(object_tile))
-                    .then_some((index + 1) as u16)
+        for object_id in session
+            .standing_strength_boulders_on_pits_checked()
+            .map_err(|error| anyhow::anyhow!("scan standing Strength boulders: {error}"))?
+        {
+            let object_tile = session
+                .object_runtime_tile_by_id(&object_id)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "resolve standing Strength boulder {object_id} runtime tile: {error}"
+                    )
+                })?;
+            let landing_warp = session
+                .map_events
+                .warps
+                .iter()
+                .enumerate()
+                .find_map(|(index, warp)| {
+                    (warp_tile_position_checked(warp) == Some(object_tile))
+                        .then_some((index + 1) as u16)
+                });
+            let Some(landing_warp) = landing_warp else {
+                continue;
+            };
+            let Some(entry) = state
+                .script_runtime
+                .stone_table_entries
+                .iter()
+                .find(|entry| entry.warp == landing_warp && entry.object_event == object_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if state.script_runtime.next_script.is_some() {
+                anyhow::bail!(
+                    "cannot queue Strength boulder landing script {} while another script is pending",
+                    entry.script
+                );
+            }
+            state.script_runtime.next_script = Some(ScriptLocation {
+                origin_map_name: session.map.name.clone(),
+                script: entry.script,
             });
-        let Some(landing_warp) = landing_warp else {
-            return Ok(false);
-        };
-        let Some(entry) = state
-            .script_runtime
-            .stone_table_entries
-            .iter()
-            .find(|entry| entry.warp == landing_warp && entry.object_event == object_id)
-            .cloned()
-        else {
-            return Ok(false);
-        };
-        if state.script_runtime.next_script.is_some() {
-            anyhow::bail!(
-                "cannot queue Strength boulder landing script {} while another script is pending",
-                entry.script
-            );
+            return Ok(true);
         }
-        state.script_runtime.next_script = Some(ScriptLocation {
-            origin_map_name: session.map.name.clone(),
-            script: entry.script,
-        });
-        Ok(true)
+        Ok(false)
     }
 
     /// Crystal creates a breeding egg from the mother's pre-evolution, not
@@ -3533,7 +3553,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
-        initialize_loaded_object_roster(session, state);
+        begin_map_object_setup(session, state);
         clear_transient_map_object_context(state, session);
         reset_map_bike_flags(state)?;
         // EnterMap arms wWildEncounterCooldown before running map setup.
@@ -3542,12 +3562,13 @@ impl GameDataSet {
         // transient OverworldSession.
         state.wild_encounter_cooldown = 5;
         self.complete_pending_script_warp(state, session)?;
-        self.apply_saved_overworld_overrides(session, state)?;
+        apply_state_block_overrides(session, state)?;
         let mode = self.map_entry_movement_mode(state, session, mode)?;
         session.player.mode = mode;
         self.sync_current_map_music(state, &request.target_map, mode, music_ids)?;
         self.sync_current_map_scene(state, &request.target_map)?;
         self.apply_map_setup_callbacks(state, session, &request.target_map, "MAPSETUP_WARP")?;
+        finish_map_object_setup(session)?;
         let callback_mode = self.map_entry_movement_mode(state, session, session.player.mode)?;
         if callback_mode != session.player.mode {
             session.player.mode = callback_mode;
@@ -4116,7 +4137,7 @@ impl GameDataSet {
                 next_state.script_runtime.pending_waterfall_field_move = Some(pending);
             }
         }
-        Self::apply_script_movement_effects_to_state(&mut next_state, &mut next_session, &outcome)?;
+        Self::apply_script_movement_effects_to_state(&mut next_state, &outcome)?;
         sync_state_object_overrides(&mut next_state, &next_session)
             .context("sync script movement object overrides")?;
         *state = next_state;
@@ -4145,19 +4166,12 @@ impl GameDataSet {
 
     fn apply_script_movement_effects_to_state(
         state: &mut GameState,
-        session: &mut OverworldSession,
         outcome: &ScriptMovementOutcome,
     ) -> Result<()> {
         for effect in &outcome.effects {
             match effect.command.as_str() {
                 "teleport_from" => state.script_runtime.teleport_from_queued = true,
                 "teleport_to" => state.script_runtime.teleport_from_queued = false,
-                "hide_object" | "remove_object" | "step_dig" => {
-                    Self::apply_script_movement_visibility_effect(state, session, outcome, true)?;
-                }
-                "show_object" | "return_dig" => {
-                    Self::apply_script_movement_visibility_effect(state, session, outcome, false)?;
-                }
                 "hide_emote" => {
                     state
                         .script_runtime
@@ -4167,64 +4181,6 @@ impl GameDataSet {
                 _ => {}
             }
         }
-        Ok(())
-    }
-
-    fn apply_script_movement_visibility_effect(
-        state: &mut GameState,
-        session: &mut OverworldSession,
-        outcome: &ScriptMovementOutcome,
-        hidden: bool,
-    ) -> Result<()> {
-        if outcome.object_id == "PLAYER" {
-            session.player_hidden = hidden;
-            return Ok(());
-        }
-        let object = session
-            .objects
-            .iter()
-            .find(|object| object.object_identifier.as_deref() == Some(outcome.object_id.as_str()))
-            .with_context(|| {
-                format!(
-                    "script movement {} references unknown object {}",
-                    outcome.movement, outcome.object_id
-                )
-            })?;
-        let event_flag = object.event_flag.clone();
-        if event_flag == "-1" {
-            session.clear_loaded_roster_visibility_override(&outcome.object_id);
-            if hidden {
-                session.shown_object_identifiers.remove(&outcome.object_id);
-                session
-                    .hidden_object_identifiers
-                    .insert(outcome.object_id.clone());
-            } else {
-                session.hidden_object_identifiers.remove(&outcome.object_id);
-                session
-                    .shown_object_identifiers
-                    .insert(outcome.object_id.clone());
-            }
-            return Ok(());
-        }
-        if !is_hideable_object_event_flag(&event_flag) {
-            anyhow::bail!(
-                "script movement {} cannot toggle object {} with event flag {}",
-                outcome.movement,
-                outcome.object_id,
-                event_flag
-            );
-        }
-        state
-            .flags
-            .set_event_flag(&event_flag, hidden)
-            .with_context(|| {
-                format!(
-                    "script movement {} toggles object {} event flag {}",
-                    outcome.movement, outcome.object_id, event_flag
-                )
-            })?;
-        session.sync_event_flag_memory(&state.flags);
-        session.clear_loaded_roster_visibility_override(&outcome.object_id);
         Ok(())
     }
 
@@ -6923,7 +6879,10 @@ impl GameDataSet {
             RuntimeMutationCommand::ApplyOverworldInput(command) => {
                 let mut next_state = state.clone();
                 let mut next_session = session.clone();
-                next_session.set_time_of_day(next_state.time.time_of_day);
+                next_session.set_time(
+                    next_state.time.registers.hours,
+                    next_state.time.time_of_day,
+                );
                 let mut divider = ReplayDivider::new(command.divider_trace.samples.iter().copied());
                 let frame = self.apply_overworld_input(
                     &mut next_state,
@@ -11133,7 +11092,7 @@ impl GameDataSet {
                 )
             }
         };
-        session.set_time_of_day(state.time.time_of_day);
+        session.set_time(state.time.registers.hours, state.time.time_of_day);
         session.sync_event_flag_memory(&state.flags);
         let result_tag = result.result_tag();
         // The loaded state is validated at runtime-shell construction and
@@ -11802,7 +11761,7 @@ impl GameDataSet {
             mode.traversal_state(),
         )?;
         session.player.mode = mode;
-        initialize_loaded_object_roster(session, state);
+        begin_map_object_setup(session, state);
         if let Some((facing, last_step_direction)) = connection_movement {
             // ASM EnterMapConnection updates wMapGroup/wMapNumber, the
             // coordinates, and wOverworldMapAnchor in place. Unlike a warp,
@@ -11829,13 +11788,14 @@ impl GameDataSet {
                 .set_engine_flag("STATUSFLAGS_FLASH", false)
                 .map_err(|error| anyhow::anyhow!("reset FLASH on outdoor map entry: {error}"))?;
         }
-        self.apply_saved_overworld_overrides(session, state)?;
+        apply_state_block_overrides(session, state)?;
         let mode = self.map_entry_movement_mode(state, session, mode)?;
         session.player.mode = mode;
         self.sync_current_map_music(state, destination_map, mode, music_ids)?;
         self.sync_current_map_scene(state, destination_map)?;
         self.init_map_name_sign(state, destination_map)?;
         self.apply_map_setup_callbacks(state, session, destination_map, map_setup)?;
+        finish_map_object_setup(session)?;
         let callback_mode = self.map_entry_movement_mode(state, session, session.player.mode)?;
         if callback_mode != session.player.mode {
             session.player.mode = callback_mode;
@@ -11869,7 +11829,7 @@ impl GameDataSet {
         let spawn_tile = runtime_spawn_expected_tile(spawn);
         let mut overworld = self.overworld_session(&spawn.map_name, spawn_tile, 0)?;
         self.initialize_new_game_state(&mut state)?;
-        initialize_loaded_object_roster(&mut overworld, &state);
+        begin_map_object_setup(&mut overworld, &state);
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
@@ -11882,12 +11842,13 @@ impl GameDataSet {
         self.sync_current_map_scene(&mut state, &map_name)?;
         self.init_map_name_sign(&mut state, &map_name)?;
         self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_WARP")?;
+        finish_map_object_setup(&mut overworld)?;
         self.commit_overworld_snapshot(
             &mut state,
             &overworld,
             SpawnMemoryUpdate::Set(spawn.identifier),
         );
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         Ok((state, overworld))
     }
 
@@ -11901,7 +11862,7 @@ impl GameDataSet {
         let mut overworld = self.overworld_session(map_name, tile, 0)?;
         let mut state = GameState::reset_wram_for_new_game();
         self.initialize_new_game_state(&mut state)?;
-        initialize_loaded_object_roster(&mut overworld, &state);
+        begin_map_object_setup(&mut overworld, &state);
         // The location tester may enter any map before ordinary story scripts
         // have first written that map's WRAM bytes. A real new game reaches
         // callbacks with cleared WRAM, so seed every exact readmem target used
@@ -11926,8 +11887,9 @@ impl GameDataSet {
         self.sync_current_map_scene(&mut state, &map_name)?;
         self.init_map_name_sign(&mut state, &map_name)?;
         self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_WARP")?;
+        finish_map_object_setup(&mut overworld)?;
         self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         Ok((state, overworld))
     }
 
@@ -12007,7 +11969,7 @@ impl GameDataSet {
         self.init_map_name_sign(&mut state, &map_name)?;
         self.apply_map_setup_callbacks(&mut state, &mut overworld, &map_name, "MAPSETUP_CONTINUE")?;
         self.commit_overworld_snapshot(&mut state, &overworld, SpawnMemoryUpdate::Preserve);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         if let Some(music) = state.script_runtime.current_music.as_deref() {
             core_validate_saved_audio_reference(
                 "state.script_runtime.current_music",
@@ -12043,6 +12005,8 @@ impl GameDataSet {
         // clones so every divider failure is atomic. A later VBlank/object
         // frame-kernel rewrite owns any journal-disabled idle optimization;
         // do not bypass staging while phone, encounter, or object RNG may run.
+        let strength_boulder_landing =
+            self.queue_strength_boulder_landing_script(&mut staged_state, &staged_session)?;
         let has_autonomous_objects = staged_session.objects.iter().any(|object| {
             matches!(
                 object.spritemovedata.as_str(),
@@ -12056,7 +12020,8 @@ impl GameDataSet {
                     | "SPRITEMOVEDATA_SPINRANDOM_FAST"
             )
         });
-        let input_locked = Self::game_state_blocks_overworld_input(&staged_state);
+        let input_locked = strength_boulder_landing
+            || Self::game_state_blocks_overworld_input(&staged_state);
         let bug_contest_blocks_phone = staged_state
             .flags
             .is_engine_flag_set("ENGINE_BUG_CONTEST_TIMER")
@@ -12124,6 +12089,7 @@ impl GameDataSet {
             && !staged_state.bug_contest.timer_active
             && !forced_tile_movement_pending
             && !downhill_movement_pending
+            && !staged_session.has_required_object_steps()
             && (input_locked || !has_autonomous_objects)
         {
             staged_state
@@ -12213,7 +12179,6 @@ impl GameDataSet {
         let mut interaction = None;
         let mut wild_encounter = None;
         let mut wild_battle = None;
-        let mut strength_boulder_landing = false;
 
         let overworld_input_locked =
             bug_contest_timed_out || Self::game_state_blocks_overworld_input(&staged_state);
@@ -12286,34 +12251,16 @@ impl GameDataSet {
                     .map_err(|error| anyhow::anyhow!("check active Strength flag: {error}"))?;
                 let can_jump_ledge = !direct_forced_step
                     && staged_session.can_jump_ledge_checked(direction, options)?;
-                let pushed_boulder = (strength_active && !direct_forced_step && !can_jump_ledge)
+                let _requested_boulder = (strength_active && !direct_forced_step && !can_jump_ledge)
                     .then(|| {
                         staged_session
-                            .push_strength_boulder_checked(direction, options)
+                            .request_strength_boulder_push_checked(direction, options)
                             .with_context(|| {
                                 format!("push Strength boulder on {}", staged_session.map.name)
                             })
                     })
                     .transpose()?
                     .flatten();
-                if let Some(object_id) = pushed_boulder {
-                    staged_state
-                        .script_runtime
-                        .audio_events
-                        .push(ScriptAudioRuntimeEvent {
-                            command: "playsound".to_string(),
-                            kind: ScriptAudioRuntimeKind::SoundEffect,
-                            audio_id: Some("SFX_STRENGTH".to_string()),
-                            fade_frames: None,
-                            source_script: "MovementFunction_Strength".to_string(),
-                            command_index: 0,
-                        });
-                    strength_boulder_landing = self.queue_strength_boulder_landing_script(
-                        &mut staged_state,
-                        &staged_session,
-                        &object_id,
-                    )?;
-                }
                 if direct_forced_step {
                     movement = Some(
                         staged_session
@@ -12475,12 +12422,10 @@ impl GameDataSet {
                     let grass_permission =
                         sample_collision(&staged_session.map, &staged_session.tileset, *to)
                             .map(|sample| sample.permission);
-                    if grass_permission
-                        .is_some_and(|permission| matches!(permission, 0x14 | 0x18 | 0x1c))
-                    {
+                    if grass_permission.is_some_and(spawns_shaking_grass_object) {
                         grass_rustle = Some(OverworldGrassRustle {
                             tile: *to,
-                            duration_frames: (8 / (*speed_multiplier).max(1)).max(1),
+                            duration_frames: grass_rustle_duration_for_speed(*speed_multiplier)?,
                         });
                     }
                 }
@@ -12549,7 +12494,7 @@ impl GameDataSet {
                                             && !events.egg_hatched
                                             && events.poison_result.is_none()
                                     });
-                                if count_step_completed && !strength_boulder_landing {
+                                if count_step_completed {
                                     wild_encounter = self.check_wild_encounter_after_step(
                                         &mut staged_state,
                                         &staged_session,
@@ -12617,7 +12562,7 @@ impl GameDataSet {
             };
         }
 
-        if !overworld_input_locked
+        if (!overworld_input_locked || staged_session.has_required_object_steps())
             && wild_battle.is_none()
             && phone_call.is_none()
             && warp.is_none()
@@ -12636,12 +12581,28 @@ impl GameDataSet {
                         | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
                 )
             });
-            if has_autonomous_object {
-                staged_session
-                    .advance_autonomous_objects_exact(&mut rng)
+            if has_autonomous_object || staged_session.has_required_object_steps() {
+                let object_advance = if overworld_input_locked {
+                    staged_session.advance_required_object_steps_exact(&mut rng)
+                } else {
+                    staged_session.advance_autonomous_objects_exact(&mut rng)
+                }
                     .map_err(|error| {
                         anyhow::anyhow!("advance autonomous overworld objects: {error}")
                     })?;
+                for _object_id in object_advance.started_strength_boulders {
+                    staged_state
+                        .script_runtime
+                        .audio_events
+                        .push(ScriptAudioRuntimeEvent {
+                            command: "playsound".to_string(),
+                            kind: ScriptAudioRuntimeKind::SoundEffect,
+                            audio_id: Some("SFX_STRENGTH".to_string()),
+                            fade_frames: None,
+                            source_script: "MovementFunction_Strength".to_string(),
+                            command_index: 0,
+                        });
+                }
             }
         }
 
@@ -13191,6 +13152,7 @@ impl GameDataSet {
             map_name,
             memory,
             |_| self.saved_map_tile_bounds(map_name),
+            |_| self.map_module(map_name).ok().map(|module| module.objects.len()),
             |object_id| self.map_declares_event_object(map_name, object_id),
         )
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -24806,6 +24768,19 @@ mod branching_callasm_host_service_tests {
                 .expect("resolve scoped gift name"),
             "SCOPED"
         );
+    }
+}
+
+#[cfg(test)]
+mod overworld_tracking_object_tests {
+    use super::*;
+
+    #[test]
+    fn grass_rustle_duration_matches_same_frame_tracking_object_decrements() {
+        assert_eq!(grass_rustle_duration_for_speed(1).unwrap(), 6);
+        assert_eq!(grass_rustle_duration_for_speed(2).unwrap(), 2);
+        assert!(grass_rustle_duration_for_speed(0).is_err());
+        assert!(grass_rustle_duration_for_speed(3).is_err());
     }
 }
 

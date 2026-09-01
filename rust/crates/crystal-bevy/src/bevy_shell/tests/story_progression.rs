@@ -25,14 +25,30 @@ fn seen_by_trainer_commits_the_approached_tile_to_raw_map_object_memory() {
         session.overworld.last_talked_object_identifier.as_deref(),
         Some(object_id)
     );
+    let map_object_index = session
+        .overworld
+        .objects
+        .iter()
+        .position(|object| object.object_identifier.as_deref() == Some(object_id))
+        .map(|index| u8::try_from(index + 1).expect("map-object index fits one byte"))
+        .expect("trainer map object");
+    let memory = session
+        .state
+        .map_object_overrides
+        .get("Route36")
+        .expect("Route36 current-map object image");
     assert_eq!(
-        session
-            .state
-            .map_object_overrides
-            .get("Route36")
-            .and_then(|memory| memory.objects.get(object_id))
-            .map(|object| (object.x, object.y, object.tile)),
-        Some((22, 13, Some(approached_tile)))
+        memory.objects.get(object_id).map(|object| (object.x, object.y)),
+        Some((22, 13))
+    );
+    assert_eq!(
+        memory
+            .object_structs
+            .structs
+            .iter()
+            .find(|object| object.map_object_index == map_object_index)
+            .map(|object| object.live_tile),
+        Some(approached_tile)
     );
 }
 
@@ -1533,6 +1549,13 @@ fn moms_coord_event_keeps_the_written_dialogue_in_the_textbox() {
 
 fn assert_rendered_field_dialogue_page(world: &mut World, expected_page: &str) {
     let expected_rows = expected_page.lines().collect::<Vec<_>>();
+    let prompt_arrow_key = {
+        let (x, y) = battle_hud_tile_origin(
+            FIELD_TEXT_BOX_LEFT_TILE + FIELD_TEXT_BOX_WIDTH_TILES - 2.0,
+            FIELD_TEXT_BOX_TOP_TILE + FIELD_TEXT_BOX_HEIGHT_TILES - 2.0,
+        );
+        dialog_glyph_key(x, y, 0)
+    };
     assert!(
         world
             .query_filtered::<Entity, With<SceneDialogTextBoxBackgroundMarker>>()
@@ -1541,7 +1564,7 @@ fn assert_rendered_field_dialogue_page(world: &mut World, expected_page: &str) {
             .is_some(),
         "the rendered frame has dialogue glyphs without the textbox surface"
     );
-    let expected = {
+    let mut expected = {
         let rendered_art = world.resource::<RenderedTilesetArt>();
         let font = rendered_art
             .font_cache
@@ -1594,9 +1617,9 @@ fn assert_rendered_field_dialogue_page(world: &mut World, expected_page: &str) {
                 .iter()
                 .any(|expected| (transform.translation.y - expected).abs() < f32::EPSILON)
         })
+        .filter(|(marker, _, _)| marker.key != prompt_arrow_key)
         .map(|(marker, texture, _)| (marker.key, format!("{:?}", texture.id())))
         .collect::<Vec<_>>();
-    let mut expected = expected;
     actual.sort();
     expected.sort();
     assert_eq!(

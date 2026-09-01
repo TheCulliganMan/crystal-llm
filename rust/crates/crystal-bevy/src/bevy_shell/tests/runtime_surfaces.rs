@@ -1365,6 +1365,7 @@ fn retained_field_fullscreen_ownership_distinguishes_new_game_and_capture_name_c
         },
         scripted_static_wild: None,
         default_name: "SUDOWOODO".to_string(),
+        prompt_for_nickname: true,
     });
     assert!(
         !retained_field_fullscreen_active(&runtime_shell),

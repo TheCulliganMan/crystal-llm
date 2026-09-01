@@ -878,6 +878,116 @@ fn route29_warp_transition_resolves_destination_from_pack_constants() {
 }
 
 #[test]
+fn vermilion_snorlax_uses_the_exported_big_object_footprint() {
+    let root = repository_root_for_tests();
+    let asset_root = AssetRoot::new(root);
+    let data = asset_root
+        .load_base_game_data()
+        .expect("load base game data");
+    let module = data
+        .map_module("VermilionCity")
+        .expect("assemble Vermilion City module");
+    let snorlax = module
+        .objects
+        .iter()
+        .find(|object| object.script == "VermilionSnorlax")
+        .expect("Vermilion Snorlax object");
+    assert_eq!(snorlax.x, 34);
+    assert_eq!(snorlax.y, 8);
+    assert_eq!(snorlax.spritemovedata, "SPRITEMOVEDATA_BIGDOLLSYM");
+
+    let map = data
+        .overworld_map("VermilionCity")
+        .expect("assemble Vermilion City map");
+    let tileset = asset_root
+        .load_tileset_collision(&module.attributes.tileset_name)
+        .expect("load Vermilion City tileset collision");
+    let mut session = OverworldSession::with_events_and_objects(
+        map,
+        module.events.clone(),
+        module.objects.clone(),
+        tileset,
+        TilePosition::new(36, 9),
+    );
+    session.player.facing = Direction::Left;
+
+    let interaction = session
+        .check_interaction_checked(StepOptions::default().stride_tiles)
+        .expect("checked interaction")
+        .expect("interact with the lower-right Snorlax tile");
+
+    assert_eq!(interaction.target_tile, TilePosition::new(35, 9));
+    assert_eq!(interaction.script, "VermilionSnorlax");
+    assert!(
+        session
+            .occupied_tiles()
+            .iter()
+            .any(|occupied| occupied.tile == TilePosition::new(35, 9))
+    );
+}
+
+#[test]
+fn exported_radius_one_walker_rejects_its_adjacent_asm_boundary() {
+    let root = repository_root_for_tests();
+    let asset_root = AssetRoot::new(root);
+    let data = asset_root
+        .load_base_game_data()
+        .expect("load base game data");
+    let module = data
+        .map_module("FuchsiaPokecenter1F")
+        .expect("assemble Fuchsia Pokémon Center module");
+    let walker = module
+        .objects
+        .iter()
+        .find(|object| object.script == "FuchsiaPokecenter1FCooltrainerMScript")
+        .expect("Fuchsia horizontal walker")
+        .clone();
+    assert_eq!(walker.spritemovedata, "SPRITEMOVEDATA_WALK_LEFT_RIGHT");
+    assert_eq!((walker.x, walker.y), (8, 4));
+    assert_eq!((walker.move_range_x, walker.move_range_y), (1, 0));
+
+    let map = data
+        .overworld_map("FuchsiaPokecenter1F")
+        .expect("assemble Fuchsia Pokémon Center map");
+    let tileset = asset_root
+        .load_tileset_collision(&module.attributes.tileset_name)
+        .expect("load Fuchsia Pokémon Center tileset collision");
+    assert_eq!(
+        describe_collision(
+            sample_collision(&map, &tileset, TilePosition::new(7, 4))
+                .expect("left target collision")
+                .permission
+        )
+        .terrain,
+        Terrain::Land
+    );
+    let mut session = OverworldSession::with_events_and_objects(
+        map,
+        MapEvents::default(),
+        vec![walker],
+        tileset,
+        TilePosition::new(6, 6),
+    );
+    let mut divider = ReplayDivider::new([0, 0, 0, 0]);
+    let mut rng = CrystalRandom::new(
+        crystal_core::random::CrystalRandomState::default(),
+        &mut divider,
+    );
+
+    session
+        .advance_autonomous_objects_exact(&mut rng)
+        .expect("source radius-one decision");
+
+    assert_eq!(
+        session
+            .object_runtime_tile_by_id("FUCHSIAPOKECENTER1F_COOLTRAINER_M")
+            .expect("loaded walker tile"),
+        TilePosition::new(8, 4)
+    );
+    assert_eq!(divider.remaining(), 0);
+}
+
+#[test]
 fn warp_transition_requires_declared_target_map_constant() {
     let root = repository_root_for_tests();
     let data = AssetRoot::new(root)

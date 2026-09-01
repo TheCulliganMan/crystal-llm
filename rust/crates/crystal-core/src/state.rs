@@ -30,7 +30,8 @@ use crate::timing::{Frame, wrapping_byte_counter_frames, wrapping_byte_counter_t
 use crate::world::map::{Direction, TilePosition};
 use crate::world::movement::MovementMode;
 use crate::world::session::{
-    OverworldSnapshot, raw_event_tile_to_runtime_tile_checked, runtime_tile_to_raw_event_tile,
+    OverworldObjectStructRosterMemory, OverworldSnapshot, raw_event_tile_to_runtime_tile_checked,
+    runtime_tile_to_raw_event_tile,
 };
 
 pub const PLAYER_NAME_LENGTH: usize = 8;
@@ -2011,7 +2012,9 @@ where
 #[serde(deny_unknown_fields)]
 pub struct OverworldObjectMapMemory {
     pub objects: BTreeMap<String, OverworldObjectMemory>,
+    pub object_structs: OverworldObjectStructRosterMemory,
     pub hidden_object_identifiers: BTreeSet<String>,
+    pub shown_object_identifiers: BTreeSet<String>,
     pub following: Option<OverworldFollowMemory>,
     pub last_talked_object_identifier: Option<String>,
     pub player_hidden: bool,
@@ -2026,7 +2029,9 @@ impl<'de> Deserialize<'de> for OverworldObjectMapMemory {
         #[serde(deny_unknown_fields)]
         struct RawOverworldObjectMapMemory {
             objects: BTreeMap<String, OverworldObjectMemory>,
+            object_structs: OverworldObjectStructRosterMemory,
             hidden_object_identifiers: BTreeSet<String>,
+            shown_object_identifiers: BTreeSet<String>,
             following: Option<OverworldFollowMemory>,
             last_talked_object_identifier: Option<String>,
             player_hidden: bool,
@@ -2035,7 +2040,9 @@ impl<'de> Deserialize<'de> for OverworldObjectMapMemory {
         let raw = RawOverworldObjectMapMemory::deserialize(deserializer)?;
         let memory = Self {
             objects: raw.objects,
+            object_structs: raw.object_structs,
             hidden_object_identifiers: raw.hidden_object_identifiers,
+            shown_object_identifiers: raw.shown_object_identifiers,
             following: raw.following,
             last_talked_object_identifier: raw.last_talked_object_identifier,
             player_hidden: raw.player_hidden,
@@ -2060,47 +2067,157 @@ impl OverworldObjectMapMemory {
                 &format!("map_object_overrides[{map_name}].hidden_object_identifiers"),
                 object_id,
             )?;
-            if self.objects.contains_key(object_id) {
+        }
+        for object_id in &self.shown_object_identifiers {
+            validate_script_runtime_token(
+                &format!("map_object_overrides[{map_name}].shown_object_identifiers"),
+                object_id,
+            )?;
+            if self.hidden_object_identifiers.contains(object_id) {
                 return Err(format!(
-                    "map_object_overrides[{map_name}] object {object_id} cannot be both overridden and hidden"
+                    "map_object_overrides[{map_name}] object {object_id} cannot be both hidden and shown"
                 ));
             }
+        }
+        let mut slots = BTreeSet::new();
+        let mut map_objects = BTreeSet::new();
+        let mut normal_follower_slot = self.object_structs.player_normal_following.then_some(0);
+        if self.object_structs.structs.len() > 12 {
+            return Err(format!(
+                "map_object_overrides[{map_name}].object_structs contains {} non-player structs; Crystal has 12 slots",
+                self.object_structs.structs.len()
+            ));
+        }
+        for object_struct in &self.object_structs.structs {
+            if !(1..=12).contains(&object_struct.slot) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} is outside 1..=12",
+                    object_struct.slot
+                ));
+            }
+            if !slots.insert(object_struct.slot) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs duplicates slot {}",
+                    object_struct.slot
+                ));
+            }
+            if !(1..=15).contains(&object_struct.map_object_index) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs map-object index {} is outside 1..=15",
+                    object_struct.map_object_index
+                ));
+            }
+            if !map_objects.insert(object_struct.map_object_index) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs duplicates map-object index {}",
+                    object_struct.map_object_index
+                ));
+            }
+            if object_struct.last_tile_occupied_remaining_frames != 0
+                && object_struct.last_tile.is_none()
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has a last-tile timer without a last tile",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.pending_random_wait && object_struct.step_duration.is_none() {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has pending random wait without a step duration",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.strength_push_direction.is_some() && object_struct.strength_moving {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has both pending and active Strength movement",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.strength_push_direction.is_some()
+                && object_struct.step_duration.is_some()
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has pending Strength movement while a step duration is active",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.strength_moving
+                && (!matches!(object_struct.step_duration, Some(1..=16))
+                    || object_struct.last_tile.is_none()
+                    || object_struct.last_tile_occupied_remaining_frames
+                        != object_struct
+                            .step_duration
+                            .expect("active Strength duration checked"))
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has invalid active Strength step/last-tile duration state",
+                    object_struct.slot
+                ));
+            }
+            if object_struct
+                .following_not_exact_leader_slot
+                .is_some_and(|slot| slot > 12)
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} has a follow-not-exact leader slot outside 0..=12",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.normal_following
+                && object_struct.following_not_exact_leader_slot.is_some()
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs slot {} cannot have both FOLLOWING and FOLLOWNOTEXACT movement types",
+                    object_struct.slot
+                ));
+            }
+            if object_struct.normal_following
+                && normal_follower_slot.replace(object_struct.slot).is_some()
+            {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs contains more than one FOLLOWING movement type"
+                ));
+            }
+        }
+        if self
+            .object_structs
+            .player_last_tile_occupied_remaining_frames
+            != 0
+            && self.object_structs.player_last_tile.is_none()
+        {
+            return Err(format!(
+                "map_object_overrides[{map_name}].object_structs has a player last-tile timer without a last tile"
+            ));
         }
         validate_optional_script_runtime_token(
             &format!("map_object_overrides[{map_name}].last_talked_object_identifier"),
             self.last_talked_object_identifier.as_deref(),
         )?;
         if let Some(following) = &self.following {
-            validate_script_runtime_token(
-                &format!("map_object_overrides[{map_name}].following.leader_object_id"),
-                &following.leader_object_id,
-            )?;
-            validate_script_runtime_token(
-                &format!("map_object_overrides[{map_name}].following.follower_object_id"),
-                &following.follower_object_id,
-            )?;
-            if following.leader_object_id == following.follower_object_id {
+            if following.leader_slot.is_none() && following.follower_slot.is_none() {
                 return Err(format!(
-                    "map_object_overrides[{map_name}].following leader and follower cannot both be {}",
-                    following.leader_object_id
+                    "map_object_overrides[{map_name}].following cannot have both slots absent"
                 ));
             }
-            if self
-                .hidden_object_identifiers
-                .contains(&following.leader_object_id)
-            {
+            if following.leader_slot.is_some_and(|slot| slot > 12) {
                 return Err(format!(
-                    "map_object_overrides[{map_name}].following leader {} cannot be hidden",
-                    following.leader_object_id
+                    "map_object_overrides[{map_name}].following leader slot is outside 0..=12"
                 ));
             }
-            if self
-                .hidden_object_identifiers
-                .contains(&following.follower_object_id)
-            {
+            if following.follower_slot.is_some_and(|slot| slot > 12) {
                 return Err(format!(
-                    "map_object_overrides[{map_name}].following follower {} cannot be hidden",
-                    following.follower_object_id
+                    "map_object_overrides[{map_name}].following follower slot is outside 0..=12"
+                ));
+            }
+        }
+        if let Some(movement_slot) = normal_follower_slot {
+            let follower_slot = self
+                .following
+                .as_ref()
+                .and_then(|follow| follow.follower_slot);
+            if follower_slot != Some(movement_slot) {
+                return Err(format!(
+                    "map_object_overrides[{map_name}].object_structs FOLLOWING movement slot {movement_slot} does not match follower byte {follower_slot:?}"
                 ));
             }
         }
@@ -2108,54 +2225,18 @@ impl OverworldObjectMapMemory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldObjectMemory {
     pub x: u16,
     pub y: u16,
-    pub tile: Option<TilePosition>,
-    pub facing: Option<Direction>,
-}
-
-impl<'de> Deserialize<'de> for OverworldObjectMemory {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawOverworldObjectMemory {
-            x: u16,
-            y: u16,
-            #[serde(deserialize_with = "required_nullable_tile_position")]
-            tile: Option<TilePosition>,
-            facing: Option<Direction>,
-        }
-
-        let raw = RawOverworldObjectMemory::deserialize(deserializer)?;
-        Ok(Self {
-            x: raw.x,
-            y: raw.y,
-            tile: raw.tile,
-            facing: raw.facing,
-        })
-    }
-}
-
-fn required_nullable_tile_position<'de, D>(
-    deserializer: D,
-) -> Result<Option<TilePosition>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<TilePosition>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldFollowMemory {
-    pub leader_object_id: String,
-    pub follower_object_id: String,
+    pub leader_slot: Option<u8>,
+    pub follower_slot: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3633,7 +3714,13 @@ impl ScriptRuntimeMemory {
             validate_script_runtime_token(&format!("variables[{key}]"), key)?;
         }
         for key in self.memory.keys() {
-            validate_script_runtime_token(&format!("memory[{key}]"), key)?;
+            // `memcall wCallerContact + PHONE_CONTACT_SCRIPT2_BANK` is one
+            // exact compiled ASM operand, not three independent WRAM keys.
+            // Retain that source expression verbatim while keeping every
+            // other memory key on the ordinary exact-token boundary.
+            if key != "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK" {
+                validate_script_runtime_token(&format!("memory[{key}]"), key)?;
+            }
         }
         for key in self.named_buffers.keys() {
             validate_script_runtime_token(&format!("named_buffers[{key}]"), key)?;
@@ -6226,12 +6313,22 @@ pub enum ObjectOverrideSaveError {
         width: u16,
         height: u16,
     },
+    #[error(
+        "saved map_object_overrides.object_structs {map_name} slot {slot} references map-object index {map_object_index}, but the compiled map has {object_count} events"
+    )]
+    MissingStructMapObject {
+        map_name: String,
+        slot: u8,
+        map_object_index: u8,
+        object_count: usize,
+    },
 }
 
 pub fn validate_saved_object_overrides(
     map_name: &str,
     memory: &OverworldObjectMapMemory,
     runtime_tile_bounds: impl FnOnce(&str) -> Option<(u16, u16)>,
+    map_object_count: impl FnOnce(&str) -> Option<usize>,
     mut object_exists: impl FnMut(&str) -> bool,
 ) -> Result<(), ObjectOverrideSaveError> {
     let Some((width, height)) = runtime_tile_bounds(map_name) else {
@@ -6239,6 +6336,10 @@ pub fn validate_saved_object_overrides(
             map_name: map_name.to_string(),
         });
     };
+    let object_count =
+        map_object_count(map_name).ok_or_else(|| ObjectOverrideSaveError::MissingMap {
+            map_name: map_name.to_string(),
+        })?;
     for (object_id, object_memory) in &memory.objects {
         validate_object_override_object(
             map_name,
@@ -6281,25 +6382,29 @@ pub fn validate_saved_object_overrides(
             &mut object_exists,
         )?;
     }
+    for object_id in &memory.shown_object_identifiers {
+        validate_object_override_object(
+            map_name,
+            "map_object_overrides.shown_object_identifiers",
+            object_id,
+            &mut object_exists,
+        )?;
+    }
+    for object_struct in &memory.object_structs.structs {
+        if usize::from(object_struct.map_object_index) > object_count {
+            return Err(ObjectOverrideSaveError::MissingStructMapObject {
+                map_name: map_name.to_string(),
+                slot: object_struct.slot,
+                map_object_index: object_struct.map_object_index,
+                object_count,
+            });
+        }
+    }
     if let Some(object_id) = &memory.last_talked_object_identifier {
         validate_object_override_object(
             map_name,
             "map_object_overrides.last_talked_object_identifier",
             object_id,
-            &mut object_exists,
-        )?;
-    }
-    if let Some(following) = &memory.following {
-        validate_object_override_actor(
-            map_name,
-            "map_object_overrides.following.leader_object_id",
-            &following.leader_object_id,
-            &mut object_exists,
-        )?;
-        validate_object_override_actor(
-            map_name,
-            "map_object_overrides.following.follower_object_id",
-            &following.follower_object_id,
             &mut object_exists,
         )?;
     }
@@ -6320,19 +6425,6 @@ fn validate_object_override_object(
             map_name: map_name.to_string(),
             object_id: object_id.to_string(),
         })
-    }
-}
-
-fn validate_object_override_actor(
-    map_name: &str,
-    path: &str,
-    object_id: &str,
-    object_exists: &mut impl FnMut(&str) -> bool,
-) -> Result<(), ObjectOverrideSaveError> {
-    if object_id == "PLAYER" {
-        Ok(())
-    } else {
-        validate_object_override_object(map_name, path, object_id, object_exists)
     }
 }
 
@@ -8854,6 +8946,24 @@ impl GameState {
             validate_script_runtime_token("map_object_overrides map", map_name)?;
             memory.validate_saved_state(map_name)?;
         }
+        if self.map_object_overrides.len() > 1 {
+            return Err(format!(
+                "map_object_overrides contains {} map images; Crystal saves exactly one current wMapObjects/wObjectStructs image",
+                self.map_object_overrides.len()
+            ));
+        }
+        if let Some(map_name) = self.map_object_overrides.keys().next() {
+            let Some((active_map, ..)) = self.overworld.snapshot_identity() else {
+                return Err(format!(
+                    "map_object_overrides current map {map_name} cannot be saved with inactive overworld"
+                ));
+            };
+            if active_map != map_name {
+                return Err(format!(
+                    "map_object_overrides current map {map_name} does not match active overworld map {active_map}"
+                ));
+            }
+        }
         self.link_session.validate_saved_state()?;
         let saved_combat_is_link = self
             .script_runtime
@@ -10896,22 +11006,35 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "LYRA".to_string(),
-                    OverworldObjectMemory {
-                        x: 1,
-                        y: 1,
-                        tile: Some(TilePosition::new(1, 1)),
-                        facing: None,
-                    },
+                    OverworldObjectMemory { x: 1, y: 1 },
                 )]),
                 hidden_object_identifiers: BTreeSet::from(["LYRA".to_string()]),
                 ..OverworldObjectMapMemory::default()
             },
         );
+        state.overworld = OverworldMemory::Active {
+            map_name: "Route29".to_string(),
+            tile: TilePosition::new(0, 0),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
+        assert_eq!(state.validate_saved_state(), Ok(()));
+
+        state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                following: Some(OverworldFollowMemory {
+                    leader_slot: None,
+                    follower_slot: None,
+                }),
+                ..OverworldObjectMapMemory::default()
+            },
+        );
         assert_eq!(
             state.validate_saved_state(),
             Err(
-                "map_object_overrides[Route29] object LYRA cannot be both overridden and hidden"
-                    .to_string()
+                "map_object_overrides[Route29].following cannot have both slots absent".to_string()
             )
         );
 
@@ -10920,8 +11043,8 @@ mod tests {
             "Route29".to_string(),
             OverworldObjectMapMemory {
                 following: Some(OverworldFollowMemory {
-                    leader_object_id: "PLAYER".to_string(),
-                    follower_object_id: "PLAYER".to_string(),
+                    leader_slot: Some(13),
+                    follower_slot: Some(1),
                 }),
                 ..OverworldObjectMapMemory::default()
             },
@@ -10929,8 +11052,7 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err(
-                "map_object_overrides[Route29].following leader and follower cannot both be PLAYER"
-                    .to_string()
+                "map_object_overrides[Route29].following leader slot is outside 0..=12".to_string()
             )
         );
 
@@ -10938,10 +11060,9 @@ mod tests {
         state.map_object_overrides.insert(
             "Route29".to_string(),
             OverworldObjectMapMemory {
-                hidden_object_identifiers: BTreeSet::from(["PLAYER".to_string()]),
                 following: Some(OverworldFollowMemory {
-                    leader_object_id: "PLAYER".to_string(),
-                    follower_object_id: "LYRA".to_string(),
+                    leader_slot: Some(0),
+                    follower_slot: Some(13),
                 }),
                 ..OverworldObjectMapMemory::default()
             },
@@ -10949,27 +11070,51 @@ mod tests {
         assert_eq!(
             state.validate_saved_state(),
             Err(
-                "map_object_overrides[Route29].following leader PLAYER cannot be hidden"
+                "map_object_overrides[Route29].following follower slot is outside 0..=12"
                     .to_string()
             )
         );
 
         state = GameState::default();
+        state
+            .map_object_overrides
+            .insert("Route29".to_string(), OverworldObjectMapMemory::default());
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides current map Route29 cannot be saved with inactive overworld"
+                    .to_string()
+            )
+        );
+
+        state.overworld = OverworldMemory::Active {
+            map_name: "NewBarkTown".to_string(),
+            tile: TilePosition::new(0, 0),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
+        assert_eq!(
+            state.validate_saved_state(),
+            Err(
+                "map_object_overrides current map Route29 does not match active overworld map NewBarkTown"
+                    .to_string()
+            )
+        );
+
+        state.overworld = OverworldMemory::Active {
+            map_name: "Route29".to_string(),
+            tile: TilePosition::new(0, 0),
+            facing: Direction::Down,
+            mode: MovementMode::Normal,
+        };
         state.map_object_overrides.insert(
-            "Route29".to_string(),
-            OverworldObjectMapMemory {
-                hidden_object_identifiers: BTreeSet::from(["LYRA".to_string()]),
-                following: Some(OverworldFollowMemory {
-                    leader_object_id: "PLAYER".to_string(),
-                    follower_object_id: "LYRA".to_string(),
-                }),
-                ..OverworldObjectMapMemory::default()
-            },
+            "NewBarkTown".to_string(),
+            OverworldObjectMapMemory::default(),
         );
         assert_eq!(
             state.validate_saved_state(),
             Err(
-                "map_object_overrides[Route29].following follower LYRA cannot be hidden"
+                "map_object_overrides contains 2 map images; Crystal saves exactly one current wMapObjects/wObjectStructs image"
                     .to_string()
             )
         );
@@ -11990,16 +12135,12 @@ mod tests {
                 &OverworldObjectMapMemory {
                     objects: BTreeMap::from([(
                         "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 10,
-                            y: 1,
-                            tile: Some(TilePosition::new(10, 1)),
-                            facing: None,
-                        },
+                        OverworldObjectMemory { x: 10, y: 1 },
                     )]),
                     ..OverworldObjectMapMemory::default()
                 },
                 |_| Some((10, 10)),
+                |_| Some(1),
                 |_| true,
             ),
             Err(ObjectOverrideSaveError::RuntimeTileOutOfBounds {
@@ -12019,70 +12160,99 @@ mod tests {
                 &OverworldObjectMapMemory {
                     objects: BTreeMap::from([(
                         "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 1,
-                            y: 0,
-                            tile: Some(TilePosition::new(1, 0)),
-                            facing: None,
-                        },
+                        OverworldObjectMemory { x: 1, y: 0 },
                     )]),
                     ..OverworldObjectMapMemory::default()
                 },
                 |_| Some((2, 2)),
+                |_| Some(1),
                 |_| true,
             ),
             Ok(())
         );
         assert_eq!(
             validate_saved_object_overrides(
-                "CherrygroveCity",
+                "Route29",
                 &OverworldObjectMapMemory {
-                    following: Some(OverworldFollowMemory {
-                        leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
-                        follower_object_id: "PLAYER".to_string(),
-                    }),
-                    ..OverworldObjectMapMemory::default()
+                    object_structs: OverworldObjectStructRosterMemory {
+                        structs: vec![crate::world::session::OverworldObjectStructMemory {
+                            slot: 1,
+                            map_object_index: 2,
+                            live_tile: TilePosition::new(1, 0),
+                            last_tile: None,
+                            initial_tile: TilePosition::new(1, 0),
+                            facing: Some(Direction::Down),
+                            step_duration: None,
+                            last_tile_occupied_remaining_frames: 0,
+                            pending_random_wait: false,
+                            initialized_fixed_spin: false,
+                            strength_push_direction: None,
+                            strength_moving: false,
+                            fixed_facing: false,
+                            sliding: false,
+                            visible: true,
+                            normal_following: false,
+                            following_not_exact_leader_slot: None,
+                        }],
+                        ..Default::default()
+                    },
+                    ..Default::default()
                 },
-                |_| Some((40, 18)),
-                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
+                |_| Some((2, 2)),
+                |_| Some(1),
+                |_| true,
             ),
-            Ok(())
-        );
-        assert_eq!(
-            validate_saved_object_overrides(
-                "CherrygroveCity",
-                &OverworldObjectMapMemory {
-                    following: Some(OverworldFollowMemory {
-                        leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
-                        follower_object_id: "MISSING_FOLLOWER".to_string(),
-                    }),
-                    ..OverworldObjectMapMemory::default()
-                },
-                |_| Some((40, 18)),
-                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
-            ),
-            Err(ObjectOverrideSaveError::MissingObject {
-                path: "map_object_overrides.following.follower_object_id".to_string(),
-                map_name: "CherrygroveCity".to_string(),
-                object_id: "MISSING_FOLLOWER".to_string(),
+            Err(ObjectOverrideSaveError::MissingStructMapObject {
+                map_name: "Route29".to_string(),
+                slot: 1,
+                map_object_index: 2,
+                object_count: 1,
             })
         );
         assert_eq!(
             validate_saved_object_overrides(
+                "CherrygroveCity",
+                &OverworldObjectMapMemory {
+                    following: Some(OverworldFollowMemory {
+                        leader_slot: Some(1),
+                        follower_slot: Some(0),
+                    }),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((40, 18)),
+                |_| Some(1),
+                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
+                "CherrygroveCity",
+                &OverworldObjectMapMemory {
+                    following: Some(OverworldFollowMemory {
+                        leader_slot: Some(1),
+                        follower_slot: Some(2),
+                    }),
+                    ..OverworldObjectMapMemory::default()
+                },
+                |_| Some((40, 18)),
+                |_| Some(1),
+                |object_id| object_id == "CHERRYGROVECITY_GRAMPS",
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_saved_object_overrides(
                 "Route29",
                 &OverworldObjectMapMemory {
                     objects: BTreeMap::from([(
                         "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 1,
-                            y: 0,
-                            tile: Some(TilePosition::new(-1, 9)),
-                            facing: None,
-                        },
+                        OverworldObjectMemory { x: 1, y: 0 },
                     )]),
                     ..OverworldObjectMapMemory::default()
                 },
                 |_| Some((2, 2)),
+                |_| Some(1),
                 |_| true,
             ),
             Ok(())
@@ -12093,16 +12263,12 @@ mod tests {
                 &OverworldObjectMapMemory {
                     objects: BTreeMap::from([(
                         "YOUNGSTER".to_string(),
-                        OverworldObjectMemory {
-                            x: 40_000,
-                            y: 1,
-                            tile: Some(TilePosition::new(0, 1)),
-                            facing: None,
-                        },
+                        OverworldObjectMemory { x: 40_000, y: 1 },
                     )]),
                     ..OverworldObjectMapMemory::default()
                 },
                 |_| Some((30_000, 10)),
+                |_| Some(1),
                 |_| true,
             ),
             Err(ObjectOverrideSaveError::CoordinateOutOfRange {
@@ -12930,6 +13096,13 @@ mod tests {
             runtime.validate(),
             Err("variables[VAR BAD] has invalid token 'VAR BAD'".to_string())
         );
+
+        runtime = ScriptRuntimeMemory::default();
+        runtime.memory.insert(
+            "wCallerContact + PHONE_CONTACT_SCRIPT2_BANK".to_string(),
+            "BillPhoneScript1".to_string(),
+        );
+        assert_eq!(runtime.validate(), Ok(()));
 
         runtime = ScriptRuntimeMemory::default();
         runtime
@@ -14920,7 +15093,7 @@ mod tests {
         assert_eq!(reloaded_handshake.link_session, handshake.link_session);
 
         let mut room = GameState::default();
-        room.link_session.link_mode = 2;
+        room.link_session.link_mode = LINK_MODE_COLOSSEUM;
         room.link_session.serial_connection_status = LinkSerialConnectionStatus::UsingExternalClock;
         let missing_stream_error = serde_json::from_value::<GameState>(
             serde_json::to_value(&room).expect("serialize active room without battle RNG stream"),
@@ -15227,49 +15400,28 @@ mod tests {
             "{overworld_memory_error}"
         );
 
-        let object_without_tile_error =
-            serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
-                "x": 1,
-                "y": 2,
-                "facing": null
-            }))
-            .expect_err("saved object memory must explicitly declare runtime tile")
-            .to_string();
-        assert!(
-            object_without_tile_error.contains("missing field `tile`"),
-            "{object_without_tile_error}"
-        );
-
         assert_eq!(
             serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
                 "x": 1,
-                "y": 2,
-                "tile": null,
-                "facing": null
+                "y": 2
             }))
-            .expect("explicit null tile is authoritative raw-coordinate memory"),
-            OverworldObjectMemory {
-                x: 1,
-                y: 2,
-                tile: None,
-                facing: None,
-            }
+            .expect("map-object memory contains only the map-record coordinates"),
+            OverworldObjectMemory { x: 1, y: 2 }
         );
 
-        assert_eq!(
+        let object_struct_field_error =
             serde_json::from_value::<OverworldObjectMemory>(serde_json::json!({
                 "x": 1,
                 "y": 2,
                 "tile": { "x": -1, "y": 9 },
                 "facing": "left"
             }))
-            .expect("signed object runtime tile is saveable"),
-            OverworldObjectMemory {
-                x: 1,
-                y: 2,
-                tile: Some(TilePosition::new(-1, 9)),
-                facing: Some(Direction::Left),
-            }
+            .expect_err("live object-struct fields cannot leak into map-object records")
+            .to_string();
+        assert!(
+            object_struct_field_error.contains("unknown field `tile`")
+                || object_struct_field_error.contains("unknown field `facing`"),
+            "{object_struct_field_error}"
         );
 
         let text_speed_error =

@@ -4061,8 +4061,23 @@ fn initialize_loaded_object_roster(session: &mut OverworldSession, state: &GameS
     // Crystal builds the map-object roster once from the current time and
     // event flags when entering a map. Later flag mutations deliberately keep
     // that loaded roster until an explicit object command or another entry.
-    session.set_time_of_day(state.time.time_of_day);
+    session.set_time(state.time.registers.hours, state.time.time_of_day);
     session.sync_event_flag_memory(&state.flags);
+}
+
+fn begin_map_object_setup(session: &mut OverworldSession, state: &GameState) {
+    // `LoadMapObjects` runs MAPCALLBACK_OBJECTS before
+    // InitializeVisibleSprites. Install the entry-time mask inputs first, but
+    // leave ordinary events unallocated while callbacks mutate map-object
+    // memory. Callback-time `appear` remains able to reserve a slot directly.
+    initialize_loaded_object_roster(session, state);
+    session.begin_map_object_setup();
+}
+
+fn finish_map_object_setup(session: &mut OverworldSession) -> Result<()> {
+    session
+        .finish_map_object_setup()
+        .map_err(|error| anyhow::anyhow!("initialize visible map objects: {error}"))
 }
 
 fn reset_map_bike_flags(state: &mut GameState) -> Result<()> {

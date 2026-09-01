@@ -2212,6 +2212,12 @@ fn runtime_save_rejects_invalid_overworld_and_map_override_references() {
     ));
 
     let mut state = GameState::default();
+    state.overworld = OverworldMemory::Active {
+        map_name: "RuntimeMap".to_string(),
+        tile: TilePosition::new(0, 0),
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     state.map_object_overrides.insert(
         "RuntimeMap".to_string(),
         OverworldObjectMapMemory {
@@ -2220,8 +2226,6 @@ fn runtime_save_rejects_invalid_overworld_and_map_override_references() {
                 OverworldObjectMemory {
                     x: 0,
                     y: 0,
-                    tile: Some(TilePosition::new(0, 0)),
-                    facing: None,
                 },
             )]),
             ..OverworldObjectMapMemory::default()
@@ -2234,6 +2238,12 @@ fn runtime_save_rejects_invalid_overworld_and_map_override_references() {
     assert!(error.contains("saved map_object_overrides.objects MissingObject is missing"));
 
     let mut state = GameState::default();
+    state.overworld = OverworldMemory::Active {
+        map_name: "RuntimeMap".to_string(),
+        tile: TilePosition::new(0, 0),
+        facing: Direction::Down,
+        mode: MovementMode::Normal,
+    };
     state.map_object_overrides.insert(
         "RuntimeMap".to_string(),
         OverworldObjectMapMemory {
@@ -2242,8 +2252,6 @@ fn runtime_save_rejects_invalid_overworld_and_map_override_references() {
                 OverworldObjectMemory {
                     x: 10,
                     y: 0,
-                    tile: Some(TilePosition::new(10, 0)),
-                    facing: None,
                 },
             )]),
             ..OverworldObjectMapMemory::default()

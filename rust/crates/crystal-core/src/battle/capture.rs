@@ -1080,11 +1080,6 @@ pub fn complete_active_wild_capture_result_with_transformed_replacement(
         state.pokedex.record_caught_pokemon(&contest_pokemon);
         if state.bug_contest.caught_mon.is_some() {
             state.bug_contest.pending_caught_mon = Some(contest_pokemon.clone());
-            state.script_runtime.text_window_open = true;
-            state.script_runtime.pending_yes_no = Some(crate::state::ScriptYesNoPrompt {
-                source_script: "BugContestSetCaughtContestMon".to_string(),
-                command_index: 0,
-            });
         } else {
             state.bug_contest.caught_mon = Some(contest_pokemon.clone());
         }
@@ -2527,6 +2522,41 @@ mod tests {
         assert_eq!(state.battle_result, 0);
         assert_eq!(state.battle, BattleMemory::Inactive);
         assert!(state.storage.party.pokemon.iter().all(Option::is_none));
+
+        let replacement = pokemon("PINSIR", 255, 12, 1, 18);
+        state.battle = BattleMemory::Wild {
+            battle_type: "BATTLETYPE_CONTEST".to_string(),
+            battle_music: "MUSIC_BUG_CATCHING_CONTEST".to_string(),
+            map_name: "NATIONAL_PARK_BUG_CONTEST".to_string(),
+            roaming_slot: None,
+            enemy_pokemon: replacement,
+            enemy_party: Vec::new(),
+        };
+        state.battle_active_party_index = Some(0);
+        state.battle_active_enemy_party_index = Some(0);
+        complete_active_wild_capture_result(&mut state, &outcome)
+            .expect("stage second Bug Contest capture");
+        assert_eq!(
+            state
+                .bug_contest
+                .caught_mon
+                .as_ref()
+                .map(|pokemon| pokemon.species.id.as_str()),
+            Some("SCYTHER")
+        );
+        assert_eq!(
+            state
+                .bug_contest
+                .pending_caught_mon
+                .as_ref()
+                .map(|pokemon| pokemon.species.id.as_str()),
+            Some("PINSIR")
+        );
+        assert!(
+            state.script_runtime.pending_yes_no.is_none(),
+            "special-routine Contest choice must not invent a compiled-script continuation"
+        );
+        assert!(!state.script_runtime.text_window_open);
     }
 
     #[test]

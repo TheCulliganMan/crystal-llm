@@ -1264,17 +1264,65 @@ pub fn apply_script_movement(
     let previous_hidden = if object_id == "PLAYER" {
         session.player_hidden
     } else {
-        session.hidden_object_identifiers.contains(&object_id)
+        session
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+            .is_some_and(|index| !session.object_struct_is_visible(index))
     };
+    if object_id != "PLAYER" {
+        let object_index = session
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+            .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
+                object_id: object_id.clone(),
+            })?;
+        if !session.object_has_loaded_struct(object_index) {
+            let fixed_facing = session.fixed_facing_object_identifiers.contains(&object_id);
+            let sliding = session.sliding_object_identifiers.contains(&object_id);
+            return Ok(ScriptMovementOutcome {
+                object_id,
+                movement: movement.label.clone(),
+                previous_tile,
+                previous_facing: facing,
+                previous_hidden,
+                previous_follower: None,
+                tile,
+                facing,
+                executed_steps: Vec::new(),
+                effects: Vec::new(),
+                fixed_facing,
+                sliding,
+                steps_applied: 0,
+            });
+        }
+    }
+    // LoadMovementDataPointer installs STEP_TYPE_RESET before scripted
+    // movement begins. The flags2 BOULDER_MOVING bit is independent and is
+    // deliberately retained, but an in-flight Strength step no longer owns
+    // its duration or previous-coordinate collision.
+    session.reset_object_step_type_for_script_movement(&object_id);
+    let follow_queue_active = session.following.as_ref().is_some_and(|following| {
+        session
+            .object_struct_slot(&object_id)
+            .is_some_and(|object_struct_slot| {
+                following.leader_slot == Some(object_struct_slot)
+                    && following.follower_slot.is_some()
+            })
+            && session.normal_follow_object_ids().is_some()
+    });
     let previous_follower = session
         .following
         .as_ref()
-        .filter(|following| following.leader_object_id == object_id)
-        .map(|following| {
+        .filter(|_| follow_queue_active)
+        .and_then(|following| following.follower_slot)
+        .and_then(|slot| session.object_id_for_struct_slot(slot))
+        .map(|follower_object_id| {
             Ok(ScriptMovementFollower {
-                object_id: following.follower_object_id.clone(),
-                tile: object_tile(session, &following.follower_object_id)?,
-                facing: object_facing(session, &following.follower_object_id)?,
+                tile: object_tile(session, &follower_object_id)?,
+                facing: object_facing(session, &follower_object_id)?,
+                object_id: follower_object_id,
                 queued_step: session.following_queued_step,
             })
         })
@@ -1316,6 +1364,7 @@ pub fn apply_script_movement(
     let mut executed_steps = Vec::new();
     let mut effects = Vec::new();
     let mut last_movement_step = None;
+    let mut player_path = Vec::new();
 
     for step in &movement.steps {
         match step.command.as_str() {
@@ -1396,7 +1445,7 @@ pub fn apply_script_movement(
                     );
                     follower_facing = Some(queued_direction);
                 }
-                if previous_follower.is_some() {
+                if follow_queue_active {
                     queued_follower_step = Some((
                         direction,
                         stride,
@@ -1415,6 +1464,9 @@ pub fn apply_script_movement(
                         y: tile.y,
                     }
                 })?;
+                if object_id == "PLAYER" {
+                    player_path.push(tile);
+                }
                 last_movement_step = Some((from_tile, tile));
                 steps_applied += 1;
             }
@@ -1458,6 +1510,18 @@ pub fn apply_script_movement(
         validate_follow_after_script_movement(session, &object_id, previous_tile)?;
     }
 
+    if object_id == "PLAYER" {
+        session
+            .advance_object_struct_roster_along_player_path(&player_path)
+            .map_err(|error| match error {
+                crate::world::session::OverworldObjectCoordinateError::OutOfRange {
+                    object_id,
+                    x,
+                    y,
+                } => ScriptObjectCommandError::ObjectCoordinatesOutOfRange { object_id, x, y },
+            })?;
+    }
+
     set_object_tile(session, &object_id, tile)?;
     set_object_facing(session, &object_id, facing)?;
     if fixed_facing {
@@ -1477,6 +1541,17 @@ pub fn apply_script_movement(
     {
         set_object_tile(session, &follower.object_id, tile)?;
         set_object_facing(session, &follower.object_id, facing)?;
+        session.following_queued_step =
+            queued_follower_step.map(|(direction, stride, duration, jump, standing_frame)| {
+                FollowQueuedStep {
+                    direction,
+                    stride,
+                    duration,
+                    jump,
+                    standing_frame,
+                }
+            });
+    } else if follow_queue_active {
         session.following_queued_step =
             queued_follower_step.map(|(direction, stride, duration, jump, standing_frame)| {
                 FollowQueuedStep {
@@ -1590,10 +1665,11 @@ fn script_movement_step_issue_error(
 
 fn apply_movement_step_effect(session: &mut OverworldSession, object_id: &str, command: &str) {
     match command {
-        "remove_object" | "hide_object" | "step_dig" => {
-            set_movement_object_hidden(session, object_id, true)
+        "remove_object" => {
+            session.delete_loaded_object_struct_for_movement_remove(object_id);
         }
-        "show_object" | "return_dig" => set_movement_object_hidden(session, object_id, false),
+        "hide_object" => set_movement_object_hidden(session, object_id, true),
+        "show_object" => set_movement_object_hidden(session, object_id, false),
         _ => {}
     }
 }
@@ -1601,18 +1677,8 @@ fn apply_movement_step_effect(session: &mut OverworldSession, object_id: &str, c
 fn set_movement_object_hidden(session: &mut OverworldSession, object_id: &str, hidden: bool) {
     if object_id == "PLAYER" {
         session.player_hidden = hidden;
-    } else if hidden {
-        session.clear_loaded_roster_visibility_override(object_id);
-        session.shown_object_identifiers.remove(object_id);
-        session
-            .hidden_object_identifiers
-            .insert(object_id.to_string());
     } else {
-        session.clear_loaded_roster_visibility_override(object_id);
-        session.hidden_object_identifiers.remove(object_id);
-        session
-            .shown_object_identifiers
-            .insert(object_id.to_string());
+        session.set_loaded_object_struct_invisible(object_id, hidden);
     }
 }
 
@@ -1624,6 +1690,9 @@ fn apply_visibility_command(
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
     let object_id = required_object_id(session, command)?;
     if object_id == "PLAYER" {
+        if hidden {
+            session.stop_follow_for_deleted_object_struct("PLAYER");
+        }
         session.player_hidden = hidden;
         return Ok(ScriptObjectMutationOutcome {
             command: command.command.clone(),
@@ -1670,6 +1739,22 @@ fn apply_visibility_command(
             session.hidden_object_identifiers.remove(&object_id);
             session.shown_object_identifiers.insert(object_id.clone());
         }
+    }
+
+    if hidden {
+        session.delete_loaded_object_struct_for_disappear(&object_id);
+    } else {
+        session
+            .copy_object_struct_for_appear(&object_id)
+            .map_err(|error| match error {
+                crate::world::session::OverworldObjectCoordinateError::OutOfRange {
+                    x, y, ..
+                } => ScriptObjectCommandError::ObjectCoordinatesOutOfRange {
+                    object_id: object_id.clone(),
+                    x,
+                    y,
+                },
+            })?;
     }
 
     Ok(ScriptObjectMutationOutcome {
@@ -1812,6 +1897,42 @@ fn apply_follow_command(
     let follower_object_id = required_target_object_id(session, command)?;
     validate_object_reference(session, &leader_object_id)?;
     validate_object_reference(session, &follower_object_id)?;
+    let Some(leader_slot) = session.object_struct_slot(&leader_object_id) else {
+        return Ok(ScriptObjectMutationOutcome {
+            command: command.command.clone(),
+            object_id: leader_object_id,
+            event_flag: None,
+            previous_x: None,
+            previous_y: None,
+            x: None,
+            y: None,
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+    };
+    let follower_slot = session.object_struct_slot(&follower_object_id);
+    session.reset_normal_follower_movement();
+    session.following = Some(OverworldFollowState {
+        leader_slot: Some(leader_slot),
+        follower_slot,
+    });
+    if follower_slot.is_none() {
+        session.following_queued_step = None;
+        return Ok(ScriptObjectMutationOutcome {
+            command: command.command.clone(),
+            object_id: leader_object_id,
+            event_flag: None,
+            previous_x: None,
+            previous_y: None,
+            x: None,
+            y: None,
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+    }
+    session.set_normal_follower_movement(
+        follower_slot.expect("loaded follower slot checked before queue initialization"),
+    );
     let leader_tile = object_tile(session, &leader_object_id)?;
     let follower_tile = object_tile(session, &follower_object_id)?;
     let initial_direction = direction_toward(follower_tile, leader_tile);
@@ -1822,10 +1943,6 @@ fn apply_follow_command(
     if follower_object_id != "PLAYER" {
         set_object_tile(session, &follower_object_id, follower_tile)?;
     }
-    session.following = Some(OverworldFollowState {
-        leader_object_id: leader_object_id.clone(),
-        follower_object_id: follower_object_id.clone(),
-    });
     session.following_queued_step = initial_direction.map(|direction| FollowQueuedStep {
         direction,
         stride: SCRIPT_MOVEMENT_EVENT_TILE_STRIDE,
@@ -1851,6 +1968,7 @@ fn apply_stopfollow_command(
     session: &mut OverworldSession,
     command: &ScriptObjectCommand,
 ) -> Result<ScriptObjectMutationOutcome, ScriptObjectCommandError> {
+    session.reset_normal_follower_movement();
     session.following = None;
     session.following_queued_step = None;
     Ok(ScriptObjectMutationOutcome {
@@ -1874,6 +1992,24 @@ fn apply_follownotexact_command(
     let follower_object_id = required_target_object_id(session, command)?;
     validate_object_reference(session, &leader_object_id)?;
     validate_object_reference(session, &follower_object_id)?;
+    if !object_is_visible(session, &leader_object_id)?
+        || !object_is_visible(session, &follower_object_id)?
+    {
+        return Ok(ScriptObjectMutationOutcome {
+            command: command.command.clone(),
+            object_id: follower_object_id,
+            event_flag: None,
+            previous_x: None,
+            previous_y: None,
+            x: None,
+            y: None,
+            source_script: command.source_script.clone(),
+            command_index: command.command_index,
+        });
+    }
+    let leader_slot = session
+        .object_struct_slot(&leader_object_id)
+        .expect("a visible script object has an allocated object struct");
     let leader_tile = object_tile(session, &leader_object_id)?;
     let previous_follower_tile = object_tile(session, &follower_object_id)?;
     let follower_tile = direction_toward(previous_follower_tile, leader_tile)
@@ -1888,10 +2024,25 @@ fn apply_follownotexact_command(
     set_object_tile(session, &follower_object_id, follower_tile)?;
     session
         .following_not_exact
-        .insert(follower_object_id.clone(), leader_object_id.clone());
+        .insert(follower_object_id.clone(), leader_slot);
+    session
+        .normal_following_object_identifiers
+        .remove(&follower_object_id);
     session.object_step_durations.remove(&follower_object_id);
     session
+        .strength_moving_object_identifiers
+        .remove(&follower_object_id);
+    session
         .object_pending_random_wait
+        .remove(&follower_object_id);
+    session
+        .initialized_fixed_spin_objects
+        .remove(&follower_object_id);
+    session
+        .object_last_runtime_tiles
+        .insert(follower_object_id.clone(), follower_tile);
+    session
+        .object_last_tiles_occupied_until_frame
         .remove(&follower_object_id);
 
     Ok(ScriptObjectMutationOutcome {
@@ -1967,25 +2118,36 @@ fn apply_moveobject_command(
         .ok_or_else(|| ScriptObjectCommandError::MissingMoveCoordinates {
             object_id: object_id.clone(),
         })?;
-    if !session
+    let object_index = session
         .objects
         .iter()
-        .find(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
-        .is_some()
-    {
-        return Err(ScriptObjectCommandError::UnknownObject {
+        .position(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
+        .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
             object_id: object_id.clone(),
-        });
+        })?;
+    require_moveobject_runtime_tile(session, &object_id, x, y)?;
+    let live_tile = session
+        .object_runtime_tile_checked(object_index, &session.objects[object_index])
+        .map_err(|error| match error {
+            crate::world::session::OverworldObjectCoordinateError::OutOfRange { x, y, .. } => {
+                ScriptObjectCommandError::ObjectCoordinatesOutOfRange {
+                    object_id: object_id.clone(),
+                    x,
+                    y,
+                }
+            }
+        })?;
+    let previous_x = session.objects[object_index].x;
+    let previous_y = session.objects[object_index].y;
+    if session.object_has_loaded_struct(object_index) {
+        session
+            .object_runtime_tiles
+            .insert(object_id.clone(), live_tile);
+    } else {
+        session.object_runtime_tiles.remove(&object_id);
     }
-    let tile = require_moveobject_runtime_tile(session, &object_id, x, y)?;
-    let object = session
-        .objects
-        .iter()
-        .find(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
-        .expect("object existence checked before coordinate validation");
-    let previous_x = object.x;
-    let previous_y = object.y;
-    set_object_tile(session, &object_id, tile)?;
+    session.objects[object_index].x = x;
+    session.objects[object_index].y = y;
 
     Ok(ScriptObjectMutationOutcome {
         command: command.command.clone(),
@@ -2020,7 +2182,7 @@ pub fn apply_writeobjectxy_command(
             .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
                 object_id: object_id.clone(),
             })?;
-        if !session.is_object_visible(&session.objects[object_index]) {
+        if !session.object_has_loaded_struct(object_index) {
             return Ok(writeobjectxy_noop_outcome(command, object_id));
         }
         (
@@ -2148,21 +2310,31 @@ fn validate_follow_after_script_movement(
     let Some(following) = session.following.as_ref() else {
         return Ok(());
     };
-    if following.leader_object_id != moved_object_id {
+    if session.object_struct_slot(moved_object_id) != following.leader_slot {
         return Ok(());
     }
-    if following.follower_object_id == "PLAYER" {
+    let Some(follower_slot) = following.follower_slot else {
+        return Ok(());
+    };
+    let Some(follower_object_id) = session.object_id_for_struct_slot(follower_slot) else {
+        return Ok(());
+    };
+    if !session
+        .normal_following_object_identifiers
+        .contains(&follower_object_id)
+    {
+        return Ok(());
+    }
+    if follower_object_id == "PLAYER" {
         return Ok(());
     }
     session
         .objects
         .iter()
-        .any(|object| {
-            object.object_identifier.as_deref() == Some(following.follower_object_id.as_str())
-        })
+        .any(|object| object.object_identifier.as_deref() == Some(follower_object_id.as_str()))
         .then_some(())
         .ok_or_else(|| ScriptObjectCommandError::FollowObjectMissing {
-            object_id: following.follower_object_id.clone(),
+            object_id: follower_object_id,
         })
 }
 
@@ -2488,14 +2660,15 @@ fn object_is_visible(
     if object_id == "PLAYER" {
         return Ok(!session.player_hidden);
     }
-    let object = session
+    let (index, _) = session
         .objects
         .iter()
-        .find(|object| object.object_identifier.as_deref() == Some(object_id))
+        .enumerate()
+        .find(|(_, object)| object.object_identifier.as_deref() == Some(object_id))
         .ok_or_else(|| ScriptObjectCommandError::UnknownObject {
             object_id: object_id.to_string(),
         })?;
-    Ok(session.is_object_visible(object))
+    Ok(session.object_has_loaded_struct(index))
 }
 
 fn object_has_facings(
@@ -2737,6 +2910,59 @@ mod tests {
     }
 
     #[test]
+    fn applymovement_resets_an_active_strength_step_but_retains_the_push_flag() {
+        let mut boulder = object("BOULDER", "-1", 4, 4);
+        boulder.spritemovedata = "SPRITEMOVEDATA_STRENGTH_BOULDER".to_string();
+        let mut session = session(vec![boulder]);
+        session
+            .object_runtime_tiles
+            .insert("BOULDER".to_string(), TilePosition::new(5, 4));
+        session
+            .object_last_runtime_tiles
+            .insert("BOULDER".to_string(), TilePosition::new(4, 4));
+        session
+            .object_last_tiles_occupied_until_frame
+            .insert("BOULDER".to_string(), session.frame + 6);
+        session
+            .object_step_durations
+            .insert("BOULDER".to_string(), 6);
+        session
+            .strength_moving_object_identifiers
+            .insert("BOULDER".to_string());
+        session
+            .strength_boulder_push_directions
+            .insert("BOULDER".to_string(), Direction::Right);
+
+        apply_test_movement(&mut session, "BOULDER", "MoveBoulder", &["RIGHT"]);
+
+        assert_eq!(
+            session.object_runtime_tiles.get("BOULDER"),
+            Some(&TilePosition::new(6, 4))
+        );
+        assert_eq!(
+            session.object_last_runtime_tiles.get("BOULDER"),
+            Some(&TilePosition::new(5, 4)),
+            "STEP_TYPE_RESET copies the live coordinate before scripted movement"
+        );
+        assert!(!session.object_step_durations.contains_key("BOULDER"));
+        assert!(
+            !session
+                .strength_moving_object_identifiers
+                .contains("BOULDER")
+        );
+        assert!(
+            !session
+                .object_last_tiles_occupied_until_frame
+                .contains_key("BOULDER")
+        );
+        assert_eq!(
+            session.strength_boulder_push_directions.get("BOULDER"),
+            Some(&Direction::Right),
+            "LoadMovementDataPointer does not clear the flags2 BOULDER_MOVING bit"
+        );
+    }
+
+    #[test]
     fn session_initializes_object_facing_from_exact_movement_data() {
         let mut down = object("DOWN_OBJECT", "EVENT_DOWN", 1, 1);
         down.spritemovedata = "SPRITEMOVEDATA_STANDING_DOWN".to_string();
@@ -2895,19 +3121,17 @@ mod tests {
     }
 
     #[test]
-    fn writeobjectxy_returns_without_reading_coordinates_when_object_is_not_visible() {
+    fn writeobjectxy_returns_without_reading_coordinates_when_object_struct_is_unloaded() {
         let mut state = GameState::default();
         let mut session = session(vec![object("HIDDEN_TRAINER", "-1", 2, 3)]);
-        session
-            .hidden_object_identifiers
-            .insert("HIDDEN_TRAINER".to_string());
+        session.delete_loaded_object_struct("HIDDEN_TRAINER");
         session
             .object_runtime_tiles
             .insert("HIDDEN_TRAINER".to_string(), TilePosition::new(-1, -1));
         let command = command("writeobjectxy", "HIDDEN_TRAINER");
 
         let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
-            .expect("invisible writeobjectxy returns like CheckObjectVisibility carry");
+            .expect("unloaded writeobjectxy returns like CheckObjectVisibility carry");
 
         assert_eq!((outcome.previous_x, outcome.previous_y), (None, None));
         assert_eq!((outcome.x, outcome.y), (None, None));
@@ -2924,6 +3148,61 @@ mod tests {
         assert_eq!(script_movement_step_runtime_stride("step"), Some(1));
         assert_eq!(script_movement_step_runtime_stride("jump_step"), Some(2));
         assert_eq!(script_movement_step_runtime_stride("turn_head"), None);
+    }
+
+    #[test]
+    fn scripted_player_path_loads_each_newly_exposed_object_struct_edge() {
+        let mut session = session(vec![object("ELM", "-1", 3, 4)]);
+        session
+            .advance_object_struct_roster_along_player_path(&[TilePosition::new(4, 11)])
+            .expect("fixture object coordinates");
+        assert!(!session.object_has_loaded_struct(0));
+        let mut command = command("applymovement", "PLAYER");
+        command.movement = Some("WalkUpToElm".to_string());
+        let movement = ScriptMovement {
+            label: "WalkUpToElm".to_string(),
+            source_script: None,
+            steps: (0..7)
+                .map(|index| ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("UP".to_string()),
+                    duration: None,
+                    index,
+                })
+                .collect(),
+        };
+
+        apply_script_movement(&mut session, &command, &movement)
+            .expect("scripted player path applies");
+
+        assert_eq!(session.player.tile, TilePosition::new(4, 4));
+        assert!(session.object_has_loaded_struct(0));
+    }
+
+    #[test]
+    fn applymovement_returns_without_running_for_unloaded_map_object() {
+        let mut session = session(vec![object("OFFSCREEN_NPC", "-1", 20, 0)]);
+        assert!(!session.object_has_loaded_struct(0));
+        let mut command = command("applymovement", "OFFSCREEN_NPC");
+        command.movement = Some("OffscreenMovement".to_string());
+        let movement = ScriptMovement {
+            label: "OffscreenMovement".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "step".to_string(),
+                direction: Some("LEFT".to_string()),
+                duration: None,
+                index: 0,
+            }],
+        };
+
+        let outcome = apply_script_movement(&mut session, &command, &movement)
+            .expect("GetMovementData carry returns without starting movement");
+
+        assert_eq!(outcome.previous_tile, TilePosition::new(20, 0));
+        assert_eq!(outcome.tile, TilePosition::new(20, 0));
+        assert_eq!(outcome.steps_applied, 0);
+        assert!(outcome.executed_steps.is_empty());
     }
 
     #[test]
@@ -3251,6 +3530,7 @@ mod tests {
             2,
             3,
         )]);
+        assert!(session.object_has_loaded_struct(0));
 
         let disappear = apply_script_object_mutation(
             &mut state,
@@ -3269,6 +3549,7 @@ mod tests {
             Ok(true)
         );
         assert!(!session.is_object_visible(&session.objects[0]));
+        assert!(!session.object_has_loaded_struct(0));
 
         apply_script_object_mutation(
             &mut state,
@@ -3283,6 +3564,34 @@ mod tests {
             Ok(false)
         );
         assert!(session.is_object_visible(&session.objects[0]));
+        assert!(session.object_has_loaded_struct(0));
+    }
+
+    #[test]
+    fn appear_copies_an_offscreen_map_event_into_an_available_object_struct() {
+        let mut state = GameState::default();
+        state
+            .flags
+            .set_event_flag("EVENT_OFFSCREEN_OBJECT", true)
+            .expect("hide fixture map event");
+        let mut session = session(vec![object(
+            "OFFSCREEN_OBJECT",
+            "EVENT_OFFSCREEN_OBJECT",
+            20,
+            0,
+        )]);
+        session.sync_event_flag_memory(&state.flags);
+        assert!(!session.object_has_loaded_struct(0));
+
+        apply_script_object_mutation(
+            &mut state,
+            &mut session,
+            &command("appear", "OFFSCREEN_OBJECT"),
+        )
+        .expect("appear copies map object regardless of viewport");
+
+        assert!(session.is_object_visible(&session.objects[0]));
+        assert!(session.object_has_loaded_struct(0));
     }
 
     #[test]
@@ -3429,7 +3738,7 @@ mod tests {
     }
 
     #[test]
-    fn moveobject_updates_exact_raw_event_coordinates() {
+    fn moveobject_updates_map_memory_without_teleporting_loaded_object_struct() {
         let mut state = GameState::default();
         let mut session = session(vec![object(
             "INDIGOPLATEAUPOKECENTER1F_RIVAL",
@@ -3446,11 +3755,31 @@ mod tests {
 
         assert_eq!((outcome.previous_x, outcome.previous_y), (Some(1), Some(1)));
         assert_eq!((outcome.x, outcome.y), (Some(7), Some(5)));
+        assert_eq!((session.objects[0].x, session.objects[0].y), (7, 5));
         assert_eq!(
             session
                 .object_runtime_tiles
                 .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
-            Some(&TilePosition::new(7, 5))
+            Some(&TilePosition::new(1, 1))
+        );
+
+        apply_script_object_mutation(
+            &mut state,
+            &mut session,
+            &command("disappear", "INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+        )
+        .expect("disappear deletes the old live object struct");
+        apply_script_object_mutation(
+            &mut state,
+            &mut session,
+            &command("appear", "INDIGOPLATEAUPOKECENTER1F_RIVAL"),
+        )
+        .expect("appear copies the updated map-object coordinates");
+        assert_eq!(
+            session
+                .object_runtime_tile_by_id("INDIGOPLATEAUPOKECENTER1F_RIVAL")
+                .expect("reloaded live object coordinate"),
+            TilePosition::new(7, 5)
         );
     }
 
@@ -3540,11 +3869,12 @@ mod tests {
 
         apply_script_object_mutation(&mut state, &mut session, &moveobject)
             .expect("raw moveobject coordinates inside current map must apply");
+        assert_eq!((session.objects[0].x, session.objects[0].y), (8, 4));
         assert_eq!(
             session
                 .object_runtime_tiles
                 .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
-            Some(&TilePosition::new(8, 4))
+            Some(&TilePosition::new(1, 1))
         );
     }
 
@@ -3628,6 +3958,9 @@ mod tests {
             7,
             4,
         )]);
+        session
+            .copy_object_struct_for_appear("ECRUTEAKPOKECENTER1F_BILL")
+            .expect("allocate movement fixture");
         let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
         movement_command.movement = Some("MovesOutOfMap".to_string());
         let movement = ScriptMovement {
@@ -3661,11 +3994,119 @@ mod tests {
         );
         assert_eq!((session.objects[0].x, session.objects[0].y), (7, 4));
         assert_eq!(outcome.steps_applied, 2);
+        assert!(!session.object_struct_is_visible(0));
+    }
+
+    #[test]
+    fn movement_remove_object_deletes_only_the_object_struct_not_the_map_event() {
+        let object = object("TRANSIENT_REMOVAL", "-1", 1, 1);
+        let mut session = session(vec![object.clone()]);
+        let mut movement_command = command("applymovement", "TRANSIENT_REMOVAL");
+        movement_command.movement = Some("RemoveStruct".to_string());
+        let movement = ScriptMovement {
+            label: "RemoveStruct".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "remove_object".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }],
+        };
+
+        apply_script_movement(&mut session, &movement_command, &movement)
+            .expect("remove object movement applies");
+
+        assert!(!session.object_has_loaded_struct(0));
+        assert!(
+            session.is_object_visible(&object),
+            "Movement_remove_object leaves the map object unmasked"
+        );
         assert!(
             session
-                .hidden_object_identifiers
-                .contains("ECRUTEAKPOKECENTER1F_BILL")
+                .copy_object_struct_for_appear("TRANSIENT_REMOVAL")
+                .expect("the retained map object can be copied again")
         );
+        assert!(session.object_has_loaded_struct(0));
+    }
+
+    #[test]
+    fn deleting_an_object_struct_discards_transient_movement_flags() {
+        let mut session = session(vec![object("TRANSIENT_FLAGS", "-1", 1, 1)]);
+        let mut movement_command = command("applymovement", "TRANSIENT_FLAGS");
+        movement_command.movement = Some("SetTransientFlags".to_string());
+        let movement = ScriptMovement {
+            label: "SetTransientFlags".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "fix_facing".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "set_sliding".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+                ScriptMovementStep {
+                    command: "hide_object".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 2,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 3,
+                },
+            ],
+        };
+
+        apply_script_movement(&mut session, &movement_command, &movement)
+            .expect("transient flag movement applies");
+        session
+            .following_not_exact
+            .insert("TRANSIENT_FLAGS".to_string(), 0);
+        assert!(
+            session
+                .fixed_facing_object_identifiers
+                .contains("TRANSIENT_FLAGS")
+        );
+        assert!(
+            session
+                .sliding_object_identifiers
+                .contains("TRANSIENT_FLAGS")
+        );
+        assert!(!session.object_struct_is_visible(0));
+
+        session.delete_loaded_object_struct("TRANSIENT_FLAGS");
+
+        assert!(
+            !session
+                .fixed_facing_object_identifiers
+                .contains("TRANSIENT_FLAGS")
+        );
+        assert!(
+            !session
+                .sliding_object_identifiers
+                .contains("TRANSIENT_FLAGS")
+        );
+        assert!(
+            !session
+                .hidden_object_identifiers
+                .contains("TRANSIENT_FLAGS")
+        );
+        assert!(!session.following_not_exact.contains_key("TRANSIENT_FLAGS"));
+        assert!(
+            session
+                .copy_object_struct_for_appear("TRANSIENT_FLAGS")
+                .expect("map object can be copied after transient struct deletion")
+        );
+        assert!(session.object_struct_is_visible(0));
     }
 
     #[test]
@@ -3676,6 +4117,9 @@ mod tests {
             i16::MAX as u16,
             0,
         )]);
+        session
+            .copy_object_struct_for_appear("ECRUTEAKPOKECENTER1F_BILL")
+            .expect("allocate movement fixture");
         let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
         movement_command.movement = Some("MovesPastRuntimeLimit".to_string());
         let movement = ScriptMovement {
@@ -3722,7 +4166,7 @@ mod tests {
     }
 
     #[test]
-    fn applymovement_rejects_missing_follower_without_moving_leader_or_effects() {
+    fn applymovement_with_empty_follower_slot_moves_leader_and_retains_the_queue() {
         let mut session = session(vec![object(
             "ECRUTEAKPOKECENTER1F_BILL",
             "EVENT_BILL_IN_ECRUTEAK",
@@ -3730,8 +4174,8 @@ mod tests {
             4,
         )]);
         session.following = Some(OverworldFollowState {
-            leader_object_id: "ECRUTEAKPOKECENTER1F_BILL".to_string(),
-            follower_object_id: "MISSING_FOLLOWER".to_string(),
+            leader_slot: Some(1),
+            follower_slot: Some(12),
         });
         let mut movement_command = command("applymovement", "ECRUTEAKPOKECENTER1F_BILL");
         movement_command.movement = Some("MoveWithFollower".to_string());
@@ -3754,20 +4198,22 @@ mod tests {
             ],
         };
 
-        let error = apply_script_movement(&mut session, &movement_command, &movement)
-            .expect_err("missing follower must reject script movement");
+        apply_script_movement(&mut session, &movement_command, &movement)
+            .expect("an empty referenced struct slot does not reject leader movement");
 
-        assert_eq!(
-            error,
-            ScriptObjectCommandError::UnknownObject {
-                object_id: "MISSING_FOLLOWER".to_string(),
-            }
-        );
         assert_eq!((session.objects[0].x, session.objects[0].y), (4, 4));
+        assert_eq!(
+            object_tile(&session, "ECRUTEAKPOKECENTER1F_BILL").unwrap(),
+            TilePosition::new(5, 4)
+        );
         assert!(
-            !session
-                .hidden_object_identifiers
+            session
+                .invisible_object_struct_identifiers
                 .contains("ECRUTEAKPOKECENTER1F_BILL")
+        );
+        assert_eq!(
+            session.following_queued_step.map(|step| step.direction),
+            Some(Direction::Right)
         );
     }
 
@@ -3921,8 +4367,8 @@ mod tests {
         assert_eq!(
             session.following,
             Some(OverworldFollowState {
-                leader_object_id: "BATTLETOWER1F_RECEPTIONIST".to_string(),
-                follower_object_id: "PLAYER".to_string(),
+                leader_slot: Some(1),
+                follower_slot: Some(0),
             })
         );
 
@@ -3972,11 +4418,326 @@ mod tests {
     }
 
     #[test]
+    fn follow_preserves_partial_slot_writes_from_visibility_checks() {
+        let mut state = GameState::default();
+        let mut leader_missing = session(vec![object("LEADER", "-1", 4, 4)]);
+        leader_missing.delete_loaded_object_struct("LEADER");
+        leader_missing.following = Some(OverworldFollowState {
+            leader_slot: Some(7),
+            follower_slot: Some(0),
+        });
+        let mut follow = command("follow", "LEADER");
+        follow.target_object_id = Some("PLAYER".to_string());
+        apply_script_object_mutation(&mut state, &mut leader_missing, &follow)
+            .expect("missing leader is a successful no-op");
+        assert_eq!(
+            leader_missing.following,
+            Some(OverworldFollowState {
+                leader_slot: Some(7),
+                follower_slot: Some(0),
+            })
+        );
+
+        let mut follower_missing = session(vec![
+            object("LEADER", "-1", 4, 4),
+            object("FOLLOWER", "-1", 5, 4),
+        ]);
+        follower_missing.delete_loaded_object_struct("FOLLOWER");
+        let mut follow = command("follow", "LEADER");
+        follow.target_object_id = Some("FOLLOWER".to_string());
+        apply_script_object_mutation(&mut state, &mut follower_missing, &follow)
+            .expect("missing follower retains the newly written leader slot");
+        assert_eq!(
+            follower_missing.following,
+            Some(OverworldFollowState {
+                leader_slot: Some(1),
+                follower_slot: None,
+            })
+        );
+    }
+
+    #[test]
+    fn follow_replaces_and_stopfollow_resets_the_follower_movement_phase() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("LEADER", "-1", 4, 4),
+            object("OLD_FOLLOWER", "-1", 5, 4),
+            object("NEW_FOLLOWER", "-1", 6, 4),
+        ]);
+        session.following = Some(OverworldFollowState {
+            leader_slot: Some(1),
+            follower_slot: Some(2),
+        });
+        session
+            .normal_following_object_identifiers
+            .insert("OLD_FOLLOWER".to_string());
+        for object_id in ["OLD_FOLLOWER", "NEW_FOLLOWER"] {
+            session
+                .object_step_durations
+                .insert(object_id.to_string(), 37);
+            session
+                .object_pending_random_wait
+                .insert(object_id.to_string());
+            session
+                .initialized_fixed_spin_objects
+                .insert(object_id.to_string());
+            session.following_not_exact.insert(object_id.to_string(), 1);
+        }
+        session
+            .object_runtime_tiles
+            .insert("OLD_FOLLOWER".to_string(), TilePosition::new(5, 4));
+        session
+            .object_last_runtime_tiles
+            .insert("OLD_FOLLOWER".to_string(), TilePosition::new(4, 4));
+        session
+            .object_last_tiles_occupied_until_frame
+            .insert("OLD_FOLLOWER".to_string(), 8);
+        session
+            .object_runtime_tiles
+            .insert("NEW_FOLLOWER".to_string(), TilePosition::new(6, 4));
+        session
+            .object_last_runtime_tiles
+            .insert("NEW_FOLLOWER".to_string(), TilePosition::new(7, 4));
+        session
+            .object_last_tiles_occupied_until_frame
+            .insert("NEW_FOLLOWER".to_string(), 8);
+
+        let mut follow = command("follow", "LEADER");
+        follow.target_object_id = Some("NEW_FOLLOWER".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &follow)
+            .expect("replacement follow applies");
+
+        for object_id in ["OLD_FOLLOWER", "NEW_FOLLOWER"] {
+            assert!(!session.object_step_durations.contains_key(object_id));
+            assert!(!session.object_pending_random_wait.contains(object_id));
+            assert!(!session.initialized_fixed_spin_objects.contains(object_id));
+            assert!(!session.following_not_exact.contains_key(object_id));
+            assert_eq!(
+                session.object_last_runtime_tiles.get(object_id),
+                session.object_runtime_tiles.get(object_id),
+                "STEP_TYPE_RESET copies the live coordinate into OBJECT_LAST_MAP_X/Y"
+            );
+            assert!(
+                !session
+                    .object_last_tiles_occupied_until_frame
+                    .contains_key(object_id),
+                "the pre-reset tile must stop owning collision"
+            );
+        }
+
+        session
+            .object_runtime_tiles
+            .insert("NEW_FOLLOWER".to_string(), TilePosition::new(7, 4));
+        session
+            .object_last_runtime_tiles
+            .insert("NEW_FOLLOWER".to_string(), TilePosition::new(6, 4));
+        session
+            .object_last_tiles_occupied_until_frame
+            .insert("NEW_FOLLOWER".to_string(), 8);
+        session
+            .object_step_durations
+            .insert("NEW_FOLLOWER".to_string(), 19);
+        session
+            .object_pending_random_wait
+            .insert("NEW_FOLLOWER".to_string());
+        let stop = command("stopfollow", "");
+        apply_script_object_mutation(&mut state, &mut session, &stop).expect("stopfollow applies");
+
+        assert!(!session.object_step_durations.contains_key("NEW_FOLLOWER"));
+        assert!(!session.object_pending_random_wait.contains("NEW_FOLLOWER"));
+        assert_eq!(
+            session.object_last_runtime_tiles.get("NEW_FOLLOWER"),
+            session.object_runtime_tiles.get("NEW_FOLLOWER")
+        );
+        assert!(
+            !session
+                .object_last_tiles_occupied_until_frame
+                .contains_key("NEW_FOLLOWER")
+        );
+        assert_eq!(session.following, None);
+        assert_eq!(session.following_queued_step, None);
+    }
+
+    #[test]
+    fn stopfollow_resets_a_player_followers_last_coordinate() {
+        let mut state = GameState::default();
+        let mut session = session(vec![object("GUIDE", "-1", 4, 4)]);
+        session.player.tile = TilePosition::new(5, 4);
+        session.player_last_runtime_tile = Some(TilePosition::new(6, 4));
+        session.player_last_tile_occupied_until_frame = 8;
+        session.following = Some(OverworldFollowState {
+            leader_slot: Some(1),
+            follower_slot: Some(0),
+        });
+        session
+            .normal_following_object_identifiers
+            .insert("PLAYER".to_string());
+
+        let stop = command("stopfollow", "");
+        apply_script_object_mutation(&mut state, &mut session, &stop).expect("stopfollow applies");
+
+        assert_eq!(session.player_last_runtime_tile, Some(session.player.tile));
+        assert_eq!(session.player_last_tile_occupied_until_frame, session.frame);
+        assert!(
+            !session
+                .normal_following_object_identifiers
+                .contains("PLAYER")
+        );
+    }
+
+    #[test]
+    fn disappear_stops_follow_when_deleting_either_participating_object_struct() {
+        for disappeared in ["FOLLOW_LEADER", "FOLLOWER"] {
+            let mut state = GameState::default();
+            let mut session = session(vec![
+                object("FOLLOW_LEADER", "-1", 4, 4),
+                object("FOLLOWER", "-1", 5, 4),
+            ]);
+            let mut follow = command("follow", "FOLLOW_LEADER");
+            follow.target_object_id = Some("FOLLOWER".to_string());
+            apply_script_object_mutation(&mut state, &mut session, &follow)
+                .expect("follow applies");
+            assert!(session.following.is_some());
+
+            let disappear = command("disappear", disappeared);
+            apply_script_object_mutation(&mut state, &mut session, &disappear)
+                .expect("disappear applies");
+
+            assert_eq!(session.following, None);
+            assert_eq!(session.following_queued_step, None);
+        }
+    }
+
+    #[test]
+    fn raw_follower_slot_reuse_does_not_transfer_the_following_movement_type() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("FOLLOW_LEADER", "-1", 4, 4),
+            object("OLD_FOLLOWER", "-1", 5, 4),
+            object("NEW_FOLLOWER", "-1", 5, 4),
+        ]);
+        session.delete_loaded_object_struct("NEW_FOLLOWER");
+        let mut follow = command("follow", "FOLLOW_LEADER");
+        follow.target_object_id = Some("OLD_FOLLOWER".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &follow).expect("follow applies");
+        let remove = ScriptMovement {
+            label: "RemoveFollowerStruct".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "remove_object".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }],
+        };
+        let mut remove_command = command("applymovement", "OLD_FOLLOWER");
+        remove_command.movement = Some(remove.label.clone());
+        apply_script_movement(&mut session, &remove_command, &remove)
+            .expect("raw follower deletion applies");
+        assert!(
+            session
+                .copy_object_struct_for_appear("NEW_FOLLOWER")
+                .expect("replacement follower takes the freed slot")
+        );
+        assert_eq!(session.object_struct_slot("NEW_FOLLOWER"), Some(2));
+        let replacement_before =
+            object_tile(&session, "NEW_FOLLOWER").expect("replacement follower tile");
+        let leader_step = ScriptMovement {
+            label: "LeaderStep".to_string(),
+            source_script: None,
+            steps: vec![
+                ScriptMovementStep {
+                    command: "step".to_string(),
+                    direction: Some("RIGHT".to_string()),
+                    duration: None,
+                    index: 0,
+                },
+                ScriptMovementStep {
+                    command: "step_end".to_string(),
+                    direction: None,
+                    duration: None,
+                    index: 1,
+                },
+            ],
+        };
+
+        let mut leader_command = command("applymovement", "FOLLOW_LEADER");
+        leader_command.movement = Some(leader_step.label.clone());
+        apply_script_movement(&mut session, &leader_command, &leader_step)
+            .expect("leader movement applies");
+
+        assert_eq!(
+            object_tile(&session, "NEW_FOLLOWER").expect("replacement follower remains autonomous"),
+            replacement_before
+        );
+        assert_eq!(
+            session.following_queued_step.map(|step| step.direction),
+            Some(Direction::Right),
+            "the raw queue byte still advances even though the replacement struct cannot consume it"
+        );
+    }
+
+    #[test]
+    fn movement_remove_object_compares_the_deleted_struct_slot_to_the_leader_slot() {
+        let mut session = session(vec![
+            object("UNRELATED", "-1", 3, 4),
+            object("FOLLOWER", "-1", 5, 4),
+            object("LEADER", "-1", 4, 4),
+        ]);
+        session.delete_loaded_object_struct("UNRELATED");
+        session.delete_loaded_object_struct("LEADER");
+        assert!(session.copy_object_struct_for_appear("LEADER").unwrap());
+        assert!(session.copy_object_struct_for_appear("UNRELATED").unwrap());
+        assert_eq!(session.object_struct_slot("LEADER"), Some(1));
+        assert_eq!(session.object_struct_slot("UNRELATED"), Some(3));
+        session.following = Some(OverworldFollowState {
+            leader_slot: Some(1),
+            follower_slot: Some(2),
+        });
+        let remove = ScriptMovement {
+            label: "RemoveUnrelated".to_string(),
+            source_script: None,
+            steps: vec![ScriptMovementStep {
+                command: "remove_object".to_string(),
+                direction: None,
+                duration: None,
+                index: 0,
+            }],
+        };
+        let mut remove_command = command("applymovement", "UNRELATED");
+        remove_command.movement = Some(remove.label.clone());
+
+        apply_script_movement(&mut session, &remove_command, &remove)
+            .expect("unrelated raw deletion applies");
+
+        assert_eq!(
+            session.following,
+            Some(OverworldFollowState {
+                leader_slot: Some(1),
+                follower_slot: Some(2),
+            })
+        );
+
+        let mut remove_leader_command = command("applymovement", "LEADER");
+        remove_leader_command.movement = Some(remove.label.clone());
+        apply_script_movement(&mut session, &remove_leader_command, &remove)
+            .expect("leader raw deletion applies");
+
+        assert_eq!(
+            session.following,
+            Some(OverworldFollowState {
+                leader_slot: None,
+                follower_slot: Some(2),
+            })
+        );
+    }
+
+    #[test]
     fn follownotexact_moves_object1_toward_object2_and_tracks_its_last_coordinate() {
         let mut state = GameState::default();
         let mut session = session(vec![
             object("LOOSE_LEADER", "EVENT_LOOSE_LEADER", 4, 4),
-            object("LOOSE_FOLLOWER", "EVENT_LOOSE_FOLLOWER", 8, 6),
+            object("LOOSE_FOLLOWER", "EVENT_LOOSE_FOLLOWER", 6, 4),
         ]);
         let leader_tile = object_tile(&session, "LOOSE_LEADER").expect("leader tile");
         let follower_before = object_tile(&session, "LOOSE_FOLLOWER").expect("follower tile");
@@ -3989,10 +4750,7 @@ mod tests {
         assert_eq!(follower_after.x, follower_before.x - 1);
         assert_eq!(follower_after.y, follower_before.y);
         assert_eq!(outcome.object_id, "LOOSE_FOLLOWER");
-        assert_eq!(
-            session.following_not_exact.get("LOOSE_FOLLOWER"),
-            Some(&"LOOSE_LEADER".to_string())
-        );
+        assert_eq!(session.following_not_exact.get("LOOSE_FOLLOWER"), Some(&1));
 
         session.update_follow_after_entity_move(
             "LOOSE_LEADER",
@@ -4009,7 +4767,68 @@ mod tests {
     }
 
     #[test]
-    fn facing_commands_return_without_turning_invisible_objects() {
+    fn follownotexact_returns_without_mutation_when_either_object_struct_is_unloaded() {
+        for unloaded_object_id in ["LOOSE_LEADER", "LOOSE_FOLLOWER"] {
+            let mut state = GameState::default();
+            let mut session = session(vec![
+                object("LOOSE_LEADER", "EVENT_LOOSE_LEADER", 4, 4),
+                object("LOOSE_FOLLOWER", "EVENT_LOOSE_FOLLOWER", 6, 4),
+            ]);
+            session.delete_loaded_object_struct(unloaded_object_id);
+            let follower_before = object_tile(&session, "LOOSE_FOLLOWER").expect("follower tile");
+            let mut command = command("follownotexact", "LOOSE_LEADER");
+            command.target_object_id = Some("LOOSE_FOLLOWER".to_string());
+
+            let outcome = apply_script_object_mutation(&mut state, &mut session, &command)
+                .expect("an unloaded object makes follownotexact a successful no-op");
+
+            assert_eq!(outcome.object_id, "LOOSE_FOLLOWER");
+            assert_eq!(
+                object_tile(&session, "LOOSE_FOLLOWER").expect("follower tile after command"),
+                follower_before
+            );
+            assert!(session.following_not_exact.is_empty());
+        }
+    }
+
+    #[test]
+    fn follownotexact_tracks_the_leader_struct_slot_after_allocator_reuse() {
+        let mut state = GameState::default();
+        let mut session = session(vec![
+            object("OLD_LEADER", "EVENT_OLD_LEADER", 4, 4),
+            object("LOOSE_FOLLOWER", "EVENT_LOOSE_FOLLOWER", 6, 4),
+            object("NEW_LEADER", "EVENT_NEW_LEADER", 4, 4),
+        ]);
+        session.delete_loaded_object_struct("NEW_LEADER");
+        let mut command = command("follownotexact", "OLD_LEADER");
+        command.target_object_id = Some("LOOSE_FOLLOWER".to_string());
+        apply_script_object_mutation(&mut state, &mut session, &command)
+            .expect("follownotexact applies");
+        assert_eq!(session.following_not_exact.get("LOOSE_FOLLOWER"), Some(&1));
+
+        session.delete_loaded_object_struct("OLD_LEADER");
+        assert!(
+            session
+                .copy_object_struct_for_appear("NEW_LEADER")
+                .expect("replacement object can reuse the deleted leader's slot")
+        );
+        assert_eq!(session.object_struct_slot("NEW_LEADER"), Some(1));
+        let follower_before = object_tile(&session, "LOOSE_FOLLOWER").expect("follower tile");
+        session.update_follow_after_entity_move(
+            "NEW_LEADER",
+            TilePosition::new(4, 4),
+            TilePosition::new(5, 4),
+        );
+
+        assert_ne!(
+            object_tile(&session, "LOOSE_FOLLOWER").expect("tracked follower tile"),
+            follower_before,
+            "OBJECT_RANGE follows the new occupant of the stored struct slot"
+        );
+    }
+
+    #[test]
+    fn facing_commands_return_without_turning_unloaded_objects() {
         let mut state = GameState::default();
         let mut session = session(vec![
             object("HIDDEN_NPC", "EVENT_HIDDEN_NPC", 4, 4),
@@ -4017,9 +4836,7 @@ mod tests {
             object("STILL_OBJECT", "EVENT_STILL_OBJECT", 6, 6),
         ]);
         session.objects[2].sprite_has_facings = false;
-        session
-            .hidden_object_identifiers
-            .insert("HIDDEN_NPC".to_string());
+        session.delete_loaded_object_struct("HIDDEN_NPC");
         session
             .object_facings
             .insert("HIDDEN_NPC".to_string(), Direction::Left);
@@ -4258,10 +5075,16 @@ mod tests {
     fn applymovement_follow_advances_per_script_step() {
         let mut session = session(vec![object("GUIDE", "-1", 10, 6)]);
         session.player.tile = TilePosition::new(9, 6);
+        session
+            .copy_object_struct_for_appear("GUIDE")
+            .expect("allocate guide fixture");
         session.following = Some(OverworldFollowState {
-            leader_object_id: "GUIDE".to_string(),
-            follower_object_id: "PLAYER".to_string(),
+            leader_slot: Some(1),
+            follower_slot: Some(0),
         });
+        session
+            .normal_following_object_identifiers
+            .insert("PLAYER".to_string());
         let mut command = command("applymovement", "GUIDE");
         command.movement = Some("GuideWalks".to_string());
         let movement = ScriptMovement {
@@ -4318,10 +5141,16 @@ mod tests {
     fn applymovement_guide_tour_follow_path_ends_on_last_leader_step() {
         let mut session = session(vec![object("CHERRYGROVECITY_GRAMPS", "-1", 32, 6)]);
         session.player.tile = TilePosition::new(32, 7);
+        session
+            .copy_object_struct_for_appear("CHERRYGROVECITY_GRAMPS")
+            .expect("allocate guide fixture");
         session.following = Some(OverworldFollowState {
-            leader_object_id: "CHERRYGROVECITY_GRAMPS".to_string(),
-            follower_object_id: "PLAYER".to_string(),
+            leader_slot: Some(1),
+            follower_slot: Some(0),
         });
+        session
+            .normal_following_object_identifiers
+            .insert("PLAYER".to_string());
 
         apply_test_movement(
             &mut session,

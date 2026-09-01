@@ -152,6 +152,13 @@ pub const fn is_grass_encounter_permission(permission: u8) -> bool {
     )
 }
 
+pub const fn spawns_shaking_grass_object(permission: u8) -> bool {
+    matches!(
+        permission,
+        permissions::LONG_GRASS | permissions::LONG_GRASS_1C
+    ) || (matches!(permission & 0xf0, 0x10 | 0x20) && permission & 0x07 == 0)
+}
+
 pub fn is_warp_permission(permission: u8) -> bool {
     permission == permissions::PIT
         || permission == permissions::PIT_68
@@ -291,8 +298,9 @@ pub fn is_direction_blocked(permission: u8, facing: Direction) -> bool {
     }
 }
 
-/// Mirror `CanObjectLeaveTile`: side-wall and side-buoy permissions constrain
-/// autonomous objects both when entering a tile and when walking off one.
+/// Decode the departure half of Crystal's side-wall and side-buoy masks.
+/// `GetMovementPermissions` applies this to the player, and
+/// `CanObjectLeaveTile` applies the same directional relationship to NPCs.
 pub fn is_direction_blocked_leaving(permission: u8, facing: Direction) -> bool {
     let hi = permission & 0xf0;
     if hi != (permissions::RIGHT_WALL & 0xf0) && hi != (permissions::RIGHT_BUOY & 0xf0) {
@@ -935,5 +943,18 @@ mod tests {
             traversal_error.contains("invalid type") || traversal_error.contains("unknown variant"),
             "{traversal_error}"
         );
+    }
+
+    #[test]
+    fn shaking_grass_permissions_match_both_source_checks_exactly() {
+        let expected = [0x10, 0x14, 0x18, 0x1c, 0x20, 0x28];
+
+        for permission in u8::MIN..=u8::MAX {
+            assert_eq!(
+                spawns_shaking_grass_object(permission),
+                expected.contains(&permission),
+                "collision {permission:#04x}"
+            );
+        }
     }
 }

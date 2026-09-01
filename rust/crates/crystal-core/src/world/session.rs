@@ -67,6 +67,33 @@ pub struct OverworldSession {
     pub object_pending_random_wait: BTreeSet<String>,
     #[serde(default)]
     pub initialized_fixed_spin_objects: BTreeSet<String>,
+    /// `CheckStrengthBoulder` has set `BOULDER_MOVING_F` and stored the
+    /// requested direction in `OBJECT_RANGE`, but the object's movement
+    /// function has not run yet. Player collision and object scheduling are
+    /// separate phases in Crystal's overworld frame.
+    pub strength_boulder_push_directions: BTreeMap<String, Direction>,
+    /// Objects currently executing `STEP_TYPE_STRENGTH_BOULDER`. Their live
+    /// coordinate changes when the step starts, while map-object memory and
+    /// the old tile remain owned until the sixteen-frame slow step lands.
+    pub strength_moving_object_identifiers: BTreeSet<String>,
+    /// Map-event indices currently backed by one of Crystal's twelve
+    /// non-player object structs. Map events outside this roster do not run
+    /// movement functions and therefore cannot consume the global RNG.
+    #[serde(default)]
+    /// Map-event index to the exact non-player `wObjectStructs` slot (1..=12).
+    /// Slots are not equivalent to map-event order after deletion and
+    /// `appear`: `CopyMapObjectToObjectStruct` always reuses the first free
+    /// struct, and Crystal saves that allocator state verbatim.
+    loaded_object_struct_slots: BTreeMap<usize, u8>,
+    /// OBJECT_INIT_MAP_X/Y captured when each map event was copied into an
+    /// object struct. CheckObjectStillVisible retains the struct while either
+    /// this tile or its live tile remains in the loaded viewport.
+    #[serde(default)]
+    loaded_object_struct_initial_tiles: BTreeMap<usize, TilePosition>,
+    #[serde(default)]
+    object_struct_roster_player_tile: Option<TilePosition>,
+    #[serde(default)]
+    object_struct_roster_initialized: bool,
     /// Exact transient OBJECT_FLAGS1 `FIXED_FACING_F` state. This survives
     /// separate movement programs until `remove_fixed_facing` or map reload.
     #[serde(default)]
@@ -75,12 +102,21 @@ pub struct OverworldSession {
     /// object struct bit, it survives separate movement programs on this map.
     #[serde(default)]
     pub sliding_object_identifiers: BTreeSet<String>,
+    /// Exact transient OBJECT_FLAGS1 `INVISIBLE_F` state for allocated
+    /// non-player object structs. This is distinct from wObjectMasks: deleting
+    /// the struct discards the bit, while the map event remains copyable.
+    pub invisible_object_struct_identifiers: BTreeSet<String>,
     pub following: Option<OverworldFollowState>,
+    /// Object structs whose transient OBJECT_MOVEMENT_TYPE is
+    /// SPRITEMOVEDATA_FOLLOWING. This is allocation-owned state: deleting a
+    /// struct discards it, and a later occupant of the same slot keeps its own
+    /// map-event movement type even while the raw follow byte remains stale.
+    pub normal_following_object_identifiers: BTreeSet<String>,
     /// `SPRITEMOVEDATA_FOLLOWNOTEXACT` stores the followed object-struct index
-    /// in each follower's OBJECT_RANGE byte. Symbolic ids retain that exact
-    /// per-object relationship without depending on allocator indices.
+    /// in each follower's OBJECT_RANGE byte. The slot remains meaningful when
+    /// its old occupant is deleted and the allocator reuses it for a new one.
     #[serde(default)]
-    pub following_not_exact: BTreeMap<String, String>,
+    pub following_not_exact: BTreeMap<String, u8>,
     /// The movement command the follower consumes when its leader completes
     /// the next step. Crystal's follower queue survives separate
     /// `applymovement` programs; retaining it here prevents each program from
@@ -108,10 +144,11 @@ pub struct OverworldSession {
     /// or the next map entry.
     #[serde(default)]
     pub object_visibility_initialized: bool,
-    /// The time used by Crystal's object scheduler (`hram_y`).  This lives on
-    /// the session because collision, interaction, and trainer sight all
-    /// query the same visible-object set.
-    #[serde(default = "default_session_time_of_day")]
+    /// `hHours` used by `CheckObjectTime` for hour-range object schedules.
+    pub hour: u8,
+    /// `wTimeOfDay` used by `CheckObjectTime` when MAPOBJECT_HOUR_1 is `$ff`.
+    /// Both values live on the session because collision, interaction, and
+    /// trainer sight all query the same loaded-object set.
     pub time_of_day: TimeOfDay,
     pub tileset: TilesetCollision,
     pub player: PlayerMovementState,
@@ -125,15 +162,11 @@ pub struct OverworldSession {
     pub player_last_tile_occupied_until_frame: u64,
 }
 
-const fn default_session_time_of_day() -> TimeOfDay {
-    TimeOfDay::Day
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OverworldFollowState {
-    pub leader_object_id: String,
-    pub follower_object_id: String,
+    pub leader_slot: Option<u8>,
+    pub follower_slot: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +177,52 @@ pub struct FollowQueuedStep {
     pub duration: u8,
     pub jump: bool,
     pub standing_frame: bool,
+}
+
+/// Modeled bytes from one non-player entry in the saved `wObjectStructs`
+/// array. `slot` is the real struct index (the player owns slot 0), while
+/// `map_object_index` is the corresponding `wMapObjects` index (also 1-based).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldObjectStructMemory {
+    pub slot: u8,
+    pub map_object_index: u8,
+    pub live_tile: TilePosition,
+    pub last_tile: Option<TilePosition>,
+    pub initial_tile: TilePosition,
+    pub facing: Option<Direction>,
+    pub step_duration: Option<u8>,
+    pub last_tile_occupied_remaining_frames: u8,
+    pub pending_random_wait: bool,
+    pub initialized_fixed_spin: bool,
+    pub strength_push_direction: Option<Direction>,
+    pub strength_moving: bool,
+    pub fixed_facing: bool,
+    pub sliding: bool,
+    pub visible: bool,
+    pub normal_following: bool,
+    pub following_not_exact_leader_slot: Option<u8>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OverworldObjectAdvance {
+    pub started_strength_boulders: Vec<String>,
+    pub landed_strength_boulders: Vec<String>,
+}
+
+/// The saved current-map object-struct image and adjacent follow state that
+/// Rust currently models. Fresh map entry discards this; Continue restores it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverworldObjectStructRosterMemory {
+    pub structs: Vec<OverworldObjectStructMemory>,
+    pub following_queued_step: Option<FollowQueuedStep>,
+    pub last_step_direction: Option<Direction>,
+    pub player_last_tile: Option<TilePosition>,
+    pub player_last_tile_occupied_remaining_frames: u8,
+    pub player_fixed_facing: bool,
+    pub player_sliding: bool,
+    pub player_normal_following: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +299,51 @@ pub enum OverworldInputError {
 pub enum OverworldObjectCoordinateError {
     #[error("object '{object_id}' has out-of-range runtime coordinates ({x}, {y})")]
     OutOfRange { object_id: String, x: u16, y: u16 },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum OverworldObjectStructMemoryError {
+    #[error("saved object struct slot {slot} is outside Crystal's non-player range 1..=12")]
+    InvalidSlot { slot: u8 },
+    #[error("saved map-object index {map_object_index} is outside the current map's event range")]
+    InvalidMapObjectIndex { map_object_index: u8 },
+    #[error("saved object struct slot {slot} is allocated more than once")]
+    DuplicateSlot { slot: u8 },
+    #[error("saved map-object index {map_object_index} has more than one object struct")]
+    DuplicateMapObjectIndex { map_object_index: u8 },
+    #[error("saved follow-not-exact leader slot {slot} is outside Crystal's range 0..=12")]
+    InvalidFollowNotExactLeaderSlot { slot: u8 },
+    #[error(
+        "saved object struct slot {slot} cannot have both FOLLOWING and FOLLOWNOTEXACT movement types"
+    )]
+    ConflictingFollowMovementTypes { slot: u8 },
+    #[error(
+        "saved FOLLOWING movement slot {movement_slot} does not match follower byte {follower_slot:?}"
+    )]
+    NormalFollowerSlotMismatch {
+        movement_slot: u8,
+        follower_slot: Option<u8>,
+    },
+    #[error("saved object image contains more than one FOLLOWING movement type")]
+    MultipleNormalFollowers,
+    #[error("saved object struct slot {slot} has both pending and active Strength movement")]
+    ConflictingStrengthMovementPhases { slot: u8 },
+    #[error("saved object struct slot {slot} has pending Strength movement on {movement}")]
+    InvalidStrengthPushMovement { slot: u8, movement: String },
+    #[error("saved object struct slot {slot} has pending Strength movement during an active step")]
+    InvalidStrengthPushStepState { slot: u8 },
+    #[error("saved object struct slot {slot} has active Strength movement on {movement}")]
+    InvalidStrengthStepMovement { slot: u8, movement: String },
+    #[error(
+        "saved active Strength object struct slot {slot} requires equal nonzero step and last-tile durations"
+    )]
+    InvalidStrengthStepDuration { slot: u8 },
+    #[error(
+        "object struct timer extends {remaining_frames} frames beyond the supported byte range"
+    )]
+    RemainingFramesOutOfRange { remaining_frames: u64 },
+    #[error(transparent)]
+    Coordinate(#[from] OverworldObjectCoordinateError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -497,7 +621,7 @@ impl OverworldSession {
     ) -> Self {
         let (object_facings, fixed_facing_object_identifiers, sliding_object_identifiers) =
             initial_object_runtime_state(&objects);
-        Self {
+        let mut session = Self {
             frame: 0,
             map,
             map_events,
@@ -509,9 +633,17 @@ impl OverworldSession {
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            strength_boulder_push_directions: BTreeMap::new(),
+            strength_moving_object_identifiers: BTreeSet::new(),
+            loaded_object_struct_slots: BTreeMap::new(),
+            loaded_object_struct_initial_tiles: BTreeMap::new(),
+            object_struct_roster_player_tile: None,
+            object_struct_roster_initialized: false,
             fixed_facing_object_identifiers,
             sliding_object_identifiers,
+            invisible_object_struct_identifiers: BTreeSet::new(),
             following: None,
+            normal_following_object_identifiers: BTreeSet::new(),
             following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
@@ -522,17 +654,21 @@ impl OverworldSession {
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
-            time_of_day: default_session_time_of_day(),
+            hour: 12,
+            time_of_day: TimeOfDay::Day,
             tileset,
             player: PlayerMovementState::new(player_tile),
             last_step_direction: None,
             player_last_runtime_tile: None,
             player_last_tile_occupied_until_frame: 0,
-        }
+        };
+        session.initialize_loaded_object_struct_roster();
+        session
     }
 
     pub fn with_hidden_event_flags(mut self, hidden_event_flags: BTreeSet<String>) -> Self {
         self.hidden_event_flags = hidden_event_flags;
+        self.initialize_loaded_object_struct_roster();
         self
     }
 
@@ -541,6 +677,7 @@ impl OverworldSession {
         self.loaded_roster_hidden_object_identifiers.clear();
         self.loaded_roster_shown_object_identifiers.clear();
         self.object_visibility_initialized = true;
+        self.initialize_loaded_object_struct_roster();
         self
     }
 
@@ -548,6 +685,7 @@ impl OverworldSession {
         if !self.object_visibility_initialized {
             self.hidden_event_flags = flags.active_event_flags().cloned().collect();
             self.object_visibility_initialized = true;
+            self.initialize_loaded_object_struct_roster();
             return;
         }
         let visibility = self.loaded_object_visibility();
@@ -568,7 +706,8 @@ impl OverworldSession {
         for object_id in object_ids {
             self.clear_loaded_roster_visibility_override(&object_id);
             self.shown_object_identifiers.remove(&object_id);
-            self.hidden_object_identifiers.insert(object_id);
+            self.hidden_object_identifiers.insert(object_id.clone());
+            self.delete_loaded_object_struct_for_disappear(&object_id);
         }
     }
 
@@ -651,6 +790,7 @@ impl OverworldSession {
     ) -> Result<StepOutcome, OverworldCoordinateError> {
         require_runtime_stride(options.stride_tiles)?;
         self.require_checked_tile_bounds()?;
+        self.refresh_loaded_object_struct_roster()?;
         let occupied_tiles = self.occupied_tiles_checked()?;
         self.validate_follow_after_entity_move("PLAYER", self.player.tile)?;
         let outcome = attempt_step_with_occupied_tiles(
@@ -673,6 +813,7 @@ impl OverworldSession {
             self.player_last_tile_occupied_until_frame = self
                 .frame
                 .saturating_add(u64::from((8 / speed_multiplier.max(1)).max(1)));
+            self.refresh_loaded_object_struct_roster()?;
         }
         self.frame += 1;
         Ok(outcome)
@@ -690,6 +831,7 @@ impl OverworldSession {
     ) -> Result<StepOutcome, OverworldCoordinateError> {
         require_runtime_stride(options.stride_tiles)?;
         self.require_checked_tile_bounds()?;
+        self.refresh_loaded_object_struct_roster()?;
         self.validate_follow_after_entity_move("PLAYER", self.player.tile)?;
         self.player.facing = direction;
         let from = self.player.tile;
@@ -705,6 +847,7 @@ impl OverworldSession {
         self.last_step_direction = Some(direction);
         self.player_last_runtime_tile = Some(from);
         self.player_last_tile_occupied_until_frame = self.frame.saturating_add(8);
+        self.refresh_loaded_object_struct_roster()?;
         self.frame += 1;
         Ok(StepOutcome::Moved {
             from,
@@ -725,6 +868,7 @@ impl OverworldSession {
     ) -> Result<LedgeJumpOutcome, OverworldCoordinateError> {
         require_runtime_stride(options.stride_tiles)?;
         self.require_checked_tile_bounds()?;
+        self.refresh_loaded_object_struct_roster()?;
         let occupied_tiles = self.occupied_tiles_checked()?;
         self.validate_follow_after_entity_move("PLAYER", self.player.tile)?;
         let outcome = attempt_ledge_jump_with_occupied_tiles(
@@ -748,6 +892,7 @@ impl OverworldSession {
             self.player_last_tile_occupied_until_frame = self
                 .frame
                 .saturating_add(u64::from((16 / speed_multiplier.max(1)).max(1)));
+            self.refresh_loaded_object_struct_roster()?;
         }
         self.frame += 1;
         Ok(outcome)
@@ -767,10 +912,13 @@ impl OverworldSession {
         from: TilePosition,
         to: TilePosition,
     ) {
+        let Some(moved_slot) = self.object_struct_slot(moved_object_id) else {
+            return;
+        };
         let loose_followers = self
             .following_not_exact
             .iter()
-            .filter(|(_, leader)| leader.as_str() == moved_object_id)
+            .filter(|(_, leader_slot)| **leader_slot == moved_slot)
             .map(|(follower, _)| follower.clone())
             .collect::<Vec<_>>();
         for follower in loose_followers {
@@ -802,22 +950,45 @@ impl OverworldSession {
         let Some(following) = self.following.clone() else {
             return;
         };
-        if following.leader_object_id != moved_object_id {
+        if self.object_struct_slot(moved_object_id) != following.leader_slot {
             return;
         }
-        let current = if following.follower_object_id == "PLAYER" {
+        let next_queued_step = direction_between_tiles(from, to).map(|direction| {
+            let stride = (to.x - from.x).abs().max((to.y - from.y).abs());
+            FollowQueuedStep {
+                direction,
+                stride,
+                duration: 8,
+                jump: false,
+                standing_frame: false,
+            }
+        });
+        let Some(follower_object_id) = following
+            .follower_slot
+            .and_then(|slot| self.object_id_for_struct_slot(slot))
+        else {
+            self.following_queued_step = next_queued_step;
+            return;
+        };
+        if !self
+            .normal_following_object_identifiers
+            .contains(&follower_object_id)
+        {
+            self.following_queued_step = next_queued_step;
+            return;
+        }
+        let current = if follower_object_id == "PLAYER" {
             Some(self.player.tile)
         } else {
             self.object_runtime_tiles
-                .get(&following.follower_object_id)
+                .get(&follower_object_id)
                 .copied()
                 .or_else(|| {
                     self.objects
                         .iter()
                         .enumerate()
                         .find(|(_, object)| {
-                            object.object_identifier.as_deref()
-                                == Some(following.follower_object_id.as_str())
+                            object.object_identifier.as_deref() == Some(follower_object_id.as_str())
                         })
                         .and_then(|(index, object)| {
                             self.object_runtime_tile_checked(index, object).ok()
@@ -837,20 +1008,11 @@ impl OverworldSession {
         });
         if let (Some(current), Some(queued)) = (current, queued) {
             if let Some(tile) = checked_move_by_stride(current, queued.direction, queued.stride) {
-                self.set_follow_entity_tile(&following.follower_object_id, tile);
-                self.set_follow_entity_facing(&following.follower_object_id, queued.direction);
+                self.set_follow_entity_tile(&follower_object_id, tile);
+                self.set_follow_entity_facing(&follower_object_id, queued.direction);
             }
         }
-        if let Some(direction) = direction_between_tiles(from, to) {
-            let stride = (to.x - from.x).abs().max((to.y - from.y).abs());
-            self.following_queued_step = Some(FollowQueuedStep {
-                direction,
-                stride,
-                duration: 8,
-                jump: false,
-                standing_frame: false,
-            });
-        }
+        self.following_queued_step = next_queued_step;
     }
 
     fn validate_follow_after_entity_move(
@@ -861,20 +1023,30 @@ impl OverworldSession {
         let Some(following) = self.following.as_ref() else {
             return Ok(());
         };
-        if following.leader_object_id != moved_object_id {
+        if self.object_struct_slot(moved_object_id) != following.leader_slot {
             return Ok(());
         }
-        if following.follower_object_id == "PLAYER" {
+        let Some(follower_object_id) = following
+            .follower_slot
+            .and_then(|slot| self.object_id_for_struct_slot(slot))
+        else {
+            return Ok(());
+        };
+        if !self
+            .normal_following_object_identifiers
+            .contains(&follower_object_id)
+        {
+            return Ok(());
+        }
+        if follower_object_id == "PLAYER" {
             return Ok(());
         }
         self.objects
             .iter()
-            .any(|object| {
-                object.object_identifier.as_deref() == Some(following.follower_object_id.as_str())
-            })
+            .any(|object| object.object_identifier.as_deref() == Some(follower_object_id.as_str()))
             .then_some(())
             .ok_or_else(|| OverworldCoordinateError::FollowObjectMissing {
-                object_id: following.follower_object_id.clone(),
+                object_id: follower_object_id,
             })
     }
 
@@ -990,17 +1162,17 @@ impl OverworldSession {
         &self,
     ) -> Result<Vec<OccupiedTile>, OverworldObjectCoordinateError> {
         let mut occupied = Vec::new();
-        for (index, object) in self
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| self.is_object_visible(object))
-        {
+        for (index, object) in self.objects.iter().enumerate().filter(|(index, object)| {
+            self.object_has_loaded_struct(*index)
+                && !object_event_starts_as_emote_object(&object.spritemovedata)
+        }) {
             let tile = self.object_runtime_tile_checked(index, object)?;
-            occupied.push(OccupiedTile {
-                tile,
-                object_identifier: object.object_identifier.clone(),
-            });
+            for tile in object_current_occupied_tiles_checked(index, object, tile)? {
+                occupied.push(OccupiedTile {
+                    tile,
+                    object_identifier: object.object_identifier.clone(),
+                });
+            }
         }
         for (object_id, tile) in &self.object_last_runtime_tiles {
             let retained = self
@@ -1008,9 +1180,10 @@ impl OverworldSession {
                 .get(object_id)
                 .is_some_and(|until_frame| self.frame < *until_frame);
             if retained
-                && self.objects.iter().any(|object| {
-                    object.object_identifier.as_deref() == Some(object_id.as_str())
-                        && self.is_object_visible(object)
+                && self.objects.iter().enumerate().any(|(index, object)| {
+                    self.object_has_loaded_struct(index)
+                        && object.object_identifier.as_deref() == Some(object_id.as_str())
+                        && !object_event_starts_as_emote_object(&object.spritemovedata)
                 })
                 && !occupied.iter().any(|entry| {
                     entry.tile == *tile
@@ -1026,7 +1199,7 @@ impl OverworldSession {
         Ok(occupied)
     }
 
-    pub fn push_strength_boulder_checked(
+    pub fn request_strength_boulder_push_checked(
         &mut self,
         direction: Direction,
         options: StepOptions,
@@ -1039,27 +1212,41 @@ impl OverworldSession {
         let Some((object_slot, object)) = self.visible_object_at_checked(facing_tile)? else {
             return Ok(None);
         };
-        if object.spritemovedata != "SPRITEMOVEDATA_STRENGTH_BOULDER" {
+        if !object_event_has_strength_boulder_palette(&object.spritemovedata) {
             return Ok(None);
         }
         let Some(object_id) = object.object_identifier.clone() else {
             return Ok(None);
         };
         let object_index = usize::from(object_slot.saturating_sub(1));
-        let object_tile = self.object_runtime_tile_checked(object_index, object)?;
+        if self.strength_moving_object_identifiers.contains(&object_id)
+            || self.object_step_durations.contains_key(&object_id)
+        {
+            return Ok(None);
+        }
         let occupied_tiles = self
             .objects
             .iter()
             .enumerate()
-            .filter(|(index, object)| *index != object_index && self.is_object_visible(object))
+            .filter(|(index, object)| {
+                *index != object_index
+                    && self.object_has_loaded_struct(*index)
+                    && !object_event_starts_as_emote_object(&object.spritemovedata)
+            })
             .map(|(index, object)| {
                 self.object_runtime_tile_checked(index, object)
-                    .map(|tile| OccupiedTile {
-                        tile,
-                        object_identifier: object.object_identifier.clone(),
+                    .and_then(|tile| object_current_occupied_tiles_checked(index, object, tile))
+                    .map(|tiles| {
+                        tiles.into_iter().map(|tile| OccupiedTile {
+                            tile,
+                            object_identifier: object.object_identifier.clone(),
+                        })
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let mut player_probe = self.player.clone();
         if !matches!(
             attempt_step_with_occupied_tiles(
@@ -1074,22 +1261,84 @@ impl OverworldSession {
         ) {
             return Ok(None);
         }
-        let mut boulder = PlayerMovementState::new(object_tile);
+        self.strength_boulder_push_directions
+            .insert(object_id.clone(), direction);
+        Ok(Some(object_id))
+    }
+
+    fn strength_boulder_step_target_checked(
+        &self,
+        object_index: usize,
+        object_id: &str,
+        direction: Direction,
+    ) -> Result<Option<TilePosition>, OverworldObjectCoordinateError> {
+        let object = &self.objects[object_index];
+        let current = self.object_runtime_tile_checked(object_index, object)?;
+        let mut occupied_tiles = self
+            .occupied_tiles_checked()?
+            .into_iter()
+            .filter(|occupied| occupied.object_identifier.as_deref() != Some(object_id))
+            .collect::<Vec<_>>();
+        occupied_tiles.push(OccupiedTile {
+            tile: self.player.tile,
+            object_identifier: Some("PLAYER".to_string()),
+        });
+        if self.frame < self.player_last_tile_occupied_until_frame
+            && let Some(last_tile) = self.player_last_runtime_tile
+            && last_tile != self.player.tile
+        {
+            occupied_tiles.push(OccupiedTile {
+                tile: last_tile,
+                object_identifier: Some("PLAYER".to_string()),
+            });
+        }
+        let mut boulder = PlayerMovementState::new(current);
         let outcome = attempt_step_with_occupied_tiles(
             &mut boulder,
             direction,
             &self.map,
             &self.tileset,
-            options,
+            StepOptions {
+                force_step_after_turn: true,
+                ..StepOptions::default()
+            },
             &occupied_tiles,
         );
-        if !matches!(outcome, StepOutcome::Moved { .. }) {
-            return Ok(None);
+        Ok(matches!(outcome, StepOutcome::Moved { .. }).then_some(boulder.tile))
+    }
+
+    pub fn has_required_object_steps(&self) -> bool {
+        !self.strength_boulder_push_directions.is_empty()
+            || !self.strength_moving_object_identifiers.is_empty()
+    }
+
+    pub fn standing_strength_boulders_on_pits_checked(
+        &self,
+    ) -> Result<Vec<String>, OverworldObjectCoordinateError> {
+        let mut boulders = Vec::new();
+        for index in self.loaded_object_indices_in_struct_order() {
+            let object = &self.objects[index];
+            if object.spritemovedata != "SPRITEMOVEDATA_STRENGTH_BOULDER" {
+                continue;
+            }
+            let Some(object_id) = object.object_identifier.as_deref() else {
+                continue;
+            };
+            if self.normal_following_object_identifiers.contains(object_id)
+                || self.following_not_exact.contains_key(object_id)
+                || self.strength_moving_object_identifiers.contains(object_id)
+                || self.object_step_durations.contains_key(object_id)
+            {
+                continue;
+            }
+            let tile = self.object_runtime_tile_checked(index, object)?;
+            if sample_collision(&self.map, &self.tileset, tile).is_some_and(|sample| {
+                matches!(sample.permission, permissions::PIT | permissions::PIT_68)
+            }) {
+                boulders.push(object_id.to_string());
+            }
         }
-        self.object_runtime_tiles
-            .insert(object_id.clone(), boulder.tile);
-        self.object_facings.insert(object_id.clone(), direction);
-        Ok(Some(object_id))
+        Ok(boulders)
     }
 
     pub fn is_object_visible(&self, object: &ObjectEvent) -> bool {
@@ -1122,19 +1371,189 @@ impl OverworldSession {
         self.is_object_visible_without_identifier_override(object)
     }
 
+    pub fn object_has_loaded_struct(&self, index: usize) -> bool {
+        if self.object_struct_roster_initialized {
+            return self.loaded_object_struct_slots.contains_key(&index);
+        }
+        let mut allocated = 0usize;
+        for (candidate_index, object) in self.objects.iter().enumerate().take(index + 1) {
+            if !self.is_object_visible(object) {
+                continue;
+            }
+            let in_initial_viewport = self
+                .object_runtime_tile_checked(candidate_index, object)
+                .map(|tile| object_struct_tile_is_in_loaded_viewport(self.player.tile, tile))
+                // Keep malformed visible objects in the candidate roster so
+                // checked queries surface their coordinate error instead of
+                // silently treating invalid pack data as unloaded.
+                .unwrap_or(true);
+            if !in_initial_viewport {
+                continue;
+            }
+            if allocated >= MAX_LOADED_MAP_OBJECT_STRUCTS {
+                return false;
+            }
+            if candidate_index == index {
+                return true;
+            }
+            allocated += 1;
+        }
+        false
+    }
+
+    pub fn object_struct_slot(&self, object_id: &str) -> Option<u8> {
+        if object_id == "PLAYER" {
+            return (!self.player_hidden).then_some(0);
+        }
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id))?;
+        if self.object_struct_roster_initialized {
+            return self.loaded_object_struct_slots.get(&index).copied();
+        }
+        let mut slot = 1u8;
+        for candidate_index in 0..=index {
+            if !self.object_has_loaded_struct(candidate_index) {
+                continue;
+            }
+            if candidate_index == index {
+                return Some(slot);
+            }
+            slot = slot.checked_add(1)?;
+        }
+        None
+    }
+
+    pub fn object_id_for_struct_slot(&self, slot: u8) -> Option<String> {
+        if slot == 0 {
+            return (!self.player_hidden).then(|| "PLAYER".to_string());
+        }
+        let index = self
+            .loaded_object_struct_slots
+            .iter()
+            .find_map(|(index, candidate)| (*candidate == slot).then_some(*index))?;
+        self.objects.get(index)?.object_identifier.clone()
+    }
+
+    pub fn normal_follow_object_ids(&self) -> Option<(String, String)> {
+        let following = self.following.as_ref()?;
+        let follower = self.object_id_for_struct_slot(following.follower_slot?)?;
+        if !self.normal_following_object_identifiers.contains(&follower) {
+            return None;
+        }
+        Some((
+            self.object_id_for_struct_slot(following.leader_slot?)?,
+            follower,
+        ))
+    }
+
+    fn reset_object_movement_for_normal_follow_slot(&mut self, slot: u8) {
+        let Some(object_id) = self.object_id_for_struct_slot(slot) else {
+            return;
+        };
+        if object_id == "PLAYER" {
+            self.player_last_runtime_tile = Some(self.player.tile);
+            self.player_last_tile_occupied_until_frame = self.frame;
+        } else if let Ok(live_tile) = self.object_runtime_tile_by_id(&object_id) {
+            self.object_last_runtime_tiles
+                .insert(object_id.clone(), live_tile);
+            self.object_last_tiles_occupied_until_frame
+                .remove(&object_id);
+        }
+        self.normal_following_object_identifiers.remove(&object_id);
+        self.following_not_exact.remove(&object_id);
+        self.object_step_durations.remove(&object_id);
+        self.strength_moving_object_identifiers.remove(&object_id);
+        self.object_pending_random_wait.remove(&object_id);
+        self.initialized_fixed_spin_objects.remove(&object_id);
+    }
+
+    pub fn reset_normal_follower_movement(&mut self) {
+        if let Some(slot) = self
+            .following
+            .as_ref()
+            .and_then(|follow| follow.follower_slot)
+        {
+            self.reset_object_movement_for_normal_follow_slot(slot);
+        }
+    }
+
+    pub fn reset_object_step_type_for_script_movement(&mut self, object_id: &str) {
+        if object_id == "PLAYER" {
+            self.player_last_runtime_tile = Some(self.player.tile);
+            self.player_last_tile_occupied_until_frame = self.frame;
+        } else if let Ok(live_tile) = self.object_runtime_tile_by_id(object_id) {
+            self.object_last_runtime_tiles
+                .insert(object_id.to_string(), live_tile);
+            self.object_last_tiles_occupied_until_frame
+                .remove(object_id);
+        }
+        self.object_step_durations.remove(object_id);
+        self.strength_moving_object_identifiers.remove(object_id);
+        self.object_pending_random_wait.remove(object_id);
+        self.initialized_fixed_spin_objects.remove(object_id);
+    }
+
+    pub fn set_normal_follower_movement(&mut self, slot: u8) {
+        self.reset_object_movement_for_normal_follow_slot(slot);
+        if let Some(object_id) = self.object_id_for_struct_slot(slot) {
+            self.normal_following_object_identifiers.insert(object_id);
+        }
+    }
+
+    pub fn object_struct_is_visible(&self, index: usize) -> bool {
+        self.object_has_loaded_struct(index)
+            && self.objects.get(index).is_some_and(|object| {
+                object.object_identifier.as_ref().is_none_or(|object_id| {
+                    !self.invisible_object_struct_identifiers.contains(object_id)
+                })
+            })
+    }
+
+    pub fn set_loaded_object_struct_invisible(&mut self, object_id: &str, invisible: bool) {
+        let loaded = self
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id))
+            .is_some_and(|index| self.object_has_loaded_struct(index));
+        if !loaded {
+            return;
+        }
+        if invisible {
+            self.invisible_object_struct_identifiers
+                .insert(object_id.to_string());
+        } else {
+            self.invisible_object_struct_identifiers.remove(object_id);
+        }
+    }
+
+    fn loaded_object_indices_in_struct_order(&self) -> Vec<usize> {
+        let mut entries = self
+            .loaded_object_struct_slots
+            .iter()
+            .map(|(index, slot)| (*slot, *index))
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        entries.into_iter().map(|(_, index)| index).collect()
+    }
+
     fn is_object_visible_without_identifier_override(&self, object: &ObjectEvent) -> bool {
         if object.event_flag != "-1" && self.hidden_event_flags.contains(&object.event_flag) {
             return false;
         }
-        object_visible_at_time(object.hram_y, self.time_of_day)
+        object_visible_at_time(object.hram_x, object.hram_y, self.hour, self.time_of_day)
     }
 
-    pub fn set_time_of_day(&mut self, time_of_day: TimeOfDay) {
+    pub fn set_time(&mut self, hour: u8, time_of_day: TimeOfDay) {
+        assert!(hour < 24, "hHours must remain in the source range 0..24");
         if !self.object_visibility_initialized {
+            self.hour = hour;
             self.time_of_day = time_of_day;
             return;
         }
         let visibility = self.loaded_object_visibility();
+        self.hour = hour;
         self.time_of_day = time_of_day;
         self.retain_loaded_object_visibility(&visibility);
     }
@@ -1142,11 +1561,13 @@ impl OverworldSession {
     fn loaded_object_visibility(&self) -> Vec<(String, bool)> {
         self.objects
             .iter()
-            .filter_map(|object| {
+            .enumerate()
+            .filter(|(index, _)| self.object_has_loaded_struct(*index))
+            .filter_map(|(_, object)| {
                 object
                     .object_identifier
                     .as_ref()
-                    .map(|id| (id.clone(), self.is_object_visible(object)))
+                    .map(|id| (id.clone(), true))
             })
             .collect()
     }
@@ -1220,12 +1641,15 @@ impl OverworldSession {
     pub fn advance_autonomous_objects_with_rng(
         &mut self,
         mut rng: Option<&mut Random>,
-    ) -> Result<(), OverworldObjectCoordinateError> {
-        self.advance_autonomous_objects_with_random_add(rng.as_mut().map(|rng| {
-            move |_carry: bool| -> Result<u8, std::convert::Infallible> {
-                Ok(rng.crystal_random_add_sub().0)
-            }
-        }))
+    ) -> Result<OverworldObjectAdvance, OverworldObjectCoordinateError> {
+        self.advance_object_steps_with_random_add(
+            rng.as_mut().map(|rng| {
+                move |_carry: bool| -> Result<u8, std::convert::Infallible> {
+                    Ok(rng.crystal_random_add_sub().0)
+                }
+            }),
+            true,
+        )
         .map_err(|error| match error {
             AutonomousObjectAdvanceError::Coordinate(error) => error,
             AutonomousObjectAdvanceError::Divider(never) => match never {},
@@ -1235,42 +1659,74 @@ impl OverworldSession {
     pub fn advance_autonomous_objects_exact<S>(
         &mut self,
         rng: &mut CrystalRandom<&mut S>,
-    ) -> Result<(), AutonomousObjectAdvanceError<S::Error>>
+    ) -> Result<OverworldObjectAdvance, AutonomousObjectAdvanceError<S::Error>>
     where
         S: DividerSource + ?Sized,
     {
-        self.advance_autonomous_objects_with_random_add(Some(|carry| {
-            rng.random(carry)?;
-            Ok(rng.state().add)
-        }))
+        self.advance_object_steps_with_random_add(
+            Some(|carry| {
+                rng.random(carry)?;
+                Ok(rng.state().add)
+            }),
+            true,
+        )
     }
 
-    fn advance_autonomous_objects_with_random_add<E, F>(
+    pub fn advance_required_object_steps_exact<S>(
+        &mut self,
+        rng: &mut CrystalRandom<&mut S>,
+    ) -> Result<OverworldObjectAdvance, AutonomousObjectAdvanceError<S::Error>>
+    where
+        S: DividerSource + ?Sized,
+    {
+        self.advance_object_steps_with_random_add(
+            Some(|carry| {
+                rng.random(carry)?;
+                Ok(rng.state().add)
+            }),
+            false,
+        )
+    }
+
+    fn advance_object_steps_with_random_add<E, F>(
         &mut self,
         mut random_add: Option<F>,
-    ) -> Result<(), AutonomousObjectAdvanceError<E>>
+        advance_autonomous: bool,
+    ) -> Result<OverworldObjectAdvance, AutonomousObjectAdvanceError<E>>
     where
         F: FnMut(bool) -> Result<u8, E>,
     {
+        let mut outcome = OverworldObjectAdvance::default();
+        self.refresh_loaded_object_struct_roster()
+            .map_err(AutonomousObjectAdvanceError::Coordinate)?;
         let visible_indices: Vec<usize> = self
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| self.is_object_visible(object))
-            .filter(|(_, object)| {
-                matches!(
-                    object.spritemovedata.as_str(),
-                    "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
-                        | "SPRITEMOVEDATA_WALK_UP_DOWN"
-                        | "SPRITEMOVEDATA_WANDER"
-                        | "SPRITEMOVEDATA_SWIM_WANDER"
-                        | "SPRITEMOVEDATA_SPINCLOCKWISE"
-                        | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
-                        | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
-                        | "SPRITEMOVEDATA_SPINRANDOM_FAST"
-                )
+            .loaded_object_indices_in_struct_order()
+            .into_iter()
+            .filter(|index| {
+                let object = &self.objects[*index];
+                if object.object_identifier.as_ref().is_some_and(|object_id| {
+                    self.normal_following_object_identifiers.contains(object_id)
+                }) {
+                    return false;
+                }
+                self.strength_boulder_push_directions
+                    .contains_key(object.object_identifier.as_deref().unwrap_or_default())
+                    || self
+                        .strength_moving_object_identifiers
+                        .contains(object.object_identifier.as_deref().unwrap_or_default())
+                    || (advance_autonomous
+                        && matches!(
+                            object.spritemovedata.as_str(),
+                            "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
+                                | "SPRITEMOVEDATA_WALK_UP_DOWN"
+                                | "SPRITEMOVEDATA_WANDER"
+                                | "SPRITEMOVEDATA_SWIM_WANDER"
+                                | "SPRITEMOVEDATA_SPINCLOCKWISE"
+                                | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
+                                | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
+                                | "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                        ))
             })
-            .map(|(index, _)| index)
             .collect();
         // Runtime object coordinates commit atomically here, but Crystal keeps
         // OBJECT_LAST_MAP_* collision-owned through the visible stride. A
@@ -1289,6 +1745,35 @@ impl OverworldSession {
                     continue;
                 }
                 self.object_step_durations.remove(object_id);
+                if self.strength_moving_object_identifiers.remove(object_id) {
+                    let live_tile = self
+                        .object_runtime_tile_checked(index, object)
+                        .map_err(AutonomousObjectAdvanceError::Coordinate)?;
+                    let raw_tile = runtime_tile_to_raw_event_tile(live_tile).ok_or_else(|| {
+                        AutonomousObjectAdvanceError::Coordinate(object_coordinate_out_of_range(
+                            index, object,
+                        ))
+                    })?;
+                    let raw_x = u16::try_from(raw_tile.x).map_err(|_| {
+                        AutonomousObjectAdvanceError::Coordinate(object_coordinate_out_of_range(
+                            index, object,
+                        ))
+                    })?;
+                    let raw_y = u16::try_from(raw_tile.y).map_err(|_| {
+                        AutonomousObjectAdvanceError::Coordinate(object_coordinate_out_of_range(
+                            index, object,
+                        ))
+                    })?;
+                    let landing_object_id = object_id.to_string();
+                    self.objects[index].x = raw_x;
+                    self.objects[index].y = raw_y;
+                    self.object_last_runtime_tiles
+                        .insert(landing_object_id.clone(), live_tile);
+                    self.object_last_tiles_occupied_until_frame
+                        .remove(&landing_object_id);
+                    outcome.landed_strength_boulders.push(landing_object_id);
+                    continue;
+                }
                 if self.object_pending_random_wait.remove(object_id) {
                     let Some(random_add) = random_add.as_mut() else {
                         self.object_pending_random_wait
@@ -1308,17 +1793,70 @@ impl OverworldSession {
             let current = self
                 .object_runtime_tile_checked(index, object)
                 .map_err(AutonomousObjectAdvanceError::Coordinate)?;
+            let initial = *self
+                .loaded_object_struct_initial_tiles
+                .get(&index)
+                .expect("a valid loaded object struct owns initial coordinates");
             // Object movement uses the same one-runtime-tile stride as the
             // player.  METATILE_WIDTH is the map-art block size, not the
             // gameplay movement stride.
             let stride = DEFAULT_RUNTIME_TILE_STRIDE;
-            let (min_x, max_x, min_y, max_y) = (
-                object.x as i16 * stride - object.move_range_x as i16 * stride,
-                object.x as i16 * stride + object.move_range_x as i16 * stride,
-                object.y as i16 * stride - object.move_range_y as i16 * stride,
-                object.y as i16 * stride + object.move_range_y as i16 * stride,
-            );
             let movement = object.spritemovedata.as_str();
+            if let Some(direction) = self
+                .strength_boulder_push_directions
+                .get(object_id)
+                .copied()
+            {
+                if !object_event_uses_strength_movement(movement)
+                    || self.following_not_exact.contains_key(object_id)
+                {
+                    continue;
+                }
+                if sample_collision(&self.map, &self.tileset, current).is_some_and(|sample| {
+                    matches!(sample.permission, permissions::PIT | permissions::PIT_68)
+                }) {
+                    continue;
+                }
+                self.strength_boulder_push_directions.remove(object_id);
+                if let Some(target) = self
+                    .strength_boulder_step_target_checked(index, object_id, direction)
+                    .map_err(AutonomousObjectAdvanceError::Coordinate)?
+                {
+                    self.object_runtime_tiles
+                        .insert(object_id.to_string(), target);
+                    self.object_last_runtime_tiles
+                        .insert(object_id.to_string(), current);
+                    self.object_last_tiles_occupied_until_frame
+                        .insert(object_id.to_string(), self.frame.saturating_add(16));
+                    self.object_step_durations.insert(object_id.to_string(), 16);
+                    self.strength_moving_object_identifiers
+                        .insert(object_id.to_string());
+                    outcome
+                        .started_strength_boulders
+                        .push(object_id.to_string());
+                } else {
+                    self.object_last_runtime_tiles
+                        .insert(object_id.to_string(), current);
+                    self.object_last_tiles_occupied_until_frame
+                        .remove(object_id);
+                }
+                continue;
+            }
+            if !advance_autonomous
+                || !matches!(
+                    movement,
+                    "SPRITEMOVEDATA_WALK_LEFT_RIGHT"
+                        | "SPRITEMOVEDATA_WALK_UP_DOWN"
+                        | "SPRITEMOVEDATA_WANDER"
+                        | "SPRITEMOVEDATA_SWIM_WANDER"
+                        | "SPRITEMOVEDATA_SPINCLOCKWISE"
+                        | "SPRITEMOVEDATA_SPINCOUNTERCLOCKWISE"
+                        | "SPRITEMOVEDATA_SPINRANDOM_SLOW"
+                        | "SPRITEMOVEDATA_SPINRANDOM_FAST"
+                )
+            {
+                continue;
+            }
             let mut direction = *self
                 .object_facings
                 .get(object_id)
@@ -1432,21 +1970,42 @@ impl OverworldSession {
             let (dx, dy) = direction.delta();
             let target = TilePosition::new(current.x + dx * stride, current.y + dy * stride);
             let outside_range = movement != "SPRITEMOVEDATA_SWIM_WANDER"
-                && (target.x < min_x || target.x > max_x || target.y < min_y || target.y > max_y);
+                && object_target_reaches_movement_limit(
+                    initial,
+                    target,
+                    object.move_range_x,
+                    object.move_range_y,
+                );
+            let outside_screen = movement != "SPRITEMOVEDATA_SWIM_WANDER"
+                && autonomous_object_target_is_offscreen(self.player.tile, target);
             let player_occupied = target == self.player.tile
                 || (self.frame < self.player_last_tile_occupied_until_frame
                     && self.player_last_runtime_tile == Some(target));
-            let occupied = self
+            let occupied_by_current = self
                 .objects
                 .iter()
                 .enumerate()
-                .filter(|(other_index, other)| {
-                    *other_index != index && self.is_object_visible(other)
+                .filter(|(other_index, _)| {
+                    *other_index != index
+                        && self.loaded_object_struct_slots.contains_key(other_index)
                 })
-                .filter_map(|(other_index, other)| {
-                    self.object_runtime_tile_checked(other_index, other).ok()
-                })
-                .any(|tile| tile == target)
+                .try_fold(false, |occupied, (other_index, other)| {
+                    if occupied {
+                        return Ok(true);
+                    }
+                    if object_event_starts_as_emote_object(&other.spritemovedata) {
+                        return Ok(false);
+                    }
+                    let tile = self
+                        .object_runtime_tile_checked(other_index, other)
+                        .map_err(AutonomousObjectAdvanceError::Coordinate)?;
+                    Ok(
+                        object_current_occupied_tiles_checked(other_index, other, tile)
+                            .map_err(AutonomousObjectAdvanceError::Coordinate)?
+                            .contains(&target),
+                    )
+                })?;
+            let occupied = occupied_by_current
                 || self
                     .object_last_runtime_tiles
                     .iter()
@@ -1457,9 +2016,10 @@ impl OverworldSession {
                                 .object_last_tiles_occupied_until_frame
                                 .get(other_id)
                                 .is_some_and(|until_frame| self.frame < *until_frame)
-                            && self.objects.iter().any(|other| {
-                                other.object_identifier.as_deref() == Some(other_id.as_str())
-                                    && self.is_object_visible(other)
+                            && self.objects.iter().enumerate().any(|(other_index, other)| {
+                                self.loaded_object_struct_slots.contains_key(&other_index)
+                                    && other.object_identifier.as_deref() == Some(other_id.as_str())
+                                    && !object_event_starts_as_emote_object(&other.spritemovedata)
                             })
                     })
                 || vacated_tiles.contains(&target);
@@ -1479,8 +2039,12 @@ impl OverworldSession {
                     }
                 })
                 .unwrap_or(false);
-            let moved =
-                !outside_range && !player_occupied && !occupied && !blocked_leaving && walkable;
+            let moved = !outside_range
+                && !outside_screen
+                && !player_occupied
+                && !occupied
+                && !blocked_leaving
+                && walkable;
             if moved {
                 self.object_runtime_tiles
                     .insert(object_id.to_string(), target);
@@ -1503,7 +2067,615 @@ impl OverworldSession {
                     .insert(object_id.to_string(), duration_roll & 0x7f);
             }
         }
+        Ok(outcome)
+    }
+
+    fn refresh_loaded_object_struct_roster(
+        &mut self,
+    ) -> Result<(), OverworldObjectCoordinateError> {
+        let initialize = !self.object_struct_roster_initialized;
+        let previous_player_tile = self.object_struct_roster_player_tile;
+        if initialize {
+            self.loaded_object_struct_slots.clear();
+            self.loaded_object_struct_initial_tiles.clear();
+            self.object_struct_roster_initialized = true;
+        }
+        self.object_struct_roster_player_tile = Some(self.player.tile);
+
+        let loaded_indices = self
+            .loaded_object_struct_slots
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for index in loaded_indices {
+            let Some(object) = self.objects.get(index) else {
+                self.unload_object_struct(index);
+                continue;
+            };
+            let current = self.object_runtime_tile_checked(index, object)?;
+            let initial = self
+                .loaded_object_struct_initial_tiles
+                .get(&index)
+                .copied()
+                .unwrap_or(current);
+            if !object_struct_tile_is_in_loaded_viewport(self.player.tile, current)
+                && !object_struct_tile_is_in_loaded_viewport(self.player.tile, initial)
+                && !object_event_starts_wont_delete(&object.spritemovedata)
+            {
+                self.unload_object_struct(index);
+            }
+        }
+
+        let entering_direction = previous_player_tile
+            .and_then(|previous| cardinal_step_direction(previous, self.player.tile));
+        if !initialize && entering_direction.is_none() {
+            return Ok(());
+        }
+
+        for index in 0..self.objects.len() {
+            if self.loaded_object_struct_slots.len() >= MAX_LOADED_MAP_OBJECT_STRUCTS {
+                break;
+            }
+            if self.loaded_object_struct_slots.contains_key(&index) {
+                continue;
+            }
+            let object = &self.objects[index];
+            if !self.is_object_visible(object) {
+                continue;
+            }
+            let current = self.object_runtime_tile_checked(index, object)?;
+            let enters_roster = if initialize {
+                object_struct_tile_is_in_loaded_viewport(self.player.tile, current)
+            } else {
+                entering_direction.is_some_and(|direction| {
+                    object_struct_tile_is_on_entering_edge(self.player.tile, current, direction)
+                })
+            };
+            if enters_roster {
+                let slot = self
+                    .next_available_object_struct_slot()
+                    .expect("loaded object count guarantees an available struct slot");
+                self.loaded_object_struct_slots.insert(index, slot);
+                self.loaded_object_struct_initial_tiles
+                    .insert(index, current);
+            }
+        }
         Ok(())
+    }
+
+    pub fn advance_object_struct_roster_along_player_path(
+        &mut self,
+        path: &[TilePosition],
+    ) -> Result<(), OverworldObjectCoordinateError> {
+        let mut staged = self.clone();
+        for tile in path {
+            staged.player.tile = *tile;
+            staged.refresh_loaded_object_struct_roster()?;
+        }
+        *self = staged;
+        Ok(())
+    }
+
+    /// Enter the `LoadMapObjects` callback window before
+    /// `InitializeVisibleSprites`.
+    ///
+    /// Map setup callbacks operate on map-object memory while ordinary map
+    /// events still have no object struct. Explicit `appear` may allocate one
+    /// during this window, and that allocation must retain its earlier slot
+    /// priority when the remaining visible objects are initialized.
+    pub fn begin_map_object_setup(&mut self) {
+        let loaded_indices = self
+            .loaded_object_struct_slots
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for index in loaded_indices {
+            self.unload_object_struct(index);
+        }
+        self.loaded_object_struct_slots.clear();
+        self.loaded_object_struct_initial_tiles.clear();
+        self.object_struct_roster_player_tile = Some(self.player.tile);
+        self.object_struct_roster_initialized = true;
+    }
+
+    /// Complete `InitializeVisibleSprites` after map-object callbacks and mask
+    /// loading. Existing callback-time `appear` allocations are preserved;
+    /// other visible events fill the remaining slots in map-event order.
+    pub fn finish_map_object_setup(&mut self) -> Result<(), OverworldObjectCoordinateError> {
+        self.object_struct_roster_player_tile = Some(self.player.tile);
+        self.object_struct_roster_initialized = true;
+        for index in 0..self.objects.len() {
+            if self.loaded_object_struct_slots.len() >= MAX_LOADED_MAP_OBJECT_STRUCTS {
+                break;
+            }
+            if self.loaded_object_struct_slots.contains_key(&index) {
+                continue;
+            }
+            let object = &self.objects[index];
+            if !self.is_object_visible(object) {
+                continue;
+            }
+            let tile = self.object_runtime_tile_checked(index, object)?;
+            if object_struct_tile_is_in_loaded_viewport(self.player.tile, tile) {
+                let slot = self
+                    .next_available_object_struct_slot()
+                    .expect("loaded object count guarantees an available struct slot");
+                self.loaded_object_struct_slots.insert(index, slot);
+                self.loaded_object_struct_initial_tiles.insert(index, tile);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn object_struct_roster_memory(
+        &self,
+    ) -> Result<OverworldObjectStructRosterMemory, OverworldObjectStructMemoryError> {
+        let mut allocated = self
+            .loaded_object_struct_slots
+            .iter()
+            .map(|(index, slot)| (*slot, *index))
+            .collect::<Vec<_>>();
+        allocated.sort_unstable();
+        let mut structs = Vec::with_capacity(allocated.len());
+        for (slot, index) in allocated {
+            let object = &self.objects[index];
+            let object_id = object.object_identifier.as_deref();
+            let live_tile = self.object_runtime_tile_checked(index, object)?;
+            let initial_tile = self
+                .loaded_object_struct_initial_tiles
+                .get(&index)
+                .copied()
+                .unwrap_or(live_tile);
+            let remaining_frames = object_id
+                .and_then(|id| self.object_last_tiles_occupied_until_frame.get(id))
+                .copied()
+                .unwrap_or(self.frame)
+                .saturating_sub(self.frame);
+            let last_tile_occupied_remaining_frames =
+                u8::try_from(remaining_frames).map_err(|_| {
+                    OverworldObjectStructMemoryError::RemainingFramesOutOfRange { remaining_frames }
+                })?;
+            structs.push(OverworldObjectStructMemory {
+                slot,
+                map_object_index: u8::try_from(index + 1).expect("map object index fits one byte"),
+                live_tile,
+                last_tile: object_id.and_then(|id| self.object_last_runtime_tiles.get(id).copied()),
+                initial_tile,
+                facing: object_id.and_then(|id| self.object_facings.get(id).copied()),
+                step_duration: object_id.and_then(|id| self.object_step_durations.get(id).copied()),
+                last_tile_occupied_remaining_frames,
+                pending_random_wait: object_id
+                    .is_some_and(|id| self.object_pending_random_wait.contains(id)),
+                initialized_fixed_spin: object_id
+                    .is_some_and(|id| self.initialized_fixed_spin_objects.contains(id)),
+                strength_push_direction: object_id
+                    .and_then(|id| self.strength_boulder_push_directions.get(id).copied()),
+                strength_moving: object_id
+                    .is_some_and(|id| self.strength_moving_object_identifiers.contains(id)),
+                fixed_facing: object_id
+                    .is_some_and(|id| self.fixed_facing_object_identifiers.contains(id)),
+                sliding: object_id.is_some_and(|id| self.sliding_object_identifiers.contains(id)),
+                visible: object_id
+                    .is_none_or(|id| !self.invisible_object_struct_identifiers.contains(id)),
+                normal_following: object_id
+                    .is_some_and(|id| self.normal_following_object_identifiers.contains(id)),
+                following_not_exact_leader_slot: object_id
+                    .and_then(|id| self.following_not_exact.get(id).copied()),
+            });
+        }
+        let player_remaining_frames = self
+            .player_last_tile_occupied_until_frame
+            .saturating_sub(self.frame);
+        Ok(OverworldObjectStructRosterMemory {
+            structs,
+            following_queued_step: self.following_queued_step,
+            last_step_direction: self.last_step_direction,
+            player_last_tile: self.player_last_runtime_tile,
+            player_last_tile_occupied_remaining_frames: u8::try_from(player_remaining_frames)
+                .map_err(
+                    |_| OverworldObjectStructMemoryError::RemainingFramesOutOfRange {
+                        remaining_frames: player_remaining_frames,
+                    },
+                )?,
+            player_fixed_facing: self.fixed_facing_object_identifiers.contains("PLAYER"),
+            player_sliding: self.sliding_object_identifiers.contains("PLAYER"),
+            player_normal_following: self.normal_following_object_identifiers.contains("PLAYER"),
+        })
+    }
+
+    pub fn restore_object_struct_roster_memory(
+        &mut self,
+        memory: &OverworldObjectStructRosterMemory,
+    ) -> Result<(), OverworldObjectStructMemoryError> {
+        let mut slots = BTreeSet::new();
+        let mut map_objects = BTreeSet::new();
+        let mut normal_follower_slot = memory.player_normal_following.then_some(0);
+        for saved in &memory.structs {
+            if !(1..=MAX_LOADED_MAP_OBJECT_STRUCTS as u8).contains(&saved.slot) {
+                return Err(OverworldObjectStructMemoryError::InvalidSlot { slot: saved.slot });
+            }
+            if saved.map_object_index == 0
+                || usize::from(saved.map_object_index) > self.objects.len()
+            {
+                return Err(OverworldObjectStructMemoryError::InvalidMapObjectIndex {
+                    map_object_index: saved.map_object_index,
+                });
+            }
+            if !slots.insert(saved.slot) {
+                return Err(OverworldObjectStructMemoryError::DuplicateSlot { slot: saved.slot });
+            }
+            if !map_objects.insert(saved.map_object_index) {
+                return Err(OverworldObjectStructMemoryError::DuplicateMapObjectIndex {
+                    map_object_index: saved.map_object_index,
+                });
+            }
+            let movement = self.objects[usize::from(saved.map_object_index - 1)]
+                .spritemovedata
+                .as_str();
+            if saved.strength_push_direction.is_some() && saved.strength_moving {
+                return Err(
+                    OverworldObjectStructMemoryError::ConflictingStrengthMovementPhases {
+                        slot: saved.slot,
+                    },
+                );
+            }
+            if saved.strength_push_direction.is_some()
+                && !object_event_has_strength_boulder_palette(movement)
+            {
+                return Err(
+                    OverworldObjectStructMemoryError::InvalidStrengthPushMovement {
+                        slot: saved.slot,
+                        movement: movement.to_string(),
+                    },
+                );
+            }
+            if saved.strength_push_direction.is_some() && saved.step_duration.is_some() {
+                return Err(
+                    OverworldObjectStructMemoryError::InvalidStrengthPushStepState {
+                        slot: saved.slot,
+                    },
+                );
+            }
+            if saved.strength_moving && !object_event_uses_strength_movement(movement) {
+                return Err(
+                    OverworldObjectStructMemoryError::InvalidStrengthStepMovement {
+                        slot: saved.slot,
+                        movement: movement.to_string(),
+                    },
+                );
+            }
+            if saved.strength_moving
+                && (!matches!(saved.step_duration, Some(1..=16))
+                    || saved.last_tile.is_none()
+                    || saved.last_tile_occupied_remaining_frames
+                        != saved
+                            .step_duration
+                            .expect("active Strength duration checked"))
+            {
+                return Err(
+                    OverworldObjectStructMemoryError::InvalidStrengthStepDuration {
+                        slot: saved.slot,
+                    },
+                );
+            }
+            if saved
+                .following_not_exact_leader_slot
+                .is_some_and(|slot| slot > MAX_LOADED_MAP_OBJECT_STRUCTS as u8)
+            {
+                return Err(
+                    OverworldObjectStructMemoryError::InvalidFollowNotExactLeaderSlot {
+                        slot: saved
+                            .following_not_exact_leader_slot
+                            .expect("checked follow-not-exact leader slot"),
+                    },
+                );
+            }
+            if saved.normal_following && saved.following_not_exact_leader_slot.is_some() {
+                return Err(
+                    OverworldObjectStructMemoryError::ConflictingFollowMovementTypes {
+                        slot: saved.slot,
+                    },
+                );
+            }
+            if saved.normal_following && normal_follower_slot.replace(saved.slot).is_some() {
+                return Err(OverworldObjectStructMemoryError::MultipleNormalFollowers);
+            }
+        }
+        if let Some(movement_slot) = normal_follower_slot {
+            let follower_slot = self
+                .following
+                .as_ref()
+                .and_then(|follow| follow.follower_slot);
+            if follower_slot != Some(movement_slot) {
+                return Err(
+                    OverworldObjectStructMemoryError::NormalFollowerSlotMismatch {
+                        movement_slot,
+                        follower_slot,
+                    },
+                );
+            }
+        }
+
+        let mut staged = self.clone();
+        staged.loaded_object_struct_slots.clear();
+        staged.loaded_object_struct_initial_tiles.clear();
+        staged.object_last_runtime_tiles.clear();
+        staged.object_last_tiles_occupied_until_frame.clear();
+        staged.object_step_durations.clear();
+        staged.object_pending_random_wait.clear();
+        staged.initialized_fixed_spin_objects.clear();
+        staged.strength_boulder_push_directions.clear();
+        staged.strength_moving_object_identifiers.clear();
+        staged.invisible_object_struct_identifiers.clear();
+        staged.normal_following_object_identifiers.clear();
+        staged.following_not_exact.clear();
+        staged.loaded_roster_hidden_object_identifiers.clear();
+        staged.loaded_roster_shown_object_identifiers.clear();
+        staged.following_queued_step = memory.following_queued_step;
+        staged.last_step_direction = memory.last_step_direction;
+        staged.player_last_runtime_tile = memory.player_last_tile;
+        staged.player_last_tile_occupied_until_frame = staged
+            .frame
+            .saturating_add(u64::from(memory.player_last_tile_occupied_remaining_frames));
+        if memory.player_fixed_facing {
+            staged
+                .fixed_facing_object_identifiers
+                .insert("PLAYER".to_string());
+        } else {
+            staged.fixed_facing_object_identifiers.remove("PLAYER");
+        }
+        if memory.player_sliding {
+            staged
+                .sliding_object_identifiers
+                .insert("PLAYER".to_string());
+        } else {
+            staged.sliding_object_identifiers.remove("PLAYER");
+        }
+        if memory.player_normal_following {
+            staged
+                .normal_following_object_identifiers
+                .insert("PLAYER".to_string());
+        }
+
+        for saved in &memory.structs {
+            let index = usize::from(saved.map_object_index - 1);
+            staged.loaded_object_struct_slots.insert(index, saved.slot);
+            staged
+                .loaded_object_struct_initial_tiles
+                .insert(index, saved.initial_tile);
+            let Some(object_id) = staged.objects[index].object_identifier.clone() else {
+                continue;
+            };
+            staged
+                .object_runtime_tiles
+                .insert(object_id.clone(), saved.live_tile);
+            if let Some(last_tile) = saved.last_tile {
+                staged
+                    .object_last_runtime_tiles
+                    .insert(object_id.clone(), last_tile);
+            }
+            if saved.last_tile_occupied_remaining_frames != 0 {
+                staged.object_last_tiles_occupied_until_frame.insert(
+                    object_id.clone(),
+                    staged
+                        .frame
+                        .saturating_add(u64::from(saved.last_tile_occupied_remaining_frames)),
+                );
+            }
+            if let Some(facing) = saved.facing {
+                staged.object_facings.insert(object_id.clone(), facing);
+            }
+            if let Some(duration) = saved.step_duration {
+                staged
+                    .object_step_durations
+                    .insert(object_id.clone(), duration);
+            }
+            if saved.pending_random_wait {
+                staged.object_pending_random_wait.insert(object_id.clone());
+            }
+            if saved.initialized_fixed_spin {
+                staged
+                    .initialized_fixed_spin_objects
+                    .insert(object_id.clone());
+            }
+            if let Some(direction) = saved.strength_push_direction {
+                staged
+                    .strength_boulder_push_directions
+                    .insert(object_id.clone(), direction);
+            }
+            if saved.strength_moving {
+                staged
+                    .strength_moving_object_identifiers
+                    .insert(object_id.clone());
+            }
+            if saved.fixed_facing {
+                staged
+                    .fixed_facing_object_identifiers
+                    .insert(object_id.clone());
+            } else {
+                staged.fixed_facing_object_identifiers.remove(&object_id);
+            }
+            if saved.sliding {
+                staged.sliding_object_identifiers.insert(object_id.clone());
+            } else {
+                staged.sliding_object_identifiers.remove(&object_id);
+            }
+            if let Some(leader_slot) = saved.following_not_exact_leader_slot {
+                staged
+                    .following_not_exact
+                    .insert(object_id.clone(), leader_slot);
+            }
+            if saved.visible {
+                staged
+                    .invisible_object_struct_identifiers
+                    .remove(&object_id);
+            } else {
+                staged
+                    .invisible_object_struct_identifiers
+                    .insert(object_id.clone());
+            }
+            if saved.normal_following {
+                staged
+                    .normal_following_object_identifiers
+                    .insert(object_id.clone());
+            }
+        }
+        staged.object_struct_roster_player_tile = Some(staged.player.tile);
+        staged.object_struct_roster_initialized = true;
+        *self = staged;
+        Ok(())
+    }
+
+    pub fn delete_loaded_object_struct(&mut self, object_id: &str) {
+        if let Some(index) = self
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id))
+        {
+            self.unload_object_struct(index);
+        }
+    }
+
+    pub fn delete_loaded_object_struct_for_disappear(&mut self, object_id: &str) {
+        self.stop_follow_for_deleted_object_struct(object_id);
+        self.delete_loaded_object_struct(object_id);
+    }
+
+    pub fn stop_follow_for_deleted_object_struct(&mut self, object_id: &str) {
+        let deleted_slot = self.object_struct_slot(object_id);
+        if self.following.as_ref().is_some_and(|following| {
+            deleted_slot.is_some_and(|slot| {
+                following.leader_slot == Some(slot) || following.follower_slot == Some(slot)
+            })
+        }) {
+            self.reset_normal_follower_movement();
+            self.following = None;
+            self.following_queued_step = None;
+        }
+    }
+
+    pub fn delete_loaded_object_struct_for_movement_remove(&mut self, object_id: &str) {
+        let object_struct_slot = self.object_struct_slot(object_id);
+        self.delete_loaded_object_struct(object_id);
+        if let Some(following) = self.following.as_mut()
+            && following.leader_slot == object_struct_slot
+        {
+            following.leader_slot = None;
+        }
+    }
+
+    pub fn copy_object_struct_for_appear(
+        &mut self,
+        object_id: &str,
+    ) -> Result<bool, OverworldObjectCoordinateError> {
+        let Some(index) = self
+            .objects
+            .iter()
+            .position(|object| object.object_identifier.as_deref() == Some(object_id))
+        else {
+            return Err(OverworldObjectCoordinateError::OutOfRange {
+                object_id: object_id.to_string(),
+                x: 0,
+                y: 0,
+            });
+        };
+        if self.loaded_object_struct_slots.contains_key(&index) {
+            return Ok(true);
+        }
+        if self.loaded_object_struct_slots.len() >= MAX_LOADED_MAP_OBJECT_STRUCTS {
+            return Ok(false);
+        }
+        let current = self.object_runtime_tile_checked(index, &self.objects[index])?;
+        let slot = self
+            .next_available_object_struct_slot()
+            .expect("loaded object count guarantees an available struct slot");
+        self.loaded_object_struct_slots.insert(index, slot);
+        self.loaded_object_struct_initial_tiles
+            .insert(index, current);
+        self.object_struct_roster_initialized = true;
+        self.object_struct_roster_player_tile = Some(self.player.tile);
+        Ok(true)
+    }
+
+    fn initialize_loaded_object_struct_roster(&mut self) {
+        self.loaded_object_struct_slots.clear();
+        self.loaded_object_struct_initial_tiles.clear();
+        self.object_struct_roster_player_tile = Some(self.player.tile);
+        self.object_struct_roster_initialized = true;
+        for index in 0..self.objects.len() {
+            if self.loaded_object_struct_slots.len() >= MAX_LOADED_MAP_OBJECT_STRUCTS {
+                break;
+            }
+            let object = &self.objects[index];
+            if !self.is_object_visible(object) {
+                continue;
+            }
+            match self.object_runtime_tile_checked(index, object) {
+                Ok(tile) if object_struct_tile_is_in_loaded_viewport(self.player.tile, tile) => {
+                    let slot = self
+                        .next_available_object_struct_slot()
+                        .expect("loaded object count guarantees an available struct slot");
+                    self.loaded_object_struct_slots.insert(index, slot);
+                    self.loaded_object_struct_initial_tiles.insert(index, tile);
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // Preserve strict checked-query behavior for malformed
+                    // pack data: an invalid visible map event occupies its
+                    // source-order candidate slot and is rejected when the
+                    // object struct is actually queried.
+                    let slot = self
+                        .next_available_object_struct_slot()
+                        .expect("loaded object count guarantees an available struct slot");
+                    self.loaded_object_struct_slots.insert(index, slot);
+                }
+            }
+        }
+    }
+
+    fn next_available_object_struct_slot(&self) -> Option<u8> {
+        (1..=MAX_LOADED_MAP_OBJECT_STRUCTS as u8).find(|slot| {
+            !self
+                .loaded_object_struct_slots
+                .values()
+                .any(|used| used == slot)
+        })
+    }
+
+    fn unload_object_struct(&mut self, index: usize) {
+        self.loaded_object_struct_slots.remove(&index);
+        self.loaded_object_struct_initial_tiles.remove(&index);
+        let Some(object_id) = self
+            .objects
+            .get(index)
+            .and_then(|object| object.object_identifier.clone())
+        else {
+            return;
+        };
+        self.object_runtime_tiles.remove(&object_id);
+        self.object_last_runtime_tiles.remove(&object_id);
+        self.object_last_tiles_occupied_until_frame
+            .remove(&object_id);
+        self.object_step_durations.remove(&object_id);
+        self.object_pending_random_wait.remove(&object_id);
+        self.initialized_fixed_spin_objects.remove(&object_id);
+        self.strength_boulder_push_directions.remove(&object_id);
+        self.strength_moving_object_identifiers.remove(&object_id);
+        self.normal_following_object_identifiers.remove(&object_id);
+        self.invisible_object_struct_identifiers.remove(&object_id);
+        self.following_not_exact.remove(&object_id);
+        self.clear_loaded_roster_visibility_override(&object_id);
+        if object_event_starts_fixed_and_sliding(&self.objects[index].spritemovedata) {
+            self.fixed_facing_object_identifiers
+                .insert(object_id.clone());
+            self.sliding_object_identifiers.insert(object_id.clone());
+        } else {
+            self.fixed_facing_object_identifiers.remove(&object_id);
+            self.sliding_object_identifiers.remove(&object_id);
+        }
+        if let Some(facing) = object_event_initial_facing(&self.objects[index].spritemovedata) {
+            self.object_facings.insert(object_id, facing);
+        }
     }
 
     pub fn check_interaction_checked(
@@ -1639,10 +2811,9 @@ impl OverworldSession {
     where
         F: FnMut(&ObjectEvent) -> bool,
     {
-        self.objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| self.is_object_visible(object))
+        self.loaded_object_indices_in_struct_order()
+            .into_iter()
+            .map(|index| (index, &self.objects[index]))
             .filter(|(_, object)| eligible(object))
             .filter(|(_, object)| {
                 object.object_type == "OBJECTTYPE_TRAINER"
@@ -1689,14 +2860,13 @@ impl OverworldSession {
         &self,
         tile: TilePosition,
     ) -> Result<Option<(u16, &ObjectEvent)>, OverworldObjectCoordinateError> {
-        for (index, object) in self
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| self.is_object_visible(object))
-        {
+        for index in self.loaded_object_indices_in_struct_order() {
+            let object = &self.objects[index];
+            if object_event_starts_as_emote_object(&object.spritemovedata) {
+                continue;
+            }
             let object_tile = self.object_runtime_tile_checked(index, object)?;
-            if object_tile == tile {
+            if object_current_occupied_tiles_checked(index, object, object_tile)?.contains(&tile) {
                 return Ok(Some(((index + 1) as u16, object)));
             }
         }
@@ -2534,6 +3704,103 @@ fn object_event_starts_fixed_and_sliding(movement: &str) -> bool {
     )
 }
 
+/// Exact `EMOTE_OBJECT_F` members of `SpriteMovementData`.
+///
+/// `IsNPCAtCoord` skips these allocated structs before testing either their
+/// live or last coordinates. The flag is copied when the struct is allocated;
+/// later movement-type changes do not rewrite it.
+fn object_event_starts_as_emote_object(movement: &str) -> bool {
+    matches!(
+        movement,
+        "SPRITEMOVEDATA_SHADOW"
+            | "SPRITEMOVEDATA_EMOTE"
+            | "SPRITEMOVEDATA_SCREENSHAKE"
+            | "SPRITEMOVEDATA_BOULDERDUST"
+            | "SPRITEMOVEDATA_GRASS"
+    )
+}
+
+/// Exact `STRENGTH_BOULDER_F` members of `SpriteMovementData`.
+///
+/// Player collision sets `BOULDER_MOVING_F` for all four. BIGDOLLSYM retains
+/// that bit because its movement function is not Strength; the other three
+/// consume it from `MovementFunction_Strength`.
+fn object_event_has_strength_boulder_palette(movement: &str) -> bool {
+    matches!(
+        movement,
+        "SPRITEMOVEDATA_BIGDOLLSYM"
+            | "SPRITEMOVEDATA_STRENGTH_BOULDER"
+            | "SPRITEMOVEDATA_BIGDOLLASYM"
+            | "SPRITEMOVEDATA_BIGDOLL"
+    )
+}
+
+/// Exact `MovementFunction_Strength` members of `SpriteMovementData`.
+pub fn object_event_uses_strength_movement(movement: &str) -> bool {
+    matches!(
+        movement,
+        "SPRITEMOVEDATA_STRENGTH_BOULDER" | "SPRITEMOVEDATA_BIGDOLLASYM" | "SPRITEMOVEDATA_BIGDOLL"
+    )
+}
+
+/// `IsNPCAtCoord` tests `BIG_OBJECT_F` objects as a 2×2 rectangle rooted at
+/// `OBJECT_MAP_X/Y`. Only the live coordinate gets that wider footprint; the
+/// later `OBJECT_LAST_MAP_X/Y` comparison remains a single tile in ASM.
+fn object_current_occupied_tiles_checked(
+    index: usize,
+    object: &ObjectEvent,
+    tile: TilePosition,
+) -> Result<Vec<TilePosition>, OverworldObjectCoordinateError> {
+    if !matches!(
+        object.spritemovedata.as_str(),
+        "SPRITEMOVEDATA_BIGDOLLSYM" | "SPRITEMOVEDATA_BIGDOLLASYM" | "SPRITEMOVEDATA_BIGDOLL"
+    ) {
+        return Ok(vec![tile]);
+    }
+    let right = tile
+        .x
+        .checked_add(1)
+        .ok_or_else(|| object_coordinate_out_of_range(index, object))?;
+    let bottom = tile
+        .y
+        .checked_add(1)
+        .ok_or_else(|| object_coordinate_out_of_range(index, object))?;
+    Ok(vec![
+        tile,
+        TilePosition::new(right, tile.y),
+        TilePosition::new(tile.x, bottom),
+        TilePosition::new(right, bottom),
+    ])
+}
+
+/// Exact `WONT_DELETE_F` members of `SpriteMovementData`.
+///
+/// `CheckObjectStillVisible` leaves these object structs allocated after both
+/// their live and initialization coordinates leave the viewport. Runtime
+/// movement-type changes such as `follow` do not rewrite OBJECT_FLAGS1, so
+/// this remains the flag copied from the map object's source movement record.
+fn object_event_starts_wont_delete(movement: &str) -> bool {
+    matches!(
+        movement,
+        "SPRITEMOVEDATA_00"
+            | "SPRITEMOVEDATA_PLAYER"
+            | "SPRITEMOVEDATA_FOLLOWING"
+            | "SPRITEMOVEDATA_SCRIPTED"
+            | "SPRITEMOVEDATA_BIGDOLLSYM"
+            | "SPRITEMOVEDATA_POKEMON"
+            | "SPRITEMOVEDATA_SMASHABLE_ROCK"
+            | "SPRITEMOVEDATA_STRENGTH_BOULDER"
+            | "SPRITEMOVEDATA_FOLLOWNOTEXACT"
+            | "SPRITEMOVEDATA_SHADOW"
+            | "SPRITEMOVEDATA_EMOTE"
+            | "SPRITEMOVEDATA_SCREENSHAKE"
+            | "SPRITEMOVEDATA_BIGDOLLASYM"
+            | "SPRITEMOVEDATA_BIGDOLL"
+            | "SPRITEMOVEDATA_BOULDERDUST"
+            | "SPRITEMOVEDATA_GRASS"
+    )
+}
+
 fn initial_object_runtime_state(
     objects: &[ObjectEvent],
 ) -> (
@@ -2724,9 +3991,17 @@ impl WarpTransition {
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            strength_boulder_push_directions: BTreeMap::new(),
+            strength_moving_object_identifiers: BTreeSet::new(),
+            loaded_object_struct_slots: BTreeMap::new(),
+            loaded_object_struct_initial_tiles: BTreeMap::new(),
+            object_struct_roster_player_tile: None,
+            object_struct_roster_initialized: false,
             fixed_facing_object_identifiers,
             sliding_object_identifiers,
+            invisible_object_struct_identifiers: BTreeSet::new(),
             following: None,
+            normal_following_object_identifiers: BTreeSet::new(),
             following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
@@ -2737,7 +4012,8 @@ impl WarpTransition {
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
-            time_of_day: default_session_time_of_day(),
+            hour: 12,
+            time_of_day: TimeOfDay::Day,
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
             last_step_direction: None,
@@ -2771,9 +4047,17 @@ impl ConnectionTransition {
             object_step_durations: BTreeMap::new(),
             object_pending_random_wait: BTreeSet::new(),
             initialized_fixed_spin_objects: BTreeSet::new(),
+            strength_boulder_push_directions: BTreeMap::new(),
+            strength_moving_object_identifiers: BTreeSet::new(),
+            loaded_object_struct_slots: BTreeMap::new(),
+            loaded_object_struct_initial_tiles: BTreeMap::new(),
+            object_struct_roster_player_tile: None,
+            object_struct_roster_initialized: false,
             fixed_facing_object_identifiers,
             sliding_object_identifiers,
+            invisible_object_struct_identifiers: BTreeSet::new(),
             following: None,
+            normal_following_object_identifiers: BTreeSet::new(),
             following_not_exact: BTreeMap::new(),
             following_queued_step: None,
             last_talked_object_identifier: None,
@@ -2784,7 +4068,8 @@ impl ConnectionTransition {
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
-            time_of_day: default_session_time_of_day(),
+            hour: 12,
+            time_of_day: TimeOfDay::Day,
             tileset,
             player: PlayerMovementState::new(self.destination.tile).with_mode(mode),
             last_step_direction: None,
@@ -2792,6 +4077,93 @@ impl ConnectionTransition {
             player_last_tile_occupied_until_frame: 0,
         }
     }
+}
+
+const MAX_LOADED_MAP_OBJECT_STRUCTS: usize = 12;
+
+/// Normalized-coordinate form of `CheckObjectStillVisible` and
+/// `InitializeVisibleSprites`.
+///
+/// ASM map-object coordinates include the object-event `+ 4` padding, then
+/// test `coordinate + 1 - wXCoord` against widths 12 and 11. Runtime event
+/// coordinates therefore occupy x -5..=6 and y -5..=5 around the player.
+fn object_struct_tile_is_in_loaded_viewport(player: TilePosition, object: TilePosition) -> bool {
+    let dx = i32::from(object.x) - i32::from(player.x);
+    let dy = i32::from(object.y) - i32::from(player.y);
+    (-5..=6).contains(&dx) && (-5..=5).contains(&dy)
+}
+
+fn cardinal_step_direction(from: TilePosition, to: TilePosition) -> Option<Direction> {
+    match (
+        i32::from(to.x) - i32::from(from.x),
+        i32::from(to.y) - i32::from(from.y),
+    ) {
+        (0, dy) if dy < 0 => Some(Direction::Up),
+        (0, dy) if dy > 0 => Some(Direction::Down),
+        (dx, 0) if dx < 0 => Some(Direction::Left),
+        (dx, 0) if dx > 0 => Some(Direction::Right),
+        _ => None,
+    }
+}
+
+fn object_struct_tile_is_on_entering_edge(
+    player: TilePosition,
+    object: TilePosition,
+    direction: Direction,
+) -> bool {
+    let dx = i32::from(object.x) - i32::from(player.x);
+    let dy = i32::from(object.y) - i32::from(player.y);
+    match direction {
+        Direction::Up => dy == -5 && (-5..=6).contains(&dx),
+        Direction::Down => dy == 5 && (-5..=6).contains(&dx),
+        Direction::Left => dx == -5 && (-5..=5).contains(&dy),
+        Direction::Right => dx == 6 && (-5..=5).contains(&dy),
+    }
+}
+
+/// Exact normalized-coordinate form of `IsObjectMovingOffEdgeOfScreen`.
+///
+/// Map object coordinates carry the source `+ 4` object-event padding while
+/// `wXCoord`/`wYCoord` do not. After removing that padding, ordinary objects
+/// may choose a destination from player x - 4 through x + 5 and player y - 4
+/// through y + 4. Swimming objects bypass this check in
+/// `CanObjectMoveInDirection`, preserving Crystal's documented movement bug.
+fn autonomous_object_target_is_offscreen(player: TilePosition, target: TilePosition) -> bool {
+    let dx = i32::from(target.x) - i32::from(player.x);
+    let dy = i32::from(target.y) - i32::from(player.y);
+    !(-4..=5).contains(&dx) || !(-4..=4).contains(&dy)
+}
+
+/// Normalized-coordinate form of `HasObjectReachedMovementLimit`.
+///
+/// `InitStep` writes the proposed destination into `OBJECT_MAP_X/Y` before
+/// the check. Crystal compares that byte for equality with the two wrapped
+/// `OBJECT_INIT_X/Y ± radius` boundaries. It does not clamp an object that a
+/// scripted movement has already placed outside the interval. The stored
+/// object coordinates include the map object's four-tile padding, retained
+/// here so byte underflow and overflow match the cartridge as well.
+fn object_target_reaches_movement_limit(
+    initial: TilePosition,
+    target: TilePosition,
+    move_range_x: u16,
+    move_range_y: u16,
+) -> bool {
+    fn object_coordinate_byte(coordinate: i16) -> u8 {
+        (i32::from(coordinate) + 4).rem_euclid(256) as u8
+    }
+
+    let initial_x = object_coordinate_byte(initial.x);
+    let initial_y = object_coordinate_byte(initial.y);
+    let target_x = object_coordinate_byte(target.x);
+    let target_y = object_coordinate_byte(target.y);
+    let radius_x = (move_range_x & 0xf) as u8;
+    let radius_y = (move_range_y & 0xf) as u8;
+    (radius_x != 0
+        && (target_x == initial_x.wrapping_sub(radius_x)
+            || target_x == initial_x.wrapping_add(radius_x)))
+        || (radius_y != 0
+            && (target_y == initial_y.wrapping_sub(radius_y)
+                || target_y == initial_y.wrapping_add(radius_y)))
 }
 
 pub fn object_tile_position_checked(object: &ObjectEvent) -> Option<TilePosition> {
@@ -2812,18 +4184,38 @@ fn object_coordinate_out_of_range(
     }
 }
 
-/// Crystal stores an NPC's schedule as a bit mask in `hram_y`: morning is
-/// bit 0, daytime bit 1, and night bit 2. Zero and -1 mean "any time".
-fn object_visible_at_time(hram_y: i16, time_of_day: TimeOfDay) -> bool {
-    if hram_y == 0 || hram_y == -1 {
+/// Exact `CheckObjectTime` interpretation of MAPOBJECT_HOUR_1/2.
+///
+/// `$ff` in the first byte selects the time-of-day mask form. Otherwise the
+/// two bytes are inclusive hours; a descending pair wraps across midnight,
+/// and equal endpoints mean the object is always scheduled.
+fn object_visible_at_time(
+    hour_1: i16,
+    hour_2: i16,
+    current_hour: u8,
+    time_of_day: TimeOfDay,
+) -> bool {
+    let hour_1 = hour_1 as u8;
+    let hour_2 = hour_2 as u8;
+    if hour_1 == u8::MAX {
+        if hour_2 == u8::MAX {
+            return true;
+        }
+        let time_mask = match time_of_day {
+            TimeOfDay::Morning => 0b001,
+            TimeOfDay::Day => 0b010,
+            TimeOfDay::Night => 0b100,
+        };
+        return hour_2 & time_mask != 0;
+    }
+    if hour_1 == hour_2 {
         return true;
     }
-    let time_mask = match time_of_day {
-        TimeOfDay::Morning => 0b001,
-        TimeOfDay::Day => 0b010,
-        TimeOfDay::Night => 0b100,
-    };
-    (hram_y as u16 & time_mask) != 0
+    if hour_1 < hour_2 {
+        current_hour >= hour_1 && current_hour <= hour_2
+    } else {
+        current_hour >= hour_1 || current_hour <= hour_2
+    }
 }
 
 pub fn background_event_tile_position_checked(event: &BackgroundEvent) -> Option<TilePosition> {
@@ -2873,13 +4265,56 @@ mod tests {
     use crate::world::encounters::{WildEncounter, WildEncounterTable};
 
     #[test]
-    fn object_schedule_mask_matches_crystal_time_of_day_bits() {
-        assert!(object_visible_at_time(-1, TimeOfDay::Morning));
-        assert!(object_visible_at_time(0, TimeOfDay::Night));
-        assert!(object_visible_at_time(0b001, TimeOfDay::Morning));
-        assert!(!object_visible_at_time(0b001, TimeOfDay::Day));
-        assert!(object_visible_at_time(0b110, TimeOfDay::Night));
-        assert!(!object_visible_at_time(0b110, TimeOfDay::Morning));
+    fn object_schedule_matches_crystals_mask_and_inclusive_hour_branches() {
+        assert!(object_visible_at_time(-1, -1, 12, TimeOfDay::Morning));
+        assert!(!object_visible_at_time(-1, 0, 12, TimeOfDay::Night));
+        assert!(object_visible_at_time(-1, 0b001, 12, TimeOfDay::Morning));
+        assert!(!object_visible_at_time(-1, 0b001, 12, TimeOfDay::Day));
+        assert!(object_visible_at_time(-1, 0b110, 12, TimeOfDay::Night));
+        assert!(!object_visible_at_time(-1, 0b110, 12, TimeOfDay::Morning));
+
+        for hour in 0..24 {
+            assert_eq!(
+                object_visible_at_time(9, 17, hour, TimeOfDay::Day),
+                (9..=17).contains(&hour),
+                "ordinary interval at hour {hour}"
+            );
+            assert_eq!(
+                object_visible_at_time(18, 6, hour, TimeOfDay::Day),
+                hour >= 18 || hour <= 6,
+                "midnight-wrapping interval at hour {hour}"
+            );
+            assert!(
+                object_visible_at_time(7, 7, hour, TimeOfDay::Day),
+                "equal endpoints are always visible"
+            );
+        }
+    }
+
+    #[test]
+    fn map_entry_roster_uses_the_complete_hour_pair_not_only_time_of_day() {
+        let mut hourly = object("HOURLY_OBJECT", 4, 4, "-1");
+        hourly.hram_x = 18;
+        hourly.hram_y = 6;
+        let make_session = || {
+            OverworldSession::with_events_and_objects(
+                map_with_blocks(5, 5, vec![0; 25]),
+                MapEvents::default(),
+                vec![hourly.clone()],
+                tileset(),
+                TilePosition::new(4, 4),
+            )
+        };
+
+        let mut night = make_session();
+        night.set_time(22, TimeOfDay::Night);
+        let night = night.with_event_flag_memory(&EventFlagMemory::default());
+        assert!(night.object_has_loaded_struct(0));
+
+        let mut noon = make_session();
+        noon.set_time(12, TimeOfDay::Day);
+        let noon = noon.with_event_flag_memory(&EventFlagMemory::default());
+        assert!(!noon.object_has_loaded_struct(0));
     }
 
     #[test]
@@ -2910,13 +4345,13 @@ mod tests {
     fn autonomous_horizontal_walker_advances_on_crystal_frame_cadence() {
         let mut walker = object("WALKER", 1, 1, "-1");
         walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
-        walker.move_range_x = 1;
+        walker.move_range_x = 2;
         let mut session = OverworldSession::with_events_and_objects(
             map_with_blocks(4, 4, vec![0; 16]),
             MapEvents::default(),
             vec![walker],
             tileset(),
-            TilePosition::new(6, 6),
+            TilePosition::new(4, 4),
         );
         session.frame = 16;
         let mut divider = crate::random::ReplayDivider::new([0, 0]);
@@ -2932,17 +4367,735 @@ mod tests {
     }
 
     #[test]
+    fn normal_follower_does_not_run_its_map_event_autonomous_movement() {
+        let mut walker = object("FOLLOWER", 1, 1, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        session.following = Some(OverworldFollowState {
+            leader_slot: Some(0),
+            follower_slot: Some(1),
+        });
+        session
+            .normal_following_object_identifiers
+            .insert("FOLLOWER".to_string());
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("FOLLOWING movement does not execute the map event movement function");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("FOLLOWER").unwrap(),
+            TilePosition::new(1, 1)
+        );
+        assert_eq!(divider.remaining(), 2);
+    }
+
+    #[test]
+    fn autonomous_radius_one_rejects_the_exact_asm_boundary_tile() {
+        let mut walker = object("WALKER", 2, 2, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 1;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(4, 4, vec![0; 16]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        // The first Random selects left. HasObjectReachedMovementLimit sees
+        // the proposed x == OBJECT_INIT_X - 1, rejects it, and the second
+        // Random installs the slow wait.
+        let mut divider = crate::random::ReplayDivider::new([0, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("radius-one movement decision");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(2, 2)
+        );
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn autonomous_radius_remains_anchored_to_the_loaded_struct_initial_tile() {
+        let mut walker = object("WALKER", 4, 4, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 6, vec![0; 72]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(6, 4),
+        );
+        assert_eq!(
+            session.loaded_object_struct_initial_tiles.get(&0),
+            Some(&TilePosition::new(4, 4))
+        );
+        // CopyDECoordsToMapObject mutates only wMapObjects. It must not move
+        // the already-loaded OBJECT_INIT_X/Y radius anchor.
+        session
+            .set_object_runtime_tile("WALKER", TilePosition::new(4, 4))
+            .expect("preserve the allocated struct's live coordinate");
+        session.objects[0].x = 20;
+        let mut divider = crate::random::ReplayDivider::new([1, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("movement after map-object coordinate write");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(5, 4)
+        );
+        assert_eq!(divider.remaining(), 2);
+    }
+
+    #[test]
+    fn autonomous_radius_uses_asm_boundary_equality_not_host_range_clamping() {
+        let mut walker = object("WALKER", 4, 4, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 6, vec![0; 72]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(6, 4),
+        );
+        // A preceding scripted movement can leave the live struct beyond its
+        // initial radius. ASM rejects only a proposed coordinate equal to an
+        // exact boundary; it does not clamp an already-outside object.
+        session
+            .set_object_runtime_tile("WALKER", TilePosition::new(8, 4))
+            .expect("scripted movement endpoint");
+        let mut divider = crate::random::ReplayDivider::new([1, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("movement beyond initial radius");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(9, 4)
+        );
+        assert_eq!(divider.remaining(), 2);
+    }
+
+    #[test]
+    fn autonomous_walker_cannot_move_beyond_the_live_screen_edge() {
+        let mut walker = object("WALKER", 11, 6, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(8, 8, vec![0; 64]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(6, 6),
+        );
+        // The first Random call leaves hRandomAdd odd, selecting RIGHT. A
+        // blocked step then consumes the second call for the new sleep.
+        let mut divider = crate::random::ReplayDivider::new([1, 0, 0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("walker screen-edge decision");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(11, 6),
+            "IsObjectMovingOffEdgeOfScreen blocks the step beyond player x + 5"
+        );
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
+    fn unloaded_autonomous_map_object_does_not_consume_rng() {
+        let mut walker = object("WALKER", 14, 4, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![walker],
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("an object without a loaded object struct is not scheduled");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(14, 4)
+        );
+        drop(rng);
+        assert_eq!(divider.remaining(), 0);
+
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        for player_x in 5..=7 {
+            session.player.tile = TilePosition::new(player_x, 4);
+            session
+                .advance_autonomous_objects_exact(&mut rng)
+                .expect("offscreen map event remains unloaded");
+        }
+        drop(rng);
+        assert_eq!(divider.remaining(), 0);
+
+        session.player.tile = TilePosition::new(8, 4);
+        let mut divider = crate::random::ReplayDivider::new([0, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("the map event is copied once it enters the loaded viewport");
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(13, 4)
+        );
+        drop(rng);
+        assert_eq!(divider.remaining(), 0);
+
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        session.player.tile = TilePosition::new(7, 4);
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("live coordinates retain the loaded struct at x + 6");
+        session.player.tile = TilePosition::new(6, 4);
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("both live and init coordinates are now offscreen");
+        assert!(!session.loaded_object_struct_slots.contains_key(&0));
+        assert!(!session.object_step_durations.contains_key("WALKER"));
+
+        session.player.tile = TilePosition::new(7, 4);
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("map-memory coordinate has not reached the right edge");
+        assert!(!session.loaded_object_struct_slots.contains_key(&0));
+        session.player.tile = TilePosition::new(8, 4);
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("map-memory coordinate re-enters on the right edge");
+        assert!(session.loaded_object_struct_slots.contains_key(&0));
+        assert_eq!(
+            session.loaded_object_struct_initial_tiles.get(&0),
+            Some(&TilePosition::new(14, 4)),
+            "ordinary walking never writes live coordinates back to map-object memory"
+        );
+    }
+
+    #[test]
+    fn loaded_map_object_roster_reserves_the_player_struct_slot() {
+        let objects = (0..13)
+            .map(|index| object(&format!("OBJECT_{index}"), 5, 4, "-1"))
+            .collect();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            objects,
+            tileset(),
+            TilePosition::new(5, 4),
+        );
+
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("fixture object coordinates");
+
+        assert_eq!(session.loaded_object_struct_slots.len(), 12);
+        assert!((0..12).all(|index| session.loaded_object_struct_slots.contains_key(&index)));
+        assert!(!session.loaded_object_struct_slots.contains_key(&12));
+    }
+
+    #[test]
+    fn wont_delete_object_struct_survives_beyond_live_and_initial_viewports() {
+        let mut boulder = object("BOULDER", 10, 4, "-1");
+        boulder.spritemovedata = "SPRITEMOVEDATA_STRENGTH_BOULDER".to_string();
+        let ordinary = object("ORDINARY", 10, 5, "-1");
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![boulder, ordinary],
+            tileset(),
+            TilePosition::new(10, 4),
+        );
+
+        assert!(session.object_has_loaded_struct(0));
+        assert!(session.object_has_loaded_struct(1));
+
+        session.player.tile = TilePosition::new(3, 4);
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("fixture object coordinates");
+
+        assert!(
+            session.object_has_loaded_struct(0),
+            "CheckObjectStillVisible preserves OBJECT_FLAGS1 WONT_DELETE_F"
+        );
+        assert!(
+            !session.object_has_loaded_struct(1),
+            "ordinary object structs are deleted once live and initial coordinates are offscreen"
+        );
+    }
+
+    #[test]
+    fn offscreen_wont_delete_struct_keeps_its_allocator_slot() {
+        let mut objects = (0..12)
+            .map(|index| {
+                let mut object = object(&format!("DYNAMIC_{index}"), 4, 4, "-1");
+                object.spritemovedata = "SPRITEMOVEDATA_SCRIPTED".to_string();
+                object
+            })
+            .collect::<Vec<_>>();
+        objects.push(object("ENTERING_OBJECT", 16, 4, "-1"));
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 5, vec![0; 60]),
+            MapEvents::default(),
+            objects,
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+
+        for player_x in 5..=10 {
+            session.player.tile = TilePosition::new(player_x, 4);
+            session
+                .refresh_loaded_object_struct_roster()
+                .expect("fixture object coordinates");
+        }
+
+        assert_eq!(session.loaded_object_struct_slots.len(), 12);
+        assert!((0..12).all(|index| session.object_has_loaded_struct(index)));
+        assert!(
+            !session.object_has_loaded_struct(12),
+            "the entering event cannot replace an offscreen WONT_DELETE_F struct"
+        );
+    }
+
+    #[test]
+    fn map_object_setup_mutates_memory_before_visible_struct_initialization() {
+        let elm = object("ELM", 5, 2, "-1");
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 6, vec![0; 60]),
+            MapEvents::default(),
+            vec![elm],
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        assert!(session.object_has_loaded_struct(0));
+
+        session.begin_map_object_setup();
+        assert!(!session.object_has_loaded_struct(0));
+        session.objects[0].x = 3;
+        session.objects[0].y = 4;
+        session
+            .finish_map_object_setup()
+            .expect("initialize callback-mutated map object");
+
+        assert!(session.object_has_loaded_struct(0));
+        assert_eq!(
+            session.object_runtime_tile_by_id("ELM").unwrap(),
+            TilePosition::new(3, 4)
+        );
+        assert_eq!(
+            session.loaded_object_struct_initial_tiles.get(&0),
+            Some(&TilePosition::new(3, 4))
+        );
+    }
+
+    #[test]
+    fn callback_appear_reserves_a_struct_before_visible_initialization() {
+        let mut objects = (0..12)
+            .map(|index| object(&format!("VISIBLE_{index}"), 4, 4, "-1"))
+            .collect::<Vec<_>>();
+        objects.push(object("OFFSCREEN_APPEAR", 16, 4, "-1"));
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 5, vec![0; 60]),
+            MapEvents::default(),
+            objects,
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+
+        session.begin_map_object_setup();
+        assert!(
+            session
+                .copy_object_struct_for_appear("OFFSCREEN_APPEAR")
+                .expect("callback appear coordinates")
+        );
+        session
+            .finish_map_object_setup()
+            .expect("initialize remaining visible objects");
+
+        assert!(session.object_has_loaded_struct(12));
+        assert!((0..11).all(|index| session.object_has_loaded_struct(index)));
+        assert!(!session.object_has_loaded_struct(11));
+    }
+
+    #[test]
+    fn current_map_object_struct_memory_restores_slot_reuse_and_transient_phase() {
+        let objects = vec![
+            object("REMOVED", 4, 4, "-1"),
+            object("SECOND", 5, 4, "-1"),
+            object("THIRD", 6, 4, "-1"),
+            object("APPEARED", 18, 4, "-1"),
+        ];
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 5, vec![0; 60]),
+            MapEvents::default(),
+            objects.clone(),
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        session.frame = 40;
+        assert_eq!(session.loaded_object_struct_slots.get(&0), Some(&1));
+        assert_eq!(session.loaded_object_struct_slots.get(&1), Some(&2));
+        assert_eq!(session.loaded_object_struct_slots.get(&2), Some(&3));
+        session.delete_loaded_object_struct("REMOVED");
+        assert!(
+            session
+                .copy_object_struct_for_appear("APPEARED")
+                .expect("copy appeared object")
+        );
+        assert_eq!(
+            session.loaded_object_struct_slots.get(&3),
+            Some(&1),
+            "CopyMapObjectToObjectStruct reuses the first free slot"
+        );
+        session
+            .object_runtime_tiles
+            .insert("APPEARED".to_string(), TilePosition::new(9, 4));
+        session
+            .object_last_runtime_tiles
+            .insert("APPEARED".to_string(), TilePosition::new(8, 4));
+        session
+            .object_last_tiles_occupied_until_frame
+            .insert("APPEARED".to_string(), 45);
+        session
+            .object_step_durations
+            .insert("APPEARED".to_string(), 7);
+        session
+            .object_pending_random_wait
+            .insert("APPEARED".to_string());
+        session
+            .initialized_fixed_spin_objects
+            .insert("APPEARED".to_string());
+        session
+            .fixed_facing_object_identifiers
+            .insert("APPEARED".to_string());
+        session
+            .sliding_object_identifiers
+            .insert("APPEARED".to_string());
+        session
+            .following_not_exact
+            .insert("APPEARED".to_string(), 2);
+        session
+            .normal_following_object_identifiers
+            .insert("THIRD".to_string());
+        session.following = Some(OverworldFollowState {
+            leader_slot: Some(0),
+            follower_slot: Some(3),
+        });
+        session.set_loaded_object_struct_invisible("APPEARED", true);
+        session.following_queued_step = Some(FollowQueuedStep {
+            direction: Direction::Left,
+            stride: 1,
+            duration: 8,
+            jump: false,
+            standing_frame: false,
+        });
+        session.last_step_direction = Some(Direction::Up);
+        session.player_last_runtime_tile = Some(TilePosition::new(4, 5));
+        session.player_last_tile_occupied_until_frame = 43;
+        session
+            .fixed_facing_object_identifiers
+            .insert("PLAYER".to_string());
+        session
+            .sliding_object_identifiers
+            .insert("PLAYER".to_string());
+
+        let saved = session
+            .object_struct_roster_memory()
+            .expect("save current object-struct image");
+        let appeared = saved
+            .structs
+            .iter()
+            .find(|entry| entry.map_object_index == 4)
+            .expect("appeared object struct");
+        assert_eq!(appeared.slot, 1);
+        assert_eq!(appeared.live_tile, TilePosition::new(9, 4));
+        assert_eq!(appeared.last_tile, Some(TilePosition::new(8, 4)));
+        assert_eq!(appeared.initial_tile, TilePosition::new(18, 4));
+        assert_eq!(appeared.step_duration, Some(7));
+        assert_eq!(appeared.last_tile_occupied_remaining_frames, 5);
+        assert!(appeared.pending_random_wait);
+        assert!(appeared.initialized_fixed_spin);
+        assert!(appeared.fixed_facing);
+        assert!(appeared.sliding);
+        assert!(!appeared.visible);
+        assert_eq!(appeared.following_not_exact_leader_slot, Some(2));
+        assert!(
+            saved
+                .structs
+                .iter()
+                .find(|entry| entry.map_object_index == 3)
+                .expect("normal follower object struct")
+                .normal_following
+        );
+
+        let mut mismatched = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 5, vec![0; 60]),
+            MapEvents::default(),
+            objects.clone(),
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        mismatched.following = Some(OverworldFollowState {
+            leader_slot: Some(0),
+            follower_slot: Some(2),
+        });
+        assert_eq!(
+            mismatched.restore_object_struct_roster_memory(&saved),
+            Err(
+                OverworldObjectStructMemoryError::NormalFollowerSlotMismatch {
+                    movement_slot: 3,
+                    follower_slot: Some(2),
+                }
+            )
+        );
+
+        let mut conflicting = saved.clone();
+        conflicting
+            .structs
+            .iter_mut()
+            .find(|entry| entry.map_object_index == 4)
+            .expect("follow-not-exact struct")
+            .normal_following = true;
+        assert_eq!(
+            session.restore_object_struct_roster_memory(&conflicting),
+            Err(OverworldObjectStructMemoryError::ConflictingFollowMovementTypes { slot: 1 })
+        );
+
+        let mut restored = OverworldSession::with_events_and_objects(
+            map_with_blocks(12, 5, vec![0; 60]),
+            MapEvents::default(),
+            objects,
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        restored.frame = 40;
+        restored.following = session.following.clone();
+        restored
+            .restore_object_struct_roster_memory(&saved)
+            .expect("Continue restores current object-struct image");
+
+        assert_eq!(
+            restored
+                .object_struct_roster_memory()
+                .expect("resave restored object-struct image"),
+            saved
+        );
+        assert!(!restored.object_has_loaded_struct(0));
+        assert_eq!(restored.loaded_object_struct_slots.get(&3), Some(&1));
+    }
+
+    #[test]
+    fn slot_unloaded_map_event_cannot_block_interact_or_spot_the_player() {
+        let mut objects = (0..12)
+            .map(|index| object(&format!("FILLER_{index}"), 5, 4, "-1"))
+            .collect::<Vec<_>>();
+        let mut trainer = object("UNLOADED_TRAINER", 6, 5, "-1");
+        trainer.object_type = "OBJECTTYPE_TRAINER".to_string();
+        trainer.spritemovedata = "SPRITEMOVEDATA_STANDING_LEFT".to_string();
+        trainer.radius = 1;
+        objects.push(trainer);
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            objects,
+            tileset(),
+            TilePosition::new(5, 5),
+        );
+        session.player.facing = Direction::Right;
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("fixture object coordinates");
+
+        assert_eq!(
+            session
+                .check_interaction_checked(DEFAULT_RUNTIME_TILE_STRIDE)
+                .expect("interaction coordinates"),
+            None
+        );
+        assert_eq!(
+            session
+                .check_trainer_sight_checked()
+                .expect("trainer coordinates"),
+            None
+        );
+        assert!(matches!(
+            session
+                .step_checked(Direction::Right, StepOptions::default())
+                .expect("step coordinates"),
+            StepOutcome::Moved {
+                to: TilePosition { x: 6, y: 5 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invisible_loaded_object_still_occupies_its_object_struct_tile() {
+        let npc = object("INVISIBLE_NPC", 6, 5, "-1");
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![npc.clone()],
+            tileset(),
+            TilePosition::new(5, 5),
+        );
+        session.player.facing = Direction::Right;
+        session.set_loaded_object_struct_invisible("INVISIBLE_NPC", true);
+
+        assert!(session.is_object_visible(&npc));
+        assert!(!session.object_struct_is_visible(0));
+        assert!(session.object_has_loaded_struct(0));
+        assert!(
+            session
+                .check_interaction_checked(DEFAULT_RUNTIME_TILE_STRIDE)
+                .expect("interaction coordinates")
+                .is_some()
+        );
+        assert!(matches!(
+            session
+                .step_checked(Direction::Right, StepOptions::default())
+                .expect("step coordinates"),
+            StepOutcome::BlockedByObject { .. }
+        ));
+    }
+
+    #[test]
+    fn emote_object_structs_are_skipped_by_the_shared_npc_coordinate_lookup() {
+        for movement in [
+            "SPRITEMOVEDATA_SHADOW",
+            "SPRITEMOVEDATA_EMOTE",
+            "SPRITEMOVEDATA_SCREENSHAKE",
+            "SPRITEMOVEDATA_BOULDERDUST",
+            "SPRITEMOVEDATA_GRASS",
+        ] {
+            let mut emote = object("EMOTE_OBJECT", 6, 5, "-1");
+            emote.spritemovedata = movement.to_string();
+            emote.script = "EmoteScript".to_string();
+            let mut ordinary = object("ORDINARY_OBJECT", 6, 5, "-1");
+            ordinary.script = "OrdinaryScript".to_string();
+            let mut session = OverworldSession::with_events_and_objects(
+                map_with_blocks(10, 5, vec![0; 50]),
+                MapEvents::default(),
+                vec![emote, ordinary],
+                tileset(),
+                TilePosition::new(5, 5),
+            );
+            session.player.facing = Direction::Right;
+
+            assert_eq!(
+                session.occupied_tiles(),
+                vec![OccupiedTile {
+                    tile: TilePosition::new(6, 5),
+                    object_identifier: Some("ORDINARY_OBJECT".to_string()),
+                }],
+                "{movement} has EMOTE_OBJECT_F and must not occupy IsNPCAtCoord"
+            );
+            assert_eq!(
+                session
+                    .check_interaction_checked(DEFAULT_RUNTIME_TILE_STRIDE)
+                    .expect("interaction coordinates")
+                    .expect("ordinary object behind emote")
+                    .script,
+                "OrdinaryScript",
+                "{movement} must be skipped before continuing the struct scan"
+            );
+
+            session.delete_loaded_object_struct("ORDINARY_OBJECT");
+            session
+                .set_object_runtime_tile("EMOTE_OBJECT", TilePosition::new(7, 5))
+                .expect("move emote live coordinate");
+            session
+                .object_last_runtime_tiles
+                .insert("EMOTE_OBJECT".to_string(), TilePosition::new(6, 5));
+            session
+                .object_last_tiles_occupied_until_frame
+                .insert("EMOTE_OBJECT".to_string(), session.frame + 8);
+            assert!(matches!(
+                session
+                    .step_checked(Direction::Right, StepOptions::default())
+                    .expect("step coordinates"),
+                StepOutcome::Moved {
+                    to: TilePosition { x: 6, y: 5 },
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn autonomous_walker_can_enter_an_emote_object_struct_tile() {
+        let mut walker = object("WALKER", 5, 5, "-1");
+        walker.spritemovedata = "SPRITEMOVEDATA_WALK_LEFT_RIGHT".to_string();
+        walker.move_range_x = 2;
+        let mut shadow = object("SHADOW", 6, 5, "-1");
+        shadow.spritemovedata = "SPRITEMOVEDATA_SHADOW".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![walker, shadow],
+            tileset(),
+            TilePosition::new(4, 4),
+        );
+        let mut divider = crate::random::ReplayDivider::new([1, 0]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("walker movement through emote object");
+
+        assert_eq!(
+            session.object_runtime_tile_by_id("WALKER").unwrap(),
+            TilePosition::new(6, 5)
+        );
+        assert_eq!(divider.remaining(), 0);
+    }
+
+    #[test]
     fn autonomous_wander_uses_injected_crystal_rng_and_collision() {
         let mut wanderer = object("WANDERER", 1, 1, "-1");
         wanderer.spritemovedata = "SPRITEMOVEDATA_WANDER".to_string();
-        wanderer.move_range_x = 1;
-        wanderer.move_range_y = 1;
+        wanderer.move_range_x = 2;
+        wanderer.move_range_y = 2;
         let mut session = OverworldSession::with_events_and_objects(
             map_with_blocks(4, 4, vec![0; 16]),
             MapEvents::default(),
             vec![wanderer],
             tileset(),
-            TilePosition::new(6, 6),
+            TilePosition::new(4, 4),
         );
         session.frame = 16;
         let mut divider = crate::random::ReplayDivider::new([0, 0xff]);
@@ -3415,16 +5568,17 @@ mod tests {
             TilesetCollision {
                 metatiles: vec![MetatileCollision { collision }],
             },
-            TilePosition::new(9, 9),
+            TilePosition::new(4, 4),
         );
         let direction_roll = match direction {
             Direction::Down | Direction::Left => 0,
             Direction::Up | Direction::Right => 1,
         };
         session
-            .advance_autonomous_objects_with_random_add(Some(
-                move |_| -> Result<u8, std::convert::Infallible> { Ok(direction_roll) },
-            ))
+            .advance_object_steps_with_random_add(
+                Some(move |_| -> Result<u8, std::convert::Infallible> { Ok(direction_roll) }),
+                true,
+            )
             .expect("autonomous walker fixture advances");
         session.object_runtime_tile_by_id("WALKER") == Ok(target)
     }
@@ -3697,6 +5851,199 @@ mod tests {
     }
 
     #[test]
+    fn big_object_blocks_its_exact_two_by_two_live_footprint() {
+        let mut big_doll = object("BIG_DOLL", 2, 2, "-1");
+        big_doll.spritemovedata = "SPRITEMOVEDATA_BIGDOLL".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 3, vec![0; 9]),
+            MapEvents::default(),
+            vec![big_doll],
+            tileset(),
+            TilePosition::new(4, 3),
+        );
+
+        assert_eq!(
+            session.occupied_tiles(),
+            vec![
+                OccupiedTile {
+                    tile: TilePosition::new(2, 2),
+                    object_identifier: Some("BIG_DOLL".to_string()),
+                },
+                OccupiedTile {
+                    tile: TilePosition::new(3, 2),
+                    object_identifier: Some("BIG_DOLL".to_string()),
+                },
+                OccupiedTile {
+                    tile: TilePosition::new(2, 3),
+                    object_identifier: Some("BIG_DOLL".to_string()),
+                },
+                OccupiedTile {
+                    tile: TilePosition::new(3, 3),
+                    object_identifier: Some("BIG_DOLL".to_string()),
+                },
+            ]
+        );
+
+        let outcome = session.step(
+            Direction::Left,
+            StepOptions {
+                force_step_after_turn: true,
+                ..StepOptions::default()
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            StepOutcome::BlockedByObject {
+                at: TilePosition::new(3, 3),
+                facing: Direction::Left,
+                object_identifier: Some("BIG_DOLL".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn strength_flag_and_movement_function_have_separate_source_ownership() {
+        for (movement, starts_strength_step) in [
+            ("SPRITEMOVEDATA_STRENGTH_BOULDER", true),
+            ("SPRITEMOVEDATA_BIGDOLLASYM", true),
+            ("SPRITEMOVEDATA_BIGDOLL", true),
+            ("SPRITEMOVEDATA_BIGDOLLSYM", false),
+        ] {
+            let mut boulder = object("BOULDER", 1, 1, "-1");
+            boulder.spritemovedata = movement.to_string();
+            let mut session = OverworldSession::with_events_and_objects(
+                map_with_blocks(3, 2, vec![0; 6]),
+                MapEvents::default(),
+                vec![boulder],
+                tileset(),
+                TilePosition::new(0, 1),
+            );
+            session.player.facing = Direction::Right;
+
+            assert_eq!(
+                session
+                    .request_strength_boulder_push_checked(
+                        Direction::Right,
+                        StepOptions::default(),
+                    )
+                    .expect("Strength collision coordinates"),
+                Some("BOULDER".to_string()),
+                "{movement} carries STRENGTH_BOULDER_F"
+            );
+            assert_eq!(
+                session.strength_boulder_push_directions.get("BOULDER"),
+                Some(&Direction::Right)
+            );
+
+            let mut divider = crate::random::ReplayDivider::new([]);
+            let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+            let advance = session
+                .advance_autonomous_objects_exact(&mut rng)
+                .expect("Strength object step");
+
+            if starts_strength_step {
+                assert_eq!(
+                    advance.started_strength_boulders,
+                    vec!["BOULDER".to_string()]
+                );
+                assert_eq!(
+                    session.object_runtime_tile_by_id("BOULDER").unwrap(),
+                    TilePosition::new(2, 1)
+                );
+                assert_eq!(
+                    session.object_last_runtime_tiles.get("BOULDER"),
+                    Some(&TilePosition::new(1, 1))
+                );
+                assert_eq!(session.object_step_durations.get("BOULDER"), Some(&16));
+                assert!(
+                    session
+                        .strength_moving_object_identifiers
+                        .contains("BOULDER")
+                );
+                assert!(
+                    !session
+                        .strength_boulder_push_directions
+                        .contains_key("BOULDER")
+                );
+                assert_eq!(
+                    session.object_facings.get("BOULDER"),
+                    Some(&Direction::Down)
+                );
+            } else {
+                assert!(advance.started_strength_boulders.is_empty());
+                assert_eq!(
+                    session.object_runtime_tile_by_id("BOULDER").unwrap(),
+                    TilePosition::new(1, 1)
+                );
+                assert_eq!(session.object_step_durations.get("BOULDER"), None);
+                assert_eq!(
+                    session.strength_boulder_push_directions.get("BOULDER"),
+                    Some(&Direction::Right),
+                    "BIGDOLLSYM never consumes BOULDER_MOVING_F because it uses BigStanding"
+                );
+            }
+            assert_eq!(divider.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn active_strength_step_round_trips_in_current_object_struct_memory() {
+        let mut boulder = object("BOULDER", 1, 1, "-1");
+        boulder.spritemovedata = "SPRITEMOVEDATA_STRENGTH_BOULDER".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 2, vec![0; 6]),
+            MapEvents::default(),
+            vec![boulder],
+            tileset(),
+            TilePosition::new(0, 1),
+        );
+        session.player.facing = Direction::Right;
+        session
+            .request_strength_boulder_push_checked(Direction::Right, StepOptions::default())
+            .expect("Strength request coordinates");
+        let mut divider = crate::random::ReplayDivider::new([]);
+        let mut rng = CrystalRandom::new(CrystalRandomState::default(), &mut divider);
+        session
+            .advance_autonomous_objects_exact(&mut rng)
+            .expect("start Strength step");
+
+        let memory = session
+            .object_struct_roster_memory()
+            .expect("capture active Strength object struct");
+        assert!(memory.structs[0].strength_moving);
+        assert_eq!(memory.structs[0].strength_push_direction, None);
+        assert_eq!(memory.structs[0].step_duration, Some(16));
+        assert_eq!(memory.structs[0].last_tile_occupied_remaining_frames, 16);
+
+        let mut restored = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 2, vec![0; 6]),
+            MapEvents::default(),
+            session.objects.clone(),
+            tileset(),
+            TilePosition::new(0, 1),
+        );
+        restored
+            .restore_object_struct_roster_memory(&memory)
+            .expect("restore active Strength object struct");
+        assert_eq!(
+            restored
+                .object_struct_roster_memory()
+                .expect("recapture active Strength object struct"),
+            memory
+        );
+
+        let mut invalid = memory.clone();
+        invalid.structs[0].step_duration = None;
+        assert_eq!(
+            restored
+                .restore_object_struct_roster_memory(&invalid)
+                .expect_err("active Strength step requires its exact duration"),
+            OverworldObjectStructMemoryError::InvalidStrengthStepDuration { slot: 1 }
+        );
+    }
+
+    #[test]
     fn session_uses_exact_event_flags_for_object_visibility() {
         let mut flags = EventFlagMemory::default();
         flags
@@ -3756,9 +6103,10 @@ mod tests {
             session.is_object_visible(&first),
             "setevent must not despawn a live object before map reload"
         );
+        assert!(session.is_object_visible(&second));
         assert!(
-            !session.is_object_visible(&second),
-            "clearevent must not load a replacement object before map reload"
+            !session.object_has_loaded_struct(1),
+            "clearevent makes the map event eligible but does not allocate an object struct"
         );
         assert!(
             session.hidden_object_identifiers.is_empty()
@@ -3881,6 +6229,129 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn interaction_targets_any_tile_in_a_big_objects_two_by_two_footprint() {
+        let mut snorlax = object("VERMILION_BIG_SNORLAX", 2, 2, "-1");
+        snorlax.spritemovedata = "SPRITEMOVEDATA_BIGDOLLSYM".to_string();
+        snorlax.script = "VermilionSnorlax".to_string();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(3, 3, vec![0; 9]),
+            MapEvents::default(),
+            vec![snorlax],
+            tileset(),
+            TilePosition::new(4, 3),
+        );
+        session.player.facing = Direction::Left;
+
+        let interaction = session
+            .check_interaction_checked(StepOptions::default().stride_tiles)
+            .expect("checked interaction")
+            .expect("big-object interaction");
+
+        assert_eq!(interaction.target_tile, TilePosition::new(3, 3));
+        assert_eq!(interaction.script, "VermilionSnorlax");
+        assert_eq!(
+            interaction.target,
+            OverworldInteractionTarget::Object {
+                object_index: 1,
+                object_identifier: Some("VERMILION_BIG_SNORLAX".to_string()),
+                object_type: "OBJECTTYPE_SCRIPT".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn event_flag_change_before_visible_range_prevents_later_object_loading() {
+        let far_object = object("FAR_OBJECT", 14, 4, "EVENT_FAR_OBJECT");
+        let initial_flags = EventFlagMemory::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![far_object.clone()],
+            tileset(),
+            TilePosition::new(4, 4),
+        )
+        .with_event_flag_memory(&initial_flags);
+        assert!(session.is_object_visible(&far_object));
+        assert!(!session.object_has_loaded_struct(0));
+
+        let mut hidden_flags = initial_flags;
+        hidden_flags
+            .set_event_flag("EVENT_FAR_OBJECT", true)
+            .expect("hide object before it enters visible range");
+        session.sync_event_flag_memory(&hidden_flags);
+
+        for player_x in 5..=8 {
+            session.player.tile = TilePosition::new(player_x, 4);
+            session
+                .refresh_loaded_object_struct_roster()
+                .expect("fixture object coordinates");
+        }
+        assert!(!session.is_object_visible(&far_object));
+        assert!(!session.object_has_loaded_struct(0));
+    }
+
+    #[test]
+    fn loaded_event_flag_retention_ends_when_object_struct_unloads() {
+        let map_object = object("MAP_OBJECT", 10, 4, "EVENT_MAP_OBJECT");
+        let initial_flags = EventFlagMemory::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            map_with_blocks(10, 5, vec![0; 50]),
+            MapEvents::default(),
+            vec![map_object.clone()],
+            tileset(),
+            TilePosition::new(10, 4),
+        )
+        .with_event_flag_memory(&initial_flags);
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("fixture object coordinates");
+        assert!(session.object_has_loaded_struct(0));
+
+        let mut hidden_flags = initial_flags;
+        hidden_flags
+            .set_event_flag("EVENT_MAP_OBJECT", true)
+            .expect("hide object for future loads");
+        session.sync_event_flag_memory(&hidden_flags);
+        assert!(session.is_object_visible(&map_object));
+
+        session.player.tile = TilePosition::new(3, 4);
+        session
+            .refresh_loaded_object_struct_roster()
+            .expect("fixture object coordinates");
+        assert!(!session.object_has_loaded_struct(0));
+        assert!(!session.is_object_visible(&map_object));
+    }
+
+    #[test]
+    fn transient_invisible_bit_does_not_break_loaded_event_flag_retention() {
+        let map_object = object("MAP_OBJECT", 1, 0, "EVENT_MAP_OBJECT");
+        let initial_flags = EventFlagMemory::default();
+        let mut session = OverworldSession::with_events_and_objects(
+            map(),
+            MapEvents::default(),
+            vec![map_object.clone()],
+            tileset(),
+            TilePosition::new(0, 0),
+        )
+        .with_event_flag_memory(&initial_flags);
+        session
+            .hidden_object_identifiers
+            .insert("MAP_OBJECT".to_string());
+        assert!(!session.is_object_visible(&map_object));
+        assert!(session.object_has_loaded_struct(0));
+
+        let mut hidden_flags = initial_flags;
+        hidden_flags
+            .set_event_flag("EVENT_MAP_OBJECT", true)
+            .expect("hide object for future loads");
+        session.sync_event_flag_memory(&hidden_flags);
+        session.hidden_object_identifiers.remove("MAP_OBJECT");
+
+        assert!(session.is_object_visible(&map_object));
+        assert!(session.object_has_loaded_struct(0));
     }
 
     #[test]
@@ -4061,10 +6532,11 @@ mod tests {
         first.script = "FirstScript".to_string();
         let mut second = object("SECOND_OBJECT", 2, 3, "-1");
         second.script = "SecondScript".to_string();
+        let third = object("THIRD_OBJECT", 15, 3, "-1");
         let mut session = OverworldSession::with_events_and_objects(
-            map_with_blocks(3, 4, vec![0; 12]),
+            map_with_blocks(10, 4, vec![0; 40]),
             MapEvents::default(),
-            vec![first, second],
+            vec![first, second, third],
             tileset(),
             TilePosition::new(2, 2),
         );
@@ -4084,6 +6556,32 @@ mod tests {
                 object_type: "OBJECTTYPE_SCRIPT".to_string(),
             }
         );
+
+        session.delete_loaded_object_struct("FIRST_OBJECT");
+        assert!(
+            session
+                .copy_object_struct_for_appear("THIRD_OBJECT")
+                .expect("third object takes freed slot 1")
+        );
+        session.delete_loaded_object_struct("SECOND_OBJECT");
+        assert!(
+            session
+                .copy_object_struct_for_appear("FIRST_OBJECT")
+                .expect("first object takes freed slot 2")
+        );
+        session.delete_loaded_object_struct("THIRD_OBJECT");
+        assert!(
+            session
+                .copy_object_struct_for_appear("SECOND_OBJECT")
+                .expect("second object takes freed slot 1")
+        );
+        let interaction = session
+            .check_interaction_checked(StepOptions::default().stride_tiles)
+            .expect("checked interaction after slot reuse")
+            .expect("object interaction after slot reuse");
+        assert_eq!(interaction.script, "SecondScript");
+        assert_eq!(session.loaded_object_struct_slots.get(&1), Some(&1));
+        assert_eq!(session.loaded_object_struct_slots.get(&0), Some(&2));
     }
 
     #[test]
@@ -5129,14 +7627,14 @@ mod tests {
     }
 
     #[test]
-    fn checked_step_rejects_missing_follow_object_before_moving_leader() {
+    fn checked_step_with_empty_follower_slot_moves_leader_and_retains_the_queue() {
         let mut session = OverworldSession::new(map(), tileset(), TilePosition::new(0, 0));
         session.following = Some(OverworldFollowState {
-            leader_object_id: "PLAYER".to_string(),
-            follower_object_id: "MISSING_FOLLOWER".to_string(),
+            leader_slot: Some(0),
+            follower_slot: Some(12),
         });
 
-        let error = session
+        let outcome = session
             .step_checked(
                 Direction::Right,
                 StepOptions {
@@ -5144,16 +7642,15 @@ mod tests {
                     ..StepOptions::default()
                 },
             )
-            .expect_err("missing follower must reject checked movement");
+            .expect("empty follower slot does not reject player movement");
 
+        assert!(matches!(outcome, StepOutcome::Moved { .. }));
+        assert_eq!(session.player.tile, TilePosition::new(1, 0));
+        assert_eq!(session.frame, 1);
         assert_eq!(
-            error,
-            OverworldCoordinateError::FollowObjectMissing {
-                object_id: "MISSING_FOLLOWER".to_string(),
-            }
+            session.following_queued_step.map(|step| step.direction),
+            Some(Direction::Right)
         );
-        assert_eq!(session.player.tile, TilePosition::new(0, 0));
-        assert_eq!(session.frame, 0);
     }
 
     #[test]

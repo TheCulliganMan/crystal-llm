@@ -2000,6 +2000,7 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
         outcome,
         scripted_static_wild: None,
         default_name: "SUDOWOODO".to_string(),
+        prompt_for_nickname: true,
     });
     finish_current_battle_message_for_regression(&mut runtime_shell);
 
@@ -2044,6 +2045,15 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
         press_visible_a_button(&mut runtime_shell).expect("open scripted Pokedex entry");
         assert!(runtime_shell.pokedex_scripted_entry);
         assert!(runtime_shell.pokedex_detail_open);
+        assert_eq!(
+            runtime_shell
+                .last_audio_events
+                .iter()
+                .filter(|event| event.contains("queued new_pokedex_entry cry"))
+                .count(),
+            1,
+            "NewPokedexEntry is the capture flow's only species-cry boundary"
+        );
     }
     app.update();
     assert_caught_capture_render_state(app.world_mut(), false);
@@ -2103,6 +2113,13 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
         assert!(runtime_shell.pending_standard_capture.is_none());
         assert!(runtime_shell.shell.snapshot().unwrap().battle.is_none());
         assert!(
+            runtime_shell
+                .last_audio_events
+                .iter()
+                .all(|event| !event.contains("battle_capture_complete cry")),
+            "capture storage/exit must not invent a second species cry after NewPokedexEntry"
+        );
+        assert!(
             runtime_shell.visible_capture_animation.is_none(),
             "capture presentation must clear only after authoritative capture commit"
         );
@@ -2112,6 +2129,264 @@ fn caught_capture_retains_then_clears_sprites_without_revealing_enemy_before_com
     let mut battlers = world.query_filtered::<Entity, With<BattleBattlerMarker>>();
     assert_eq!(battlers.iter(world).count(), 0);
     assert_eq!(capture_ball_sprite_count(world), 0);
+}
+
+#[test]
+fn new_contest_capture_stays_live_through_pokedex_then_skips_nickname() {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.visible_battle_transition = None;
+    runtime_shell.battle_entry_messages_remaining = 0;
+    runtime_shell.battle_enemy_send_out_pending = false;
+    runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_messages.clear();
+    runtime_shell.battle_message_scenes.clear();
+    let contest_pokemon = runtime_shell
+        .runtime
+        .data
+        .create_pokemon("PIDGEY", 4, Dv::from_non_hp(10, 10, 10, 10))
+        .expect("materialize a canonical Route36 Contest encounter");
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        let crate::core::state::BattleMemory::StaticWild {
+            battle_music,
+            roaming_slot,
+            ..
+        } = state.battle.clone()
+        else {
+            panic!("contest capture fixture requires a static wild battle");
+        };
+        state.battle = crate::core::state::BattleMemory::Wild {
+            battle_type: "BATTLETYPE_CONTEST".to_string(),
+            battle_music,
+            map_name: "Route36".to_string(),
+            roaming_slot,
+            enemy_pokemon: contest_pokemon.clone(),
+            enemy_party: vec![contest_pokemon.clone()],
+        };
+        if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
+            combat.enemy = contest_pokemon.clone();
+            combat.enemy_party = vec![contest_pokemon.clone()];
+            combat.enemy_party_index = 0;
+        }
+    }
+    let battle_scene = runtime_shell
+        .shell
+        .snapshot()
+        .expect("active Contest capture battle snapshot");
+    let gotcha = "Gotcha! PIDGEY\nwas caught!".to_string();
+    let pokedex = "PIDGEY's data\nwas newly added to\nthe POKéDEX.".to_string();
+    runtime_shell.battle_messages.push_back(gotcha.clone());
+    runtime_shell.battle_messages.push_back(pokedex.clone());
+    runtime_shell.battle_message_scene = Some(Box::new(battle_scene));
+    runtime_shell.visible_capture_animation = Some(VisibleCaptureAnimation {
+        trigger_message: "Player used POKé BALL!".to_string(),
+        ball_id: "POKE_BALL".to_string(),
+        animation_shakes: 3,
+        blocked: false,
+        caught: true,
+        started: true,
+        complete: true,
+        sprites_cleared: false,
+        frame: 228 + 48 * 3,
+    });
+    runtime_shell.pending_standard_capture = Some(PendingStandardCapture {
+        outcome: crate::core::battle::capture::CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 3,
+            final_catch_rate: u8::MAX,
+            ball_id: Some("POKE_BALL".to_string()),
+        },
+        scripted_static_wild: None,
+        default_name: "PIDGEY".to_string(),
+        prompt_for_nickname: false,
+    });
+
+    finish_current_battle_message_for_regression(&mut runtime_shell);
+    press_visible_a_button(&mut runtime_shell).expect("dismiss Contest Gotcha page");
+    assert_eq!(runtime_shell.battle_messages.front(), Some(&pokedex));
+    assert!(runtime_shell.shell.snapshot().unwrap().battle.is_some());
+
+    finish_current_battle_message_for_regression(&mut runtime_shell);
+    press_visible_a_button(&mut runtime_shell).expect("open Contest Pokedex entry");
+    assert!(runtime_shell.pokedex_scripted_entry);
+    assert!(runtime_shell.shell.snapshot().unwrap().battle.is_some());
+
+    for _ in 0..8 {
+        if !runtime_shell.pokedex_menu_open {
+            break;
+        }
+        press_visible_a_button(&mut runtime_shell).expect("advance Contest Pokedex entry");
+    }
+    assert!(!runtime_shell.pokedex_menu_open);
+    assert!(runtime_shell.pending_standard_capture.is_none());
+    assert!(runtime_shell.pending_name_choice.is_none());
+    assert!(runtime_shell.pending_name_input.is_none());
+    let snapshot = runtime_shell.shell.snapshot().expect("completed Contest capture");
+    assert!(snapshot.battle.is_none());
+    assert_eq!(
+        snapshot
+            .bug_contest
+            .caught_mon
+            .as_ref()
+            .map(|pokemon| pokemon.species.id.as_str()),
+        Some("PIDGEY")
+    );
+}
+
+fn contest_replacement_shell_for_regression() -> (BevyRuntimeShell, crate::core::models::Pokemon) {
+    let mut runtime_shell = route36_battle_shell_for_render_regression();
+    runtime_shell.visible_battle_transition = None;
+    runtime_shell.battle_entry_messages_remaining = 0;
+    runtime_shell.battle_enemy_send_out_pending = false;
+    runtime_shell.battle_player_send_out_pending = false;
+    runtime_shell.battle_messages.clear();
+    runtime_shell.battle_message_scenes.clear();
+    let previous = runtime_shell
+        .runtime
+        .data
+        .create_pokemon("LEDYBA", 5, Dv::from_non_hp(8, 8, 8, 8))
+        .expect("materialize prior Contest catch");
+    let candidate = runtime_shell
+        .runtime
+        .data
+        .create_pokemon("PIDGEY", 4, Dv::from_non_hp(10, 10, 10, 10))
+        .expect("materialize candidate Contest catch");
+    {
+        let state = runtime_shell.shell.session_mut().state_mut();
+        let crate::core::state::BattleMemory::StaticWild {
+            battle_music,
+            roaming_slot,
+            ..
+        } = state.battle.clone()
+        else {
+            panic!("Contest replacement fixture requires a static wild battle");
+        };
+        state.battle = crate::core::state::BattleMemory::Wild {
+            battle_type: "BATTLETYPE_CONTEST".to_string(),
+            battle_music,
+            map_name: "Route36".to_string(),
+            roaming_slot,
+            enemy_pokemon: candidate.clone(),
+            enemy_party: vec![candidate.clone()],
+        };
+        state.bug_contest.caught_mon = Some(previous);
+        if let Some(combat) = state.script_runtime.active_battle_combat.as_mut() {
+            combat.enemy = candidate.clone();
+            combat.enemy_party = vec![candidate.clone()];
+            combat.enemy_party_index = 0;
+        }
+    }
+    (runtime_shell, candidate)
+}
+
+fn complete_contest_replacement_for_regression(runtime_shell: &mut BevyRuntimeShell) {
+    complete_visible_standard_capture(
+        runtime_shell,
+        crate::core::battle::capture::CaptureOutcome {
+            caught: true,
+            blocked: false,
+            storage_full: false,
+            wobble_count: 3,
+            animation_shakes: 3,
+            final_catch_rate: u8::MAX,
+            ball_id: Some("PARK_BALL".to_string()),
+        },
+        None,
+        None,
+    )
+    .expect("stage Contest replacement");
+    finish_current_battle_message_for_regression(runtime_shell);
+    press_visible_a_button(runtime_shell).expect("dismiss already-caught text");
+}
+
+#[test]
+fn contest_replacement_no_keeps_stock_mon_and_exits_after_stats_prompt() {
+    let (mut runtime_shell, candidate) = contest_replacement_shell_for_regression();
+    complete_contest_replacement_for_regression(&mut runtime_shell);
+
+    assert_eq!(
+        runtime_shell
+            .visible_bug_contest_replacement
+            .as_ref()
+            .map(|replacement| replacement.phase),
+        Some(VisibleBugContestReplacementPhase::StatsPrompt)
+    );
+    assert_eq!(runtime_shell.yes_no_cursor.as_ref().unwrap().option_index, 0);
+    let snapshot = runtime_shell.shell.snapshot().unwrap();
+    assert_eq!(
+        snapshot.bug_contest.caught_mon.as_ref().unwrap().species.id,
+        "LEDYBA"
+    );
+    assert_eq!(
+        snapshot
+            .bug_contest
+            .pending_caught_mon
+            .as_ref()
+            .unwrap()
+            .species
+            .id,
+        candidate.species.id
+    );
+
+    let mut app = battle_render_regression_app(runtime_shell);
+    app.update();
+    assert!(
+        app.world().resource::<BevyRuntimeShell>().last_error.is_none(),
+        "Contest stats comparison failed to render"
+    );
+    {
+        let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        press_visible_b_button(&mut runtime_shell).expect("keep prior Contest catch");
+        assert!(runtime_shell.visible_bug_contest_replacement.is_none());
+        let snapshot = runtime_shell.shell.snapshot().unwrap();
+        assert_eq!(
+            snapshot.bug_contest.caught_mon.as_ref().unwrap().species.id,
+            "LEDYBA"
+        );
+        assert!(snapshot.bug_contest.pending_caught_mon.is_none());
+        assert!(snapshot.battle.is_none());
+    }
+}
+
+#[test]
+fn contest_replacement_yes_commits_candidate_then_waits_for_caught_text() {
+    let (mut runtime_shell, candidate) = contest_replacement_shell_for_regression();
+    complete_contest_replacement_for_regression(&mut runtime_shell);
+    press_visible_a_button(&mut runtime_shell).expect("switch to candidate Contest catch");
+
+    assert_eq!(
+        runtime_shell
+            .visible_bug_contest_replacement
+            .as_ref()
+            .map(|replacement| replacement.phase),
+        Some(VisibleBugContestReplacementPhase::CaughtText)
+    );
+    assert_eq!(runtime_shell.field_notice.as_deref(), Some("Caught PIDGEY!"));
+    let snapshot = runtime_shell.shell.snapshot().unwrap();
+    assert_eq!(
+        snapshot.bug_contest.caught_mon.as_ref().unwrap().species.id,
+        candidate.species.id
+    );
+    assert!(snapshot.bug_contest.pending_caught_mon.is_none());
+    assert!(
+        runtime_shell.visible_walk_warp_phase.is_none(),
+        "caught text must precede the battle map reload"
+    );
+
+    let caught_text = runtime_shell.field_notice.clone().unwrap();
+    runtime_shell.field_text_reveal = Some(VisibleFieldTextReveal {
+        text: caught_text.clone(),
+        page_index: 0,
+        visible_chars: caught_text.chars().count(),
+        frames_until_next_char: 0,
+    });
+    press_visible_a_button(&mut runtime_shell).expect("dismiss Contest caught text");
+    assert!(runtime_shell.field_notice.is_none());
+    assert!(runtime_shell.visible_bug_contest_replacement.is_none());
+    assert!(runtime_shell.shell.snapshot().unwrap().battle.is_none());
 }
 
 #[test]

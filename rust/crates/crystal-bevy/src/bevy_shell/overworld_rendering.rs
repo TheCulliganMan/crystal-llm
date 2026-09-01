@@ -478,7 +478,13 @@ fn field_warp_prompt_label(warp: &crate::core::map::WarpEvent) -> String {
 /// full-screen surface. The presenter is retired only after these states
 /// close and the complete overworld replacement has been staged.
 fn retained_field_fullscreen_active(runtime_shell: &BevyRuntimeShell) -> bool {
-    (runtime_shell.pending_name_choice.is_some()
+    runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .is_some_and(|replacement| {
+            replacement.phase != VisibleBugContestReplacementPhase::AlreadyCaughtText
+        })
+        || (runtime_shell.pending_name_choice.is_some()
         && runtime_shell.pending_standard_capture.is_none()
         && runtime_shell.pending_gift_pokemon_nickname.is_none()
         && runtime_shell.pending_egg_hatch_nickname.is_none())
@@ -529,6 +535,29 @@ fn spawn_field_command_menu(
     images: &mut Assets<Image>,
     render_error: &mut Option<anyhow::Error>,
 ) {
+    if runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .is_some_and(|replacement| {
+            replacement.phase != VisibleBugContestReplacementPhase::AlreadyCaughtText
+        })
+    {
+        if let Err(error) = require_bitmap_font_art(rendered_art, asset_root, images) {
+            *render_error = Some(error);
+            return;
+        }
+        if let Err(error) = spawn_visible_bug_contest_replacement(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        ) {
+            *render_error = Some(error);
+        }
+        return;
+    }
     if runtime_shell.field_notice.is_some() && !visible_field_pack_is_open(runtime_shell) {
         if let Err(error) = require_bitmap_font_art(rendered_art, asset_root, images) {
             *render_error = Some(error);
@@ -3878,6 +3907,160 @@ fn spawn_field_notice(
         asset_root,
         images,
     )
+}
+
+fn spawn_visible_bug_contest_replacement(
+    commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    let replacement = runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .context("Bug Contest comparison renderer has no replacement state")?;
+    anyhow::ensure!(
+        replacement.phase != VisibleBugContestReplacementPhase::AlreadyCaughtText,
+        "Bug Contest comparison renderer cannot own the already-caught battle text"
+    );
+    let (center_x, center_y) = field_window_center(0.0, 0.0, 20.0, 18.0);
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(TILE_SIZE * 20.0, TILE_SIZE * 18.0)),
+                ..default()
+            },
+            transform: Transform::from_xyz(center_x, center_y, 3.3),
+            ..default()
+        },
+        FieldCommandMarker,
+    ));
+    let frame = battle_window_frame_art(rendered_art, asset_root, images)
+        .cloned()
+        .context("required Bug Contest comparison window frame is unavailable")?;
+    spawn_field_command_window_frame_tiles(commands, &frame, 0.0, 0.0, 15, 6, 3.35);
+    spawn_field_command_window_frame_tiles(commands, &frame, 0.0, 6.0, 15, 6, 3.35);
+
+    let previous_name =
+        crate::core::models::pokemon_species_display_name(&replacement.previous.species.id);
+    let candidate_name = if replacement.candidate.nickname.trim().is_empty() {
+        crate::core::models::pokemon_species_display_name(&replacement.candidate.species.id)
+    } else {
+        replacement.candidate.nickname.clone()
+    };
+    let rows = [
+        (" STOCK <PKMN> ".to_string(), 2.0, 0.0),
+        (previous_name, 1.0, 2.0),
+        (
+            format!("<LV>{}", replacement.previous.level),
+            8.0,
+            2.0,
+        ),
+        ("HEALTH".to_string(), 5.0, 4.0),
+        (
+            format!("{:>3}", replacement.previous.max_hp),
+            11.0,
+            4.0,
+        ),
+        (" THIS <PKMN>  ".to_string(), 2.0, 6.0),
+        (candidate_name, 1.0, 8.0),
+        (
+            format!("<LV>{}", replacement.candidate.level),
+            8.0,
+            8.0,
+        ),
+        ("HEALTH".to_string(), 5.0, 10.0),
+        (
+            format!("{:>3}", replacement.candidate.max_hp),
+            11.0,
+            10.0,
+        ),
+    ];
+    for (text, tile_x, tile_y) in rows {
+        let (x, y) = battle_hud_tile_origin(tile_x, tile_y);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &text,
+            x,
+            y,
+            3.4,
+        );
+    }
+
+    if replacement.phase == VisibleBugContestReplacementPhase::StatsPrompt {
+        spawn_field_command_window_frame_tiles(commands, &frame, 0.0, 12.0, 20, 6, 3.45);
+        let mut boundaries = visible_exported_special_text_boundaries(
+            runtime_shell,
+            "ContestAskSwitchText",
+            "_ContestAskSwitchText",
+        )?;
+        let prompt = boundaries
+            .pop_front()
+            .and_then(|boundary| boundary.details.into_iter().next())
+            .context("Contest switch prompt rendered no source page")?;
+        anyhow::ensure!(
+            boundaries.is_empty(),
+            "Contest switch prompt unexpectedly rendered multiple pages"
+        );
+        let (x, y) = battle_hud_tile_origin(1.0, 14.0);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            &prompt,
+            x,
+            y,
+            3.5,
+        );
+        spawn_field_command_window_frame_tiles(commands, &frame, 14.0, 7.0, 6, 5, 3.55);
+        for (text, tile_y) in [("YES", 8.0), ("NO", 10.0)] {
+            let (x, y) = battle_hud_tile_origin(16.0, tile_y);
+            spawn_field_command_bitmap_text(
+                commands,
+                rendered_art,
+                asset_root,
+                images,
+                text,
+                x,
+                y,
+                3.6,
+            );
+        }
+        let cursor_row = runtime_shell
+            .yes_no_cursor
+            .as_ref()
+            .context("Contest switch prompt has no Yes/No cursor")?
+            .option_index;
+        anyhow::ensure!(cursor_row < 2, "Contest switch cursor is outside Yes/No");
+        let (x, y) = battle_hud_tile_origin(15.0, 8.0 + cursor_row as f32 * 2.0);
+        spawn_field_command_bitmap_text(
+            commands,
+            rendered_art,
+            asset_root,
+            images,
+            ">",
+            x,
+            y,
+            3.6,
+        );
+    } else {
+        spawn_field_notice(
+            commands,
+            snapshot,
+            runtime_shell,
+            rendered_art,
+            asset_root,
+            images,
+        )?;
+    }
+    Ok(())
 }
 
 fn spawn_field_party_summary_screen(

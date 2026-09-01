@@ -4887,6 +4887,15 @@ fn move_visible_primary_cursor(runtime_shell: &mut BevyRuntimeShell, delta: isiz
             &mut runtime_shell.last_audio_events,
         );
     }
+    if runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .is_some_and(|replacement| {
+            replacement.phase == VisibleBugContestReplacementPhase::StatsPrompt
+        })
+    {
+        return move_visible_yes_no_cursor(runtime_shell, delta);
+    }
     if snapshot.ui.pending_yes_no.is_some() {
         // `yesorno` is an interpreter boundary, not permission to expose its
         // cursor before every page written ahead of it has been read.  During

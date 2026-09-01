@@ -390,7 +390,7 @@ use crystal_core::systems::tmhm::{
 use crystal_core::world::collision::{
     MetatileCollision, PlayerTraversalState, Terrain, TilesetCollision, can_enter_tile,
     describe_collision, is_permission_passable, permissions, sample_collision,
-    standard_interaction_script,
+    spawns_shaking_grass_object, standard_interaction_script,
 };
 #[cfg(any(test, feature = "test-fixtures"))]
 use crystal_core::world::encounters::roll_headbutt_encounter as core_roll_headbutt_encounter;

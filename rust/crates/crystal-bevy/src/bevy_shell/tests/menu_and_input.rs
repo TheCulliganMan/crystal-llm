@@ -207,6 +207,7 @@ fn visible_pokegear_phone_call_without_service_stays_in_the_contact_menu() {
         .data()
         .overworld_session("WhirlIslandCave", cave_tile, 0)
         .expect("start no-service cave session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     runtime_shell.pokegear_menu_open = true;
     runtime_shell.pokegear_page = PokegearPage::Phone;
     runtime_shell.pokegear_phone_cursor = 0;
@@ -543,6 +544,7 @@ fn dst_confirmation_uses_the_live_dst_flag_not_special_execution_history() {
             source_script: "MeetMomScript".to_string(),
             command_index: yes_no_index,
         });
+        sync_synthetic_current_map_image(&mut runtime_shell);
 
         let snapshot = runtime_shell.shell.snapshot().expect("DST prompt snapshot");
         assert_eq!(
@@ -2308,6 +2310,7 @@ fn buenas_password_requires_the_source_three_choice_input_and_allows_a_wrong_ans
         .data()
         .overworld_session("RadioTower2F", TilePosition::new(8, 7), 0)
         .expect("start Radio Tower 2F session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -2429,6 +2432,7 @@ fn buena_remember_password_special_opens_its_source_yes_no_menu_without_host_inp
         .data()
         .overworld_session("RadioTower2F", TilePosition::new(8, 7), 0)
         .expect("start Radio Tower 2F session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -2557,6 +2561,7 @@ fn battle_tower_action_is_silent_and_reaches_the_authored_receptionist_text() {
         .data()
         .overworld_session("BattleTower1F", TilePosition::new(10, 9), 0)
         .expect("start Battle Tower 1F session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     arm_visible_active_script_cursor_with_origin(
         &mut runtime_shell,
         "BattleTower1F",
@@ -2598,6 +2603,7 @@ fn battle_tower_challenge_menu_uses_source_choices_and_cancel_result() {
             .data()
             .overworld_session("BattleTower1F", TilePosition::new(10, 9), 0)
             .expect("start Battle Tower 1F session");
+        sync_synthetic_current_map_image(&mut runtime_shell);
         let command_index = runtime_shell
             .shell
             .runtime()
@@ -2766,6 +2772,7 @@ fn battle_tower_room_menu_selects_a_level_or_returns_source_cancel_code() {
             .data()
             .overworld_session("BattleTower1F", TilePosition::new(10, 9), 0)
             .expect("start Battle Tower 1F session");
+        sync_synthetic_current_map_image(&mut runtime_shell);
         let command_index = runtime_shell
             .shell
             .runtime()
@@ -2958,6 +2965,7 @@ fn battle_tower_receptionist_escort_launches_canonical_opponent_battle() {
         .data()
         .overworld_session("BattleTower1F", TilePosition::new(7, 7), 0)
         .expect("start Battle Tower 1F session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     runtime_shell.shell.session.state.battle_tower.level_group = 1;
     arm_visible_active_script_cursor_with_origin(
         &mut runtime_shell,
@@ -3053,6 +3061,7 @@ fn battle_tower_win_resumes_the_room_loop_instead_of_the_failure_warp() {
         .data()
         .overworld_session("BattleTowerBattleRoom", TilePosition::new(4, 6), 0)
         .expect("start Battle Tower battle-room session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     runtime_shell.shell.session.state.battle_tower.level_group = 1;
     runtime_shell
         .shell
@@ -3075,6 +3084,16 @@ fn battle_tower_win_resumes_the_room_loop_instead_of_the_failure_warp() {
                     == Some("BattleTowerBattle")
         })
         .expect("BattleTowerBattle command");
+    runtime_shell
+        .shell
+        .apply_compiled_script_command(
+            "BattleTowerBattleRoom",
+            "Script_BattleRoomLoop",
+            battle_command_index,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("start the source BattleTowerBattle special");
     arm_visible_active_script_cursor_with_origin(
         &mut runtime_shell,
         "BattleTowerBattleRoom",
@@ -3141,6 +3160,7 @@ fn battle_tower_room_decision_shell() -> (BevyRuntimeShell, PathBuf) {
         .data()
         .overworld_session("BattleTower1F", TilePosition::new(7, 7), 0)
         .expect("start Battle Tower 1F save session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let scene_table = runtime_shell
         .shell
         .runtime()
@@ -3172,6 +3192,7 @@ fn battle_tower_room_decision_shell() -> (BevyRuntimeShell, PathBuf) {
         .data()
         .overworld_session("BattleTowerBattleRoom", TilePosition::new(4, 6), 0)
         .expect("start Battle Tower battle-room session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let tower = &mut runtime_shell.shell.session.state.battle_tower;
     tower.level_group = 1;
     tower.beaten_trainers = 3;
@@ -3564,6 +3585,7 @@ fn photo_studio_special_prints_its_intro_before_opening_party_selection() {
         .data()
         .overworld_session("CianwoodPhotoStudio", TilePosition::new(2, 4), 0)
         .expect("start Photo Studio session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -3622,6 +3644,7 @@ fn poke_seer_special_prints_its_intro_before_opening_party_selection() {
         .data()
         .overworld_session("PokeSeersHouse", TilePosition::new(2, 4), 0)
         .expect("start Poke Seer's House session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -3705,6 +3728,7 @@ fn name_rater_special_preserves_the_exported_intro_pages_before_its_prompt() {
         .data()
         .overworld_session("GoldenrodNameRater", TilePosition::new(2, 4), 0)
         .expect("start Goldenrod Name Rater session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -3826,6 +3850,7 @@ fn day_care_lady_intro_and_which_mon_prompt_preserve_exported_pages() {
         .data()
         .overworld_session("DayCare", TilePosition::new(2, 7), 0)
         .expect("start Day-Care session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let command_index = runtime_shell
         .shell
         .runtime()
@@ -3906,6 +3931,7 @@ fn day_care_growth_and_fee_pages_resolve_exact_decimal_operands() {
         .data()
         .overworld_session("DayCare", TilePosition::new(2, 7), 0)
         .expect("start Day-Care session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     let mut resident = runtime_shell.shell.session.state.storage.party.pokemon[0]
         .clone()
         .expect("party Pokemon");
@@ -5606,6 +5632,7 @@ fn successful_npc_trade_waits_for_the_cable_prompt_before_exchanging_pokemon() {
         .data()
         .overworld_session("GoldenrodDeptStore5F", TilePosition::new(10, 3), 0)
         .expect("start Mike's trade map session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     runtime_shell
         .shell
         .add_party_pokemon(
@@ -5701,6 +5728,7 @@ fn seventh_battle_tower_win_shell() -> BevyRuntimeShell {
         .data()
         .overworld_session("BattleTowerBattleRoom", TilePosition::new(4, 6), 0)
         .expect("start Battle Tower battle-room session");
+    sync_synthetic_current_map_image(&mut runtime_shell);
     runtime_shell.shell.session.state.battle_tower.level_group = 1;
     runtime_shell
         .shell
@@ -5730,6 +5758,16 @@ fn seventh_battle_tower_win_shell() -> BevyRuntimeShell {
                     == Some("BattleTowerBattle")
         })
         .expect("BattleTowerBattle command");
+    runtime_shell
+        .shell
+        .apply_compiled_script_command(
+            "BattleTowerBattleRoom",
+            "Script_BattleRoomLoop",
+            battle_command_index,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("start the source BattleTowerBattle special");
     arm_visible_active_script_cursor_with_origin(
         &mut runtime_shell,
         "BattleTowerBattleRoom",
@@ -7209,6 +7247,15 @@ fn initialized_mail_reader_shell(mail_type: &str) -> BevyRuntimeShell {
         .state_mut()
         .sync_party_from_storage();
     shell
+}
+
+fn sync_synthetic_current_map_image(runtime_shell: &mut BevyRuntimeShell) {
+    let session = &mut runtime_shell.shell.session;
+    crate::core::systems::map_context::sync_state_object_overrides(
+        &mut session.state,
+        &session.overworld,
+    )
+    .expect("sync synthetic current-map object image");
 }
 
 #[test]

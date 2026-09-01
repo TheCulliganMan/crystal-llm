@@ -9971,7 +9971,7 @@ mod tests {
         received.pokerus = 0x43;
         received.caught_data = Some(crate::models::pokemon::CaughtData {
             level: 12,
-            time_of_day: Some(crate::systems::time::TimeOfDay::Night),
+            time_of_day: Some(crate::world::encounters::TimeOfDay::Night),
             original_trainer_gender: 1,
             location: 44,
         });
@@ -9985,9 +9985,6 @@ mod tests {
             .stat_boosts
             .values_mut()
             .for_each(|stage| *stage = 3);
-        received.special_attack = 1;
-        received.special_defense = 2;
-
         let outcome = TradeOutcome::new(
             "time-capsule-1",
             false,

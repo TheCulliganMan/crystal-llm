@@ -8,7 +8,7 @@ use crate::state::{
 };
 use crate::world::map::TilePosition;
 use crate::world::session::{
-    OverworldFollowState, OverworldSession, OverworldSnapshot,
+    OverworldFollowState, OverworldObjectStructMemoryError, OverworldSession, OverworldSnapshot,
     raw_event_tile_to_runtime_tile_checked,
 };
 
@@ -63,6 +63,8 @@ pub enum MapContextError {
         width: u16,
         height: u16,
     },
+    #[error("saved object-struct image for the current map is invalid: {0}")]
+    ObjectStructMemory(#[from] OverworldObjectStructMemoryError),
 }
 
 pub fn apply_map_context(
@@ -188,49 +190,29 @@ pub fn apply_state_object_overrides(
             height,
         )?;
     }
+    let mut staged = overworld.clone();
     for (object_id, object_memory) in &memory.objects {
-        let object = overworld
+        let object = staged
             .objects
             .iter_mut()
             .find(|object| object.object_identifier.as_deref() == Some(object_id.as_str()))
             .expect("validated object override target must remain present");
         object.x = object_memory.x;
         object.y = object_memory.y;
-        if let Some(tile) = object_memory.tile {
-            overworld
-                .object_runtime_tiles
-                .insert(object_id.clone(), tile);
-        } else {
-            let tile = saved_object_raw_tile_to_runtime_tile(
-                &overworld.map.name,
-                object_id,
-                object_memory.x,
-                object_memory.y,
-                width,
-                height,
-            )?;
-            overworld
-                .object_runtime_tiles
-                .insert(object_id.clone(), tile);
-        }
-        if let Some(facing) = object_memory.facing {
-            overworld.object_facings.insert(object_id.clone(), facing);
-        }
     }
-    overworld.hidden_object_identifiers = memory.hidden_object_identifiers.clone();
-    overworld.player_hidden = memory.player_hidden;
-    overworld.last_talked_object_identifier = memory.last_talked_object_identifier.clone();
-    overworld.following = memory
+    staged.hidden_object_identifiers = memory.hidden_object_identifiers.clone();
+    staged.shown_object_identifiers = memory.shown_object_identifiers.clone();
+    staged.player_hidden = memory.player_hidden;
+    staged.last_talked_object_identifier = memory.last_talked_object_identifier.clone();
+    staged.following = memory
         .following
         .as_ref()
         .map(|following| OverworldFollowState {
-            leader_object_id: following.leader_object_id.clone(),
-            follower_object_id: following.follower_object_id.clone(),
+            leader_slot: following.leader_slot,
+            follower_slot: following.follower_slot,
         });
-    // Saved map overrides retain the relationship, not Crystal's transient
-    // movement queue. The first leader step re-primes it from the restored
-    // geometry, exactly as a newly loaded map object set does.
-    overworld.following_queued_step = None;
+    staged.restore_object_struct_roster_memory(&memory.object_structs)?;
+    *overworld = staged;
     Ok(())
 }
 
@@ -250,10 +232,7 @@ pub fn sync_state_object_overrides(
         let Some(object_id) = object.object_identifier.as_ref() else {
             continue;
         };
-        if overworld.hidden_object_identifiers.contains(object_id) {
-            continue;
-        }
-        let raw_tile = saved_object_raw_tile_to_runtime_tile(
+        saved_object_raw_tile_to_runtime_tile(
             &overworld.map.name,
             object_id,
             object.x,
@@ -261,46 +240,30 @@ pub fn sync_state_object_overrides(
             width,
             height,
         )?;
-        let runtime_tile = overworld
-            .object_runtime_tiles
-            .get(object_id)
-            .copied()
-            .unwrap_or(raw_tile);
         objects.insert(
             object_id.clone(),
             OverworldObjectMemory {
                 x: object.x,
                 y: object.y,
-                tile: Some(runtime_tile),
-                facing: overworld.object_facings.get(object_id).copied(),
             },
         );
     }
+    let object_structs = overworld.object_struct_roster_memory()?;
+    state.map_object_overrides.clear();
     state.map_object_overrides.insert(
         overworld.map.name.clone(),
         OverworldObjectMapMemory {
             objects,
+            object_structs,
             hidden_object_identifiers: overworld.hidden_object_identifiers.clone(),
-            following: overworld.following.as_ref().and_then(|following| {
-                let leader_hidden = if following.leader_object_id == "PLAYER" {
-                    overworld.player_hidden
-                } else {
-                    overworld
-                        .hidden_object_identifiers
-                        .contains(&following.leader_object_id)
-                };
-                let follower_hidden = if following.follower_object_id == "PLAYER" {
-                    overworld.player_hidden
-                } else {
-                    overworld
-                        .hidden_object_identifiers
-                        .contains(&following.follower_object_id)
-                };
-                (!leader_hidden && !follower_hidden).then(|| OverworldFollowMemory {
-                    leader_object_id: following.leader_object_id.clone(),
-                    follower_object_id: following.follower_object_id.clone(),
-                })
-            }),
+            shown_object_identifiers: overworld.shown_object_identifiers.clone(),
+            following: overworld
+                .following
+                .as_ref()
+                .map(|following| OverworldFollowMemory {
+                    leader_slot: following.leader_slot,
+                    follower_slot: following.follower_slot,
+                }),
             last_talked_object_identifier: overworld.last_talked_object_identifier.clone(),
             player_hidden: overworld.player_hidden,
         },
@@ -350,7 +313,10 @@ mod tests {
     use crate::map::{MapAttributes, MapScene, ObjectEvent};
     use crate::world::collision::{MetatileCollision, TilesetCollision, permissions};
     use crate::world::map::{Direction, OverworldMapData, TilePosition};
-    use crate::world::session::object_tile_position_checked;
+    use crate::world::session::{
+        OverworldObjectStructMemory, OverworldObjectStructRosterMemory,
+        object_tile_position_checked,
+    };
 
     fn test_map() -> OverworldMapData {
         OverworldMapData::from_attributes(
@@ -413,6 +379,33 @@ mod tests {
             event_flag: "EVENT_YOUNGSTER".to_string(),
             object_identifier: Some(object_id.to_string()),
             sightline_direction_override: None,
+        }
+    }
+
+    fn test_object_struct(
+        slot: u8,
+        map_object_index: u8,
+        tile: TilePosition,
+        facing: Direction,
+    ) -> OverworldObjectStructMemory {
+        OverworldObjectStructMemory {
+            slot,
+            map_object_index,
+            live_tile: tile,
+            last_tile: None,
+            initial_tile: tile,
+            facing: Some(facing),
+            step_duration: None,
+            last_tile_occupied_remaining_frames: 0,
+            pending_random_wait: false,
+            initialized_fixed_spin: false,
+            strength_push_direction: None,
+            strength_moving: false,
+            fixed_facing: false,
+            sliding: false,
+            visible: true,
+            normal_following: false,
+            following_not_exact_leader_slot: None,
         }
     }
 
@@ -536,14 +529,19 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                    OverworldObjectMemory {
-                        x: 1,
-                        y: 0,
-                        tile: Some(TilePosition::new(1, 0)),
-                        facing: Some(Direction::Left),
-                    },
+                    OverworldObjectMemory { x: 1, y: 0 },
                 )]),
+                object_structs: OverworldObjectStructRosterMemory {
+                    structs: vec![test_object_struct(
+                        1,
+                        1,
+                        TilePosition::new(1, 0),
+                        Direction::Left,
+                    )],
+                    ..Default::default()
+                },
                 hidden_object_identifiers: BTreeSet::from(["HIDDEN_NPC".to_string()]),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: Some("YOUNGSTER".to_string()),
                 player_hidden: true,
@@ -621,14 +619,11 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                    OverworldObjectMemory {
-                        x: 40_000,
-                        y: 0,
-                        tile: Some(TilePosition::new(0, 0)),
-                        facing: None,
-                    },
+                    OverworldObjectMemory { x: 40_000, y: 0 },
                 )]),
+                object_structs: Default::default(),
                 hidden_object_identifiers: BTreeSet::new(),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: None,
                 player_hidden: false,
@@ -660,26 +655,15 @@ mod tests {
             "Route29".to_string(),
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([
-                    (
-                        "FIRST".to_string(),
-                        OverworldObjectMemory {
-                            x: 2,
-                            y: 0,
-                            tile: Some(TilePosition::new(2, 0)),
-                            facing: Some(Direction::Right),
-                        },
-                    ),
+                    ("FIRST".to_string(), OverworldObjectMemory { x: 2, y: 0 }),
                     (
                         "SECOND".to_string(),
-                        OverworldObjectMemory {
-                            x: 40_000,
-                            y: 0,
-                            tile: None,
-                            facing: Some(Direction::Left),
-                        },
+                        OverworldObjectMemory { x: 40_000, y: 0 },
                     ),
                 ]),
+                object_structs: Default::default(),
                 hidden_object_identifiers: BTreeSet::from(["HIDDEN_NPC".to_string()]),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: Some("FIRST".to_string()),
                 player_hidden: true,
@@ -714,6 +698,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_saved_object_struct_image_does_not_partially_mutate_current_map() {
+        let mut state = GameState::default();
+        state.map_object_overrides.insert(
+            "Route29".to_string(),
+            OverworldObjectMapMemory {
+                objects: BTreeMap::from([(
+                    "YOUNGSTER".to_string(),
+                    OverworldObjectMemory { x: 2, y: 0 },
+                )]),
+                object_structs: OverworldObjectStructRosterMemory {
+                    structs: vec![test_object_struct(
+                        1,
+                        2,
+                        TilePosition::new(2, 0),
+                        Direction::Right,
+                    )],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut overworld = OverworldSession::with_events_and_objects(
+            test_map(),
+            Default::default(),
+            vec![test_object("YOUNGSTER", 1, 0)],
+            test_tileset(),
+            TilePosition::new(0, 0),
+        );
+        let before = overworld.clone();
+
+        assert_eq!(
+            apply_state_object_overrides(&mut overworld, &state),
+            Err(MapContextError::ObjectStructMemory(
+                OverworldObjectStructMemoryError::InvalidMapObjectIndex {
+                    map_object_index: 2,
+                }
+            ))
+        );
+        assert_eq!(overworld, before);
+    }
+
+    #[test]
     fn state_object_overrides_reject_coordinates_outside_runtime_map_bounds() {
         let mut state = GameState::default();
         state.map_object_overrides.insert(
@@ -721,14 +747,11 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                    OverworldObjectMemory {
-                        x: 6,
-                        y: 0,
-                        tile: Some(TilePosition::new(6, 0)),
-                        facing: None,
-                    },
+                    OverworldObjectMemory { x: 6, y: 0 },
                 )]),
+                object_structs: Default::default(),
                 hidden_object_identifiers: BTreeSet::new(),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: None,
                 player_hidden: false,
@@ -774,8 +797,8 @@ mod tests {
             .hidden_object_identifiers
             .insert("ESCORT".to_string());
         overworld.following = Some(OverworldFollowState {
-            leader_object_id: "ESCORT".to_string(),
-            follower_object_id: "PLAYER".to_string(),
+            leader_slot: Some(2),
+            follower_slot: Some(0),
         });
         overworld.last_talked_object_identifier = Some("YOUNGSTER".to_string());
         overworld.player_hidden = true;
@@ -792,16 +815,23 @@ mod tests {
             .expect("route object memory");
         assert_eq!(
             memory.objects.get("YOUNGSTER"),
-            Some(&OverworldObjectMemory {
-                x: 2,
-                y: 1,
-                tile: Some(TilePosition::new(2, 1)),
-                facing: Some(Direction::Right),
-            })
+            Some(&OverworldObjectMemory { x: 2, y: 1 })
         );
         assert!(memory.hidden_object_identifiers.contains("ESCORT"));
-        assert!(!memory.objects.contains_key("ESCORT"));
-        assert_eq!(memory.following, None);
+        assert_eq!(
+            memory
+                .objects
+                .get("ESCORT")
+                .map(|object| (object.x, object.y)),
+            Some((3, 1))
+        );
+        assert_eq!(
+            memory.following,
+            Some(OverworldFollowMemory {
+                leader_slot: Some(2),
+                follower_slot: Some(0),
+            })
+        );
         assert_eq!(
             memory.last_talked_object_identifier.as_deref(),
             Some("YOUNGSTER")
@@ -819,6 +849,33 @@ mod tests {
     }
 
     #[test]
+    fn sync_state_object_overrides_replaces_the_prior_current_map_image() {
+        let mut state = GameState::default();
+        state
+            .map_object_overrides
+            .insert("OldMap".to_string(), OverworldObjectMapMemory::default());
+        let overworld = OverworldSession::with_events_and_objects(
+            test_map(),
+            Default::default(),
+            vec![test_object("YOUNGSTER", 1, 1)],
+            test_tileset(),
+            TilePosition::new(0, 0),
+        );
+
+        sync_state_object_overrides(&mut state, &overworld).expect("sync current map object image");
+
+        assert_eq!(
+            state
+                .map_object_overrides
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["Route29"],
+            "SavePlayerData stores one current wMapObjects/wObjectStructs image"
+        );
+    }
+
+    #[test]
     fn sync_state_object_overrides_rejects_unsaveable_object_coordinates_without_state_changes() {
         let mut state = GameState::default();
         state.map_object_overrides.insert(
@@ -826,14 +883,11 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "OLD".to_string(),
-                    OverworldObjectMemory {
-                        x: 1,
-                        y: 1,
-                        tile: Some(TilePosition::new(1, 1)),
-                        facing: Some(Direction::Down),
-                    },
+                    OverworldObjectMemory { x: 1, y: 1 },
                 )]),
+                object_structs: Default::default(),
                 hidden_object_identifiers: BTreeSet::from(["OLD_HIDDEN".to_string()]),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: Some("OLD".to_string()),
                 player_hidden: true,
@@ -898,14 +952,11 @@ mod tests {
             OverworldObjectMapMemory {
                 objects: BTreeMap::from([(
                     "YOUNGSTER".to_string(),
-                    OverworldObjectMemory {
-                        x: 1,
-                        y: 1,
-                        tile: Some(TilePosition::new(1, 1)),
-                        facing: Some(Direction::Down),
-                    },
+                    OverworldObjectMemory { x: 1, y: 1 },
                 )]),
+                object_structs: Default::default(),
                 hidden_object_identifiers: BTreeSet::new(),
+                shown_object_identifiers: BTreeSet::new(),
                 following: None,
                 last_talked_object_identifier: None,
                 player_hidden: false,

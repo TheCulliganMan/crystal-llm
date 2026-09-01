@@ -3787,12 +3787,20 @@ fn map_module_extracts_object_commands_and_applies_exact_mutations() {
         session
             .object_runtime_tiles
             .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
-        Some(&TilePosition::new(17, 9))
+        None
     );
     assert_eq!(
         (rival.x, rival.y),
-        (16, 9),
-        "pack object coordinates remain definitive while runtime overlays move objects"
+        (17, 9),
+        "moveobject writes map-object memory without allocating or moving a live struct"
+    );
+
+    apply_script_object_mutation(&mut state, &mut session, &appear).expect("appear applies");
+    assert_eq!(
+        session
+            .object_runtime_tile_by_id("INDIGOPLATEAUPOKECENTER1F_RIVAL")
+            .expect("appeared rival live tile"),
+        TilePosition::new(17, 9)
     );
 
     let moved_by_script = apply_script_movement(&mut session, &applymovement, &rival_movement)
@@ -3812,7 +3820,7 @@ fn map_module_extracts_object_commands_and_applies_exact_mutations() {
             .get("INDIGOPLATEAUPOKECENTER1F_RIVAL"),
         Some(&TilePosition::new(17, 4))
     );
-    assert_eq!((rival.x, rival.y), (16, 9));
+    assert_eq!((rival.x, rival.y), (17, 9));
     assert_eq!(
         session
             .object_facings
@@ -3910,7 +3918,7 @@ fn map_module_extracts_fixed_facing_movement_without_turning_player() {
 }
 
 #[test]
-fn runtime_script_movement_visibility_steps_update_visibility_state() {
+fn runtime_script_movement_visibility_steps_update_object_struct_state() {
     let mut module = test_map_module("Route29", "ROUTE_29", None);
     module.objects = vec![test_object(
         "ROUTE_29_YOUNGSTER",
@@ -4035,16 +4043,17 @@ fn runtime_script_movement_visibility_steps_update_visibility_state() {
         state.script_runtime.pending_emotes[0].object,
         "OTHER_OBJECT"
     );
-    assert_eq!(
-        state.flags.event_flags.get("EVENT_HIDE_YOUNGSTER"),
-        Some(&true)
-    );
+    assert_eq!(state.flags.event_flags.get("EVENT_HIDE_YOUNGSTER"), None);
     let youngster = session
         .objects
         .iter()
         .find(|object| object.object_identifier.as_deref() == Some("ROUTE_29_YOUNGSTER"))
         .expect("youngster object");
-    assert!(!session.is_object_visible(youngster));
+    assert!(
+        session.is_object_visible(youngster),
+        "remove_object does not mask the retained map event"
+    );
+    assert!(!session.object_has_loaded_struct(0));
 }
 
 #[test]
@@ -4134,7 +4143,7 @@ fn runtime_script_movement_teleport_to_clears_teleport_from_flag() {
 }
 
 #[test]
-fn runtime_script_movement_dig_effects_sync_player_visibility() {
+fn runtime_script_movement_dig_effects_preserve_player_object_visibility() {
     let mut module = test_map_module("Route29", "ROUTE_29", None);
     module.script_object_commands = vec![
         ScriptObjectCommand {
@@ -4232,13 +4241,13 @@ fn runtime_script_movement_dig_effects_sync_player_visibility() {
         0,
     )
     .expect("dig out movement applies through runtime data");
-    assert!(session.player_hidden);
+    assert!(!session.player_hidden);
     assert_eq!(
         state
             .map_object_overrides
             .get("Route29")
             .map(|memory| memory.player_hidden),
-        Some(true)
+        Some(false)
     );
 
     data.apply_script_movement_in_session(
@@ -4303,7 +4312,7 @@ fn map_module_extracts_follow_and_last_talked_object_commands() {
                 collision: [permissions::FLOOR; 4],
             }],
         },
-        TilePosition::new(0, 0),
+        TilePosition::new(7, 6),
     );
     let mut state = GameState::default();
 
@@ -4311,8 +4320,8 @@ fn map_module_extracts_follow_and_last_talked_object_commands() {
     assert_eq!(
         session.following,
         Some(crystal_core::world::session::OverworldFollowState {
-            leader_object_id: "BATTLETOWER1F_RECEPTIONIST".to_string(),
-            follower_object_id: "PLAYER".to_string(),
+            leader_slot: Some(1),
+            follower_slot: Some(0),
         })
     );
     apply_script_object_mutation(&mut state, &mut session, &stopfollow)
@@ -6005,7 +6014,7 @@ fn callasm_conditional_return_uses_preserved_cpu_flags() {
 }
 
 #[test]
-fn phone_callasm_targets_retain_non_accumulator_engine_dispatch() {
+fn synthetic_phone_callasms_cannot_bypass_certified_typed_dispatch() {
     let root = repository_root_for_tests();
     let base = AssetRoot::new(root)
         .load_base_game_data()
@@ -6092,7 +6101,7 @@ fn phone_callasm_targets_retain_non_accumulator_engine_dispatch() {
     for command in callasms {
         let mut state = GameState::default();
         let mut session = session.clone();
-        let (_, outcome) = data
+        let error = data
             .apply_script_runtime_command_in_session(
                 &mut state,
                 &mut session,
@@ -6101,21 +6110,13 @@ fn phone_callasm_targets_retain_non_accumulator_engine_dispatch() {
                 command.command_index,
                 ScriptRuntimeInputs::default(),
             )
-            .expect("dispatch non-accumulator phone callasm");
-
-        assert!(matches!(
-            outcome,
-            ScriptRuntimeOutcome::EffectRecorded {
-                ref command,
-                ..
-            } if command == "callasm"
-        ));
-        assert_eq!(state.script_runtime.script_value, None);
-        assert_eq!(state.script_runtime.command_queue.len(), 1);
-        assert_eq!(
-            state.script_runtime.command_queue[0].target,
-            command.args[0]
+            .expect_err("synthetic phone callasm must not bypass certified typed execution");
+        assert!(
+            error.to_string().contains("cannot execute synchronously"),
+            "{error:#}"
         );
+        assert_eq!(state.script_runtime.script_value, None);
+        assert!(state.script_runtime.command_queue.is_empty());
     }
 }
 

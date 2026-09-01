@@ -8561,6 +8561,31 @@ fn shell_render_key(runtime_shell: &BevyRuntimeShell) -> u64 {
     runtime_shell.visible_diploma.hash(&mut hasher);
     runtime_shell.visible_battle_transition.hash(&mut hasher);
     runtime_shell.visible_capture_animation.hash(&mut hasher);
+    if let Some(replacement) = &runtime_shell.visible_bug_contest_replacement {
+        true.hash(&mut hasher);
+        replacement.phase.hash(&mut hasher);
+        replacement.previous.species.id.hash(&mut hasher);
+        replacement.previous.level.hash(&mut hasher);
+        replacement.previous.max_hp.hash(&mut hasher);
+        replacement.candidate.species.id.hash(&mut hasher);
+        replacement.candidate.nickname.hash(&mut hasher);
+        replacement.candidate.level.hash(&mut hasher);
+        replacement.candidate.max_hp.hash(&mut hasher);
+        if let Some(origin) = &replacement.scripted_static_wild {
+            true.hash(&mut hasher);
+            origin.map_name.hash(&mut hasher);
+            origin.source_script.hash(&mut hasher);
+            origin.startbattle_command_index.hash(&mut hasher);
+            origin.resume_command_index.hash(&mut hasher);
+            origin.battle_type.hash(&mut hasher);
+            origin.species.hash(&mut hasher);
+            origin.level.hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+    } else {
+        false.hash(&mut hasher);
+    }
     runtime_shell.visible_move_animations.hash(&mut hasher);
     runtime_shell.visible_send_out_animation.hash(&mut hasher);
     runtime_shell

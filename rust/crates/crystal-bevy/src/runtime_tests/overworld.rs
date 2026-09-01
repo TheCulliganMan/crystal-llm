@@ -3727,14 +3727,35 @@ fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
             .map(|object| (object.x, object.y)),
         Some((2, 0))
     );
+    let map_object_index = session
+        .overworld
+        .objects
+        .iter()
+        .position(|object| object.object_identifier.as_deref() == Some("RUNTIME_NPC"))
+        .map(|index| u8::try_from(index + 1).expect("map-object index fits one byte"))
+        .expect("runtime NPC map object");
+    let object_memory = session
+        .state
+        .map_object_overrides
+        .get("RuntimeMap")
+        .expect("current RuntimeMap object image");
     assert_eq!(
-        session
-            .state
-            .map_object_overrides
-            .get("RuntimeMap")
-            .and_then(|memory| memory.objects.get("RUNTIME_NPC"))
-            .map(|object| (object.x, object.y, object.facing)),
-        Some((1, 0, Some(Direction::Up)))
+        object_memory
+            .objects
+            .get("RUNTIME_NPC")
+            .map(|object| (object.x, object.y)),
+        Some((0, 0)),
+        "script movement does not write MAPOBJECT_X/Y"
+    );
+    assert_eq!(
+        object_memory
+            .object_structs
+            .structs
+            .iter()
+            .find(|object| object.map_object_index == map_object_index)
+            .map(|object| (object.live_tile, object.facing)),
+        Some((TilePosition::new(1, 0), Some(Direction::Up))),
+        "script movement writes live OBJECT_MAP_X/Y and OBJECT_DIRECTION"
     );
 
     let follow = session
@@ -3747,13 +3768,8 @@ fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
             .map_object_overrides
             .get("RuntimeMap")
             .and_then(|memory| memory.following.as_ref())
-            .map(|following| {
-                (
-                    following.leader_object_id.as_str(),
-                    following.follower_object_id.as_str(),
-                )
-            }),
-        Some(("RUNTIME_GUIDE", "PLAYER"))
+            .map(|following| (following.leader_slot, following.follower_slot)),
+        Some((Some(2), Some(0)))
     );
 
     let saved_state = session.state.clone();
@@ -3765,7 +3781,14 @@ fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
         .iter()
         .find(|object| object.object_identifier.as_deref() == Some("RUNTIME_NPC"))
         .expect("resumed npc");
-    assert_eq!((resumed_npc.x, resumed_npc.y), (1, 0));
+    assert_eq!((resumed_npc.x, resumed_npc.y), (0, 0));
+    assert_eq!(
+        resumed
+            .overworld
+            .object_runtime_tile_by_id("RUNTIME_NPC")
+            .expect("resumed live npc tile"),
+        TilePosition::new(1, 0)
+    );
     assert_eq!(
         resumed.overworld.object_facings.get("RUNTIME_NPC"),
         Some(&Direction::Up)
@@ -3773,8 +3796,8 @@ fn runtime_applies_script_object_and_movement_commands_with_persistent_state() {
     assert_eq!(
         resumed.overworld.following,
         Some(OverworldFollowState {
-            leader_object_id: "RUNTIME_GUIDE".to_string(),
-            follower_object_id: "PLAYER".to_string(),
+            leader_slot: Some(2),
+            follower_slot: Some(0),
         })
     );
 
@@ -4149,64 +4172,26 @@ fn runtime_shell_routes_compiled_special_commands_to_special_routines() {
 
 #[test]
 fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let canonical_asset_root = AssetRoot::new(repo_root);
+    let canonical = CrystalRuntime::load_from_compiled_pack(
+        &canonical_asset_root,
+        "content-packs/core-modular.crystalpack",
+    )
+    .expect("load canonical phone scripts");
     let root = temp_repository_root("global-phone-caller");
     write_floor_tileset(&root, "johto");
     let asset_root = AssetRoot::new(&root);
     let mut data = minimal_runtime_data();
-    data.phone_contacts = crystal_core::systems::phone::PhoneContactCatalog(BTreeMap::from([(
-        "PHONE_TEST".to_string(),
-        crystal_core::systems::phone::PhoneContactRecord {
-            contact_id: "PHONE_TEST".to_string(),
-            trainer_class: None,
-            trainer_label: None,
-            lines: vec!["Test caller".to_string()],
-            primary_label: "PHONE_TEST".to_string(),
-            map_constant: None,
-            callee_time_mask: 7,
-            callee_script: None,
-            caller_time_mask: 7,
-            caller_script: Some("TestPhoneCallerScript".to_string()),
-        },
-    )]));
-    data.special_phone_calls.insert(
-        "SPECIALCALL_TEST".to_string(),
-        crystal_assets::SpecialPhoneCallRule {
-            value: 7,
-            condition: "SpecialCallOnlyWhenOutside".to_string(),
-            contact_id: "PHONE_TEST".to_string(),
-            caller_script: "TestPhoneCallerScript".to_string(),
-        },
-    );
-    data.asm_text
-        .insert("_TestGiftText".to_string(), "A test gift call.".to_string());
-    data.phone_scripts = vec![serde_json::json!({
-        "TestPhoneCallerScript": [
-            {"command": "readvar", "args": ["VAR_SPECIALPHONECALL"]},
-            {"command": "ifequal", "args": ["$7", ".Gift"]},
-            {"command": "end", "args": []}
-        ],
-        ".Gift@TestPhoneCallerScript": [
-            {"command": "farwritetext", "args": ["TestGiftText"]},
-            {"command": "specialphonecall", "args": ["SPECIALCALL_NONE"]},
-            {"command": "end", "args": []}
-        ],
-        "TestGiftText": [
-            {"command": "text_far", "args": ["_TestGiftText"]},
-            {"command": "text_end", "args": []}
-        ],
-        "Script_ReceivePhoneCall": [
-            {"command": "reanchormap", "args": []},
-            {"command": "callasm", "args": ["RingTwice_StartCall"]},
-            {"command": "memcall", "args": ["wCallerContact", "+", "PHONE_CONTACT_SCRIPT2_BANK"]},
-            {"command": "waitbutton", "args": []},
-            {"command": "callasm", "args": ["HangUp"]},
-            {"command": "closetext", "args": []},
-            {"command": "callasm", "args": ["InitCallReceiveDelay"]},
-            {"command": "end", "args": []}
-        ]
-    })];
-    data.materialize_global_scripts()
-        .expect("materialize global phone scripts");
+    data.global_scripts = canonical.data().global_scripts.clone();
+    data.phone_contacts = canonical.data().phone_contacts.clone();
+    data.special_phone_calls = canonical.data().special_phone_calls.clone();
+    data.initialize_events = canonical.data().initialize_events.clone();
+    data.story_event_script_constants = canonical.data().story_event_script_constants.clone();
+    data.asm_text = canonical.data().asm_text.clone();
     let runtime = CrystalRuntime::from_compiled_pack(
         &asset_root,
         CompiledGamePack::new_unchecked_for_tests(data, report()),
@@ -4215,13 +4200,13 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
     .expect("runtime");
     let mut shell = RuntimeGameShell::new_game(asset_root.clone(), runtime, 0).expect("game shell");
     shell.session_mut().state.script_runtime.special_phone_call =
-        Some("SPECIALCALL_TEST".to_string());
+        Some("SPECIALCALL_BIKESHOP".to_string());
     shell
         .session_mut()
         .state
         .script_runtime
         .variables
-        .insert("VAR_SPECIALPHONECALL".to_string(), "7".to_string());
+        .insert("VAR_SPECIALPHONECALL".to_string(), "6".to_string());
 
     shell
         .tick([GameButton::Right])
@@ -4231,8 +4216,8 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
         .expect("step and receive special call")
         .clone();
     let call = phone_frame.phone_call.expect("special call dispatch");
-    assert_eq!(call.contact_id, "PHONE_TEST");
-    assert_eq!(call.caller_script, "TestPhoneCallerScript");
+    assert_eq!(call.contact_id, "PHONE_OAK");
+    assert_eq!(call.caller_script, "BikeShopPhoneCallerScript");
     assert_eq!(call.receive_script, "Script_ReceivePhoneCall");
     assert!(
         shell
@@ -4280,7 +4265,7 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
     shell
         .take_pending_script_request(RuntimePendingScriptRequestKind::MapRefresh)
         .expect("complete receive-call map refresh");
-    let caller_after_refresh = shell
+    let caller_ring = shell
         .run_compiled_script_until_boundary(
             caller
                 .run
@@ -4290,7 +4275,29 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
             ScriptRuntimeInputs::default(),
             ScriptPhoneInputs::default(),
         )
-        .expect("run dynamic caller after map refresh");
+        .expect("run canonical incoming-call ring after map refresh");
+    assert_eq!(
+        caller_ring
+            .steps
+            .iter()
+            .map(|step| (step.source_script.as_str(), step.command.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("Script_ReceivePhoneCall", "callasm")]
+    );
+    assert!(matches!(
+        caller_ring.boundary,
+        Some(RuntimeCompiledScriptBoundary::PhoneCallasm(
+            crystal_core::systems::script_runtime::ScriptPhoneCallasmPresentation::RingTwice
+        ))
+    ));
+    let caller_after_refresh = shell
+        .run_compiled_script_until_boundary(
+            caller_ring.next_cursor.expect("post-ring continuation"),
+            8,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("run dynamic caller after canonical ring");
     assert_eq!(
         caller_after_refresh
             .steps
@@ -4298,16 +4305,13 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
             .map(|step| (step.source_script.as_str(), step.command.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            ("Script_ReceivePhoneCall", "callasm"),
             ("Script_ReceivePhoneCall", "memcall"),
-            ("TestPhoneCallerScript", "readvar"),
-            ("TestPhoneCallerScript", "ifequal"),
-            (".Gift@TestPhoneCallerScript", "farwritetext"),
+            ("BikeShopPhoneCallerScript", "farwritetext"),
         ]
     );
     assert!(matches!(
         caller_after_refresh.boundary,
-        Some(RuntimeCompiledScriptBoundary::TextLabel(ref label)) if label == "TestGiftText"
+        Some(RuntimeCompiledScriptBoundary::TextLabel(ref label)) if label == "BikeShopPhoneCallerText"
     ));
     shell
         .take_pending_script_request(RuntimePendingScriptRequestKind::TextLabel)
@@ -4329,8 +4333,9 @@ fn incoming_phone_call_runs_global_caller_and_resumes_receive_wrapper() {
             .map(|step| (step.source_script.as_str(), step.command.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            (".Gift@TestPhoneCallerScript", "specialphonecall"),
-            (".Gift@TestPhoneCallerScript", "end"),
+            ("BikeShopPhoneCallerScript", "clearflag"),
+            ("BikeShopPhoneCallerScript", "specialphonecall"),
+            ("BikeShopPhoneCallerScript", "end"),
             ("Script_ReceivePhoneCall", "waitbutton"),
         ]
     );

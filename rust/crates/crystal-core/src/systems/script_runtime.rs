@@ -3122,7 +3122,8 @@ mod tests {
             state
                 .script_runtime
                 .text_events
-                .last()
+                .iter()
+                .find(|event| event.command == "repeattext")
                 .and_then(|event| event.text_label.as_deref()),
             Some("RetainedText")
         );

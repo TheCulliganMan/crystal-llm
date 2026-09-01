@@ -2965,11 +2965,6 @@ fn activate_visible_special_routine_boundary(
             Ok(false)
         }
         SpecialRoutineEffect::LoadOpponentTrainerAndPokemonWithOtSprite { .. } => {
-            // CopyBTTrainer_FromBT_OT_TowBT_OTTemp writes the in-progress
-            // challenge byte and increments the opponent counter in SRAM
-            // before StartBattle. Preserve the pre-entry overworld checkpoint
-            // while committing those independently durable bytes.
-            persist_visible_battle_tower_sram(runtime_shell, false)?;
             Ok(false)
         }
         SpecialRoutineEffect::BugContestJudging { placements, .. } => {
@@ -3457,6 +3452,10 @@ fn activate_visible_special_routine_boundary(
             Ok(true)
         }
         SpecialRoutineEffect::BattleTowerBattleStarted => {
+            // ReadBTTrainerParty commits CopyBTTrainer_FromBT_OT_TowBT_OTTemp's
+            // in-progress byte and incremented opponent counter immediately
+            // before StartBattle.
+            persist_visible_battle_tower_sram(runtime_shell, false)?;
             prepare_visible_battle_entry(runtime_shell)?;
             Ok(true)
         }

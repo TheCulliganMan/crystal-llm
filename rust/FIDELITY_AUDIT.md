@@ -457,7 +457,7 @@ not evidence of either fidelity or divergence.
 | Party-row identity and battle party surface | Party selection identifies Pokémon by nickname and the battle switch screen owns the full 20×18 party layout: canonical two-frame species/egg icons begin at LCD `(8,4)` with a 16-pixel stride, animate at HP-zone durations `8/72/136`, and bob the selected healthy icon every 16 frames by two/one/zero pixels. A held item places `item.2bpp` on the lower icon tile, while Mail uses `mail.2bpp`; the overlay follows the same bob offset. Cursor/name occupy odd rows, status/level/HP bar use the following rows, HP digits start at column 13, CANCEL follows the party, and the choice prompt occupies the bottom window. Eggs omit ordinary battle stats. | Rust labeled field and battle rows with raw species IDs, leaked held-item IDs, and rendered battle switching as overflowing one-line strings inside the battle textbox without party icons or held-item markers. | Centralize snapshot-aware rows around nickname and compiled item names, render switching on a dedicated full-screen party surface, require the compiled species→icon mapping, decode both authoritative 16×16 2bpp frames plus the strict one-tile item/Mail overlays with `party_menu_ob.pal`, place them at the ASM OAM coordinates, and drive frame/bob phase deterministically from the authoritative frame clock and current HP zone. | Static comparison against TypeScript `party-menu-layout.ts`, `_battle-party-menu.ts`, `party-menu-icons.ts`, and ASM row/OAM geometry complete; final validation deferred. |
 | Overworld poison flash | TypeScript overlays the complete 160×144 play surface with RGBA `(230,173,255,176)` when a poison step damages the party, then linearly fades it over exactly four frames | Rust applied poison and exposed only a status string, with no on-screen damage flash | Add a dedicated full-screen overlay driven directly by the poison step boundary, using the exact TypeScript color, alpha, duration, and per-frame linear decay | Static cross-comparison complete; final validation deferred |
 | Player ledge traversal | TypeScript tests the facing ledge before ordinary movement, moves across both ledge strides, plays `SFX_JUMP_OVER_LEDGE`, follows the 16-entry `UpdateJumpPosition` offset curve, draws the composed `FACING_SHADOW`, and blocks another player action until landing | Rust's core had ledge collision and mutation routines, but the production asset/runtime input path never called them and therefore treated every directional input as an ordinary one-stride step | Check ledge eligibility before stepping, execute the authoritative two-stride jump/warp path, retain explicit `LedgeJumpOutcome` in the runtime frame while projecting it as moved for shared step events, queue the source jump SFX, interpolate the retained player sprite over 16 Game Boy frames using TypeScript's exact offset table, suppress input until landing, and load/flip/overlap the required `gfx/overworld/shadow.png` beneath the moving ground position without fallback art | Static cross-comparison complete; final validation deferred |
-| Player grass rustle | TypeScript starts grass feedback when a completed player step targets collision `08/10/14/18/1c/28`, keeps it for the step's distance/speed duration, alternates the original and horizontally flipped required sprite every four frames, applies NPC palette 6 for the map time, and draws it over the player's feet | Rust completed grass movement with no visible rustle and carried no presentation event out of the authoritative step | Publish a typed target/duration event from the production player step, retain it for the exact eight-frame normal cadence adjusted by speed, load `gfx/overworld/grass_rustle.png`, apply exact background transparency and palette 6, alternate its two source frames every four ticks, and layer it at the player's feet without fallback art | Static cross-comparison complete; final validation deferred |
+| Player grass rustle | ASM `NormalStep` calls `CheckSuperTallGrassTile` then `CheckGrassTile`, spawning the temporary grass object for exactly `10/14/18/1c/20/28`. `MovementFunction_ShakingGrass` copies the player step duration minus one and `StepFunction_TrackingObject` decrements it again on the spawn frame, yielding six visible frames for an eight-frame walk and two for a four-frame bike step. The action alternates the required sprite every four updates with `PAL_OW_TREE`. | Rust inherited TypeScript's `14/18/1c`-only predicate and retained the effect for the complete player step, omitting three source-valid collision bytes and two same-frame decrements. | Use the source predicate and derived duration, reject non-source speed multipliers, load `gfx/overworld/grass_rustle.png`, apply exact transparency/palette, and track the player without fallback art. | Runtime predicate/duration faithful; final rendered validation deferred. |
 | Headless script presentation timing | TypeScript and live Bevy advance `pause`, `showemote`, and earthquake durations on the Game Boy frame clock before executing the following opcode | Rust's smoke/playability driver repeatedly polled those retained effects without advancing their frame counters, permanently stranding opening scripts such as Mom's introduction before `promptbutton` | Advance retained delay, emote, and earthquake presentation by exactly one frame per smoke settle iteration, preserving the same command boundary as the live frame clock | Focused opening-story validation passed |
 | SetDayOfWeek menu and register | ASM initializes `wTempDayOfWeek` to Sunday, displays the weekday selector, maps Up to the next day and Down to the previous day with wrapping, then requires a YES confirmation; NO returns to the retained selection. Script branches can loop back to the same special after a later DST prompt. | Rust initially omitted the register and crashed Mom's mandatory opening script, then injected Sunday before batched execution and silently crossed the interactive special, including DST loop-backs | Make `SetDayOfWeek` a pre-execution compiled-run boundary, retain its exact source cursor across both single-step and batched paths, render the seven-day selector and confirmation, implement exact direction/B/NO behavior, write the selected temporary register only on YES, execute the authoritative special, and resume the same compiled script | Static ASM/TypeScript screen and compiled-run comparison complete; final grouped validation deferred |
 | Post-callback overworld input release | TypeScript/ASM release joypad routing after a map callback reaches `endcallback`; emitted control/graphics work is presentation history, not a continuing input lock | Rust could retain callback side-effect queues, terminal `script_ended`/map-control records, and an intermediate cached snapshot after authoritative callback completion, causing the first direction or A press on a map to be routed as script work instead of turning/interacting | Drain completed callback presentation queues and terminal control work at arrival until stable, process terminal records even after the compiled cursor becomes idle, and prevent initialization from carrying an intermediate routing snapshot into the first joypad frame | Focused adjacent-NPC validation passed |
@@ -709,7 +709,35 @@ not evidence of either fidelity or divergence.
 - Whirlpool now retains its 32-frame post-text field-animation boundary instead of snapping directly from the intact obstruction to its replacement block. Rust composes TypeScript's fixed Johto metatile `$07`, substitutes the four exported `$32/$33/$42/$43` whirlpool VRAM tiles from `1.2bpp` through `4.2bpp`, advances their four phases on the tile-animation cadence, applies the source tileset palettes, and reveals the authoritative replacement only when the animation ends; the existing `SFX_SURF` cue remains attached to the start of that boundary.
 - Waterfall no longer reveals the core's already-committed terminal tile immediately after the use acknowledgement. Rust retains the pre-travel scene, plays `SFX_BUBBLEBEAM`, derives every upward segment from the authoritative `from_tile`/`steps`/`to_tile` outcome, and advances the surf player plus scrolling viewport at TypeScript's half-walk (bike-speed) four-frame cadence before releasing the destination snapshot. Input remains locked across the complete climb, and a path that does not end at the authoritative tile is surfaced as a runtime fidelity error rather than silently snapped.
 - Flash now honors the exceptional ASM `UseFlashTextScript` boundary: after the use line finishes printing, Rust automatically queues `SFX_FLASH` and begins the 16-frame white-out/reveal sequence instead of incorrectly waiting for an A press. The retained dark scene is released at peak white so the lit map appears during the fade back in, matching the TypeScript ordering and ASM `BlindingFlash` transition.
-- Active Strength now participates in the authoritative movement collision pass: walking into a visible `SPRITEMOVEDATA_STRENGTH_BOULDER` first attempts the boulder's same-direction stride against map collision and every other visible object, persists its runtime tile/facing, emits `SFX_STRENGTH`, and then allows the player's ordinary step into the vacated tile. Rust previously set `ENGINE_STRENGTH_ACTIVE` but treated every boulder as permanently occupied, blocking required cave and Gym routes.
+- Active Strength now preserves the source's split player/object scheduling.
+  `CheckStrengthBoulder` sets `BOULDER_MOVING_F` plus the direction but returns
+  player movement code 2, which `.TryStep` deliberately treats as a bump; the
+  player does not enter the vacated tile in the push frame. The later object
+  scheduler consumes that request without an invented facing turn, commits
+  the boulder's live destination, retains its old tile for the complete
+  16-frame slow step, and emits `SFX_STRENGTH` only when movement actually
+  starts. `SPRITEMOVEDATA_STRENGTH_BOULDER`, `BIGDOLLASYM`, and `BIGDOLL` use
+  `MovementFunction_Strength`; `BIGDOLLSYM` has the palette flag and accepts
+  the request but intentionally never consumes it through its BigStanding
+  movement function.
+- `StepFunction_StrengthBoulder` now owns the landing boundary. Map-object
+  coordinates remain at their pre-push values during all 16 frames, then copy
+  from the live struct when the step lands and `OBJECT_LAST_MAP_X/Y` normalize
+  to the destination. The CMDQUEUE stone-table scan runs before player events
+  on the following overworld frame, requires an exact standing
+  `SPRITEMOVEDATA_STRENGTH_BOULDER` on `COLL_PIT`/`COLL_PIT_68`, and only then
+  queues the matching warp/object script. Rust previously evaluated the stone
+  table in the push call before either the slow step or landing existed.
+- Pending `BOULDER_MOVING_F` direction and active Strength-step state are now
+  part of the current object-struct save image. Continue retains the exact
+  remaining duration and old-tile collision interval; malformed saves with a
+  conflicting phase, wrong movement function, or unequal step/collision
+  durations are rejected.
+- `LoadMovementDataPointer` now applies its source `STEP_TYPE_RESET` ownership
+  before an `applymovement` body runs. Scripted movement cancels an in-flight
+  Strength duration, normalizes `OBJECT_LAST_MAP_X/Y`, and releases the old
+  collision tile while deliberately retaining the independent flags2
+  `BOULDER_MOVING_F` request.
 - Strength stone tables are now retained for the lifetime of their map rather than drained as diagnostic script records. A boulder pushed onto a matching warp queues the exported table target with its original map context, allowing Ice Path and Blackthorn Gym landing scripts to disappear the source object, update event flags, animate the fall, and show their compiled dialogue. The table is cleared before the next map's callbacks install its own entries.
 - Enemy battle-item narration now follows TypeScript's shared event boundary (`<active enemy nickname> used <item>!`). Rust previously replaced it with an invented three-line trainer-name/target sentence that did not match either the emitted action actor or the TypeScript LCD text.
 - WATERFALL now performs TypeScript's terminal landing step: after climbing consecutive waterfall collisions, it may enter the first passable non-wall tile and then stops because that tile is no longer a waterfall. Rust previously rejected every non-water destination before moving, leaving the player on the final waterfall collision instead of completing the ascent.
@@ -1008,8 +1036,8 @@ not evidence of either fidelity or divergence.
 - Downhill bike/skate steering now applies `TryStep`'s non-downward `STEP_WALK` override to retained-origin collision timing as well as the reported visual speed. Rust already rendered these sideways/uphill steps over eight frames, but the core expiry was still calculated from the actor's ordinary four-frame bike mode, allowing an autonomous object to claim the player's visibly occupied origin halfway through the stride.
 - Tile-forced movement now implements `CheckTile`'s full direction table: currents, both directional-walk ranges, and the source `DOOR`/`DOOR_79`/`STAIRCASE`/`CAVE` permissions continue in their authored direction without an extra input. Downhill remains distinct and passes through the ordinary four-frame `CheckTurning` boundary before coasting down; Rust previously omitted forced entrance/walk permissions and incorrectly made downhill snap into its first step without turning.
 - Autonomous first strides now interpolate from each visible object's resolved map-event tile. The Bevy change detector previously snapshotted only `object_runtime_tiles`; that map has no entry until an NPC first commits movement, so every pedestrian's first step after loading a map bypassed the eight-frame presentation and snapped directly to its destination. Invalid initial object coordinates now fail at the same authoritative boundary instead of being silently absent from detection.
-- Strength boulder pushes now independently interpolate the object for the same eight frames as the player's push step. Object-tile change detection runs for every authoritative overworld tick, not only ticks labeled as autonomous movement, so the atomically moved boulder no longer snaps to its destination while the player visibly walks into the vacated tile. The trailing boulder tile is the player's committed destination during this simultaneous step and remains collision-owned there; duplicating it as a retained boulder origin would incorrectly block the pusher itself.
-- Strength pushes now spawn ASM's `BoulderDustGFX` as an 18-frame effect tracking the boulder's interpolated stride. The renderer repeats each source 8x8 tile across the four dust quadrants, alternates tiles every two frames, uses `PAL_OW_EMOTE`, and applies the direction-specific native-pixel offsets from `MovementFunction_BoulderDust`; Rust previously omitted this visible feedback entirely.
+- Strength boulder pushes now interpolate the object for the authoritative 16-frame slow step while the player remains on the origin tile after the source bump. Object-tile change detection runs for every authoritative overworld tick, not only ticks labeled as autonomous movement, and Bevy derives each object's visible timer from the core step duration rather than truncating every object to eight frames. The boulder's trailing tile remains independently collision-owned through the exact landing boundary.
+- Every `MovementFunction_Strength` member (`SPRITEMOVEDATA_STRENGTH_BOULDER`, `BIGDOLLASYM`, and `BIGDOLL`) now spawns ASM's `BoulderDustGFX`; `BIGDOLLSYM` correctly remains excluded because it uses BigStanding despite carrying the palette flag. Dust lifetime is derived from the live object step with the source `(OBJECT_STEP_DURATION + 1) * 2` byte formula, yielding 34 visible frames for a 16-frame push instead of the former hardcoded 18. The renderer repeats each source 8x8 tile across the four dust quadrants, alternates tiles every two frames, uses `PAL_OW_EMOTE`, and applies the direction-specific native-pixel offsets from `MovementFunction_BoulderDust`.
 - Position-only overworld rendering now yields to full OAM composition while a ledge jump, grass rustle, or Strength dust effect is active. Those effects are created on the same authoritative tick that changes player/object coordinates; the old fast path moved retained player/NPC transforms and returned before spawning the new shadow/rustle/dust sprite, dropping the effect's first visible frame.
 - Player walk origins now remain authoritative collision coordinates for autonomous NPC movement until the exact walk/bike/ledge frame expiry. Core records the last runtime tile and an absolute expiry when a step commits, map transitions clear both, and wanderers exclude that tile before random candidate selection instead of selecting it and losing an otherwise valid movement turn. Rust previously let NPC scheduling inspect only the atomically committed player destination, so an NPC could enter the player's still-visible origin during interpolation and overlap the moving sprite; ASM and TypeScript reserve both current and last coordinates.
 - Overworld sprite depth now uses TypeScript/ASM's complete render ordering key: runtime Y, then X, then inverse original object slot, with the player treated as the sentinel largest slot. The render snapshot carries source slots separately so hiding an earlier event object cannot renumber every later sprite's OAM priority, and the same key is reapplied during retained interpolation updates. Rust previously encoded only destination Y and added a fixed player bias, making the player incorrectly cover every same-row NPC and leaving equal-depth object ordering to Bevy rather than Crystal's OAM priority.
@@ -1274,7 +1302,9 @@ not evidence of either fidelity or divergence.
   silently snapping to their destination. Missing/zero per-object timing is
   rejected consistently with the full renderer rather than replaced by 0/1.
 - Strength boulder dust now shares the boulder's mandatory per-object timing
-  and unbounded retained origin. The effect no longer fabricates 0/1-frame
+  and unbounded retained origin. Its own tracking-object lifetime uses the
+  source doubled-plus-two duration, so it remains for the exact 18 frames
+  after a 16-frame boulder landing. The effect no longer fabricates 0/1-frame
   timing, snaps to the committed destination when its source is just outside
   the viewport, or disappears before an outward stride has fully landed.
 - Animated player and object sprites now require their source action frame.
@@ -1389,10 +1419,12 @@ not evidence of either fidelity or divergence.
   environment. Missing data previously defaulted to an outdoor transition,
   silently choosing the wrong cave/field wipe instead of exposing a malformed
   runtime pack.
-- Player grass rustle now uses TypeScript's whole-metatile tall/long-grass
-  test (`0x14`, `0x18`, `0x1c`). Rust previously tested only the destination
-  quadrant and also treated cut/special grass permissions as rustle triggers,
-  producing effects on cleared tiles while missing mixed grass metatiles.
+- Player grass rustle now uses the occupied collision byte and ASM's complete
+  `CheckSuperTallGrassTile`/`CheckGrassTile` union (`$10,$14,$18,$1c,$20,$28`).
+  The former TypeScript-derived `$14/$18/$1c` subset omitted three valid
+  temporary-object paths. Lifetime is `OBJECT_STEP_DURATION - 2` as observed
+  after `MovementFunction_ShakingGrass` and the same-frame tracking step: six
+  visible frames for walking and two for bike-speed movement.
 - Grass encounter classification now uses `CheckGrassCollision.blocks`
   exactly (`$08,$14,$18,$28,$01,$48..$4c`). The TypeScript-derived `$10`
   and `$1c` additions were removed because the cartridge does not classify
@@ -1446,15 +1478,16 @@ not evidence of either fidelity or divergence.
   five Crystal HUD tokens (`PSN/SLP/PAR/BRN/FRZ`); party confusion likewise
   resolves to `CNF`. Previously a lowercase or short-token afflicted Pokémon
   was rendered as healthy (or showed its level in battle).
-- Player grass rustle now tests the exact occupied collision quadrant rather
-  than asking whether any quadrant of the destination metatile contains
-  grass. Mixed grass/path blocks previously spawned grass around the player
-  while walking on their non-grass side; TypeScript `_is_tile_grass` and the
-  source collision byte are tile-local.
+- Player grass rustle tests the exact occupied collision quadrant rather than
+  asking whether any quadrant of the destination metatile contains grass.
+  Mixed grass/path blocks therefore follow the tile-local source collision
+  byte without TypeScript's whole-metatile heuristic.
 - Grass on a ledge landing now begins at the eight-frame midpoint of the
-  sixteen-frame jump and remains for the complete landing stride. Rust
-  previously started the final tile's rustle at takeoff and exhausted it
-  before the second half; TypeScript/ASM model the jump as two chained steps.
+  sixteen-frame jump and retains the source six-frame tracking-object life,
+  ending two updates before the landing step completes. Rust previously
+  started the final tile's rustle at takeoff and then retained it for the
+  complete second half; ASM models the jump as two chained steps and applies
+  both grass-object decrements when the landing step starts.
 # Bicycle transition timing and split pack-path parity
 
 - Made both visible Bicycle-use routes retain the pre-toggle overworld scene beneath the acknowledgement text. Crystal changes `VAR_MOVEMENT` before the text but does not run `UpdatePlayerSprite` until after it closes; the refactored generic pack path had exposed the new sprite one boundary early.
@@ -2005,3 +2038,451 @@ not evidence of either fidelity or divergence.
   Rust previously emitted `Fainted` inside the switch action and skipped the
   player move. The regression asserts Spikes damage → player move → enemy
   faint event order.
+
+# Player directional-edge departure parity (2026-09-01)
+
+- Ordinary player steps now apply side-wall and side-buoy masks from the tile
+  being left as well as the destination tile. Rust previously used the
+  destination half only, so a player already standing on a directional edge
+  could escape through its blocked side even though autonomous objects obeyed
+  the same departure constraint. This matches
+  `home/map.asm::GetMovementPermissions`, which combines the neighboring-tile
+  mask with the current tile's `.MovementPermissionsData` before
+  `CheckLandPerms`/`CheckSurfPerms`. Direct current and directional-walk tile
+  movement remains exempt because `CheckTile` enters `.DoStep` before either
+  permission routine. The core regression exhausts all four cardinal wall and
+  buoy departure edges for walking and surfing actors.
+
+# Dynamic phone-pointer save validation (2026-09-01)
+
+- Saved script memory now admits the one exact composite WRAM operand used by
+  `memcall wCallerContact + PHONE_CONTACT_SCRIPT2_BANK`. Incoming calls already
+  stored and consumed that source expression verbatim, but generic token
+  validation rejected the state between those boundaries, breaking checksums,
+  modal execution, and save/load while a call was active. All other memory
+  keys remain on the strict token boundary; near-miss expressions are not
+  accepted. This matches the two compiled `memcall` forms in
+  `engine/phone/phone.asm` without adding a general expression parser.
+
+# Battle Tower pre-battle SRAM timing (2026-09-01)
+
+- `LoadOpponentTrainerAndPokemonWithOTSprite` now stages the selected trainer
+  and party without exposing an active battle or changing the persisted
+  opponent counter. The authored `special BattleTowerBattle` boundary performs
+  the `CopyBTTrainer_FromBT_OT_TowBT_OTTemp` commit immediately before battle
+  presentation: it sets the in-progress challenge byte, increments
+  `sNrOfBeatenBattleTowerTrainers`, mirrors the count into WRAM, and persists
+  those SRAM-owned fields. This matches `ReadBTTrainerParty` in
+  `engine/events/battle_tower/battle_tower.asm`; Rust previously committed the
+  bytes during opponent selection and could expose the battle before its intro
+  script reached `StartBattle`.
+- Battle Tower party loading now recognizes both `NO_MOVE` and literal `0` as
+  the exact empty move byte. The canonical ASM uses literal zero for UNOWN's
+  three trailing move slots, which previously made real opponent selection fail
+  nondeterministically depending on the sampled party.
+
+# Compiled script input-row validation (2026-09-01)
+
+- Runtime input synthesis now first resolves the exact compiled command at the
+  requested script index. A nonexistent row can no longer return an all-empty
+  input payload that fails only later in dispatch; it rejects at the same
+  compiled-script boundary as ordinary stepping.
+
+# Capture completion cry boundary (2026-09-01)
+
+- `PokeBallEffect` plays a captured species cry only through
+  `NewPokedexEntry`, after `NewDexDataText`, and only for a newly caught
+  species when the player has received the Pokedex. The later party/box
+  storage, nickname, and `.return_from_capture` path contains no cry command.
+- The visible Rust completion path previously queued an additional species
+  cry after every successful authoritative storage commit. This made a new
+  entry cry twice and made already-caught, tutorial, and Contest completion
+  invent a cue absent from the ASM. The shared completion cue is removed;
+  `new_pokedex_entry` remains the sole capture-registration cry boundary.
+- The retained-capture integration regression now proves exactly one
+  `NewPokedexEntry` cry and no storage/exit cry through Pokedex pages,
+  nickname entry, authoritative capture commit, and battle-to-overworld exit.
+- Tutorial and Bug-Catching Contest captures no longer commit at ball-roll
+  resolution. `PrintText` is a blocking source boundary: Rust now retains the
+  active battle through `Text_GotchaMonWasCaught` and, for a newly registered
+  Contest species, the complete `NewPokedexEntry` sequence. Only after the
+  final owned surface closes does it apply the authoritative tutorial/Contest
+  completion. Ordinary captures then open `AskGiveNicknameText`; tutorial and
+  Contest captures skip that prompt exactly as the source branches require.
+- A real-pack retained Contest regression converts the live encounter to an
+  exact Route 36 PIDGEY row and proves battle presence across both text and
+  Pokedex pages, then asserts direct Contest storage with no nickname surface.
+
+# Bug-Catching Contest caught-mon replacement (2026-09-01)
+
+- A second Contest catch now follows
+  `engine/events/bug_contest/caught_mon.asm::BugContest_SetCaughtContestMon`
+  instead of exiting immediately. The visible shell prints the exported
+  `ContestAlreadyCaughtText`, then owns the cleared 20×18 LCD while comparing
+  the stock and candidate Pokémon. Its two 15×6 windows, labels, species or
+  nickname, levels, HEALTH rows, three-digit maximum HP values, 20×6
+  `ContestAskSwitchText` box, and the 6×5 Yes/No box use the exact coordinates
+  from `DisplayCaughtContestMonStats` and `PlaceYesNoBox` (`lb bc, 14, 7`).
+- Choosing No discards only `pending_caught_mon`, preserves the stock catch,
+  and begins the battle map reload. Choosing Yes commits the candidate and
+  retains the comparison LCD underneath the exported `ContestCaughtMonText`;
+  reload begins only after that authored text is dismissed. A/B and
+  directional input are owned by the typed comparison modal for both paths.
+- Contest replacement no longer writes the invented
+  `BugContestSetCaughtContestMon` label into generic compiled-script
+  `pending_yes_no` state. The ASM choice belongs to a special routine, not a
+  resumable map-script command; the invented label also made the next strict
+  save/snapshot validation fail because it does not exist in the compiled
+  script pack. Core coverage now proves a second catch remains valid as a
+  typed pending Contest candidate with no fake script continuation, while
+  integrated Bevy regressions cover rendered keep and replace lifecycles.
+
+# Autonomous object screen-edge movement (2026-09-01)
+
+- Ordinary autonomous walkers now apply
+  `engine/overworld/npc_movement.asm::IsObjectMovingOffEdgeOfScreen` after
+  movement-radius, terrain, side-wall, object, and player collision checks.
+  Rust previously omitted this final `CanObjectMoveInDirection` gate, allowing
+  a wandering NPC to commit a step outside the live object viewport.
+- The ASM compares padded object coordinates against unpadded
+  `wXCoord`/`wYCoord`. Normalizing the `object_event` macro's `+ 4` coordinate
+  bias produces the exact allowed destination rectangle: player-relative x
+  `-4..=5` and y `-4..=4`. The regression places a horizontal walker at the
+  rightmost valid coordinate and proves a selected right step becomes the
+  source random-sleep path without changing its tile.
+- `SPRITEMOVEDATA_SWIM_WANDER` deliberately bypasses the new gate. Crystal's
+  swimming branch jumps directly to object collision after its land check,
+  skipping both `HasObjectReachedMovementLimit` and
+  `IsObjectMovingOffEdgeOfScreen`; the existing swimmer regression continues
+  to prove movement outside the ordinary radius and viewport.
+
+# Autonomous object movement-radius boundaries (2026-09-01)
+
+- `HasObjectReachedMovementLimit` now reads the allocated struct's immutable
+  `OBJECT_INIT_X/Y` rather than the mutable `wMapObjects` coordinates. A
+  `moveobject` or `writeobjectxy` against an already-loaded object therefore
+  cannot shift its autonomous movement anchor; deleting and reallocating the
+  struct remains the boundary that captures a new initial coordinate.
+- Rust previously applied an invented inclusive host rectangle
+  `initial ± radius`. Crystal calls `InitStep` first, then rejects a proposed
+  coordinate only when its byte is exactly equal to either wrapped
+  `OBJECT_INIT - radius` or `OBJECT_INIT + radius`. Radius-one land walkers
+  consequently reject the immediately adjacent boundary tile. Conversely, a
+  scripted movement that leaves an autonomous object outside its original
+  interval is not clamped there and may keep moving until another source gate
+  blocks it. The implementation retains the map object's `+4` coordinate bias
+  while comparing bytes, including cartridge underflow and overflow.
+- A compiled base-pack regression uses the radius-one horizontal walker in
+  `FuchsiaPokecenter1F` and proves its walkable adjacent tile is rejected after
+  the exact direction and slow-wait Random calls. Synthetic regressions cover
+  initial-coordinate ownership, exact boundary rejection, and the
+  already-outside case. Pack verification now rejects either movement radius
+  above `$f`; the two values occupy the nibbles of `MAPOBJECT_RADIUS` and can no
+  longer be silently truncated from a wider modpack integer.
+
+# Loaded object-struct scheduling (2026-09-01)
+
+- Autonomous movement now runs only for map events copied into one of the
+  twelve non-player slots in `wObjectStructs`. Rust previously enumerated every
+  event/time-visible object on the map; a far-offscreen walker could therefore
+  consume `Random` calls even though `HandleNPCStep` had no object struct to
+  schedule. The regression proves zero divider reads while unloaded and the
+  first exact read when the event enters the live roster.
+- Initial loading and `CheckObjectStillVisible` use the ASM's wider normalized
+  object-struct rectangle, x `-5..=6` and y `-5..=5`, distinct from the next-step
+  gate above. Each loaded slot retains the live and load-time coordinates and
+  is deleted only when both leave that rectangle. Reloading captures the map
+  object's current coordinate and resets its autonomous duration/spin state.
+- Deletion at that boundary now also honors the copied
+  `OBJECT_FLAGS1.WONT_DELETE_F` bit. The exact `SpriteMovementData` members that
+  start with this flag—including followers, scripted/dynamic objects, strength
+  boulders, smashable rocks, dolls, Pokémon, shadows, emotes, dust, and grass—
+  retain their allocated struct even after both coordinates leave the loaded
+  rectangle. Ordinary objects still delete at the same boundary, and explicit
+  `remove_object`/`disappear` deletion remains unconditional.
+- Player steps copy only events on the newly exposed edge, matching
+  `CheckObjectEnteringVisibleRange`: up/down use y `-5`/`5` with x `-5..=6`,
+  and left/right use x `-5`/`6` with y `-5..=5`. Allocation stays in map-event
+  order and stops after twelve non-player structs, preserving the player-owned
+  slot and preventing unloaded events from participating in autonomous object
+  collision.
+- Player collision, strength checks, A-button object lookup, trainer sight,
+  object-facing commands, `writeobjectxy`, and Bevy sprite snapshots now query
+  that same allocated roster. A thirteenth event-visible map record can no
+  longer block, talk, spot the player, or render without an object struct.
+  Conversely, `Movement_hide_object` only sets the object struct's invisible
+  flag: the loaded object continues to occupy its tile exactly as
+  `IsNPCAtCoord` does. `remove_object` and `disappear` are the boundaries that
+  actually delete the struct.
+- Bevy's roster snapshot now resolves every loaded visible object's live tile
+  and facing, including objects still at their map-memory coordinates. It no
+  longer exports the raw runtime-override maps, which omitted newly initialized
+  objects while leaking overrides/facings belonging to unloaded or invisible
+  events under fields named `visible_*`.
+- Event/time flag changes retain visibility only for structs already loaded.
+  An offscreen event hidden before entering range never receives a struct; a
+  loaded event survives a flag change until `CheckObjectStillVisible` deletes
+  it, at which point the live mask applies. `appear` still invokes the source's
+  unconditional `UnmaskCopyMapObjectStruct`, including for an offscreen map
+  event when a slot is available.
+- Scripted player movement replays every committed movement step through the
+  newly exposed edge loader. Rust previously jumped the authoritative player
+  coordinate directly to the final scripted tile, skipping intermediate
+  `CheckObjectEnteringVisibleRange` calls; Elm therefore remained unloaded
+  during the canonical seven-step Lab entrance. The path replay is atomic and
+  the visible new-game, starter-selection, and aide/exit flows cover the real
+  map transition and interaction lifecycle.
+- Map entry now preserves `LoadMapObjects` ordering: entry-time event/time masks
+  are installed, ordinary object structs are cleared, map callbacks execute,
+  and only then does the `InitializeVisibleSprites` equivalent fill remaining
+  slots. Callback `moveobject` therefore updates map memory before allocation;
+  callback-time `appear` may reserve an earlier slot (even offscreen), while
+  movement/facing commands against an otherwise unloaded object retain their
+  source carry/no-op behavior. This fixes Elm's Lab without reintroducing the
+  incorrect rule that `moveobject` teleports an already-loaded object.
+- Movement `step_dig`, `return_dig`, `hide_object`, `show_object`, and
+  `remove_object` no longer mutate saved event flags. The ASM opcodes alter
+  object-struct animation/flags only; `remove_object` deletes the current map
+  object, while `step_dig` and `return_dig` select spin actions without hiding
+  the player.
+
+# Map-object versus live object coordinates (2026-09-01)
+
+- `moveobject` now implements
+  `player_object.asm::CopyDECoordsToMapObject`: it writes only the map event's
+  `MAPOBJECT_X/Y_COORD` memory. A currently allocated object struct keeps its
+  `OBJECT_MAP_X/Y` live position and does not teleport. Rust previously routed
+  the command through its live-tile setter, collapsing the cartridge's two
+  coordinate stores.
+- `writeobjectxy` remains the reverse boundary: when the target has an object
+  struct, it copies the live tile back into map-object memory; when unloaded,
+  it returns without reading coordinates. The facing and write commands now
+  use object-struct allocation for the source `CheckObjectVisibility` carry,
+  not rendered visibility.
+- Deleting an object struct now discards its live and last-occupied coordinate
+  bytes. A later `appear`/visible-edge copy starts from map-object memory.
+  Ordinary NPC walking therefore does not persist a walked tile into the map
+  record; the regression moves map memory under a loaded object, proves its
+  live tile is unchanged, then deletes and reappears it at the new coordinate.
+- `applymovement` now preserves `GetMovementData`'s unloaded-object carry: it
+  consumes the authored command boundary but starts no movement program and
+  applies no steps or effects when `MAPOBJECT_OBJECT_STRUCT_ID == -1`. The
+  canonical Indigo Plateau rival sequence is covered in source order as
+  `moveobject` → `appear` → `applymovement`, proving map-memory placement,
+  explicit allocation, and live movement remain separate operations.
+
+# Current-map object save ownership (2026-09-01)
+
+- Object persistence now represents one current-map WRAM/SRAM image instead of
+  a cache of every previously visited map. `SavePlayerData` copies the single
+  contiguous `wObjectStructs` and `wMapObjects` regions inside `wPlayerData`;
+  syncing a new current map therefore replaces the prior Rust object-memory
+  entry, and saved-state validation rejects multiple entries, an inactive
+  overworld, or a map name different from the active overworld.
+- Fresh warp and connection setup no longer reapplies an object image retained
+  from an earlier visit. `LoadMapAttributes` calls `ReadObjectEvents`, which
+  clears non-player object structs and recopies the destination map's authored
+  object records before callbacks and `InitializeVisibleSprites`; Rust now does
+  the same even for a same-map fresh entry. Event flags and map callbacks remain
+  the source-backed way to reproduce persistent story placement.
+- Continue now restores the one current map's map-object coordinates and a
+  separate ordered image of the modeled `wObjectStructs` state. Each non-player
+  entry retains its real allocator slot and 1-based map-object index, live,
+  last, and initial coordinates, facing, step duration, remaining last-tile
+  occupancy, pending `ContinueWalk` random-wait phase, initialized fixed-spin
+  phase, fixed-facing/sliding flags, transient visibility, and loose-follow
+  leader. Player last-tile state, the follow movement queue, last player-step
+  direction, player fixed-facing/sliding flags, `wObjectMasks`-equivalent
+  explicit shown/hidden state, following relationship, and last-talked object
+  are restored with the same current-map image.
+- Object-struct allocation is no longer represented as source-order set
+  membership. Deletion frees the exact slot and `appear` reuses the first free
+  non-player slot, matching `CopyMapObjectToObjectStruct`; autonomous scheduling,
+  A-button selection, and trainer-sight selection traverse slot order after
+  reuse. The regression reverses two same-tile objects' slot priority without
+  changing their map-event order and proves the newly lower slot wins.
+- Map-object records no longer duplicate live tile/facing fields. That state
+  belongs exclusively to the corresponding object struct, so a hidden but
+  still allocated object retains its live coordinates while an unloaded event
+  does not acquire a fabricated live struct on Continue. Restore validates the
+  complete image before atomically replacing the live session, and compiled-pack
+  validation rejects struct entries whose 1-based map-object index is absent.
+- The public Continue regression serializes and deserializes `GameState`, then
+  proves exact round-trip equality for a reused allocator slot, live/last/init
+  coordinates, timers and autonomous phase bits, invisibility, map masks,
+  follow queue, and player last-tile state. Fresh warp/connection entry still
+  discards this image as described above.
+- This is exact for every object-struct field currently modeled by the Rust
+  overworld. Rust still does not expose a raw 40-byte `object_struct` image;
+  sprite-tile/OAM offsets, action/step-frame/index scratch bytes, collision
+  scratch, jump height, and unused tail bytes remain renderer or interpreter
+  derivations rather than byte-addressable WRAM. Byte-complete emulation of
+  those unmodeled presentation/scratch members remains a broader fidelity gap.
+
+# Big-object collision and interaction footprint (2026-09-01)
+
+- `IsNPCAtCoord` now recognizes the exact `BIG_OBJECT_F` members of
+  `SpriteMovementData`: `BIGDOLLSYM`, `BIGDOLLASYM`, and `BIGDOLL`. Their live
+  `OBJECT_MAP_X/Y` coordinate owns the source 2×2 rectangle rooted at that
+  tile, rather than the ordinary one-tile footprint Rust previously assigned
+  to every loaded object struct.
+- The shared footprint now drives player walking and ledge collision,
+  autonomous-object collision, strength push probes, Surf occupancy, direct
+  field-object lookup, and A-button interaction. This closes the base-game
+  Vermilion Snorlax case: approaching its lower-right tile at `(35, 9)` both
+  blocks entry and resolves `VermilionSnorlax`, even though the map-object
+  anchor is `(34, 8)`. The player-room large doll uses the same source rule.
+- Crystal applies the 2×2 check only to the current live coordinates, then
+  falls through to an ordinary one-tile `OBJECT_LAST_MAP_X/Y` comparison.
+  Rust preserves that asymmetry instead of widening retained last-tile
+  occupancy. Synthetic core coverage proves all four live tiles and the
+  non-anchor interaction edge; a compiled base-pack regression proves the
+  exported Vermilion object record reaches the same runtime behavior.
+
+# Emote object-struct collision exclusion (2026-09-01)
+
+- The shared `IsNPCAtCoord` model now skips the exact `SpriteMovementData`
+  members whose allocated struct receives `EMOTE_OBJECT_F`: `SHADOW`, `EMOTE`,
+  `SCREENSHAKE`, `BOULDERDUST`, and `GRASS`. Rust previously treated those
+  transient presentation structs as ordinary occupied actors, so they could
+  block player and autonomous movement or intercept a facing-object lookup.
+- The exclusion applies before both the live-coordinate and retained
+  `OBJECT_LAST_MAP_X/Y` tests, matching the source flag check. Player walking,
+  ledges, strength probes, Surf and field-object targeting, A-button lookup,
+  and autonomous object collision consequently share the same behavior.
+  Loaded/rendered ownership is unchanged: an emote struct still exists and can
+  be drawn, but it is transparent to NPC coordinate collision.
+- Core regressions cover all five source flag members, slot-order lookup past
+  an emote to an ordinary object on the same tile, retained last-coordinate
+  transparency, player traversal, and autonomous walker traversal.
+
+# Map-event storage and object-time scheduling (2026-09-01)
+
+- Compiled data now rejects more than 15 non-player object events, matching
+  `wMap1Object` through `wMap15Object`. Object-event coordinates are limited to
+  251 because the source `object_event` macro stores each coordinate plus 4 in
+  the byte-sized `MAPOBJECT_X/Y_COORD` fields. Warp, coordinate, and background
+  event coordinates are limited to the full byte range because their macros
+  store the raw values. This prevents host-width `u16` data from compiling into
+  a map record the cartridge representation cannot encode.
+- `CheckObjectTime` now has both source branches. A first schedule byte of
+  `$ff` interprets the second byte as the MORN/DAY/NITE mask, with `$ff` always
+  visible and zero never visible. Otherwise the two bytes are inclusive hour
+  endpoints: equal endpoints are always visible, ascending endpoints select
+  the closed interval, and descending endpoints wrap across midnight.
+- `OverworldSession` carries both `hHours` and `wTimeOfDay`, and every RTC or
+  manual-clock mutation synchronizes both before later visible-edge object
+  allocation. Changing time does not rebuild the already-loaded roster, which
+  preserves Crystal's map-entry allocation lifecycle. The fast VBlank timer
+  path remains separate because it advances only the play-time counter, not
+  the RTC registers.
+- Verification accepts only the two byte forms documented by the ASM macro:
+  `$ff` plus `$ff`/a three-bit time-of-day mask, or two hours in 0..=23. Core
+  regressions cover zero and combined masks, both inclusive interval shapes,
+  equal endpoints, and map-entry allocation using the full hour pair; asset
+  regressions cover every storage limit and malformed schedule form.
+
+# Object-struct flag and deletion lifetime (2026-09-01)
+
+- Movement `hide_object`/`show_object` now mutate a dedicated modeled
+  `OBJECT_FLAGS1::INVISIBLE_F` bit on the allocated object struct. They no
+  longer write Rust's map-object mask authority. An invisible struct remains
+  collision- and interaction-owning because the ASM tests that bit only in
+  `HandleObjectAction`; the Bevy snapshot omits it from rendering while its
+  live and last coordinates remain authoritative.
+- `Movement_remove_object` now performs only `DeleteMapObject`. It frees and
+  zeroes the object struct while leaving the corresponding `wMapObjects`
+  record unmasked, so a later `CopyObjectStruct` can allocate the event again.
+  Rust previously added a persistent hidden-object override, incorrectly
+  converting this movement opcode into `disappear`.
+- Every object-struct deletion now discards transient invisible, fixed-facing,
+  sliding, and follow-not-exact follower state, then restores source
+  fixed/sliding/facing defaults for a later copy. Continue saves the actual
+  object-struct invisible bit in `OverworldObjectStructMemory.visible`; it no
+  longer derives that field from event flags, time schedules, or map masks.
+- Regressions first reproduced both failures: `remove_object` permanently
+  masked its event, and deleted ordinary structs retained movement-mutated
+  flags. Focused script-object, viewport/collision, runtime adapter, and exact
+  Continue round-trip coverage now passes at the corrected boundaries.
+
+# Follow-not-exact object-struct ownership (2026-09-01)
+
+- `FollowNotExact` first calls `CheckObjectVisibility` for the follower and
+  leader and returns on carry. Rust now likewise treats the command as a
+  successful no-op unless both object structs are allocated; it no longer
+  moves an unloaded event from its persistent map coordinates or invents a
+  movement relationship for it.
+- The source writes `hObjectStructIndex` for the leader into the follower's
+  `OBJECT_RANGE` byte before selecting `SPRITEMOVEDATA_FOLLOWNOTEXACT`.
+  Runtime and Continue memory now store that exact slot byte (player slot 0 or
+  one of the twelve non-player slots), rather than a symbolic leader ID.
+- Deleting the leader does not rewrite the follower's `OBJECT_RANGE`. If
+  `CopyMapObjectToObjectStruct` later reuses that free slot, the follower sees
+  the replacement occupant just as the cartridge does. Deleting the follower
+  still discards its movement type and range with the rest of the zeroed
+  object struct. Save validation rejects slot bytes outside 0..=12.
+- Regressions cover each unloaded operand, normal movement tracking, allocator
+  reuse by a differently identified map object, and exact Continue round-trip
+  of the slot-owned relationship.
+
+# Explicit deletion stops normal follow (2026-09-01)
+
+- `ApplyDeletionToMapObject.CheckStopFollow` compares the deleted struct slot
+  with both `wObjectFollow_Leader` and `wObjectFollow_Follower`, then calls
+  `StopFollow` when either matches. Rust's `disappear` and event-driven object
+  deletion now clear both the modeled relationship and queued follower step
+  before zeroing the struct.
+- Player deletion uses the same participant check even though Rust models the
+  player visibility bit separately. The raw deletion path remains distinct:
+  `Movement_remove_object` still performs `DeleteMapObject` without inheriting
+  `disappear`'s map mask or full `StopFollow` behavior.
+- The failing-first regression establishes both participating roles; the full
+  core suite then verifies the corrected lifecycle alongside movement removal,
+  loose following, and Continue state.
+
+# Normal-follow slot bytes (2026-09-01)
+
+- `wObjectFollow_Leader` and `wObjectFollow_Follower` are now modeled as two
+  independent optional object-struct slot bytes. Rust no longer stores a
+  symbolic leader/follower pair, so either byte can remain `$ff` while the
+  other is populated. A freed follower slot still retargets raw queue writes
+  when `CopyMapObjectToObjectStruct` gives that slot to another map event, but
+  the replacement does not become a moving follower: `SPRITEMOVEDATA_FOLLOWING`
+  is a separate field in the deleted object struct and is initialized from the
+  replacement map event rather than inherited from the reused slot.
+- `StartFollow` preserves its asymmetric visibility writes: an unloaded leader
+  returns before either byte changes, while a loaded leader is committed even
+  when the requested follower has no struct. Movement with a non-`$ff` but
+  currently empty follower slot still advances the leader and retains its
+  queued follower command instead of rejecting the frame as an unknown ID.
+- `DoStepsForAllObjects` writes the current object-struct index to
+  `hMapObjectIndex` before `HandleObjectStep` dispatches movement. Consequently
+  both `ApplyMovementToFollower` and `Movement_remove_object` compare a struct
+  slot to the stored leader struct slot. Rust now preserves that exact runtime
+  meaning instead of confusing the scratch byte's name with a map-event index.
+- Explicit `disappear` still compares the deleted struct slot against both
+  bytes and performs full `StopFollow`; raw movement deletion leaves the
+  follower byte and queue intact. Continue serializes both optional bytes
+  directly, including partial or stale relationships, and rejects only values
+  outside player/non-player slot range 0..=12 or a wrapper with both absent.
+- Normal follow now models the allocation-owned `OBJECT_MOVEMENT_TYPE` as well
+  as the adjacent relationship bytes. `SetFollowerIfVisible` suspends the new
+  follower's map-event movement function and replaces any active
+  `FOLLOWNOTEXACT` movement; `ResetFollower` on replacement or `stopfollow`
+  clears the autonomous duration/random-wait/spin phase before the original
+  map-event movement resumes. Active normal followers no longer consume
+  autonomous RNG or move independently during a follow. Continue persists the
+  `FOLLOWING` movement type per allocated struct (and separately for player
+  slot 0), rejecting multiple or slot-mismatched representations.
+- The `STEP_TYPE_RESET` installed by both follower setup and reset now copies
+  the follower's live coordinate into its last-coordinate fields and releases
+  collision ownership of the pre-reset tile. Rust previously cleared the
+  movement timer but retained `OBJECT_LAST_MAP_X/Y`-equivalent occupancy, so a
+  replaced or stopped NPC/player follower could leave an invisible blocking
+  tile behind after the follow relationship ended.
+- Core regressions cover partial `StartFollow`, empty slots, raw follower slot
+  reuse without movement-type transfer, follower movement reset, autonomous
+  exclusion, struct-slot deletion comparison, full explicit deletion, queue
+  motion, and save validation. Asset and Bevy regressions cover compiled
+  base scripts, JSON Continue round-trip, restored runtime movement, and live
+  renderer derivation of the current slot occupants.

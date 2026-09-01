@@ -3377,8 +3377,35 @@ fn script_block_change_issue_diagnostic(
 
 fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<VerificationError>) {
     for (map_name, module) in &data.maps {
+        if module.objects.len() > 15 {
+            diagnostics.push(VerificationError::error(
+                "too_many_map_objects",
+                map_name,
+                format!(
+                    "map declares {} non-player object records, but wMapObjects has only indexes 1..=15",
+                    module.objects.len()
+                ),
+            ));
+        }
         let mut object_identifiers = BTreeSet::new();
         for object in &module.objects {
+            if object.x > u16::from(u8::MAX - 4) || object.y > u16::from(u8::MAX - 4) {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "object_event_coordinate_storage_overflow",
+                    &subject,
+                    format!(
+                        "object_event coordinate ({}, {}) cannot fit MAPOBJECT_X/Y after the ASM macro adds 4",
+                        object.x, object.y
+                    ),
+                ));
+            }
             if let Some(object_id) = &object.object_identifier {
                 let subject = format!("{map_name}:{object_id}");
                 if !is_exact_object_event_reference_token(object_id) {
@@ -3455,6 +3482,45 @@ fn verify_script_object_commands(data: &GameDataSet, diagnostics: &mut Vec<Verif
                     format!(
                         "object event uses unknown spritemovedata '{}'",
                         object.spritemovedata
+                    ),
+                ));
+            }
+            if object.move_range_x > 0xf || object.move_range_y > 0xf {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "invalid_object_movement_radius",
+                    &subject,
+                    format!(
+                        "object event movement radius ({}, {}) exceeds the two four-bit fields in MAPOBJECT_RADIUS",
+                        object.move_range_x, object.move_range_y
+                    ),
+                ));
+            }
+            let valid_schedule = if object.hram_x == -1 {
+                object.hram_y == -1 || (0..=0b111).contains(&object.hram_y)
+            } else {
+                (0..24).contains(&object.hram_x) && (0..24).contains(&object.hram_y)
+            };
+            if !valid_schedule {
+                let subject = format!(
+                    "{map_name}:{}",
+                    object
+                        .object_identifier
+                        .as_deref()
+                        .unwrap_or("<unidentified>")
+                );
+                diagnostics.push(VerificationError::error(
+                    "invalid_object_schedule",
+                    &subject,
+                    format!(
+                        "object event schedule ({}, {}) must be -1 plus a three-bit time-of-day mask/-1, or two hours in 0..24",
+                        object.hram_x, object.hram_y
                     ),
                 ));
             }
@@ -5225,6 +5291,15 @@ fn verify_raw_event_runtime_position(
     bounds: (i16, i16),
     diagnostics: &mut Vec<VerificationError>,
 ) {
+    if x > u16::from(u8::MAX) || y > u16::from(u8::MAX) {
+        diagnostics.push(VerificationError::error(
+            "map_event_coordinate_storage_overflow",
+            format!("{map_name}:{event_kind}:{subject}"),
+            format!(
+                "{event_kind} coordinate ({x}, {y}) cannot fit its byte-sized ASM event record"
+            ),
+        ));
+    }
     let Some(tile) = checked_runtime_map_event_tile(x, y) else {
         diagnostics.push(VerificationError::error(
             "map_event_runtime_position_overflow",

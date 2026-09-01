@@ -337,7 +337,14 @@ fn apply_keyboard_input(
     {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
-    if runtime_shell.shell.session().overworld.following.is_none()
+    if runtime_shell
+        .shell
+        .session()
+        .overworld
+        .following
+        .as_ref()
+        .and_then(|following| following.follower_slot)
+        .is_none()
         && (!runtime_shell.pending_follower_walks.is_empty()
             || !runtime_shell.follower_visible_tile_overrides.is_empty())
     {
@@ -1869,7 +1876,10 @@ fn apply_keyboard_input(
                 .objects
                 .iter()
                 .enumerate()
-                .filter(|(_, object)| overworld.is_object_visible(object))
+                .filter(|(index, object)| {
+                    overworld.object_has_loaded_struct(*index)
+                        && overworld.is_object_visible(object)
+                })
             {
                 let Some(object_id) = object.object_identifier.as_ref() else {
                     continue;
@@ -1915,6 +1925,12 @@ fn apply_keyboard_input(
                     .overworld
                     .object_runtime_tiles
                     .clone();
+                let object_step_durations_after_tick = runtime_shell
+                    .shell
+                    .session()
+                    .overworld
+                    .object_step_durations
+                    .clone();
                 let mut newly_walking = object_tiles_before_tick
                     .into_iter()
                     .filter(|(object_id, from)| {
@@ -1924,14 +1940,12 @@ fn apply_keyboard_input(
                     })
                     .collect::<BTreeMap<_, _>>();
                 if matches!(frame.movement, Some(StepOutcome::Moved { .. }))
-                    && let Some(follower_id) = runtime_shell
+                    && let Some((leader_id, follower_id)) = runtime_shell
                         .shell
                         .session()
                         .overworld
-                        .following
-                        .as_ref()
-                        .filter(|following| following.leader_object_id == "PLAYER")
-                        .map(|following| following.follower_object_id.clone())
+                        .normal_follow_object_ids()
+                    && leader_id == "PLAYER"
                     && follower_id != "PLAYER"
                     && let Some(from) = newly_walking.remove(&follower_id)
                 {
@@ -1971,7 +1985,7 @@ fn apply_keyboard_input(
                     .find_map(|object| {
                         let object_id = object.object_identifier.as_ref()?;
                         (newly_walking_ids.contains(object_id)
-                            && object.spritemovedata == "SPRITEMOVEDATA_STRENGTH_BOULDER")
+                            && object_movement_spawns_strength_dust(&object.spritemovedata))
                             .then(|| {
                                 let from = newly_walking.get(object_id).copied();
                                 let to = object_tiles_after_tick.get(object_id).copied();
@@ -1982,28 +1996,41 @@ fn apply_keyboard_input(
                                     (Some(_), Some(_)) => Direction::Right,
                                     _ => frame.snapshot.facing,
                                 };
-                                (object_id.clone(), direction)
+                                (
+                                    object_id.clone(),
+                                    direction,
+                                    object_step_durations_after_tick.get(object_id).copied(),
+                                )
                             })
                     });
                 for (object_id, from) in newly_walking {
+                    let step_ticks = visible_object_step_duration(
+                        &object_step_durations_after_tick,
+                        &object_id,
+                    );
                     runtime_shell
                         .object_walk_from
                         .insert(object_id.clone(), from);
                     runtime_shell
                         .object_walk_frame_ticks_by_id
-                        .insert(object_id.clone(), WALK_FRAME_HOLD_TICKS);
+                        .insert(object_id.clone(), step_ticks);
                     runtime_shell
                         .object_walk_total_ticks_by_id
-                        .insert(object_id, WALK_FRAME_HOLD_TICKS);
+                        .insert(object_id, step_ticks);
                 }
-                if let Some((object_id, direction)) = pushed_boulder {
+                if let Some((object_id, direction, Some(step_duration))) = pushed_boulder.as_ref() {
                     runtime_shell.visible_strength_boulder_dust =
                         Some(VisibleStrengthBoulderDust {
-                            object_id,
-                            direction,
-                            frames_remaining: 18,
+                            object_id: object_id.clone(),
+                            direction: *direction,
+                            frames_remaining: visible_strength_dust_duration(*step_duration),
                             age: 0,
                         });
+                } else if let Some((object_id, _, None)) = pushed_boulder {
+                    tick_error = Some(anyhow::anyhow!(
+                        "Strength movement for {object_id} has no authoritative object step duration"
+                    ));
+                    break;
                 }
                 let object_facings_after_tick = runtime_shell
                     .shell
@@ -3423,6 +3450,60 @@ fn visible_actor_walk_in_flight(
             .unwrap_or(scripted_object_walk_frame_ticks)
             > 0
     }
+}
+
+fn visible_object_step_duration(
+    object_step_durations: &BTreeMap<String, u8>,
+    object_id: &str,
+) -> u8 {
+    object_step_durations
+        .get(object_id)
+        .copied()
+        .unwrap_or(WALK_FRAME_HOLD_TICKS)
+}
+
+fn object_movement_spawns_strength_dust(movement: &str) -> bool {
+    crate::core::world::session::object_event_uses_strength_movement(movement)
+}
+
+fn visible_strength_dust_duration(object_step_duration: u8) -> u8 {
+    object_step_duration.wrapping_add(1).wrapping_mul(2)
+}
+
+#[cfg(test)]
+#[test]
+fn visible_object_steps_use_the_authoritative_runtime_duration() {
+    let durations = BTreeMap::from([("BOULDER".to_string(), 16)]);
+
+    assert_eq!(visible_object_step_duration(&durations, "BOULDER"), 16);
+    assert_eq!(
+        visible_object_step_duration(&durations, "UNTRACKED"),
+        WALK_FRAME_HOLD_TICKS
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn strength_dust_uses_the_exact_strength_movement_function_members() {
+    for movement in [
+        "SPRITEMOVEDATA_STRENGTH_BOULDER",
+        "SPRITEMOVEDATA_BIGDOLLASYM",
+        "SPRITEMOVEDATA_BIGDOLL",
+    ] {
+        assert!(
+            object_movement_spawns_strength_dust(movement),
+            "{movement} calls MovementFunction_Strength"
+        );
+    }
+    assert!(!object_movement_spawns_strength_dust(
+        "SPRITEMOVEDATA_BIGDOLLSYM"
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn strength_dust_duration_uses_the_source_tracking_object_formula() {
+    assert_eq!(visible_strength_dust_duration(16), 34);
 }
 
 fn update_visible_stationary_movement_frame(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
@@ -5348,6 +5429,28 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         }
         if runtime_shell.battle_messages.is_empty() {
             runtime_shell.battle_message_scenes.clear();
+            if runtime_shell
+                .visible_bug_contest_replacement
+                .as_ref()
+                .is_some_and(|replacement| {
+                    replacement.phase == VisibleBugContestReplacementPhase::AlreadyCaughtText
+                })
+            {
+                runtime_shell
+                    .visible_bug_contest_replacement
+                    .as_mut()
+                    .expect("checked Contest replacement")
+                    .phase = VisibleBugContestReplacementPhase::StatsPrompt;
+                runtime_shell.battle_message_scene = None;
+                runtime_shell.visible_capture_animation = None;
+                runtime_shell.yes_no_cursor = Some(MenuCursor {
+                    surface_id: "ui:yes-no".to_string(),
+                    option_index: 0,
+                });
+                set_shell_action_status(runtime_shell, "BUG CONTEST SWITCH POKEMON?");
+                mark_runtime_snapshot_dirty(runtime_shell);
+                return Ok(());
+            }
             if runtime_shell.visible_blackout_phase == Some(VisibleBlackoutPhase::AwaitText) {
                 runtime_shell.visible_blackout_phase = Some(VisibleBlackoutPhase::FadeOut);
                 runtime_shell.screen_fade = Some(VisibleScreenFade::new(
@@ -5360,17 +5463,11 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
             }
             if runtime_shell.pending_standard_capture.is_some() {
                 // Capture success returns with anim_keepsprites. The source
-                // clears the retained ball before opening nickname handling,
-                // while the caught battler stays absent. The cleared capture
-                // state draws no ball and preserves that hidden-battler state
-                // until core commits the capture after nickname selection.
-                runtime_shell.pending_name_choice = Some(VisibleNameChoice {
-                    options: vec!["YES".to_string(), "NO".to_string()],
-                    selected: 0,
-                });
-                runtime_shell.battle_message_scene = None;
-                set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
-                mark_runtime_snapshot_dirty(runtime_shell);
+                // clears the retained ball before the next capture boundary,
+                // while the caught battler stays absent. Ordinary captures
+                // next ask for a nickname; tutorial and Contest captures
+                // return directly after their final authored text instead.
+                continue_visible_capture_after_owned_surface(runtime_shell)?;
                 return Ok(());
             }
             if runtime_shell
@@ -5522,6 +5619,15 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     // Core may publish YesNoBox as soon as it reaches `yesorno`, while the
     // presentation still has authored pages to print. The prompt owns A only
     // after those pages are fully consumed; otherwise A advances the text.
+    if runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .is_some_and(|replacement| {
+            replacement.phase == VisibleBugContestReplacementPhase::StatsPrompt
+        })
+    {
+        return confirm_visible_pending_yes_no(runtime_shell);
+    }
     if snapshot.ui.pending_yes_no.is_some() {
         if snapshot.ui.text.as_ref().map(|text| text.label.as_str())
             != presentation_snapshot
@@ -5575,6 +5681,25 @@ fn press_visible_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         runtime_shell.pending_field_notice_cry = Some(target_species);
     }
     if runtime_shell.field_notice.take().is_some() {
+        if runtime_shell
+            .visible_bug_contest_replacement
+            .as_ref()
+            .is_some_and(|replacement| {
+                replacement.phase == VisibleBugContestReplacementPhase::CaughtText
+            })
+        {
+            let replacement = runtime_shell
+                .visible_bug_contest_replacement
+                .take()
+                .expect("checked Contest replacement");
+            runtime_shell.field_notice_scene = None;
+            runtime_shell.field_text_reveal = None;
+            return finish_visible_wild_battle_exit(
+                runtime_shell,
+                replacement.scripted_static_wild,
+                "bug_contest_capture_replaced",
+            );
+        }
         if runtime_shell.pending_gift_pokemon_pc_notice {
             return finish_visible_gift_pokemon_pc_notice(runtime_shell);
         }
@@ -6213,6 +6338,27 @@ fn has_visible_shell_a_action(runtime_shell: &mut BevyRuntimeShell) -> Result<bo
     Ok(false)
 }
 
+fn continue_visible_capture_after_owned_surface(
+    runtime_shell: &mut BevyRuntimeShell,
+) -> Result<()> {
+    let prompt_for_nickname = runtime_shell
+        .pending_standard_capture
+        .as_ref()
+        .context("capture continuation lost its pending completion")?
+        .prompt_for_nickname;
+    runtime_shell.battle_message_scene = None;
+    if prompt_for_nickname {
+        runtime_shell.pending_name_choice = Some(VisibleNameChoice {
+            options: vec!["YES".to_string(), "NO".to_string()],
+            selected: 0,
+        });
+        set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
+    finish_visible_capture_nickname(runtime_shell, None)
+}
+
 fn press_visible_pokedex_a_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if runtime_shell.pokedex_detail_open {
         let snapshot = runtime_shell.shell.presentation_snapshot()?;
@@ -6242,12 +6388,7 @@ fn press_visible_pokedex_a_button(runtime_shell: &mut BevyRuntimeShell) -> Resul
             record_visible_runtime_action(runtime_shell, "pokedex:scripted_entry:close")?;
             close_visible_pokedex_menu(runtime_shell);
             if runtime_shell.pending_standard_capture.is_some() {
-                runtime_shell.pending_name_choice = Some(VisibleNameChoice {
-                    options: vec!["YES".to_string(), "NO".to_string()],
-                    selected: 0,
-                });
-                set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
-                mark_runtime_snapshot_dirty(runtime_shell);
+                continue_visible_capture_after_owned_surface(runtime_shell)?;
                 return Ok(());
             }
             continue_visible_script_after_prompt(runtime_shell)?;
@@ -6507,6 +6648,25 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
         queue_visible_shell_sound_effect(runtime_shell, "SFX_READ_TEXT_2")?;
     }
     if runtime_shell.field_notice.take().is_some() {
+        if runtime_shell
+            .visible_bug_contest_replacement
+            .as_ref()
+            .is_some_and(|replacement| {
+                replacement.phase == VisibleBugContestReplacementPhase::CaughtText
+            })
+        {
+            let replacement = runtime_shell
+                .visible_bug_contest_replacement
+                .take()
+                .expect("checked Contest replacement");
+            runtime_shell.field_notice_scene = None;
+            runtime_shell.field_text_reveal = None;
+            return finish_visible_wild_battle_exit(
+                runtime_shell,
+                replacement.scripted_static_wild,
+                "bug_contest_capture_replaced",
+            );
+        }
         if runtime_shell.pending_gift_pokemon_pc_notice {
             return finish_visible_gift_pokemon_pc_notice(runtime_shell);
         }
@@ -6592,6 +6752,15 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     let presentation_snapshot = runtime_shell.shell.presentation_snapshot()?;
     if advance_visible_wait_sfx_boundary(runtime_shell, &presentation_snapshot, true)? {
         return Ok(());
+    }
+    if runtime_shell
+        .visible_bug_contest_replacement
+        .as_ref()
+        .is_some_and(|replacement| {
+            replacement.phase == VisibleBugContestReplacementPhase::StatsPrompt
+        })
+    {
+        return decline_visible_pending_yes_no(runtime_shell);
     }
     if snapshot.ui.pending_yes_no.is_some() {
         if snapshot.ui.text.as_ref().map(|text| text.label.as_str())
@@ -6936,12 +7105,7 @@ fn press_visible_b_button(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
                 }
                 close_visible_pokedex_menu(runtime_shell);
                 if runtime_shell.pending_standard_capture.is_some() {
-                    runtime_shell.pending_name_choice = Some(VisibleNameChoice {
-                        options: vec!["YES".to_string(), "NO".to_string()],
-                        selected: 0,
-                    });
-                    set_shell_action_status(runtime_shell, "NICKNAME CAUGHT POKEMON");
-                    mark_runtime_snapshot_dirty(runtime_shell);
+                    continue_visible_capture_after_owned_surface(runtime_shell)?;
                     return Ok(());
                 }
                 continue_visible_script_after_prompt(runtime_shell)?;
@@ -8458,11 +8622,20 @@ fn resolve_visible_pending_yes_no(
         .pending_caught_mon
         .is_some()
     {
+        let replacement = runtime_shell
+            .visible_bug_contest_replacement
+            .as_ref()
+            .cloned()
+            .context("Bug Contest replacement prompt has no visible comparison state")?;
+        anyhow::ensure!(
+            replacement.phase == VisibleBugContestReplacementPhase::StatsPrompt,
+            "Bug Contest replacement decision arrived outside its stats prompt"
+        );
         record_visible_runtime_action(
             runtime_shell,
             format!(
                 "bug_contest:replace:{}",
-                if accepted { "keep" } else { "discard" }
+                if accepted { "switch" } else { "keep" }
             ),
         )?;
         let resolved = runtime_shell
@@ -8481,6 +8654,44 @@ fn resolve_visible_pending_yes_no(
                 "BUG CONTEST KEPT"
             },
         );
+        if accepted {
+            let candidate_name = crate::core::models::pokemon_species_display_name(
+                &replacement.candidate.species.id,
+            );
+            let mut boundaries = visible_exported_special_text_boundaries_with_buffer(
+                runtime_shell,
+                "ContestCaughtMonText",
+                "_ContestCaughtMonText",
+                Some(&candidate_name),
+            )?;
+            let caught_text = boundaries
+                .pop_front()
+                .and_then(|boundary| boundary.details.into_iter().next())
+                .context("Contest caught-mon text rendered no source page")?;
+            anyhow::ensure!(
+                boundaries.is_empty(),
+                "Contest caught-mon text unexpectedly rendered multiple pages"
+            );
+            runtime_shell.field_notice = Some(caught_text);
+            runtime_shell.field_notice_scene = None;
+            runtime_shell.field_text_reveal = None;
+            runtime_shell
+                .visible_bug_contest_replacement
+                .as_mut()
+                .expect("checked Contest replacement")
+                .phase = VisibleBugContestReplacementPhase::CaughtText;
+            mark_runtime_snapshot_dirty(runtime_shell);
+        } else {
+            let replacement = runtime_shell
+                .visible_bug_contest_replacement
+                .take()
+                .expect("checked Contest replacement");
+            finish_visible_wild_battle_exit(
+                runtime_shell,
+                replacement.scripted_static_wild,
+                "bug_contest_capture_kept",
+            )?;
+        }
         trim_event_log(&mut runtime_shell.last_audio_events);
         return Ok(());
     }

@@ -64,6 +64,30 @@ fn real_pack_battle_tower_loads_canonical_roster_and_party() {
             "OBJECT_EVENT_1".to_string(),
         )
         .expect("load canonical Battle Tower opponent");
+    let battle_command_index = shell
+        .runtime()
+        .compiled_script_commands("Script_BattleRoomLoop")
+        .expect("compiled Battle Tower room loop")
+        .iter()
+        .position(|command| {
+            command.get("command").and_then(serde_json::Value::as_str) == Some("special")
+                && command
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|args| args.first())
+                    .and_then(serde_json::Value::as_str)
+                    == Some("BattleTowerBattle")
+        })
+        .expect("BattleTowerBattle command");
+    shell
+        .apply_compiled_script_command(
+            "BattleTowerBattleRoom",
+            "Script_BattleRoomLoop",
+            battle_command_index,
+            ScriptRuntimeInputs::default(),
+            ScriptPhoneInputs::default(),
+        )
+        .expect("start canonical Battle Tower battle");
     let snapshot = shell.snapshot().expect("snapshot Battle Tower battle");
     let battle = snapshot.battle.expect("active Battle Tower battle");
     assert_eq!(battle.battle_type, "BATTLETYPE_BATTLE_TOWER");

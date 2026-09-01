@@ -6455,20 +6455,15 @@ fn throw_visible_battle_ball_id(
                 runtime_shell,
                 format!("battle:capture_complete:{ball_id}:index:{}", ball_index + 1),
             )?;
-            if matches!(battle_type, "BATTLETYPE_TUTORIAL" | "BATTLETYPE_CONTEST") {
-                complete_visible_standard_capture(
-                    runtime_shell,
-                    outcome.clone(),
-                    None,
-                    scripted_static_wild,
-                )?;
-            } else {
-                runtime_shell.pending_standard_capture = Some(PendingStandardCapture {
-                    outcome: outcome.clone(),
-                    scripted_static_wild,
-                    default_name: canonical_species_display_name(enemy_species),
-                });
-            }
+            runtime_shell.pending_standard_capture = Some(PendingStandardCapture {
+                outcome: outcome.clone(),
+                scripted_static_wild,
+                default_name: canonical_species_display_name(enemy_species),
+                prompt_for_nickname: !matches!(
+                    battle_type,
+                    "BATTLETYPE_TUTORIAL" | "BATTLETYPE_CONTEST"
+                ),
+            });
         } else {
             let text = match outcome.wobble_count.min(3) {
                 0 => "Oh no! The <PKMN>\nbroke free!".to_string(),
@@ -6550,6 +6545,40 @@ fn complete_visible_standard_capture(
     let completion = runtime_shell
         .shell
         .complete_active_wild_capture(&outcome, nickname)?;
+    let completed_snapshot = runtime_shell.shell.snapshot()?;
+    if let (Some(previous), Some(candidate)) = (
+        completed_snapshot.bug_contest.caught_mon.as_ref(),
+        completed_snapshot.bug_contest.pending_caught_mon.as_ref(),
+    ) {
+        let previous_name =
+            crate::core::models::pokemon_species_display_name(&previous.species.id);
+        let boundaries = visible_exported_special_text_boundaries_with_buffer(
+            runtime_shell,
+            "ContestAlreadyCaughtText",
+            "_ContestAlreadyCaughtText",
+            Some(&previous_name),
+        )?;
+        runtime_shell.battle_messages.extend(
+            boundaries
+                .into_iter()
+                .flat_map(|boundary| boundary.details.into_iter()),
+        );
+        runtime_shell.battle_message_scene = Some(Box::new(battle_before_completion));
+        runtime_shell.visible_bug_contest_replacement = Some(VisibleBugContestReplacement {
+            previous: previous.clone(),
+            candidate: candidate.clone(),
+            phase: VisibleBugContestReplacementPhase::AlreadyCaughtText,
+            scripted_static_wild,
+        });
+        runtime_shell.last_audio_events.push(format!(
+            "Contest capture staged replacement previous={} candidate={} checksum={:?}",
+            previous.species.id, candidate.species.id, completion.state_checksum
+        ));
+        set_shell_action_status(runtime_shell, "BUG CONTEST ALREADY CAUGHT");
+        trim_event_log(&mut runtime_shell.last_audio_events);
+        mark_runtime_snapshot_dirty(runtime_shell);
+        return Ok(());
+    }
     if let Some(stored) = completion.stored.as_ref() {
         if matches!(
             stored.location,
@@ -6566,19 +6595,6 @@ fn complete_visible_standard_capture(
         "capture complete stored={:?} checksum={:?}",
         completion.stored, completion.state_checksum
     ));
-    if let Some(caught_species) = completion
-        .stored
-        .as_ref()
-        .map(|stored| stored.pokemon.species.id.clone())
-        .or_else(|| {
-            completion
-                .contest_pokemon
-                .as_ref()
-                .map(|pokemon| pokemon.species.id.clone())
-        })
-    {
-        queue_visible_pokemon_cry(runtime_shell, &caught_species, "battle_capture_complete")?;
-    }
     set_shell_action_status(
         runtime_shell,
         visible_capture_completion_status(&completion),

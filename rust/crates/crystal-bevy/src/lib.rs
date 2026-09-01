@@ -3639,6 +3639,8 @@ impl RuntimeGameShell {
         source_script: &str,
         command_index: usize,
     ) -> Result<ScriptRuntimeInputs> {
+        self.runtime
+            .compiled_script_command_name(source_script, command_index)?;
         let map_name = origin_map_name;
         let (
             gift_original_trainer_name,
@@ -10826,29 +10828,53 @@ impl RuntimeGameShell {
             .runtime
             .ui_snapshot(&self.session.state, menu.clone())?;
         let catalogs = self.runtime.static_catalog_cache();
+        let visible_object_entries = self
+            .session
+            .overworld
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.session.overworld.object_struct_is_visible(*index))
+            .collect::<Vec<_>>();
+        let mut visible_object_runtime_tiles = BTreeMap::new();
+        let mut visible_object_facings = BTreeMap::new();
+        for (index, object) in &visible_object_entries {
+            let Some(object_id) = object.object_identifier.as_ref() else {
+                continue;
+            };
+            let tile = self
+                .session
+                .overworld
+                .object_runtime_tile_checked(*index, object)
+                .with_context(|| {
+                    format!("resolve loaded object {object_id} coordinates for runtime snapshot")
+                })?;
+            let facing = self
+                .session
+                .overworld
+                .object_facings
+                .get(object_id)
+                .copied()
+                .with_context(|| {
+                    format!("loaded object {object_id} is missing its source-initialized facing")
+                })?;
+            visible_object_runtime_tiles.insert(object_id.clone(), tile);
+            visible_object_facings.insert(object_id.clone(), facing);
+        }
         Ok(RuntimeShellSnapshot {
             boot: self.runtime.boot_summary(),
             overworld: self.session.snapshot(),
             overworld_player_hidden: self.session.overworld.player_hidden,
-            visible_objects: self
-                .session
-                .overworld
-                .objects
+            visible_objects: visible_object_entries
                 .iter()
-                .filter(|object| self.session.overworld.is_object_visible(object))
-                .cloned()
+                .map(|(_, object)| (*object).clone())
                 .collect(),
-            visible_object_slots: self
-                .session
-                .overworld
-                .objects
+            visible_object_slots: visible_object_entries
                 .iter()
-                .enumerate()
-                .filter(|(_, object)| self.session.overworld.is_object_visible(object))
-                .map(|(index, _)| index)
+                .map(|(index, _)| *index)
                 .collect(),
-            visible_object_runtime_tiles: self.session.overworld.object_runtime_tiles.clone(),
-            visible_object_facings: self.session.overworld.object_facings.clone(),
+            visible_object_runtime_tiles,
+            visible_object_facings,
             state_checksum,
             visual_state_hash,
             phase: RuntimeShellPhase::from_state(&self.session.state),
@@ -10873,7 +10899,11 @@ impl RuntimeGameShell {
             audio_catalog: Arc::clone(&catalogs.audio),
             menu,
             ui,
-            battle: RuntimeBattleSnapshot::from_state(&self.session.state)?,
+            battle: if battle_tower_opponent_is_staged(&self.session.state) {
+                None
+            } else {
+                RuntimeBattleSnapshot::from_state(&self.session.state)?
+            },
             pending_move_learn: RuntimePendingMoveLearnSnapshot::from_state(&self.session.state),
             party: RuntimePartySnapshot::from_state(&self.session.state),
             storage: RuntimeStorageSnapshot::from_state(&self.session.state),
@@ -12576,6 +12606,14 @@ impl RuntimeAudioProgramSourceSnapshot {
     }
 }
 
+fn battle_tower_opponent_is_staged(state: &GameState) -> bool {
+    state
+        .script_runtime
+        .variables
+        .get("_battle_tower_opponent_pending")
+        .is_some_and(|value| value == "1")
+}
+
 impl RuntimeShellPhase {
     fn from_state(state: &GameState) -> Self {
         if state.script_runtime.pending_yes_no.is_some() {
@@ -12589,6 +12627,8 @@ impl RuntimeShellPhase {
             Self::Shop
         } else if state.script_runtime.active_menu.is_some() {
             Self::Menu
+        } else if battle_tower_opponent_is_staged(state) {
+            Self::Overworld
         } else {
             match state.battle {
                 BattleMemory::Inactive => Self::Overworld,
@@ -19110,7 +19150,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let mutation_outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::SpecialRoutineApplied(outcome),
@@ -19148,7 +19188,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::RockMonEncounterResolved(resolved),
@@ -19185,7 +19225,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::TreeMonEncounterResolved(resolved),
@@ -19234,7 +19274,7 @@ impl RuntimeOverworldSession {
             )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ScriptedGiftPokemonGranted(resolved),
@@ -19387,7 +19427,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ScriptedWildBattleStarted(start),
@@ -19425,7 +19465,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ActiveWildCaptureCompleted(completion),
@@ -19468,7 +19508,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let mutation_outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::PhoneRandomSpecialApplied(outcome),
@@ -19510,7 +19550,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let mutation_outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::BugContestUsed(outcome),
@@ -19560,7 +19600,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::BuenaPasswordUsed(outcome),
@@ -19591,7 +19631,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ShuckieUsed(outcome),
@@ -19621,7 +19661,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::OddEggGiven(outcome),
@@ -19654,7 +19694,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::BattleTowerOpponentLoaded(outcome),
@@ -19722,7 +19762,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::DayCareUsed(outcome),
@@ -19758,7 +19798,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::DayCareManOutsideChecked(result),
@@ -19794,7 +19834,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::GameCornerOpened(outcome),
@@ -19835,7 +19875,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ScriptedWildBattleCompleted,
@@ -19882,7 +19922,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ScriptedTrainerBattleCompleted(completion),
@@ -19920,7 +19960,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ActiveWildBattleRewardsClaimed(rewards),
@@ -19957,7 +19997,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ClockUpdated,
@@ -20002,7 +20042,7 @@ impl RuntimeOverworldSession {
         )?;
         let divider_trace = RuntimeDividerTrace::new(recording.samples().iter().copied());
         drop(recording);
-        overworld.set_time_of_day(state.time.time_of_day);
+        overworld.set_time(state.time.registers.hours, state.time.time_of_day);
         overworld.sync_event_flag_memory(&state.flags);
         let outcome = RuntimeMutationOutcome {
             result: RuntimeMutationResult::ManualClockSet,
@@ -20122,7 +20162,8 @@ impl RuntimeOverworldSession {
             &self.overworld.snapshot(),
             SpawnMemoryUpdate::Preserve,
         );
-        self.overworld.set_time_of_day(self.state.time.time_of_day);
+        self.overworld
+            .set_time(self.state.time.registers.hours, self.state.time.time_of_day);
         Ok(RuntimeInteractionScriptDispatch {
             next_script: dispatch.next_script,
             last_talked_object: dispatch.last_talked_object,
@@ -20166,7 +20207,8 @@ impl RuntimeOverworldSession {
             &self.overworld.snapshot(),
             SpawnMemoryUpdate::Preserve,
         );
-        self.overworld.set_time_of_day(self.state.time.time_of_day);
+        self.overworld
+            .set_time(self.state.time.registers.hours, self.state.time.time_of_day);
         Ok(RuntimeInteractionScriptDispatch {
             next_script: dispatch.next_script,
             last_talked_object: dispatch.last_talked_object,

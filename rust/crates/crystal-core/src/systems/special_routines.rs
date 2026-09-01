@@ -11637,6 +11637,25 @@ fn battle_tower_battle(
                     .to_string(),
             });
         }
+        let rules =
+            battle_tower_rules.ok_or_else(|| SpecialRoutineError::MissingBattleTowerRules {
+                routine: routine.to_string(),
+            })?;
+        validate_battle_tower_rules(rules, routine)?;
+        // ReadBTTrainerParty calls CopyBTTrainer_FromBT_OT_TowBT_OTTemp here,
+        // immediately before StartBattle. That source routine commits the
+        // in-progress state and increments the SRAM opponent counter.
+        state.battle_tower.challenge_state = BATTLETOWER_CHALLENGE_IN_PROGRESS;
+        state.battle_tower.beaten_trainers = state
+            .battle_tower
+            .beaten_trainers
+            .saturating_add(1)
+            .min(rules.challenge_streak_length);
+        sync_battle_tower_beaten_count(state);
+        state
+            .script_runtime
+            .variables
+            .remove("_battle_tower_opponent_pending");
         heal_battle_tower_party(state, move_catalog);
         state.battle_tower.quick_saved = false;
         state.script_runtime.last_special_routine = Some(routine.to_string());
@@ -11939,7 +11958,9 @@ where
         pokemon.special_defense = mon.stats[6];
         pokemon.moves.clear();
         for (slot, move_name) in mon.moves.iter().enumerate() {
-            if move_name == "NO_MOVE" {
+            // BattleTowerMons uses both the NO_MOVE symbol and literal zero
+            // for the same empty move byte (notably UNOWN's trailing slots).
+            if move_name == "NO_MOVE" || move_name == "0" {
                 continue;
             }
             let move_data = context.move_catalog.get(move_name).ok_or_else(|| {
@@ -12124,16 +12145,10 @@ where
     })?;
 
     state.battle_tower.loaded_trainer_id = Some(trainer_id.clone());
-    // `CopyBTTrainer_FromBT_OT_TowBT_OTTemp` commits these two bytes to SRAM
-    // before `StartBattle`. They deliberately make a reset or power loss in
-    // the room distinguishable from the resumable save-and-quit state.
-    state.battle_tower.challenge_state = BATTLETOWER_CHALLENGE_IN_PROGRESS;
-    state.battle_tower.beaten_trainers = state
-        .battle_tower
-        .beaten_trainers
-        .saturating_add(1)
-        .min(rules.challenge_streak_length);
-    sync_battle_tower_beaten_count(state);
+    state.script_runtime.variables.insert(
+        "_battle_tower_opponent_pending".to_string(),
+        "1".to_string(),
+    );
     state.battle = BattleMemory::Trainer {
         battle_type: "BATTLETYPE_BATTLE_TOWER".to_string(),
         trainer_class: trainer_class.clone(),

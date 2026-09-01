@@ -771,6 +771,7 @@ struct BevyRuntimeShell {
     pending_mail_read: Option<VisibleMailRead>,
     pending_name_choice: Option<VisibleNameChoice>,
     pending_standard_capture: Option<PendingStandardCapture>,
+    visible_bug_contest_replacement: Option<VisibleBugContestReplacement>,
     pending_gift_pokemon_nickname: Option<PendingGiftPokemonNickname>,
     pending_gift_pokemon_pc_notice: bool,
     pending_egg_hatch_nickname: Option<PendingEggHatchNickname>,
@@ -2228,6 +2229,22 @@ struct PendingStandardCapture {
     outcome: crate::core::battle::capture::CaptureOutcome,
     scripted_static_wild: Option<VisibleStaticWildOrigin>,
     default_name: String,
+    prompt_for_nickname: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VisibleBugContestReplacementPhase {
+    AlreadyCaughtText,
+    StatsPrompt,
+    CaughtText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleBugContestReplacement {
+    previous: crate::core::models::Pokemon,
+    candidate: crate::core::models::Pokemon,
+    phase: VisibleBugContestReplacementPhase,
+    scripted_static_wild: Option<VisibleStaticWildOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4310,6 +4327,7 @@ struct BitmapFontArt {
     glyphs: HashMap<char, SpriteFrame>,
 }
 
+#[derive(Clone)]
 struct WindowFrameArt {
     top_left: SpriteFrame,
     top_edge: SpriteFrame,
@@ -6651,6 +6669,7 @@ fn initialize_bevy_runtime_shell(
         pending_mail_read: None,
         pending_name_choice: None,
         pending_standard_capture: None,
+        visible_bug_contest_replacement: None,
         pending_gift_pokemon_nickname: None,
         pending_gift_pokemon_pc_notice: false,
         pending_egg_hatch_nickname: None,

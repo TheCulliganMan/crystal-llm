@@ -1481,6 +1481,10 @@ fn finish_visible_capture_nickname(
 ) -> Result<()> {
     if nickname.is_none()
         && runtime_shell
+            .pending_standard_capture
+            .as_ref()
+            .is_some_and(|pending| pending.prompt_for_nickname)
+        && runtime_shell
             .runtime
             .data()
             .nuzlocke_rules()

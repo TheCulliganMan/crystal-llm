@@ -3576,7 +3576,10 @@ fn runtime_special_audio_routines_apply_exact_pack_declared_effects() {
         session.state.script_runtime.last_special_routine.as_deref(),
         Some("RestartMapMusic")
     );
-    assert_ne!(restart.state_checksum, play_map_music.state_checksum);
+    assert_eq!(
+        restart.state_checksum, play_map_music.state_checksum,
+        "RestartMapMusic reasserts the same WRAM request; the differing host-only routine label is excluded from deterministic state"
+    );
 
     session
         .state
@@ -4106,10 +4109,16 @@ fn runtime_special_party_checks_apply_exact_pack_declared_effects() {
     );
     assert_ne!(egg_check.state_checksum, happiness.state_checksum);
     assert_ne!(happiness.state_checksum, found.state_checksum);
-    assert_ne!(found.state_checksum, above_level.state_checksum);
+    assert_eq!(
+        found.state_checksum, above_level.state_checksum,
+        "both successful searches leave the same wScriptVar/_value result; their host-only routine labels are not gameplay state"
+    );
     assert_ne!(above_level.state_checksum, happy.state_checksum);
     assert_ne!(happy.state_checksum, ot_found.state_checksum);
-    assert_ne!(ot_found.state_checksum, mon_check.state_checksum);
+    assert_eq!(
+        ot_found.state_checksum, mon_check.state_checksum,
+        "the OT lookup and MonCheck both leave the same successful script result"
+    );
     assert_ne!(mon_check.state_checksum, beasts.state_checksum);
     assert_ne!(beasts.state_checksum, prize_dex.state_checksum);
     assert_ne!(prize_dex.state_checksum, set_seen.state_checksum);

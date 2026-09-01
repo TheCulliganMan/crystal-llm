@@ -1940,6 +1940,7 @@ fn trainer_prize_money_from_active_battle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battle::turn::active_battle_combat_state;
     use crate::models::{BaseStats, Stat, growth_rate};
     use crate::random::ReplayDivider;
     use crate::systems::experience::{GrowthRateCatalog, crystal_growth_rate_catalog_for_tests};

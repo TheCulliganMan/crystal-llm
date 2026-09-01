@@ -11655,7 +11655,7 @@ fn load_battle_tower_opponent_uses_exact_pack_trainer_and_sprite() {
         item: None,
         moves: vec![
             "SCRATCH".to_string(),
-            "NO_MOVE".to_string(),
+            "0".to_string(),
             "NO_MOVE".to_string(),
             "NO_MOVE".to_string(),
         ],
@@ -11745,12 +11745,20 @@ fn load_battle_tower_opponent_uses_exact_pack_trainer_and_sprite() {
         assert!(!state.script_runtime.variables.contains_key(key), "{key}");
     }
     assert_eq!(
-        state.battle_tower.challenge_state, 2,
-        "CopyBTTrainer_FromBT_OT_TowBT_OTTemp writes BATTLETOWER_CHALLENGE_IN_PROGRESS to SRAM"
+        state.battle_tower.challenge_state, 0,
+        "opponent selection precedes CopyBTTrainer_FromBT_OT_TowBT_OTTemp"
     );
     assert_eq!(
-        state.battle_tower.beaten_trainers, 1,
-        "opponent loading increments sNrOfBeatenBattleTowerTrainers before StartBattle"
+        state.battle_tower.beaten_trainers, 0,
+        "opponent selection must not increment SRAM before BattleTowerBattle starts"
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .variables
+            .get("_battle_tower_opponent_pending")
+            .map(String::as_str),
+        Some("1")
     );
     match &state.battle {
         BattleMemory::Trainer {
@@ -11806,6 +11814,22 @@ fn load_battle_tower_opponent_uses_exact_pack_trainer_and_sprite() {
     assert_eq!(
         started.effect,
         SpecialRoutineEffect::BattleTowerBattleStarted
+    );
+    assert_eq!(state.battle_tower.challenge_state, 2);
+    assert_eq!(state.battle_tower.beaten_trainers, 1);
+    assert!(
+        !state
+            .script_runtime
+            .variables
+            .contains_key("_battle_tower_opponent_pending")
+    );
+    assert_eq!(
+        state
+            .script_runtime
+            .memory
+            .get("wNrOfBeatenBattleTowerTrainers")
+            .map(String::as_str),
+        Some("1")
     );
     assert_eq!(
         state.storage.party.pokemon[0]
