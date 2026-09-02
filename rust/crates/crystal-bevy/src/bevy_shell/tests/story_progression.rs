@@ -284,6 +284,35 @@ fn poison_whiteout_presents_each_faint_before_exact_post_fade_hold() {
     present_visible_step_event(&mut runtime_shell, &event)
         .expect("present poison faint sequence");
 
+    assert_eq!(runtime_shell.poison_flash_frames_remaining, 5);
+    assert_eq!(runtime_shell.field_notice, None);
+    assert_eq!(
+        runtime_shell.pending_audio.last().map(|audio| audio.audio_id.as_str()),
+        Some("SFX_POISON"),
+    );
+    assert_eq!(
+        runtime_shell
+            .field_notice_queue
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            "CHIKORITA fainted!".to_string(),
+            "PIDGEY fainted!".to_string(),
+        ],
+        "faint text must remain behind LoadPoisonBGPals and its trailing DelayFrame",
+    );
+    assert!(
+        advance_visible_poison_flash(&mut runtime_shell, 4)
+            .expect("advance four poison-palette frames")
+    );
+    assert_eq!(runtime_shell.poison_flash_frames_remaining, 1);
+    assert_eq!(runtime_shell.field_notice, None);
+    assert!(
+        advance_visible_poison_flash(&mut runtime_shell, 1)
+            .expect("advance restored-palette DelayFrame")
+    );
+    assert_eq!(runtime_shell.poison_flash_frames_remaining, 0);
     assert_eq!(
         runtime_shell.field_notice.as_deref(),
         Some("CHIKORITA fainted!")

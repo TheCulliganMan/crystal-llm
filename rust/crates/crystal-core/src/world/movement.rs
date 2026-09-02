@@ -909,29 +909,32 @@ mod tests {
     }
 
     #[test]
-    fn bike_ledge_jump_keeps_fixed_ledge_speed() {
-        let mut state = PlayerMovementState {
-            tile: TilePosition::new(2, 2),
-            facing: Direction::Down,
-            mode: MovementMode::Bike,
-        };
-        let outcome = attempt_ledge_jump(
-            &mut state,
-            Direction::Down,
-            &ledge_map(),
-            &ledge_tileset(permissions::FLOOR),
-            StepOptions::default(),
-        );
+    fn bike_and_skate_ledge_jumps_keep_fixed_ledge_speed() {
+        for mode in [MovementMode::Bike, MovementMode::Skate] {
+            let mut state = PlayerMovementState {
+                tile: TilePosition::new(2, 2),
+                facing: Direction::Down,
+                mode,
+            };
+            let outcome = attempt_ledge_jump(
+                &mut state,
+                Direction::Down,
+                &ledge_map(),
+                &ledge_tileset(permissions::FLOOR),
+                StepOptions::default(),
+            );
 
-        assert_eq!(
-            outcome,
-            LedgeJumpOutcome::Jumped {
-                from: TilePosition::new(2, 2),
-                over: TilePosition::new(2, 3),
-                to: TilePosition::new(2, 4),
-                speed_multiplier: 1,
-            }
-        );
+            assert_eq!(
+                outcome,
+                LedgeJumpOutcome::Jumped {
+                    from: TilePosition::new(2, 2),
+                    over: TilePosition::new(2, 3),
+                    to: TilePosition::new(2, 4),
+                    speed_multiplier: 1,
+                },
+                "{mode:?} must retain STEP_LEDGE's fixed cadence",
+            );
+        }
     }
 
     #[test]

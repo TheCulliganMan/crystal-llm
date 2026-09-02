@@ -1518,11 +1518,341 @@ impl RuntimeGenderMenuDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeIntroPresentationParameters {
+    pub scene_labels: Vec<String>,
+    pub scene_operation_offsets: Vec<usize>,
+    pub completion_wait_frames: Vec<u8>,
+}
+
+impl RuntimeIntroPresentationParameters {
+    pub fn from_program(program: &RuntimePresentationProgram) -> Result<Self> {
+        let subprogram = program
+            .subprograms
+            .iter()
+            .find(|subprogram| subprogram.id == "crystal_intro")
+            .context("runtime presentation crystal_intro subprogram is missing")?;
+        let phase = subprogram
+            .phases
+            .iter()
+            .find(|phase| phase.id == "scene_dispatch")
+            .context("runtime presentation crystal_intro scene_dispatch phase is missing")?;
+        let dispatch = phase
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.op == "dispatch_table"
+                    && operation.fields.get("table").and_then(Value::as_str)
+                        == Some("IntroScenes")
+            })
+            .context("runtime presentation crystal_intro dispatch_table operation is missing")?;
+        let dispatch_contract = subprogram
+            .loop_
+            .get("scene_dispatch")
+            .context("runtime presentation crystal_intro loop scene_dispatch is missing")?;
+        let scene_labels = dispatch_contract
+            .get("entries")
+            .and_then(Value::as_array)
+            .context("runtime presentation crystal_intro dispatch entries are missing")?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_string)
+                    .context("runtime presentation crystal_intro dispatch entry is not a label")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let operation_entries = dispatch
+            .fields
+            .get("entries")
+            .and_then(Value::as_array)
+            .context("runtime presentation crystal_intro operation dispatch entries are missing")?;
+        let operation_labels = operation_entries
+            .iter()
+            .map(|entry| {
+                entry.as_str().context(
+                    "runtime presentation crystal_intro operation dispatch entry is not a label",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            operation_labels == scene_labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            "runtime presentation crystal_intro loop and operation dispatch entries disagree"
+        );
+        anyhow::ensure!(
+            !scene_labels.is_empty(),
+            "runtime presentation crystal_intro dispatch is empty"
+        );
+        let entry_offsets = dispatch_contract
+            .get("entry_offsets")
+            .and_then(Value::as_object)
+            .context("runtime presentation crystal_intro dispatch entry offsets are missing")?;
+        let mut scene_offsets = Vec::with_capacity(scene_labels.len());
+        let mut previous_offset = None;
+        for label in &scene_labels {
+            let offset = entry_offsets
+                .get(label)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .with_context(|| {
+                    format!("runtime presentation crystal_intro source label {label} is missing")
+                })?;
+            anyhow::ensure!(
+                offset < phase.operations.len(),
+                "runtime presentation crystal_intro source label {label} offset {offset} is out of range"
+            );
+            if let Some(previous) = previous_offset {
+                anyhow::ensure!(
+                    offset > previous,
+                    "runtime presentation crystal_intro source labels are not in dispatch order"
+                );
+            } else {
+                anyhow::ensure!(
+                    offset == 0,
+                    "runtime presentation crystal_intro first scene does not begin at operation zero"
+                );
+            }
+            previous_offset = Some(offset);
+            scene_offsets.push(offset);
+        }
+        anyhow::ensure!(
+            entry_offsets.len() == scene_labels.len(),
+            "runtime presentation crystal_intro has labels outside the source dispatch table"
+        );
+        for (dispatcher_entry, start) in scene_offsets.iter().enumerate() {
+            let end = scene_offsets
+                .get(dispatcher_entry + 1)
+                .copied()
+                .unwrap_or(phase.operations.len());
+            for operation in &phase.operations[*start..end] {
+                if operation.op == "play_audio" {
+                    let operation_entry = operation
+                        .fields
+                        .get("dispatcher_entry")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .context("runtime presentation crystal_intro audio operation has no dispatcher entry")?;
+                    let operation_tick = operation
+                        .fields
+                        .get("dispatch_tick")
+                        .and_then(Value::as_u64)
+                        .context("runtime presentation crystal_intro audio operation has no dispatch tick")?;
+                    let audio = operation
+                        .fields
+                        .get("audio")
+                        .and_then(Value::as_str)
+                        .filter(|audio| !audio.is_empty())
+                        .context("runtime presentation crystal_intro audio operation has no audio id")?;
+                    anyhow::ensure!(
+                        operation_entry == dispatcher_entry && operation_tick > 0,
+                        "runtime presentation crystal_intro audio operation disagrees with its scene operation range"
+                    );
+                    anyhow::ensure!(
+                        subprogram.audio.iter().any(|candidate| candidate.id == audio)
+                            || program.audio.iter().any(|candidate| candidate.id == audio),
+                        "runtime presentation crystal_intro audio operation references missing audio {audio}"
+                    );
+                    continue;
+                }
+                if operation.op == "scheduled_audio" {
+                    anyhow::ensure!(
+                        operation.fields.get("clock").and_then(Value::as_str)
+                            == Some("wIntroSceneFrameCounter")
+                            && operation.fields.get("sentinel").and_then(Value::as_u64)
+                                == Some(u64::from(u8::MAX)),
+                        "runtime presentation crystal_intro scheduled audio has an invalid clock or sentinel"
+                    );
+                    let on_match = operation
+                        .fields
+                        .get("on_match")
+                        .context("runtime presentation crystal_intro scheduled audio has no match behavior")?;
+                    anyhow::ensure!(
+                        on_match.get("play_entry").and_then(Value::as_bool) == Some(true)
+                            && on_match
+                                .get("stop_sfx_channels")
+                                .and_then(Value::as_array)
+                                .is_some_and(|channels| {
+                                    channels
+                                        .iter()
+                                        .map(Value::as_u64)
+                                        .eq([Some(5), Some(6), Some(7), Some(8)])
+                                }),
+                        "runtime presentation crystal_intro scheduled audio has invalid playback semantics"
+                    );
+                    let entries = operation
+                        .fields
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .context("runtime presentation crystal_intro scheduled audio has no entries")?;
+                    anyhow::ensure!(
+                        !entries.is_empty(),
+                        "runtime presentation crystal_intro scheduled audio is empty"
+                    );
+                    let mut previous_frame = None;
+                    for entry in entries {
+                        let frame = entry
+                            .get("frame")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u8::try_from(value).ok())
+                            .context("runtime presentation crystal_intro scheduled audio frame is invalid")?;
+                        let audio = entry
+                            .get("audio")
+                            .and_then(Value::as_str)
+                            .filter(|audio| !audio.is_empty())
+                            .context("runtime presentation crystal_intro scheduled audio id is invalid")?;
+                        anyhow::ensure!(
+                            frame < u8::MAX
+                                && previous_frame.is_none_or(|previous| frame > previous),
+                            "runtime presentation crystal_intro scheduled audio frames are not strictly ordered before the sentinel"
+                        );
+                        previous_frame = Some(frame);
+                        anyhow::ensure!(
+                            subprogram.audio.iter().any(|candidate| candidate.id == audio)
+                                || program.audio.iter().any(|candidate| candidate.id == audio),
+                            "runtime presentation crystal_intro scheduled audio references missing audio {audio}"
+                        );
+                    }
+                    continue;
+                }
+                if !matches!(operation.op.as_str(), "sprite_init_group" | "sprite_activate") {
+                    continue;
+                }
+                let operation_entry = operation
+                    .fields
+                    .get("dispatcher_entry")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .context("runtime presentation crystal_intro sprite activation has no dispatcher entry")?;
+                let operation_tick = operation
+                    .fields
+                    .get("dispatch_tick")
+                    .and_then(Value::as_u64)
+                    .context("runtime presentation crystal_intro sprite activation has no dispatch tick")?;
+                anyhow::ensure!(
+                    operation_entry == dispatcher_entry && operation_tick > 0,
+                    "runtime presentation crystal_intro sprite activation disagrees with its scene operation range"
+                );
+                if operation.op == "sprite_activate" {
+                    let lifetime = operation
+                        .fields
+                        .get("lifetime")
+                        .context("runtime presentation crystal_intro sprite activation has no lifetime")?;
+                    anyhow::ensure!(
+                        lifetime
+                            .get("allocation_dispatcher_entry")
+                            .and_then(Value::as_u64)
+                            == Some(operation_entry as u64)
+                            && lifetime
+                                .get("allocation_dispatch_tick")
+                                .and_then(Value::as_u64)
+                                == Some(operation_tick),
+                        "runtime presentation crystal_intro sprite activation disagrees with its source lifetime"
+                    );
+                } else {
+                    let instances = operation
+                        .fields
+                        .get("instances")
+                        .and_then(Value::as_array)
+                        .context("runtime presentation crystal_intro sprite group has no instances")?;
+                    anyhow::ensure!(
+                        !instances.is_empty(),
+                        "runtime presentation crystal_intro sprite group is empty"
+                    );
+                    for instance in instances {
+                        let suffix = instance
+                            .as_str()
+                            .and_then(|instance| {
+                                instance.strip_prefix("sprite:engine/movie/intro.asm:")
+                            })
+                            .context("runtime presentation crystal_intro sprite group has a malformed instance")?;
+                        let mut fields = suffix.split(':');
+                        let source_line = fields.next();
+                        let instance_tick = fields.next().and_then(|tick| tick.parse::<u64>().ok());
+                        let callback_line = fields.next();
+                        anyhow::ensure!(
+                            source_line.is_some_and(|line| !line.is_empty())
+                                && instance_tick == Some(operation_tick)
+                                && callback_line.is_some_and(|line| !line.is_empty())
+                                && fields.next().is_none(),
+                            "runtime presentation crystal_intro sprite group instance disagrees with its dispatch tick"
+                        );
+                    }
+                }
+            }
+        }
+        let completion_wait_frames = dispatch_contract
+            .get("completion_wait_frames")
+            .and_then(Value::as_array)
+            .context("runtime presentation crystal_intro completion waits are missing")?
+            .iter()
+            .map(|frames| {
+                frames
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .context("runtime presentation crystal_intro completion wait exceeds one byte")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            completion_wait_frames.len() == scene_labels.len(),
+            "runtime presentation crystal_intro completion wait count disagrees with its dispatch entries"
+        );
+        let central_wait_span: RuntimePresentationSourceSpan = serde_json::from_value(
+            subprogram
+                .loop_
+                .get("frame_wait")
+                .and_then(|wait| wait.get("source_span"))
+                .cloned()
+                .context("runtime presentation crystal_intro central frame wait is missing")?,
+        )
+        .context("runtime presentation crystal_intro central frame wait span is invalid")?;
+        let derived_wait_frames = scene_offsets
+            .iter()
+            .enumerate()
+            .map(|(index, start)| {
+                let end = scene_offsets
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(phase.operations.len());
+                phase.operations[*start..end]
+                    .iter()
+                    .filter(|operation| {
+                        operation.op == "wait_frames"
+                            && operation.source_span.file == "engine/movie/intro.asm"
+                            && operation.source_span != central_wait_span
+                    })
+                    .try_fold(0_u8, |total, operation| {
+                        let frames = operation
+                            .fields
+                            .get("frames")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u8::try_from(value).ok())
+                            .context("runtime presentation crystal_intro source wait is invalid")?;
+                        total.checked_add(frames).context(
+                            "runtime presentation crystal_intro completion waits overflow one byte",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            completion_wait_frames == derived_wait_frames,
+            "runtime presentation crystal_intro completion waits disagree with source operations"
+        );
+        Ok(Self {
+            scene_labels,
+            scene_operation_offsets: scene_offsets,
+            completion_wait_frames,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTitlePresentationParameters {
     pub entrance_start_scx: u8,
     pub entrance_scroll_step: u8,
     pub timeout_frames: u16,
     pub timeout_fade_frames: u16,
+    pub timeout_fade_rate: u8,
+    pub timeout_fade_register: String,
+    pub timeout_fade_audio: String,
     pub crystal_oam_target: String,
     pub crystal_initial_y: u8,
     pub suicune_frames: Vec<u8>,
@@ -1599,14 +1929,44 @@ impl RuntimeTitlePresentationParameters {
                     format!("runtime presentation title phase has no input mask for {target}")
                 })
         };
-        let timeout_fade_frames = title_phase
+        let timeout_fade = title_phase
             .operations
             .iter()
             .find(|operation| operation.op == "fade_audio")
-            .and_then(|operation| numeric_field(operation, "frames"))
+            .context("runtime presentation title phase has no exact timeout audio fade")?;
+        let timeout_fade_frames = numeric_field(timeout_fade, "frames")
             .and_then(|value| u16::try_from(value).ok())
             .filter(|value| *value > 0)
             .context("runtime presentation title phase has no exact timeout audio fade")?;
+        let timeout_fade_register = timeout_fade
+            .fields
+            .get("fade_register")
+            .and_then(Value::as_object)
+            .and_then(|register| register.get("target"))
+            .and_then(Value::as_str)
+            .filter(|target| !target.is_empty())
+            .context("runtime presentation title fade has no exact WRAM register")?
+            .to_string();
+        let timeout_fade_rate = timeout_fade
+            .fields
+            .get("fade_register")
+            .and_then(Value::as_object)
+            .and_then(|register| register.get("value"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0 && *value <= 0x3f)
+            .context("runtime presentation title fade has no exact source rate byte")?;
+        let timeout_fade_audio = timeout_fade
+            .fields
+            .get("audio")
+            .and_then(Value::as_str)
+            .filter(|audio| !audio.is_empty())
+            .context("runtime presentation title fade has no exact audio target")?
+            .to_string();
+        anyhow::ensure!(
+            timeout_fade_frames == u16::from(timeout_fade_rate) * 8,
+            "runtime presentation title fade duration {timeout_fade_frames} does not match source rate {timeout_fade_rate} across eight volume boundaries"
+        );
         let crystal_oam = title_phase
             .operations
             .iter()
@@ -1711,6 +2071,9 @@ impl RuntimeTitlePresentationParameters {
             entrance_scroll_step,
             timeout_frames,
             timeout_fade_frames,
+            timeout_fade_rate,
+            timeout_fade_register,
+            timeout_fade_audio,
             crystal_oam_target,
             crystal_initial_y,
             suicune_frames,
@@ -2076,14 +2439,29 @@ impl RuntimePresentationPhaseMachine {
                 }
                 "fade_audio" => {
                     let frames = numeric("frames")?;
-                    if let Some(target) = operation
+                    if let Some(register) = operation
                         .fields
                         .get("fade_register")
                         .and_then(Value::as_object)
-                        .and_then(|register| register.get("target"))
-                        .and_then(Value::as_str)
                     {
-                        self.memory.insert(target.to_string(), frames);
+                        let target = register
+                            .get("target")
+                            .and_then(Value::as_str)
+                            .context("runtime presentation fade_audio has no fade-register target")?;
+                        let value = register
+                            .get("value")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| u16::try_from(value).ok())
+                            .context("runtime presentation fade_audio has no exact fade-register value")?;
+                        anyhow::ensure!(
+                            value > 0 && value <= 0x3f,
+                            "runtime presentation fade_audio rate {value} is outside wMusicFade's low-six-bit domain"
+                        );
+                        anyhow::ensure!(
+                            frames == value * 8,
+                            "runtime presentation fade_audio duration {frames} does not match rate {value} across eight volume boundaries"
+                        );
+                        self.memory.insert(target.to_string(), value);
                     }
                     effects.push(operation);
                 }

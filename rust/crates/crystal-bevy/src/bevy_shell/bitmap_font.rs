@@ -1256,15 +1256,25 @@ fn title_screen_frame_for_art(
 fn intro_scene_art_key(intro: &VisibleIntroScreen) -> IntroSceneArtKey {
     let mut sprite_hasher = std::collections::hash_map::DefaultHasher::new();
     intro.sprites.hash(&mut sprite_hasher);
+    let mut ly_overrides_hasher = std::collections::hash_map::DefaultHasher::new();
+    intro.ly_overrides.hash(&mut ly_overrides_hasher);
+    let mut background_effect_hasher = std::collections::hash_map::DefaultHasher::new();
+    intro
+        .attrmap_palette_overrides
+        .hash(&mut background_effect_hasher);
+    intro.tile_override.hash(&mut background_effect_hasher);
     IntroSceneArtKey {
         scene_index: intro.jumptable_index,
         scene_frame_counter: intro.scene_frame_counter,
         scene_timer: intro.scene_timer,
         scroll_x: intro.scroll_x,
         scroll_y: intro.scroll_y,
+        ly_overrides_hash: ly_overrides_hasher.finish(),
+        lcdc_pointer: intro.lcdc_pointer,
+        background_effect_hash: background_effect_hasher.finish(),
         global_anim_x_offset: intro.global_anim_x_offset,
         sprite_hash: sprite_hasher.finish(),
-        palette_effect: intro.palette_effect,
+        palette_effect: intro.palette_effect.clone(),
     }
 }
 
@@ -1331,15 +1341,7 @@ fn load_intro_scene_frame(
         rendered_art,
         &mut data,
     )?;
-    if intro.jumptable_index == 9 {
-        draw_intro_grass_rustle(
-            asset_root,
-            intro,
-            intro.scene_frame_counter,
-            rendered_art,
-            &mut data,
-        )?;
-    }
+    apply_visible_intro_scanline_scroll(intro, &mut data)?;
     draw_visible_intro_sprites(
         sprite_anim_bundle,
         asset_root,
@@ -1367,6 +1369,34 @@ fn load_intro_scene_frame(
         handle: images.add(image),
         size: Vec2::new(TITLE_SCREEN_WIDTH as f32, TITLE_SCREEN_HEIGHT as f32),
     })
+}
+
+fn apply_visible_intro_scanline_scroll(intro: &VisibleIntroScreen, target: &mut [u8]) -> Result<()> {
+    const INTRO_BACKING_WIDTH: usize = 32 * SOURCE_TILE_SIZE;
+    if intro.lcdc_pointer == 0 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        intro.ly_overrides.len() == TITLE_SCREEN_HEIGHT,
+        "visible intro has {} LY overrides instead of {TITLE_SCREEN_HEIGHT}",
+        intro.ly_overrides.len()
+    );
+    let mut row = vec![0_u8; INTRO_BACKING_WIDTH * 4];
+    for (y, override_x) in intro.ly_overrides.iter().copied().enumerate() {
+        let delta = override_x.wrapping_sub(intro.scroll_x) as usize;
+        if delta == 0 {
+            continue;
+        }
+        let start = y * INTRO_BACKING_WIDTH * 4;
+        row.copy_from_slice(&target[start..start + INTRO_BACKING_WIDTH * 4]);
+        for x in 0..INTRO_BACKING_WIDTH {
+            let source_x = (x + delta) % INTRO_BACKING_WIDTH;
+            let destination = start + x * 4;
+            let source = source_x * 4;
+            target[destination..destination + 4].copy_from_slice(&row[source..source + 4]);
+        }
+    }
+    Ok(())
 }
 
 fn ensure_intro_effect_palette_banks(
@@ -1443,36 +1473,54 @@ fn draw_intro_tilemap(
         let tile_x = tile_offset % INTRO_SURFACE_TILES;
         let tile_y = tile_offset / INTRO_SURFACE_TILES;
         let tile_id = tilemap[tile_offset];
-        let attr = if intro.jumptable_index == 9 {
-            let row = tile_y;
-            let palette = if row < 12 {
-                1
-            } else if row < 15 {
-                2
-            } else {
-                3
-            };
-            (attrmap[tile_offset] & !0x07) | palette
+        let attr = if tile_x < TITLE_SCREEN_WIDTH / SOURCE_TILE_SIZE
+            && tile_y < TITLE_SCREEN_HEIGHT / SOURCE_TILE_SIZE
+        {
+            let visible_offset = tile_y * (TITLE_SCREEN_WIDTH / SOURCE_TILE_SIZE) + tile_x;
+            intro
+                .attrmap_palette_overrides
+                .iter()
+                .find(|fill| visible_offset >= fill.start && visible_offset < fill.end)
+                .map_or(attrmap[tile_offset], |fill| {
+                    (attrmap[tile_offset] & !0x07) | (fill.value & 0x07)
+                })
         } else {
             attrmap[tile_offset]
         };
         let bank = (attr >> 3) & 1;
-        let Some(binding) = background.tile_bindings.iter().find(|binding| {
-            binding.target_vram_bank == bank
-                && tile_id >= binding.tile_id_start
-                && tile_id <= binding.tile_id_end
-        }) else {
-            continue;
+        let override_binding = intro.tile_override.as_ref().filter(|tile_override| {
+            tile_override.target_vram_bank == bank
+                && tile_id >= tile_override.tile_id_start
+                && tile_id
+                    < tile_override
+                        .tile_id_start
+                        .saturating_add(tile_override.tile_count)
+        });
+        let (resource, resource_tile) = if let Some(tile_override) = override_binding {
+            (
+                tile_override.resource.as_str(),
+                u16::from(tile_id - tile_override.tile_id_start),
+            )
+        } else {
+            let Some(binding) = background.tile_bindings.iter().find(|binding| {
+                binding.target_vram_bank == bank
+                    && tile_id >= binding.tile_id_start
+                    && tile_id <= binding.tile_id_end
+            }) else {
+                continue;
+            };
+            (
+                binding.resource.as_str(),
+                binding.resource_tile_start + u16::from(tile_id - binding.tile_id_start),
+            )
         };
-        let resource_tile = binding.resource_tile_start
-            + u16::from(tile_id - binding.tile_id_start);
         let resource_tile = u8::try_from(resource_tile).with_context(|| {
             format!(
                 "intro background resource {} tile index {resource_tile} exceeds one byte",
-                binding.resource
+                resource
             )
         })?;
-        let graphic_name = visible_intro_resource_stem(&binding.resource, ".2bpp")?;
+        let graphic_name = visible_intro_resource_stem(resource, ".2bpp")?;
         draw_intro_tile(
             &intro_root,
             intro,
@@ -1518,39 +1566,6 @@ fn visible_intro_resource_stem(resource: &str, suffix: &str) -> Result<String> {
         .filter(|stem| !stem.is_empty() && !stem.contains('/') && !stem.contains('\\'))
         .map(str::to_string)
         .with_context(|| format!("intro resource {resource} is not one exact {suffix} file"))
-}
-
-fn draw_intro_grass_rustle(
-    asset_root: &AssetRoot,
-    intro: &VisibleIntroScreen,
-    scene_frame_counter: u8,
-    rendered_art: &mut RenderedTilesetArt,
-    target: &mut [u8],
-) -> Result<()> {
-    if scene_frame_counter >= 0x24 {
-        return Ok(());
-    }
-    let frame = usize::from((scene_frame_counter & 0x0c) >> 2);
-    let grass_name = ["grass1", "grass2", "grass3", "grass2"][frame];
-    let intro_root = asset_root.runtime_assets().join("gfx/intro");
-    for tile_index in 0..4_u8 {
-        draw_intro_tile(
-            &intro_root,
-            intro,
-            grass_name,
-            "background",
-            tile_index,
-            2,
-            0,
-            IntroTileIndexMode::Offset,
-            false,
-            rendered_art,
-            9 * SOURCE_TILE_SIZE + usize::from(tile_index) * SOURCE_TILE_SIZE,
-            12 * SOURCE_TILE_SIZE,
-            target,
-        )?;
-    }
-    Ok(())
 }
 
 fn draw_visible_intro_sprites(
@@ -1927,14 +1942,16 @@ fn visible_intro_effective_palette_cached(
     is_obj_palette: bool,
 ) -> Result<Palette> {
     let black = [[0_u8, 0, 0]; 4];
-    Ok(match intro.palette_effect {
+    Ok(match &intro.palette_effect {
         VisibleIntroPaletteEffect::None => *base_palette,
-        VisibleIntroPaletteEffect::ClearBg if !is_obj_palette => black,
-        VisibleIntroPaletteEffect::ClearBg => *base_palette,
-        VisibleIntroPaletteEffect::UnownFade { palette_idx, timer }
+        VisibleIntroPaletteEffect::ClearBg { color } => [*color; 4],
+        VisibleIntroPaletteEffect::UnownFade {
+            palette_idx,
+            colors,
+        }
             if !is_obj_palette && palette_name == "unowns" =>
         {
-            let target = usize::from(palette_idx & 0x07);
+            let target = usize::from(*palette_idx & 0x07);
             if palette_index != target {
                 black
             } else {
@@ -1945,30 +1962,25 @@ fn visible_intro_effective_palette_cached(
                 let mut palette = source_palette.get(target).copied().with_context(|| {
                     format!("intro palette unowns has no source entry for index {target}")
                 })?;
-                let fade_timer = {
-                    let value = timer & 0x3f;
-                    if value > 0x1f { 0x3f - value } else { value }
-                };
-                palette[1] = intro_bw_fade_color(fade_timer);
-                palette[2] = intro_black_light_blue_fade_color(fade_timer);
-                palette[3] = intro_black_blue_fade_color(fade_timer);
+                palette[1] = colors[0];
+                palette[2] = colors[1];
+                palette[3] = colors[2];
                 palette
             }
         }
         VisibleIntroPaletteEffect::UnownFade { .. } => *base_palette,
         VisibleIntroPaletteEffect::AppearUnown {
-            palette_set_idx,
+            palette_resource,
             revealed,
         } if !is_obj_palette
             && (palette_name == "unowns" || palette_name == "suicune")
             && palette_index >= 2
-            && palette_index <= usize::from(revealed) =>
+            && palette_index <= usize::from(*revealed) =>
         {
-            let palette_set = if palette_set_idx == 0 {
-                "unown_1"
-            } else {
-                "unown_2"
-            };
+            let palette_set = palette_resource
+                .strip_prefix("gfx/intro/")
+                .and_then(|resource| resource.strip_suffix(".pal"))
+                .context("intro indexed palette resource is outside gfx/intro/*.pal")?;
             rendered_art
                 .intro_palette_cache
                 .get(&format!("{palette_set}:true"))
@@ -1978,25 +1990,14 @@ fn visible_intro_effective_palette_cached(
                 .with_context(|| format!("intro palette {palette_set} has no OBJ palette"))?
         }
         VisibleIntroPaletteEffect::AppearUnown { .. } => *base_palette,
-        VisibleIntroPaletteEffect::Scene24Fade { fade_index } if !is_obj_palette => {
-            let fade_palettes = rendered_art
-                .intro_palette_cache
-                .get("fade:false")
-                .context("intro palette cache missing fade")?;
-            fade_palettes
-                .get(usize::from(fade_index))
-                .copied()
-                .with_context(|| {
-                    format!("intro fade palette has no source entry for index {fade_index}")
-                })?
-        }
+        VisibleIntroPaletteEffect::Scene24Fade { colors } if !is_obj_palette => *colors,
         VisibleIntroPaletteEffect::Scene24Fade { .. } => *base_palette,
-        VisibleIntroPaletteEffect::CrystalWordFade { fade_level, timer }
-            if palette_name == "crystal_unowns" && usize::from(fade_level) == palette_index =>
+        VisibleIntroPaletteEffect::CrystalWordFade { fade_level, colors }
+            if palette_name == "crystal_unowns" && usize::from(*fade_level) == palette_index =>
         {
             let mut palette = *base_palette;
-            palette[2] = intro_fast_fade_color(timer);
-            palette[3] = intro_slow_fade_color(timer);
+            palette[2] = colors[0];
+            palette[3] = colors[1];
             palette
         }
         VisibleIntroPaletteEffect::CrystalWordFade { .. } => *base_palette,
@@ -2031,46 +2032,6 @@ fn visible_intro_effective_palette(
         base_palette,
         false,
     )
-}
-
-fn intro_bw_fade_color(timer: u8) -> [u8; 3] {
-    let hue = timer.min(31).saturating_mul(8);
-    [hue, hue, hue]
-}
-
-fn intro_black_light_blue_fade_color(timer: u8) -> [u8; 3] {
-    let hue = timer.min(31);
-    [0, (hue / 2).saturating_mul(8), hue.saturating_mul(8)]
-}
-
-fn intro_black_blue_fade_color(timer: u8) -> [u8; 3] {
-    let hue = timer.min(31).saturating_mul(8);
-    [0, 0, hue]
-}
-
-fn intro_fast_fade_color(timer: u8) -> [u8; 3] {
-    let mut hue = 31_i16;
-    let target = usize::from(timer).min(15);
-    let mut values = [[0_u8; 3]; 16];
-    let mut index = 0;
-    for _ in 0..8 {
-        values[index] = intro_fade_gray(hue);
-        index += 1;
-        hue -= 1;
-        values[index] = intro_fade_gray(hue);
-        index += 1;
-        hue -= 2;
-    }
-    values[target]
-}
-
-fn intro_slow_fade_color(timer: u8) -> [u8; 3] {
-    intro_fade_gray(31_i16 - i16::from(timer.min(15)))
-}
-
-fn intro_fade_gray(hue: i16) -> [u8; 3] {
-    let value = hue.clamp(0, 31) as u8 * 8;
-    [value, value, value]
 }
 
 fn resolve_intro_tile_index(
@@ -3970,12 +3931,21 @@ fn ledge_shadow_frame_for_art(
                 .with_context(|| format!("decode ledge shadow PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
-            if width == 0 || height == 0 {
-                anyhow::bail!("ledge shadow PNG {} is empty", path.display());
+            if width as usize != SOURCE_TILE_SIZE || height as usize != SOURCE_TILE_SIZE {
+                anyhow::bail!(
+                    "ledge shadow PNG {} is {}x{}, expected one {}x{} source tile",
+                    path.display(),
+                    width,
+                    height,
+                    SOURCE_TILE_SIZE,
+                    SOURCE_TILE_SIZE,
+                );
             }
-            let overlap = width / 2;
+            // FacingShadow places tile $fc at x=0 and an X-flipped copy at
+            // x=8. Preserve the complete two-piece OAM footprint.
+            let second_piece_x = width;
             let combined_width = width
-                .checked_add(overlap)
+                .checked_add(second_piece_x)
                 .context("ledge shadow combined width overflow")?;
             let mut base = image::RgbaImage::new(width, height);
             for y in 0..height {
@@ -4003,7 +3973,7 @@ fn ledge_shadow_frame_for_art(
                     }
                     let pixel = *base.get_pixel(x, y);
                     if pixel[3] != 0 {
-                        combined.put_pixel(x + overlap, y, pixel);
+                        combined.put_pixel(x + second_piece_x, y, pixel);
                     }
                 }
             }
@@ -4032,6 +4002,31 @@ fn ledge_shadow_frame_for_art(
     rendered_art.ledge_shadow.clone()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrassRustleOamPiece {
+    x: u32,
+    y: u32,
+    flip_x: bool,
+}
+
+impl GrassRustleOamPiece {
+    const fn new(x: u32, y: u32, flip_x: bool) -> Self {
+        Self { x, y, flip_x }
+    }
+}
+
+const GRASS_RUSTLE_CANVAS_SOURCE_SIZE: UVec2 = UVec2::new(18, 9);
+const GRASS_RUSTLE_OAM_LAYOUTS: [[GrassRustleOamPiece; 2]; 2] = [
+    [
+        GrassRustleOamPiece::new(1, 0, false),
+        GrassRustleOamPiece::new(9, 0, true),
+    ],
+    [
+        GrassRustleOamPiece::new(0, 1, false),
+        GrassRustleOamPiece::new(10, 1, true),
+    ],
+];
+
 fn grass_rustle_frames_for_art(
     rendered_art: &mut RenderedTilesetArt,
     asset_root: &AssetRoot,
@@ -4050,35 +4045,53 @@ fn grass_rustle_frames_for_art(
                 .with_context(|| format!("decode grass rustle PNG {}", path.display()))?
                 .to_rgba8();
             let (width, height) = source.dimensions();
-            if width == 0 || height == 0 {
-                anyhow::bail!("grass rustle PNG {} is empty", path.display());
+            if width as usize != SOURCE_TILE_SIZE || height as usize != SOURCE_TILE_SIZE {
+                anyhow::bail!(
+                    "grass rustle PNG {} is {}x{}, expected one {}x{} source tile",
+                    path.display(),
+                    width,
+                    height,
+                    SOURCE_TILE_SIZE,
+                    SOURCE_TILE_SIZE,
+                );
             }
             let background = *source.get_pixel(0, 0);
             let palette_bank = load_npc_sprite_palette_bank(asset_root, &key)?;
             let palette = palette_bank
                 .get(6)
                 .context("grass rustle palette bank has no palette 6")?;
-            let build = |flipped: bool, images: &mut Assets<Image>| -> SpriteFrame {
-                let mut pixels = vec![0; width as usize * height as usize * 4];
-                for y in 0..height {
-                    for x in 0..width {
-                        let source_x = if flipped { width - 1 - x } else { x };
-                        let pixel = source.get_pixel(source_x, y);
-                        let offset = (y as usize * width as usize + x as usize) * 4;
-                        if *pixel == background {
-                            continue;
+            let build = |layout: [GrassRustleOamPiece; 2],
+                         images: &mut Assets<Image>|
+             -> SpriteFrame {
+                let canvas_width = GRASS_RUSTLE_CANVAS_SOURCE_SIZE.x;
+                let canvas_height = GRASS_RUSTLE_CANVAS_SOURCE_SIZE.y;
+                let mut pixels =
+                    vec![0; canvas_width as usize * canvas_height as usize * 4];
+                for piece in layout {
+                    for y in 0..height {
+                        for x in 0..width {
+                            let source_x = if piece.flip_x { width - 1 - x } else { x };
+                            let pixel = source.get_pixel(source_x, y);
+                            if *pixel == background {
+                                continue;
+                            }
+                            let target_x = piece.x + x;
+                            let target_y = piece.y + y;
+                            let offset = (target_y as usize * canvas_width as usize
+                                + target_x as usize)
+                                * 4;
+                            let color = palette[palette_index_from_gray(pixel[0])];
+                            pixels[offset] = color[0];
+                            pixels[offset + 1] = color[1];
+                            pixels[offset + 2] = color[2];
+                            pixels[offset + 3] = 255;
                         }
-                        let color = palette[palette_index_from_gray(pixel[0])];
-                        pixels[offset] = color[0];
-                        pixels[offset + 1] = color[1];
-                        pixels[offset + 2] = color[2];
-                        pixels[offset + 3] = 255;
                     }
                 }
                 let mut image = Image::new(
                     Extent3d {
-                        width,
-                        height,
+                        width: canvas_width,
+                        height: canvas_height,
                         depth_or_array_layers: 1,
                     },
                     TextureDimension::D2,
@@ -4089,10 +4102,13 @@ fn grass_rustle_frames_for_art(
                 image.sampler = ImageSampler::nearest();
                 SpriteFrame {
                     handle: images.add(image),
-                    size: Vec2::new(width as f32 * 4.0, height as f32 * 4.0),
+                    size: Vec2::new(canvas_width as f32 * 4.0, canvas_height as f32 * 4.0),
                 }
             };
-            Ok([build(false, images), build(true, images)])
+            Ok([
+                build(GRASS_RUSTLE_OAM_LAYOUTS[0], images),
+                build(GRASS_RUSTLE_OAM_LAYOUTS[1], images),
+            ])
         })();
         match loaded {
             Ok(frames) => {

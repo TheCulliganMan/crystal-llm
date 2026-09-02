@@ -65,7 +65,11 @@ fn setup_shell_view(mut commands: Commands) {
                 custom_size: Some(Vec2::new(640.0, 576.0)),
                 ..default()
             },
-            transform: Transform::from_xyz(0.0, 0.0, 99.0),
+            // LoadPoisonBGPals replaces every CGB background color while
+            // leaving OBJ palettes untouched. Keep this plane above the map
+            // base but below every sorted overworld object; the priority BG
+            // surface is hidden separately while the poison palette is live.
+            transform: Transform::from_xyz(0.0, 0.0, 0.9),
             ..default()
         },
         PoisonFlashOverlay,
@@ -273,6 +277,15 @@ fn apply_keyboard_input(
     runtime_shell.lcd_animation_frame = runtime_shell
         .lcd_animation_frame
         .wrapping_add(u64::from(elapsed_input_ticks));
+    match advance_visible_poison_flash(&mut runtime_shell, elapsed_input_ticks) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            record_visible_runtime_error(&mut runtime_shell, &error);
+            runtime_shell.last_error = Some(error.to_string());
+            return;
+        }
+    }
     if runtime_shell.bill_pc_move_save.is_some() {
         if let Err(error) =
             advance_visible_bill_pc_move_save(&mut runtime_shell, elapsed_input_ticks)
@@ -1209,21 +1222,10 @@ fn apply_keyboard_input(
         mark_runtime_snapshot_dirty(&mut runtime_shell);
         return;
     }
-    runtime_shell.poison_flash_frames_remaining = runtime_shell
-        .poison_flash_frames_remaining
-        .saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
-    let mut clear_map_name_sign = false;
-    if let Some(sign) = runtime_shell.visible_map_name_sign.as_mut() {
-        for _ in 0..elapsed_input_ticks {
-            if sign.frames_remaining == 0 {
-                clear_map_name_sign = true;
-                break;
-            }
-            sign.frames_remaining -= 1;
-        }
-    }
-    if clear_map_name_sign {
-        runtime_shell.visible_map_name_sign = None;
+    if advance_visible_map_name_sign(
+        &mut runtime_shell.visible_map_name_sign,
+        elapsed_input_ticks,
+    ) {
         mark_runtime_snapshot_dirty(&mut runtime_shell);
     }
     if runtime_shell.pending_trainer_sight.is_some() {
@@ -2451,6 +2453,57 @@ fn apply_keyboard_input(
             }
         }
     }
+}
+
+fn advance_visible_map_name_sign(
+    sign: &mut Option<VisibleMapNameSign>,
+    elapsed_input_ticks: u32,
+) -> bool {
+    // PlaceMapNameSign hides old timer values 60 and 59. The old-59 pass
+    // decrements to 58, initializes the name, and exposes WY=$70; timer zero
+    // remains visible until the following pass takes the disappear branch.
+    let was_visible = sign
+        .as_ref()
+        .is_some_and(|sign| sign.frames_remaining <= 58);
+    let mut clear = false;
+    if let Some(sign) = sign.as_mut() {
+        for _ in 0..elapsed_input_ticks {
+            if sign.frames_remaining == 0 {
+                clear = true;
+                break;
+            }
+            sign.frames_remaining -= 1;
+        }
+    }
+    if clear {
+        *sign = None;
+    }
+    let is_visible = sign
+        .as_ref()
+        .is_some_and(|sign| sign.frames_remaining <= 58);
+    was_visible != is_visible
+}
+
+fn advance_visible_poison_flash(
+    runtime_shell: &mut BevyRuntimeShell,
+    elapsed_input_ticks: u32,
+) -> Result<bool> {
+    if runtime_shell.poison_flash_frames_remaining == 0 {
+        return Ok(false);
+    }
+    runtime_shell.poison_flash_frames_remaining = runtime_shell
+        .poison_flash_frames_remaining
+        .saturating_sub(elapsed_input_ticks.min(u32::from(u8::MAX)) as u8);
+    if runtime_shell.poison_flash_frames_remaining == 0
+        && let Some(notice) = runtime_shell.field_notice_queue.pop_front()
+    {
+        let scene = Arc::new(runtime_shell.shell.snapshot()?);
+        runtime_shell.field_notice = Some(notice);
+        runtime_shell.field_notice_scene = Some(scene);
+        runtime_shell.field_text_reveal = None;
+    }
+    mark_runtime_snapshot_dirty(runtime_shell);
+    Ok(true)
 }
 
 /// Presentation states that install an hVBlank handler other than
@@ -4141,19 +4194,7 @@ fn sync_visible_earthquake_camera(
     let Ok(mut transform) = cameras.get_single_mut() else {
         return;
     };
-    let earthquake_offset = runtime_shell
-        .visible_earthquake
-        .filter(|earthquake| earthquake.shake_frames_remaining > 0)
-        .map(|earthquake| {
-            let distance = f32::from(earthquake.intensity.max(1)) * 4.0;
-            match earthquake.phase % 4 {
-                0 => (distance, 0.0),
-                1 => (-distance, 0.0),
-                2 => (0.0, distance),
-                _ => (0.0, -distance),
-            }
-        })
-        .unwrap_or((0.0, 0.0));
+    let earthquake_offset = visible_earthquake_camera_offset(runtime_shell.visible_earthquake);
     let battle_offset =
         visible_move_screen_shake_offset(runtime_shell.visible_move_animations.front());
     let (x, y) = (
@@ -4162,6 +4203,35 @@ fn sync_visible_earthquake_camera(
     );
     transform.translation.x = x;
     transform.translation.y = y;
+}
+
+fn visible_earthquake_camera_offset(
+    earthquake: Option<VisibleEarthquake>,
+) -> (f32, f32) {
+    earthquake
+        .filter(|earthquake| earthquake.shake_frames_remaining > 0)
+        .map(|earthquake| {
+            // MovementFunction_ScreenShake initializes the counter, then its
+            // step function decrements before drawing. Each later update
+            // first removes the prior vector and derives the next sign from
+            // the remaining counter. Counter zero restores the baseline and
+            // deletes the temporary object before OAM is built.
+            let counter = earthquake.shake_frames_remaining.saturating_sub(1);
+            if counter == 0 {
+                return (0.0, 0.0);
+            }
+            let distance = f32::from(earthquake.intensity.max(1)) * 4.0;
+            // An even counter adds +intensity to SCY and an odd counter adds
+            // -intensity. Bevy's world Y axis points upward, so SCY's screen
+            // displacement projects with the opposite sign.
+            let bevy_y = if counter & 1 == 0 {
+                -distance
+            } else {
+                distance
+            };
+            (0.0, bevy_y)
+        })
+        .unwrap_or((0.0, 0.0))
 }
 
 fn visible_move_screen_shake_offset(animation: Option<&VisibleMoveAnimation>) -> (f32, f32) {
@@ -8968,7 +9038,6 @@ fn begin_pending_field_notice_effect(runtime_shell: &mut BevyRuntimeShell) -> Re
             intensity: 2,
             frames_remaining: 20,
             shake_frames_remaining: 20,
-            phase: 0,
         });
     }
     Ok(true)

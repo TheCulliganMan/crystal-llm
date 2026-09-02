@@ -3779,6 +3779,155 @@ fn should_despawn_player_facing_entity(
     !retain_player_sprite || !is_retained_player_sprite
 }
 
+fn scripted_actor_has_active_jump(
+    movement: Option<&VisibleScriptMovement>,
+    object_id: &str,
+    frames_remaining: u8,
+) -> bool {
+    frames_remaining > 1
+        && movement.is_some_and(|movement| {
+        (movement.object_id == object_id && movement.active_jump_duration.is_some())
+            || (movement.follower_object_id.as_deref() == Some(object_id)
+                && movement.follower_active_jump_duration.is_some())
+        })
+}
+
+fn ledge_jump_has_active_shadow(jump: Option<VisibleLedgeJump>) -> bool {
+    // The shadow's tracking counter reaches zero and deletes the temporary
+    // object on the sixteenth update, before that landing frame is drawn.
+    jump.is_some_and(|jump| jump.frame < 15)
+}
+
+fn spawn_overworld_jump_shadow(
+    commands: &mut Commands,
+    shadow: SpriteFrame,
+    actor_x: f32,
+    actor_ground_y: f32,
+    actor_height: f32,
+    actor_direction: Direction,
+    actor_id: &str,
+    actor_depth: f32,
+) {
+    let (shadow_x, shadow_y) = jump_shadow_position_from_actor_ground(
+        actor_x,
+        actor_ground_y,
+        actor_height,
+        shadow.size,
+        actor_direction,
+    );
+    commands.spawn((
+        SpriteBundle {
+            texture: shadow.handle,
+            sprite: Sprite {
+                custom_size: Some(shadow.size),
+                ..default()
+            },
+            transform: Transform::from_xyz(
+                shadow_x,
+                shadow_y,
+                actor_depth - 0.000_001,
+            ),
+            ..default()
+        },
+        PlayerFacingMarker,
+        JumpShadowMarker {
+            actor_id: actor_id.to_string(),
+        },
+    ));
+}
+
+#[derive(Clone, Copy)]
+struct VisibleTrackingObjectMovement {
+    target: TilePosition,
+    from: Option<TilePosition>,
+    frames_remaining: u8,
+    total_frames: u8,
+}
+
+fn visible_emote_target_movement(
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    emote_object: &str,
+) -> Result<Option<VisibleTrackingObjectMovement>> {
+    let object_id = match emote_object {
+        "PLAYER" | "PLAYER_OBJECT" => None,
+        "LAST_TALKED" => snapshot.script_events.last_talked_object.as_deref(),
+        object_id => Some(object_id),
+    };
+    let Some(object_id) = object_id else {
+        let movement = runtime_shell
+            .visible_ledge_jump
+            .map(|jump| VisibleTrackingObjectMovement {
+                target: snapshot.overworld.tile,
+                from: Some(jump.from),
+                frames_remaining: 16_u8.saturating_sub(jump.frame),
+                total_frames: 16,
+            })
+            .unwrap_or(VisibleTrackingObjectMovement {
+                target: snapshot.overworld.tile,
+                from: runtime_shell.player_walk_from,
+                frames_remaining: runtime_shell.player_walk_frame_ticks,
+                total_frames: runtime_shell.player_walk_total_ticks,
+            });
+        if movement.from.is_some() && movement.total_frames == 0 {
+            anyhow::bail!("tracked player movement has a zero-frame duration");
+        }
+        return Ok(Some(movement));
+    };
+
+    let target = snapshot
+        .visible_object_runtime_tiles
+        .get(object_id)
+        .copied()
+        .or_else(|| {
+            snapshot.visible_objects.iter().find_map(|object| {
+                (object.object_identifier.as_deref() == Some(object_id))
+                    .then(|| object_tile_position_checked(object))
+                    .flatten()
+            })
+        });
+    let Some(target) = target else {
+        // ASM StepFunction_TrackingObject deletes itself as soon as the
+        // tracked object slot is empty.
+        return Ok(None);
+    };
+    let trainer_origin = runtime_shell
+        .trainer_walk_from
+        .as_ref()
+        .filter(|(walking_id, _)| walking_id == object_id)
+        .map(|(_, from)| *from);
+    let from = trainer_origin.or_else(|| runtime_shell.object_walk_from.get(object_id).copied());
+    let (frames_remaining, total_frames) = if trainer_origin.is_some() {
+        (
+            runtime_shell.object_walk_frame_ticks,
+            runtime_shell.object_walk_total_ticks,
+        )
+    } else if from.is_some() {
+        let frames_remaining = runtime_shell
+            .object_walk_frame_ticks_by_id
+            .get(object_id)
+            .copied()
+            .with_context(|| format!("tracked object {object_id} has no remaining-frame timer"))?;
+        let total_frames = runtime_shell
+            .object_walk_total_ticks_by_id
+            .get(object_id)
+            .copied()
+            .with_context(|| format!("tracked object {object_id} has no total-frame timer"))?;
+        (frames_remaining, total_frames)
+    } else {
+        (0, 1)
+    };
+    if from.is_some() && total_frames == 0 {
+        anyhow::bail!("tracked object {object_id} has a zero-frame duration");
+    }
+    Ok(Some(VisibleTrackingObjectMovement {
+        target,
+        from,
+        frames_remaining,
+        total_frames,
+    }))
+}
+
 fn visible_credits_screen_lines(credits: &VisibleCreditsScreen) -> Vec<String> {
     let mut lines = credits
         .lines
@@ -3808,7 +3957,7 @@ struct RenderEntityQueries<'w, 's> {
             Without<PlayerMarker>,
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
-            Without<LedgeShadowMarker>,
+            Without<JumpShadowMarker>,
         ),
     >,
     players: Query<'w, 's, Entity, Or<(With<PlayerMarker>, With<PlayerFacingMarker>)>>,
@@ -3832,7 +3981,7 @@ struct RenderEntityQueries<'w, 's> {
         's,
         (&'static mut Transform, &'static Sprite),
         (
-            With<LedgeShadowMarker>,
+            With<JumpShadowMarker>,
             Without<PlayerMarker>,
             Without<VisibleObjectSprite>,
             Without<PlayfieldTile>,
@@ -3900,7 +4049,7 @@ fn set_overworld_map_scroll(
             Without<PlayerMarker>,
             Without<VisibleObjectSprite>,
             Without<DialogGlyphMarker>,
-            Without<LedgeShadowMarker>,
+            Without<JumpShadowMarker>,
         ),
     >,
     offset: Vec2,
@@ -5209,7 +5358,7 @@ fn render_playfield(
     // Native dialogue then emitted thousands of B0003 warnings and slowed
     // down further on every page. Queue each entity exactly once per frame.
     // PlayerFacingMarker also owns short-lived OAM effects (grass rustle,
-    // ledge shadow, fishing frames, and the optional facing overlay). Keep
+    // jump shadows, fishing frames, and the optional facing overlay). Keep
     // only the real PlayerMarker entity on same-map redraws. Retaining every
     // PlayerFacingMarker caused one new grass tile to accumulate on every
     // animation tick until the overlapping sprites formed a giant smear.
@@ -6500,6 +6649,54 @@ fn render_playfield(
                         )
                     },
                 );
+                if let Some(object_id) = object.object_identifier.as_deref() {
+                    let frames_remaining = runtime_shell
+                        .visible_script_movement
+                        .as_ref()
+                        .filter(|movement| movement.object_id == object_id)
+                        .map_or_else(
+                            || {
+                                runtime_shell
+                                    .object_walk_frame_ticks_by_id
+                                    .get(object_id)
+                                    .copied()
+                                    .unwrap_or(0)
+                            },
+                            |_| runtime_shell.object_walk_frame_ticks,
+                        );
+                    if scripted_actor_has_active_jump(
+                        runtime_shell.visible_script_movement.as_ref(),
+                        object_id,
+                        frames_remaining,
+                    ) {
+                        let Some(shadow) = ledge_shadow_frame_for_art(
+                            &mut tileset_art,
+                            &runtime_shell.asset_root,
+                            &mut images,
+                        ) else {
+                            let error = tileset_art
+                                .ledge_shadow_error
+                                .clone()
+                                .unwrap_or_else(|| "unknown jump shadow load error".to_string());
+                            record_visible_render_error(
+                                &mut commands,
+                                &mut runtime_shell,
+                                anyhow::anyhow!("required scripted jump shadow could not be rendered: {error}"),
+                            );
+                            return;
+                        };
+                        spawn_overworld_jump_shadow(
+                            &mut commands,
+                            shadow,
+                            next_transform.translation.x,
+                            next_transform.translation.y,
+                            display_frame.size.y,
+                            direction,
+                            object_id,
+                            next_transform.translation.z,
+                        );
+                    }
+                }
                 let next_visible = VisibleObjectSprite {
                     object_index: index,
                     object_identifier: object.object_identifier.clone(),
@@ -6735,35 +6932,25 @@ fn render_playfield(
         return;
     }
     if let Some(emote) = runtime_shell.visible_overworld_emote.clone() {
-        let target = if matches!(
-            emote.object.as_str(),
-            "PLAYER" | "PLAYER_OBJECT" | "LAST_TALKED"
-        ) && (emote.object != "LAST_TALKED"
-            || snapshot.script_events.last_talked_object.is_none())
+        let movement = match visible_emote_target_movement(&snapshot, &runtime_shell, &emote.object)
         {
-            Some(snapshot.overworld.tile)
-        } else {
-            let object_id = if emote.object == "LAST_TALKED" {
-                snapshot.script_events.last_talked_object.as_deref()
-            } else {
-                Some(emote.object.as_str())
-            };
-            object_id.and_then(|object_id| {
-                snapshot
-                    .visible_object_runtime_tiles
-                    .get(object_id)
-                    .copied()
-                    .or_else(|| {
-                        snapshot.visible_objects.iter().find_map(|object| {
-                            (object.object_identifier.as_deref() == Some(object_id))
-                                .then(|| object_tile_position_checked(object))
-                                .flatten()
-                        })
-                    })
-            })
+            Ok(movement) => movement,
+            Err(error) => {
+                record_visible_render_error(&mut commands, &mut runtime_shell, error);
+                return;
+            }
         };
-        if let Some(target) = target {
-            if let Some((x, y)) = runtime_tile_playfield_position(target, start_x, start_y) {
+        if let Some(movement) = movement {
+            if let Some((x, y)) = visible_tracking_object_playfield_position(
+                movement.target,
+                movement.from,
+                movement.frames_remaining,
+                movement.total_frames,
+                movement_subframe,
+                start_x,
+                start_y,
+                camera_offset,
+            ) {
                 match emote_frame_for_art(
                     &mut tileset_art,
                     &runtime_shell.asset_root,
@@ -7040,7 +7227,14 @@ fn render_playfield(
                 }
             },
         );
-        if runtime_shell.visible_ledge_jump.is_some() {
+        let player_has_scripted_jump = scripted_actor_has_active_jump(
+            runtime_shell.visible_script_movement.as_ref(),
+            "PLAYER",
+            runtime_shell.player_walk_frame_ticks,
+        );
+        if ledge_jump_has_active_shadow(runtime_shell.visible_ledge_jump)
+            || player_has_scripted_jump
+        {
             let Some(shadow) = ledge_shadow_frame_for_art(
                 &mut tileset_art,
                 &runtime_shell.asset_root,
@@ -7053,28 +7247,23 @@ fn render_playfield(
                 record_visible_render_error(
                     &mut commands,
                     &mut runtime_shell,
-                    anyhow::anyhow!("required ledge shadow could not be rendered: {error}"),
+                    anyhow::anyhow!("required jump shadow could not be rendered: {error}"),
                 );
                 return;
             };
-            commands.spawn((
-                SpriteBundle {
-                    texture: shadow.handle,
-                    sprite: Sprite {
-                        custom_size: Some(shadow.size),
-                        ..default()
-                    },
-                    transform: Transform::from_xyz(
-                        player_x,
-                        player_ground_y - frame.size.y * 0.5 + shadow.size.y * 0.5,
-                        overworld_entity_depth(player_depth_tile, None, (start_x, start_y))
-                            - 0.000_001,
-                    ),
-                    ..default()
-                },
-                PlayerFacingMarker,
-                LedgeShadowMarker,
-            ));
+            spawn_overworld_jump_shadow(
+                &mut commands,
+                shadow,
+                player_x,
+                player_ground_y,
+                frame.size.y,
+                runtime_shell
+                    .visible_ledge_jump
+                    .and_then(|jump| visible_jump_direction(jump.from, jump.to))
+                    .unwrap_or(snapshot.overworld.facing),
+                "PLAYER",
+                overworld_entity_depth(player_depth_tile, None, (start_x, start_y)),
+            );
         }
         let player_flip_x = player_uses_action_frame
             && runtime_shell.player_walk_mirror_stride
@@ -7168,6 +7357,12 @@ fn render_playfield(
                 return;
             };
             let rustle_frame = &frames[usize::from((rustle.age / 4) % 2)];
+            let (rustle_x, rustle_y) = grass_rustle_position_from_player_ground(
+                player_x,
+                player_ground_y,
+                frame.size.y,
+                rustle_frame.size,
+            );
             commands.spawn((
                 SpriteBundle {
                     texture: rustle_frame.handle.clone(),
@@ -7176,8 +7371,8 @@ fn render_playfield(
                         ..default()
                     },
                     transform: Transform::from_xyz(
-                        player_x,
-                        player_y - frame.size.y * 0.5 + rustle_frame.size.y * 0.5,
+                        rustle_x,
+                        rustle_y,
                         2.5 + f32::from(rustle.tile.y) * 0.001,
                     ),
                     ..default()

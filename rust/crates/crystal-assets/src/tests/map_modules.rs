@@ -558,6 +558,72 @@
     }
 
     #[test]
+    fn exported_whirlpool_forced_movement_materializes_as_global_script_and_movements() {
+        let path = repository_root_for_tests()
+            .join("apps/web/assets/data/story_events/StandardScripts.json");
+        let mut payload: Value = serde_json::from_slice(
+            &std::fs::read(&path).expect("read exported StandardScripts catalog"),
+        )
+        .expect("parse exported StandardScripts catalog");
+        let catalog = payload
+            .get_mut("StandardScripts")
+            .and_then(Value::as_object_mut)
+            .expect("exported StandardScripts object");
+        catalog.insert("StdScripts".to_string(), Value::Array(Vec::new()));
+        catalog.insert(
+            "GlobalScriptRoots".to_string(),
+            serde_json::json!(["Script_ForcedMovement"]),
+        );
+        let mut data = GameDataSet {
+            story_events: vec![payload],
+            ..GameDataSet::default()
+        };
+
+        data.materialize_global_scripts()
+            .expect("materialize source-exact Whirlpool forced movement");
+        let module = data.global_scripts.expect("global standard-script module");
+        assert!(module.scripts.contains_key("Script_ForcedMovement"));
+        let command = module
+            .script_object_commands
+            .iter()
+            .find(|command| {
+                command.source_script == ".right@Script_ForcedMovement"
+                    && command.command_index == 0
+            })
+            .expect("right-facing forced applymovement");
+        assert_eq!(command.object_id.as_deref(), Some("PLAYER"));
+        assert_eq!(command.movement.as_deref(), Some(".MovementData_right"));
+        let movement = module
+            .script_movements
+            .iter()
+            .find(|movement| {
+                movement.label == ".MovementData_right"
+                    && movement.source_script.as_deref() == Some("Script_ForcedMovement")
+            })
+            .expect("right-facing forced movement body");
+        assert_eq!(
+            movement
+                .steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.command.as_str(),
+                        step.direction.as_deref(),
+                        step.duration,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("step_dig", None, Some(16)),
+                ("turn_in", Some("LEFT"), None),
+                ("step_dig", None, Some(16)),
+                ("turn_head", Some("LEFT"), None),
+                ("step_end", None, None),
+            ]
+        );
+    }
+
+    #[test]
     fn global_phone_landmark_and_money_commands_execute_through_pack_owned_data() {
         let mut module = test_map_module("RuntimePhoneMap", "RUNTIME_PHONE_MAP", None);
         module.scripts.insert(

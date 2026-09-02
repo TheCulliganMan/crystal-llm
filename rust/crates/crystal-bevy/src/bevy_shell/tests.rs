@@ -34,6 +34,55 @@ fn script_earthquake_shakes_then_sleeps_for_both_low_six_bit_counters() {
 }
 
 #[test]
+fn overworld_screen_shake_uses_the_vertical_source_counter_sequence() {
+    let mut earthquake = super::VisibleEarthquake::from_script(84, 20, 20);
+
+    assert_eq!(
+        super::visible_earthquake_camera_offset(Some(earthquake)),
+        (0.0, 8.0),
+        "remaining counter 19 applies -2 to SCY, which projects to +8 in Bevy's upward Y axis"
+    );
+    earthquake.advance(1);
+    assert_eq!(
+        super::visible_earthquake_camera_offset(Some(earthquake)),
+        (0.0, -8.0),
+        "remaining counter 18 applies +2 to SCY"
+    );
+    earthquake.advance(18);
+    assert_eq!(earthquake.shake_frames_remaining, 1);
+    assert_eq!(
+        super::visible_earthquake_camera_offset(Some(earthquake)),
+        (0.0, 0.0),
+        "StepFunction_ScreenShake restores the baseline before deleting on its final update"
+    );
+    earthquake.advance(1);
+    assert_eq!(earthquake.shake_frames_remaining, 0);
+    assert_eq!(
+        super::visible_earthquake_camera_offset(Some(earthquake)),
+        (0.0, 0.0),
+        "the generated step_sleep phase must not continue shaking"
+    );
+}
+
+#[test]
+fn poison_step_uses_four_opaque_bg_palette_frames_then_one_restored_frame() {
+    let poison = [230.0 / 255.0, 173.0 / 255.0, 1.0, 1.0];
+    for frames_remaining in [5, 4, 3, 2] {
+        assert_eq!(
+            super::visible_poison_bg_palette_rgba(frames_remaining),
+            Some(poison),
+            "LoadPoisonBGPals keeps every CGB background color at the poison color"
+        );
+    }
+    assert_eq!(
+        super::visible_poison_bg_palette_rgba(1),
+        None,
+        "the trailing DelayFrame runs after _UpdateTimePals restores the map palette"
+    );
+    assert_eq!(super::visible_poison_bg_palette_rgba(0), None);
+}
+
+#[test]
 fn egg_hatch_wobble_uses_exact_asm_pairs_and_crack_boundaries() {
     assert_eq!(visible_egg_wobble_x(0), -2);
     assert_eq!(visible_egg_wobble_x(2), -2);

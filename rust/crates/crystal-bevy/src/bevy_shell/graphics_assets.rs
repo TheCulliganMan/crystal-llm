@@ -440,6 +440,52 @@ fn overworld_emote_position_from_base(
     )
 }
 
+fn grass_rustle_position_from_player_ground(
+    player_x: f32,
+    player_ground_y: f32,
+    player_height: f32,
+    rustle_size: Vec2,
+) -> (f32, f32) {
+    (
+        player_x,
+        player_ground_y + player_height * 0.5 - TILE_SIZE - rustle_size.y * 0.5,
+    )
+}
+
+fn jump_shadow_position_from_actor_ground(
+    actor_x: f32,
+    actor_ground_y: f32,
+    actor_height: f32,
+    shadow_size: Vec2,
+    direction: Direction,
+) -> (f32, f32) {
+    let source_y_offset = match direction {
+        Direction::Down | Direction::Up => 14.0,
+        Direction::Left | Direction::Right => 12.0,
+    };
+    let source_pixel_scale = TILE_SIZE / SOURCE_TILE_SIZE as f32;
+    (
+        actor_x,
+        actor_ground_y + actor_height * 0.5
+            - source_y_offset * source_pixel_scale
+            - shadow_size.y * 0.5,
+    )
+}
+
+fn visible_jump_direction(from: TilePosition, to: TilePosition) -> Option<Direction> {
+    if to.x > from.x {
+        Some(Direction::Right)
+    } else if to.x < from.x {
+        Some(Direction::Left)
+    } else if to.y > from.y {
+        Some(Direction::Down)
+    } else if to.y < from.y {
+        Some(Direction::Up)
+    } else {
+        None
+    }
+}
+
 fn render_viewport_origin(player_render_tile: i16, render_extent: i16, viewport_tiles: i16) -> i16 {
     let max_origin = render_extent.saturating_sub(viewport_tiles).max(0);
     player_render_tile
@@ -1321,8 +1367,8 @@ fn format_intro_status(runtime_shell: &BevyRuntimeShell) -> String {
             intro
                 .jumptable_index
                 .saturating_add(1)
-                .min(VISIBLE_INTRO_SCENE_NAMES.len()),
-            VISIBLE_INTRO_SCENE_NAMES.len()
+                .min(intro.scene_count),
+            intro.scene_count
         ),
         format!("SCENE FRAME: {}", intro.scene_frame_counter),
         format!("SPRITES: {}", intro.sprite_count),

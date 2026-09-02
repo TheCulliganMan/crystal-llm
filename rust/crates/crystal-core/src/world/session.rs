@@ -1623,17 +1623,6 @@ impl OverworldSession {
         }
     }
 
-    pub fn forced_current_direction(&self) -> Option<Direction> {
-        let sample = sample_collision(&self.map, &self.tileset, self.player.tile)?;
-        match sample.permission {
-            permissions::CURRENT_RIGHT => Some(Direction::Right),
-            permissions::CURRENT_LEFT => Some(Direction::Left),
-            permissions::CURRENT_UP => Some(Direction::Up),
-            permissions::CURRENT_DOWN => Some(Direction::Down),
-            _ => None,
-        }
-    }
-
     /// Advance the frame-driven movement modes implemented by Crystal's
     /// `SpriteMovementData`. Script-controlled objects are left untouched;
     /// these walkers are the autonomous map-object behaviors.
@@ -2973,6 +2962,22 @@ impl OverworldSession {
     }
 
     pub fn check_warp_checked(&self) -> Result<Option<WarpTrigger>, OverworldEventCoordinateError> {
+        self.check_warp_with_directional_policy(true)
+    }
+
+    /// Implements `CheckWarpTile`, which rejects directional carpet warps.
+    /// Those are handled later by player movement's `.CheckWarp` only when a
+    /// matching direction is pressed while already facing that way.
+    pub fn check_warp_tile_checked(
+        &self,
+    ) -> Result<Option<WarpTrigger>, OverworldEventCoordinateError> {
+        self.check_warp_with_directional_policy(false)
+    }
+
+    fn check_warp_with_directional_policy(
+        &self,
+        allow_directional: bool,
+    ) -> Result<Option<WarpTrigger>, OverworldEventCoordinateError> {
         for warp in &self.map_events.warps {
             if warp_tile_position_checked(warp).is_none() {
                 return Err(OverworldEventCoordinateError::WarpOutOfRange {
@@ -2988,10 +2993,10 @@ impl OverworldSession {
         if !is_warp_permission(collision.permission) {
             return Ok(None);
         }
-        if directional_warp_facing(collision.permission)
-            .is_some_and(|required| required != self.player.facing)
-        {
-            return Ok(None);
+        if let Some(required) = directional_warp_facing(collision.permission) {
+            if !allow_directional || required != self.player.facing {
+                return Ok(None);
+            }
         }
         self.map_events
             .warps
@@ -3033,7 +3038,7 @@ impl OverworldSession {
         let mut staged = self.clone();
         let outcome = staged.step_checked(direction, options)?;
         let warp = if matches!(outcome, StepOutcome::Moved { .. }) {
-            staged.check_warp_checked()?
+            staged.check_warp_tile_checked()?
         } else {
             None
         };
@@ -3140,7 +3145,7 @@ impl OverworldSession {
         let mut staged = self.clone();
         let outcome = staged.ledge_jump_checked(direction, options)?;
         let warp = if matches!(outcome, LedgeJumpOutcome::Jumped { .. }) {
-            staged.check_warp_checked()?
+            staged.check_warp_tile_checked()?
         } else {
             None
         };
@@ -5224,24 +5229,14 @@ mod tests {
     }
 
     #[test]
-    fn current_permission_exposes_forced_down_direction() {
-        let current_tileset = TilesetCollision {
-            metatiles: vec![MetatileCollision {
-                collision: [permissions::CURRENT_DOWN; 4],
-            }],
-        };
-        let session = OverworldSession::new(
-            map_with_blocks(2, 2, vec![0; 4]),
-            current_tileset,
-            TilePosition::new(0, 0),
-        );
-        assert_eq!(session.forced_current_direction(), Some(Direction::Down));
-
-        for (permission, direction) in [
-            (permissions::CURRENT_RIGHT, Direction::Right),
-            (permissions::CURRENT_LEFT, Direction::Left),
-            (permissions::CURRENT_UP, Direction::Up),
-        ] {
+    fn complete_water_permission_range_uses_low_two_direction_bits() {
+        let directions = [
+            Direction::Right,
+            Direction::Left,
+            Direction::Up,
+            Direction::Down,
+        ];
+        for permission in 0x30..=0x3f {
             let session = OverworldSession::new(
                 map_with_blocks(2, 2, vec![0; 4]),
                 TilesetCollision {
@@ -5251,7 +5246,11 @@ mod tests {
                 },
                 TilePosition::new(0, 0),
             );
-            assert_eq!(session.forced_current_direction(), Some(direction));
+            assert_eq!(
+                session.forced_movement_direction(),
+                Some(directions[usize::from(permission & 0x03)]),
+                "water permission {permission:#04x}",
+            );
         }
 
         let mut ice_session = OverworldSession::new(
@@ -7518,6 +7517,50 @@ mod tests {
                 warp,
             })
         );
+    }
+
+    #[test]
+    fn directional_carpet_does_not_fire_on_the_landing_step() {
+        let warp = WarpEvent {
+            index: 1,
+            x: 1,
+            y: 0,
+            target_map_constant: "TARGET_MAP".to_string(),
+            target_map: "TargetMap".to_string(),
+            target_warp_id: 1,
+        };
+        let mut session = OverworldSession::with_events(
+            map_with_blocks(1, 1, vec![0]),
+            MapEvents {
+                warps: vec![warp],
+                ..MapEvents::default()
+            },
+            TilesetCollision {
+                metatiles: vec![MetatileCollision {
+                    collision: [
+                        permissions::FLOOR,
+                        permissions::WARP_CARPET_RIGHT,
+                        permissions::FLOOR,
+                        permissions::FLOOR,
+                    ],
+                }],
+            },
+            TilePosition::new(0, 0),
+        );
+
+        let result = session
+            .step_and_check_warp_checked(
+                Direction::Right,
+                StepOptions {
+                    force_step_after_turn: true,
+                    ..StepOptions::default()
+                },
+            )
+            .expect("land on directional carpet");
+
+        assert!(matches!(result.outcome, StepOutcome::Moved { .. }));
+        assert_eq!(result.warp, None);
+        assert_eq!(session.player.tile, TilePosition::new(1, 0));
     }
 
     #[test]

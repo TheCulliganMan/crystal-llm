@@ -68,7 +68,7 @@ fn visible_title_launch_starts_with_crystal_intro_before_title() {
     let intro = runtime_shell.intro_screen.as_ref().expect("intro screen");
     assert_eq!(intro.jumptable_index, 0);
     assert_eq!(intro.scene_frame_counter, 0);
-    assert_eq!(intro.scene_name(), "unown_a");
+    assert_eq!(intro.scene_name(), "IntroScene1");
     assert_eq!(intro.palette_effect, VisibleIntroPaletteEffect::None);
     assert!(
         runtime_shell
@@ -106,10 +106,14 @@ fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
     assert!(runtime_shell.intro_screen.is_none());
     assert!(runtime_shell.title_menu.as_ref().is_some_and(|title| {
         matches!(title.phase, VisibleTitlePhase::FadeOut)
-            && title.presentation_machine.memory.get("wMusicFade").copied() == Some(fade_frames)
+            && title.presentation_machine.memory.get("wMusicFade").copied() == Some(8)
+    }));
+    assert!(runtime_shell.music_fade.as_ref().is_some_and(|fade| {
+        fade.target_music == "MUSIC_NONE" && fade.rate == 8 && !fade.fading_in
     }));
 
     for _ in 0..fade_frames {
+        advance_visible_music_fade(&mut runtime_shell, 1).expect("advance source title fade");
         tick_visible_title_screen_state(&mut runtime_shell);
     }
 
@@ -122,6 +126,389 @@ fn visible_title_timeout_fades_then_restarts_the_intro_sequence() {
             && title.scx == title.entrance_start_scx
             && title.title_timer == 0
     }));
+}
+
+#[test]
+fn visible_title_fade_completion_is_not_a_handwritten_wmusicfade_countdown() {
+    let source = include_str!("../title_menu.rs");
+    assert!(
+        !source.contains("get_mut(\"wMusicFade\")"),
+        "title flow must observe the shared ASM fade engine instead of decrementing wMusicFade itself"
+    );
+}
+
+#[test]
+fn visible_intro_scene_domain_is_not_a_handwritten_runtime_table() {
+    let source = include_str!("../title_menu.rs");
+    let renderer_source = include_str!("../bitmap_font.rs");
+    assert!(
+        !source.contains("VISIBLE_INTRO_SCENE_NAMES"),
+        "the visible intro must take its dispatch domain from the exported ASM program"
+    );
+    assert!(!source.contains("VISIBLE_INTRO_CLEAR_BG_PALS_SCENES"));
+    assert!(!source.contains("visible_intro_scene_delay_frames"));
+    assert!(!source.contains("allocation_source_line"));
+    assert!(!source.contains("\"SFX_INTRO_UNOWN_3\""));
+    for audio in [
+        "SFX_INTRO_UNOWN_1",
+        "SFX_INTRO_UNOWN_2",
+        "SFX_INTRO_SUICUNE_2",
+        "SFX_INTRO_SUICUNE_3",
+        "SFX_INTRO_SUICUNE_4",
+        "SFX_INTRO_PICHU",
+        "SFX_INTRO_WHOOSH",
+        "MUSIC_CRYSTAL_OPENING",
+    ] {
+        assert!(
+            !source.contains(&format!("\"{audio}\"")),
+            "visible intro audio id {audio} must come from exported operations"
+        );
+    }
+    assert!(!source.contains("0x20 | 0x60 | 0x90 | 0xb0"));
+    assert!(!renderer_source.contains("intro_bw_fade_color"));
+    assert!(!renderer_source.contains("intro_black_light_blue_fade_color"));
+    assert!(!renderer_source.contains("intro_black_blue_fade_color"));
+    assert!(!renderer_source.contains("intro_fast_fade_color"));
+    assert!(!renderer_source.contains("intro_slow_fade_color"));
+    assert!(!source.contains("palette_set_idx"));
+    assert!(!renderer_source.contains("palette_set_idx"));
+    assert!(!source.contains("intro clear bg palettes"));
+    assert!(!source.contains("intro.global_anim_x_offset = 0xf0"));
+    assert!(!source.contains("intro.scroll_y = 144"));
+    assert!(!source.contains("intro.scroll_y = (-5_i16"));
+    assert!(!source.contains("if intro.scroll_y != 0"));
+    assert!(!source.contains("if intro.scroll_x != 0x60"));
+    assert!(!source.contains("if frame == 0x20"));
+    assert!(!source.contains("if frame == 0x60"));
+    assert!(!renderer_source.contains("draw_intro_grass_rustle"));
+    assert!(!renderer_source.contains("intro.jumptable_index == 9"));
+    assert!(source.contains("RuntimeIntroPresentationParameters::from_program"));
+}
+
+#[test]
+fn visible_intro_ordinary_audio_schedule_comes_from_exported_scene_operations() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    let program = runtime_shell.runtime.title_presentation_program();
+    for (scene, dispatch_tick, frame, audio, kind) in [
+        (1, 97, 0x60, "SFX_INTRO_UNOWN_1", "sound_effect"),
+        (5, 33, 0x20, "SFX_INTRO_UNOWN_2", "sound_effect"),
+        (5, 97, 0x60, "SFX_INTRO_UNOWN_1", "sound_effect"),
+        (7, 65, 0x40, "SFX_INTRO_SUICUNE_3", "sound_effect"),
+        (7, 95, 0x5e, "SFX_INTRO_SUICUNE_2", "sound_effect"),
+        (9, 65, 0x40, "SFX_INTRO_PICHU", "sound_effect"),
+        (9, 33, 0x20, "SFX_INTRO_PICHU", "sound_effect"),
+        (12, 1, 0x00, "MUSIC_CRYSTAL_OPENING", "music"),
+        (13, 97, 0x60, "SFX_INTRO_SUICUNE_4", "sound_effect"),
+        (27, 121, 0x08, "SFX_INTRO_WHOOSH", "sound_effect"),
+    ] {
+        intro.jumptable_index = scene;
+        intro.scene_dispatch_tick = dispatch_tick - 1;
+        intro.scene_frame_counter = frame;
+        assert_eq!(
+            visible_intro_audio_operations(&intro, program).expect("source audio operations"),
+            vec![(audio.to_string(), kind.to_string())]
+        );
+    }
+    intro.jumptable_index = 7;
+    intro.scene_dispatch_tick = 65;
+    intro.scene_frame_counter = 0x41;
+    assert!(
+        visible_intro_audio_operations(&intro, program)
+            .expect("non-audio scene tick")
+            .is_empty()
+    );
+}
+
+#[test]
+fn visible_intro_palette_and_scroll_effects_come_from_exported_operations() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    let program = runtime_shell.runtime.title_presentation_program();
+
+    intro.jumptable_index = 1;
+    assert_eq!(
+        visible_intro_unown_fade_effect(&intro, program, 0, 0x1f)
+            .expect("source Unown fade"),
+        VisibleIntroPaletteEffect::UnownFade {
+            palette_idx: 0,
+            colors: [[248, 248, 248], [0, 120, 248], [0, 0, 248]],
+        }
+    );
+    assert_eq!(
+        visible_intro_unown_fade_effect(&intro, program, 0, 0x3f)
+            .expect("source folded Unown fade"),
+        VisibleIntroPaletteEffect::UnownFade {
+            palette_idx: 0,
+            colors: [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+        }
+    );
+
+    intro.jumptable_index = 26;
+    assert_eq!(
+        visible_intro_crystal_word_fade_effect(&intro, program, 0, 15)
+            .expect("source Crystal word fade"),
+        VisibleIntroPaletteEffect::CrystalWordFade {
+            fade_level: 0,
+            colors: [[72, 72, 72], [128, 128, 128]],
+        }
+    );
+
+    intro.jumptable_index = 23;
+    assert_eq!(
+        visible_intro_broadcast_palette_effect(&intro, program, 0)
+            .expect("source palette broadcast"),
+        Some(VisibleIntroPaletteEffect::Scene24Fade {
+            colors: [
+                [192, 96, 72],
+                [248, 248, 248],
+                [96, 0, 248],
+                [0, 0, 0],
+            ],
+        })
+    );
+    assert_eq!(
+        visible_intro_broadcast_palette_effect(&intro, program, 1)
+            .expect("source palette cadence"),
+        None
+    );
+    assert_eq!(
+        visible_intro_broadcast_palette_effect(&intro, program, 28)
+            .expect("source final palette broadcast"),
+        Some(VisibleIntroPaletteEffect::Scene24Fade {
+            colors: [[248, 248, 248]; 4],
+        })
+    );
+
+    intro.jumptable_index = 19;
+    assert_eq!(
+        visible_intro_indexed_palette_effect(&intro, program, 0, 7)
+            .expect("source first indexed palette"),
+        VisibleIntroPaletteEffect::AppearUnown {
+            palette_resource: "gfx/intro/unown_1.pal".to_string(),
+            revealed: 7,
+        }
+    );
+    assert_eq!(
+        visible_intro_indexed_palette_effect(&intro, program, 1, 10)
+            .expect("source alternate indexed palette"),
+        VisibleIntroPaletteEffect::AppearUnown {
+            palette_resource: "gfx/intro/unown_2.pal".to_string(),
+            revealed: 2,
+        }
+    );
+
+    intro.jumptable_index = 27;
+    assert_eq!(
+        visible_intro_bg_palette_clear_color(&intro, program, 25)
+            .expect("pre-clear source boundary"),
+        None
+    );
+    assert_eq!(
+        visible_intro_bg_palette_clear_color(&intro, program, 24)
+            .expect("exact clear source boundary"),
+        Some([248, 248, 248])
+    );
+    assert_eq!(
+        visible_intro_bg_palette_clear_color(&intro, program, 1)
+            .expect("persistent clear source boundary"),
+        Some([248, 248, 248])
+    );
+
+    intro.jumptable_index = 15;
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCY", 0, 144)
+            .expect("vertical reveal source step"),
+        (false, 152)
+    );
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCY", 127, 0)
+            .expect("vertical reveal source stop"),
+        (false, 0)
+    );
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCY", 128, 24)
+            .expect("vertical reveal source completion"),
+        (true, 24)
+    );
+
+    intro.jumptable_index = 17;
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCX", 0, 0)
+            .expect("horizontal reveal source step"),
+        (false, 8)
+    );
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCX", 95, 96)
+            .expect("horizontal reveal source stop"),
+        (false, 96)
+    );
+    assert_eq!(
+        visible_intro_linear_scroll_step(&intro, program, "hSCX", 96, 40)
+            .expect("horizontal reveal source completion"),
+        (true, 40)
+    );
+
+    intro.jumptable_index = 14;
+    assert_eq!(
+        visible_intro_source_byte_write(&intro, program, "hSCX")
+            .expect("Scene 15 source horizontal origin"),
+        0
+    );
+    assert_eq!(
+        visible_intro_source_byte_write(&intro, program, "hSCY")
+            .expect("Scene 15 source vertical origin"),
+        144
+    );
+    intro.jumptable_index = 18;
+    assert_eq!(
+        visible_intro_source_byte_write(&intro, program, "hSCY")
+            .expect("Scene 19 signed source vertical origin"),
+        216
+    );
+
+    intro.jumptable_index = 13;
+    assert_eq!(
+        visible_intro_suicune_run_rule(&intro, program).expect("source Suicune run rule"),
+        VisibleIntroSuicuneRunRule {
+            scroll_delta: 10,
+            end_frame: 128,
+            jump_frame: 96,
+            run_frame: 64,
+            jump_timer: 1,
+            disappear_below: 136,
+            jump_offset_delta: 8,
+            run_offset_delta: 2,
+        }
+    );
+
+    intro.jumptable_index = 2;
+    intro.ly_overrides.fill(99);
+    visible_intro_reset_ly_overrides(&mut intro, program).expect("source LY reset");
+    assert!(intro.ly_overrides.iter().all(|value| *value == 0));
+    intro.jumptable_index = 3;
+    visible_intro_perspective_scroll(&mut intro, program, 1)
+        .expect("odd-frame source perspective scroll");
+    assert!(intro.ly_overrides[..95].iter().all(|value| *value == 1));
+    assert!(intro.ly_overrides[95..].iter().all(|value| *value == 2));
+    assert_eq!(intro.scroll_x, 1);
+    visible_intro_perspective_scroll(&mut intro, program, 2)
+        .expect("even-frame source perspective scroll");
+    assert!(intro.ly_overrides[..95].iter().all(|value| *value == 1));
+    assert!(intro.ly_overrides[95..].iter().all(|value| *value == 4));
+    assert_eq!(
+        visible_intro_perspective_completion_frame(&intro, program)
+            .expect("source perspective completion"),
+        128
+    );
+
+    intro.jumptable_index = 7;
+    assert_eq!(
+        visible_intro_perspective_motion_rule(&intro, program)
+            .expect("source perspective motion rule"),
+        VisibleIntroPerspectiveMotionRule {
+            motion_start_frame: 64,
+            finish_offset: 0,
+            motion_delta: 8,
+        }
+    );
+
+    intro.jumptable_index = 19;
+    assert_eq!(
+        visible_intro_unown_reveal_rule(&intro, program).expect("source Unown reveal rule"),
+        VisibleIntroUnownRevealRule {
+            end_frame: 152,
+            reveal_end_frame: 88,
+            reveal_start_frame: 64,
+            scroll_end_frame: 40,
+            scroll_delta: 1,
+            phase_subtract: 24,
+            cadence_mask: 3,
+            cadence_operand: 3,
+            timer_mask: 28,
+            timer_shift: 2,
+            palette_argument: 0,
+        }
+    );
+
+    intro.jumptable_index = 8;
+    assert_eq!(
+        visible_intro_attrmap_fills(&intro, program).expect("source visible attrmap fills"),
+        vec![
+            VisibleIntroAttrmapFill {
+                start: 0,
+                end: 240,
+                value: 1,
+            },
+            VisibleIntroAttrmapFill {
+                start: 240,
+                end: 300,
+                value: 2,
+            },
+            VisibleIntroAttrmapFill {
+                start: 300,
+                end: 360,
+                value: 3,
+            },
+        ]
+    );
+    intro.jumptable_index = 9;
+    for (frame, resource) in [
+        (0, "gfx/intro/grass1.2bpp"),
+        (4, "gfx/intro/grass2.2bpp"),
+        (8, "gfx/intro/grass3.2bpp"),
+        (12, "gfx/intro/grass2.2bpp"),
+    ] {
+        assert_eq!(
+            visible_intro_indexed_tile_override(&intro, program, frame)
+                .expect("source indexed grass request"),
+            Some(VisibleIntroTileOverride {
+                tile_id_start: 9,
+                tile_count: 4,
+                target_vram_bank: 0,
+                resource: resource.to_string(),
+            })
+        );
+    }
+    assert_eq!(
+        visible_intro_indexed_tile_override(&intro, program, 36)
+            .expect("source grass cutoff"),
+        None
+    );
+}
+
+#[test]
+fn visible_intro_unown_audio_schedule_comes_from_the_exported_scene_operation() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    intro.jumptable_index = 11;
+    let program = runtime_shell.runtime.title_presentation_program();
+    for (frame, audio) in [
+        (0x00, "SFX_INTRO_UNOWN_3"),
+        (0x20, "SFX_INTRO_UNOWN_2"),
+        (0x40, "SFX_INTRO_UNOWN_1"),
+        (0x60, "SFX_INTRO_UNOWN_2"),
+        (0x80, "SFX_INTRO_UNOWN_3"),
+        (0x90, "SFX_INTRO_UNOWN_2"),
+        (0xa0, "SFX_INTRO_UNOWN_1"),
+        (0xb0, "SFX_INTRO_UNOWN_2"),
+    ] {
+        assert_eq!(
+            visible_intro_scheduled_audio(
+                &intro,
+                program,
+                "wIntroSceneFrameCounter",
+                frame,
+            )
+            .expect("source audio schedule"),
+            Some(audio.to_string())
+        );
+    }
+    assert_eq!(
+        visible_intro_scheduled_audio(&intro, program, "wIntroSceneFrameCounter", 1)
+            .expect("source audio schedule"),
+        None
+    );
 }
 
 #[test]

@@ -9,6 +9,72 @@ fn intro_trigonometry_matches_the_asm_fixed_point_wave() {
     // point math at this intermediate pulse position.
     assert_eq!(visible_intro_sine(0x08, 0x18), 16);
 }
+
+#[test]
+fn intro_scanline_scroll_moves_only_the_background_rows() {
+    const BACKING_WIDTH: usize = 32 * SOURCE_TILE_SIZE;
+    let mut intro = VisibleIntroScreen::new();
+    intro.lcdc_pointer = 67;
+    intro.ly_overrides[0] = 1;
+    let mut target = vec![0_u8; BACKING_WIDTH * BACKING_WIDTH * 4];
+    for x in 0..BACKING_WIDTH {
+        target[x * 4] = x as u8;
+        target[(BACKING_WIDTH + x) * 4] = x as u8;
+    }
+    apply_visible_intro_scanline_scroll(&intro, &mut target)
+        .expect("apply source scanline scroll");
+    assert_eq!(target[0], 1);
+    assert_eq!(target[(BACKING_WIDTH - 1) * 4], 0);
+    assert_eq!(target[BACKING_WIDTH * 4], 0);
+}
+
+#[test]
+fn intro_grass_vram_request_changes_tiles_from_exported_resource_table() {
+    let runtime_shell = core_modular_title_shell_for_test();
+    let program = runtime_shell.runtime.title_presentation_program();
+    let mut intro = runtime_shell.intro_screen.clone().expect("intro screen");
+    intro.jumptable_index = 8;
+    intro.attrmap_palette_overrides =
+        visible_intro_attrmap_fills(&intro, program).expect("source attrmap fills");
+    intro.jumptable_index = 9;
+    apply_visible_intro_background_binding(&mut intro, program).expect("scene 10 background");
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+
+    intro.tile_override = visible_intro_indexed_tile_override(&intro, program, 0)
+        .expect("first grass request");
+    let first = intro_scene_frame_for_art(
+        &mut rendered_art,
+        &asset_root,
+        &intro,
+        &mut images,
+    )
+    .expect("render first grass frame");
+    let first_data = images
+        .get(&first.handle)
+        .expect("first grass image")
+        .data
+        .clone();
+
+    intro.tile_override = visible_intro_indexed_tile_override(&intro, program, 8)
+        .expect("third grass request");
+    let third = intro_scene_frame_for_art(
+        &mut rendered_art,
+        &asset_root,
+        &intro,
+        &mut images,
+    )
+    .expect("render third grass frame");
+    let third_data = &images.get(&third.handle).expect("third grass image").data;
+    assert_ne!(first_data, *third_data);
+}
+
 #[test]
 fn intro_framesets_preserve_asm_durations() {
     let runtime_shell = core_modular_title_shell_for_test();
@@ -244,7 +310,8 @@ fn intro_sprite_initial_registers_are_driven_by_the_presentation_program() {
     sprite_program["initial_memory"]["var2"] = serde_json::json!(9);
 
     let mut intro = VisibleIntroScreen::new();
-    spawn_visible_intro_sprite_program_group(&mut intro, bundle, &program, 673)
+    intro.jumptable_index = 12;
+    spawn_visible_intro_sprite_program_group(&mut intro, bundle, &program)
         .expect("spawn mutated pack-owned sprite program");
 
     assert_eq!((intro.sprites[0].x, intro.sprites[0].y), (77, 66));
@@ -262,12 +329,14 @@ fn intro_sprite_graphics_are_driven_by_the_allocation_vram_binding() {
     let program = &runtime_shell.runtime.data().runtime_title_screen.program;
 
     let mut jump_scene = VisibleIntroScreen::new();
-    spawn_visible_intro_sprite_program_group(&mut jump_scene, bundle, program, 787)
+    jump_scene.jumptable_index = 14;
+    spawn_visible_intro_sprite_program_group(&mut jump_scene, bundle, program)
         .expect("spawn Scene15 grass streak");
-    assert_eq!(jump_scene.sprites[0].gfx_name, "grass4");
+    assert_eq!(jump_scene.sprites[1].gfx_name, "grass4");
 
     let mut back_scene = VisibleIntroScreen::new();
-    spawn_visible_intro_sprite_program_group(&mut back_scene, bundle, program, 936)
+    back_scene.jumptable_index = 18;
+    spawn_visible_intro_sprite_program_group(&mut back_scene, bundle, program)
         .expect("spawn Scene19 grass streak");
     assert_eq!(back_scene.sprites[0].gfx_name, "grass4");
 
@@ -290,10 +359,11 @@ fn intro_sprite_graphics_are_driven_by_the_allocation_vram_binding() {
         serde_json::json!("gfx/intro/pulse.2bpp.lz");
     binding["graphic_binding"]["tile_base"] = serde_json::json!(7);
     let mut source_probe = VisibleIntroScreen::new();
-    spawn_visible_intro_sprite_program_group(&mut source_probe, bundle, &mutated_program, 787)
+    source_probe.jumptable_index = 14;
+    spawn_visible_intro_sprite_program_group(&mut source_probe, bundle, &mutated_program)
         .expect("spawn mutated source-bound sprite");
-    assert_eq!(source_probe.sprites[0].gfx_name, "pulse");
-    assert_eq!(source_probe.sprites[0].gfx_tile_base, 7);
+    assert_eq!(source_probe.sprites[1].gfx_name, "pulse");
+    assert_eq!(source_probe.sprites[1].gfx_tile_base, 7);
 }
 
 #[test]
@@ -1244,7 +1314,7 @@ fn intro_scene_renderer_composites_real_oam_sprites_from_bundle() {
         .clone();
 
     let mut with_sprite = background_only.clone();
-    spawn_visible_intro_sprite_program_group(&mut with_sprite, &sprite_bundle, &program, 393)
+    spawn_visible_intro_sprite_program_group(&mut with_sprite, &sprite_bundle, &program)
         .expect("spawn source-bound Suicune intro sprite");
     with_sprite.sprites[0].x = 10 * 8;
     with_sprite.sprites[0].y = 9 * 8;
@@ -1330,7 +1400,7 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
     faded.jumptable_index = 1;
     faded.palette_effect = VisibleIntroPaletteEffect::UnownFade {
         palette_idx: 0,
-        timer: 0x1f,
+        colors: [[248, 248, 248], [0, 120, 248], [0, 0, 248]],
     };
     let faded_frame =
         intro_scene_frame_for_art(&mut rendered_art, &asset_root, &faded, &mut images)
@@ -1362,7 +1432,7 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
 
     let mut appear = base.clone();
     appear.palette_effect = VisibleIntroPaletteEffect::AppearUnown {
-        palette_set_idx: 0,
+        palette_resource: "gfx/intro/unown_1.pal".to_string(),
         revealed: 3,
     };
     let unrevealed_suicune =
@@ -1383,7 +1453,9 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
     );
 
     let mut cleared = base.clone();
-    cleared.palette_effect = VisibleIntroPaletteEffect::ClearBg;
+    cleared.palette_effect = VisibleIntroPaletteEffect::ClearBg {
+        color: [248, 248, 248],
+    };
     let cleared_frame =
         intro_scene_frame_for_art(&mut rendered_art, &asset_root, &cleared, &mut images)
             .expect("render cleared intro frame");
@@ -1395,8 +1467,8 @@ fn intro_scene_renderer_applies_asm_palette_effects() {
         cleared_data
             .chunks_exact(4)
             .filter(|pixel| pixel[3] != 0)
-            .all(|pixel| pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0),
-        "clearBgPalettes should render all nontransparent BG pixels black"
+            .all(|pixel| pixel[0] == 248 && pixel[1] == 248 && pixel[2] == 248),
+        "ClearBGPalettes should render every nontransparent pixel with its exported fill color"
     );
 }
 
@@ -1410,7 +1482,7 @@ fn intro_unown_fade_does_not_recolor_obj_pulses() {
     let mut intro = VisibleIntroScreen::new();
     intro.palette_effect = VisibleIntroPaletteEffect::UnownFade {
         palette_idx: 0,
-        timer: 0x1f,
+        colors: [[248, 248, 248], [0, 120, 248], [0, 0, 248]],
     };
 
     let pulse_palette = visible_intro_effective_palette_cached(

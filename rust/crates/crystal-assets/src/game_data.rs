@@ -989,6 +989,40 @@ impl GameDataSet {
         Ok(false)
     }
 
+    fn queue_whirlpool_forced_movement_script(
+        &self,
+        state: &mut GameState,
+        session: &OverworldSession,
+    ) -> Result<bool> {
+        if Self::game_state_blocks_overworld_input(state) {
+            return Ok(false);
+        }
+        let on_whirlpool = sample_collision(&session.map, &session.tileset, session.player.tile)
+            .is_some_and(|sample| {
+                matches!(
+                    sample.permission,
+                    permissions::WHIRLPOOL | permissions::WHIRLPOOL_2C
+                )
+            });
+        if !on_whirlpool {
+            return Ok(false);
+        }
+        let global = self
+            .global_scripts
+            .as_ref()
+            .context("Whirlpool CheckTile requires compiled global scripts")?;
+        anyhow::ensure!(
+            global.scripts.contains_key("Script_ForcedMovement"),
+            "Whirlpool CheckTile requires exported global root Script_ForcedMovement"
+        );
+        state.script_runtime.next_script = Some(ScriptLocation {
+            origin_map_name: session.map.name.clone(),
+            script: "Script_ForcedMovement".to_string(),
+        });
+        state.script_runtime.script_ended = None;
+        Ok(true)
+    }
+
     /// Crystal creates a breeding egg from the mother's pre-evolution, not
     /// from the currently evolved daycare species.  The core step hook does
     /// not own the compiled evolution/learnset catalogs, so normalize the
@@ -12007,6 +12041,11 @@ impl GameDataSet {
         // do not bypass staging while phone, encounter, or object RNG may run.
         let strength_boulder_landing =
             self.queue_strength_boulder_landing_script(&mut staged_state, &staged_session)?;
+        let whirlpool_forced_movement = if strength_boulder_landing {
+            false
+        } else {
+            self.queue_whirlpool_forced_movement_script(&mut staged_state, &staged_session)?
+        };
         let has_autonomous_objects = staged_session.objects.iter().any(|object| {
             matches!(
                 object.spritemovedata.as_str(),
@@ -12021,6 +12060,7 @@ impl GameDataSet {
             )
         });
         let input_locked = strength_boulder_landing
+            || whirlpool_forced_movement
             || Self::game_state_blocks_overworld_input(&staged_state);
         let bug_contest_blocks_phone = staged_state
             .flags
@@ -12221,8 +12261,9 @@ impl GameDataSet {
             staged_session.frame += 1;
         } else if let Some(direction) = direction {
             let movement_mode_before = staged_session.player.mode;
-            let direct_forced_step = tile_forced_permission
-                .is_some_and(|permission| matches!(permission & 0xf0, 0x30 | 0x40 | 0x50));
+            let direct_forced_step = tile_forced_permission.is_some_and(|permission| {
+                !matches!(permission, permissions::ICE | permissions::ICE_2B)
+            });
             let blocked_connection_edge = if direct_forced_step {
                 None
             } else {
@@ -12388,12 +12429,21 @@ impl GameDataSet {
             // still run the warp check after the turn. Checking only the
             // destination of a successful step strands every such doorway.
             if warp_trigger.is_none() {
-                warp_trigger = staged_session.check_warp_checked().with_context(|| {
-                    format!("check current warp on {}", staged_session.map.name)
-                })?;
+                warp_trigger = if moved {
+                    staged_session.check_warp_tile_checked()
+                } else if matches!(movement, Some(StepOutcome::Turned { .. })) {
+                    // `.CheckTurning` returns before `.CheckWarp`. A
+                    // directional carpet therefore needs another matching
+                    // input after the player has finished turning.
+                    Ok(None)
+                } else {
+                    staged_session.check_warp_checked()
+                }
+                .with_context(|| format!("check current warp on {}", staged_session.map.name))?;
             }
             if !moved {
                 if let Some(trigger) = warp_trigger.take() {
+                    let map_setup = player_event_warp_map_setup(trigger.permission);
                     let transition =
                         self.resolve_warp_transition_with_state(&mut staged_state, &trigger)?;
                     self.apply_dig_warp_memory_for_transition(&mut staged_state, &transition)?;
@@ -12405,7 +12455,7 @@ impl GameDataSet {
                         &destination.map_name,
                         destination.tile,
                         mode,
-                        "MAPSETUP_WARP",
+                        map_setup,
                         SpawnMemoryUpdate::Preserve,
                         music_ids,
                     )?;
@@ -12457,6 +12507,7 @@ impl GameDataSet {
                         )?;
                         connection = Some(transition);
                     } else if let Some(trigger) = warp_trigger {
+                        let map_setup = player_event_warp_map_setup(trigger.permission);
                         let transition =
                             self.resolve_warp_transition_with_state(&mut staged_state, &trigger)?;
                         self.apply_dig_warp_memory_for_transition(&mut staged_state, &transition)?;
@@ -12468,7 +12519,7 @@ impl GameDataSet {
                             &destination.map_name,
                             destination.tile,
                             mode,
-                            "MAPSETUP_WARP",
+                            map_setup,
                             SpawnMemoryUpdate::Preserve,
                             music_ids,
                         )?;
@@ -22543,6 +22594,16 @@ impl GameDataSet {
             }
         }
         Ok(names)
+    }
+}
+
+/// `CheckTileEvent` dispatches pits through `FallIntoMapScript`; every other
+/// player-triggered warp uses `WarpToNewMapScript`.
+fn player_event_warp_map_setup(permission: u8) -> &'static str {
+    if matches!(permission, permissions::PIT | permissions::PIT_68) {
+        "MAPSETUP_FALL"
+    } else {
+        "MAPSETUP_DOOR"
     }
 }
 

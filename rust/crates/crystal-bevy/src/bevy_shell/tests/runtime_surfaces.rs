@@ -451,6 +451,50 @@ fn retained_animations_consume_every_bounded_catch_up_tick() {
 }
 
 #[test]
+fn map_name_sign_show_boundary_invalidates_the_idle_renderer() {
+    let mut sign = Some(VisibleMapNameSign {
+        landmark: "TEST".to_string(),
+        label: "TEST".to_string(),
+        // PlaceMapNameSign's old value 59 initializes the text and exposes
+        // the window after decrementing the WRAM timer to 58.
+        frames_remaining: 59,
+    });
+    assert!(
+        advance_visible_map_name_sign(&mut sign, 1),
+        "the 59-to-58 window-show boundary must invalidate the idle renderer"
+    );
+    assert_eq!(
+        sign
+            .as_ref()
+            .expect("map sign becomes visible")
+            .frames_remaining,
+        58
+    );
+
+    assert!(
+        !advance_visible_map_name_sign(&mut sign, 1),
+        "an already-visible countdown frame does not alter the retained surface"
+    );
+
+    sign.as_mut().expect("map sign remains retained").frames_remaining = 1;
+    assert!(
+        !advance_visible_map_name_sign(&mut sign, 1),
+        "the old-1 pass leaves the window visible with timer zero"
+    );
+    assert_eq!(
+        sign.as_ref()
+            .expect("timer zero still owns the final visible frame")
+            .frames_remaining,
+        0
+    );
+    assert!(
+        advance_visible_map_name_sign(&mut sign, 1),
+        "the following old-zero pass hides the window"
+    );
+    assert!(sign.is_none());
+}
+
+#[test]
 fn modal_early_return_does_not_replay_an_already_consumed_vblank_next_update() {
     let mut runtime_shell = core_modular_title_shell_for_test();
     runtime_shell.intro_screen = None;

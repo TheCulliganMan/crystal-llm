@@ -322,7 +322,10 @@ fn runtime_phase_machine_executes_exported_title_branches_and_memory() {
     let fade = machine
         .run_from_label(&program, "TitleScreenMain", 0)
         .expect("zero timer branch should execute");
-    assert_eq!(machine.memory["wMusicFade"], 64);
+    assert_eq!(
+        machine.memory["wMusicFade"], 8,
+        "fade_audio must write the source wMusicFade rate byte, not its derived total duration"
+    );
     assert!(
         fade.effects
             .iter()
@@ -415,6 +418,161 @@ fn runtime_phase_machine_executes_title_crystal_oam_motion() {
 }
 
 #[test]
+fn intro_presentation_parameters_are_read_from_exported_scene_dispatch_labels() {
+    let mut program = RuntimePresentationProgram {
+        subprograms: vec![RuntimePresentationSubprogram {
+            id: "crystal_intro".to_string(),
+            loop_: serde_json::json!({
+                "scene_dispatch": {
+                    "entries": ["IntroScene1", "IntroScene2", "IntroScene3"],
+                    "entry_offsets": {
+                        "IntroScene1": 0,
+                        "IntroScene2": 2,
+                        "IntroScene3": 5
+                    },
+                    "completion_wait_frames": [0, 0, 0]
+                },
+                "frame_wait": {
+                    "source_span": presentation_span()
+                }
+            }),
+            phases: vec![RuntimePresentationPhase {
+                id: "scene_dispatch".to_string(),
+                source_span: presentation_span(),
+                labels: Default::default(),
+                operations: vec![
+                    RuntimePresentationOperation {
+                        op: "dispatch_table".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("table".to_string(), serde_json::json!("IntroScenes")),
+                            ("entries".to_string(), serde_json::json!([
+                                "IntroScene1",
+                                "IntroScene2",
+                                "IntroScene3"
+                            ])),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    RuntimePresentationOperation {
+                        op: "play_audio".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("audio".to_string(), serde_json::json!("SFX_INTRO_UNOWN_1")),
+                            ("dispatcher_entry".to_string(), serde_json::json!(0)),
+                            ("dispatch_tick".to_string(), serde_json::json!(3)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    RuntimePresentationOperation {
+                        op: "sprite_init_group".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("dispatcher_entry".to_string(), serde_json::json!(1)),
+                            ("dispatch_tick".to_string(), serde_json::json!(3)),
+                            (
+                                "instances".to_string(),
+                                serde_json::json!(["sprite:engine/movie/intro.asm:10:3:20"]),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    RuntimePresentationOperation::default(),
+                    RuntimePresentationOperation {
+                        op: "scheduled_audio".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("clock".to_string(), serde_json::json!("wIntroSceneFrameCounter")),
+                            ("sentinel".to_string(), serde_json::json!(255)),
+                            (
+                                "entries".to_string(),
+                                serde_json::json!([{"frame": 0, "audio": "SFX_INTRO_UNOWN_1"}]),
+                            ),
+                            (
+                                "on_match".to_string(),
+                                serde_json::json!({
+                                    "stop_sfx_channels": [5, 6, 7, 8],
+                                    "play_entry": true
+                                }),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    RuntimePresentationOperation::default(),
+                ],
+            }],
+            audio: vec![RuntimePresentationAudio {
+                id: "SFX_INTRO_UNOWN_1".to_string(),
+                kind: "sound_effect".to_string(),
+                source_span: presentation_span(),
+            }],
+            ..RuntimePresentationSubprogram::default()
+        }],
+        ..RuntimePresentationProgram::default()
+    };
+
+    assert_eq!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect("source-derived intro parameters should resolve")
+            ,
+        RuntimeIntroPresentationParameters {
+            scene_labels: ["IntroScene1", "IntroScene2", "IntroScene3"]
+                .map(str::to_string)
+                .to_vec(),
+            scene_operation_offsets: vec![0, 2, 5],
+            completion_wait_frames: vec![0, 0, 0],
+        }
+    );
+    program.subprograms[0].loop_["scene_dispatch"]["completion_wait_frames"][0] =
+        serde_json::json!(1);
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("invented completion wait must fail closed")
+            .to_string()
+            .contains("completion waits disagree with source operations")
+    );
+    program.subprograms[0].loop_["scene_dispatch"]["completion_wait_frames"][0] =
+        serde_json::json!(0);
+    program.subprograms[0].phases[0].operations[2]
+        .fields
+        .insert("dispatcher_entry".to_string(), serde_json::json!(2));
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("sprite activation moved outside its source scene must fail closed")
+            .to_string()
+            .contains("sprite activation disagrees with its scene operation range")
+    );
+    program.subprograms[0].phases[0].operations[2]
+        .fields
+        .insert("dispatcher_entry".to_string(), serde_json::json!(1));
+    program.subprograms[0].phases[0].operations[4]
+        .fields
+        .insert("sentinel".to_string(), serde_json::json!(0));
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("malformed scheduled audio must fail closed")
+            .to_string()
+            .contains("scheduled audio has an invalid clock or sentinel")
+    );
+    program.subprograms[0].phases[0].operations[4]
+        .fields
+        .insert("sentinel".to_string(), serde_json::json!(255));
+    program.subprograms[0].phases[0].operations[1]
+        .fields
+        .insert("dispatcher_entry".to_string(), serde_json::json!(2));
+    assert!(
+        RuntimeIntroPresentationParameters::from_program(&program)
+            .expect_err("audio operation moved outside its source scene must fail closed")
+            .to_string()
+            .contains("audio operation disagrees with its scene operation range")
+    );
+}
+
+#[test]
 fn title_presentation_parameters_are_read_from_certified_operations() {
     let operation =
         |op: &str, target: &str, field: &str, value: u16| RuntimePresentationOperation {
@@ -493,7 +651,20 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
                     operation("write_memory_byte", "hSCX", "value", 112),
                     operation("subtract_memory_byte", "hSCX", "delta", 4),
                     operation("write_memory_word", "wTitleScreenTimer", "value", 4_416),
-                    operation("fade_audio", "", "frames", 64),
+                    RuntimePresentationOperation {
+                        op: "fade_audio".to_string(),
+                        source_span: presentation_span(),
+                        fields: [
+                            ("audio".to_string(), serde_json::json!("MUSIC_NONE")),
+                            ("frames".to_string(), serde_json::json!(64)),
+                            (
+                                "fade_register".to_string(),
+                                serde_json::json!({ "target": "wMusicFade", "value": 8 }),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
                     input_mask(".delete_save_data@TitleScreenMain", 0x46),
                     input_mask(".check_start@TitleScreenMain", 0x86),
                     input_mask(".reset_clock@TitleScreenMain", 0x60),
@@ -514,6 +685,9 @@ fn title_presentation_parameters_are_read_from_certified_operations() {
             entrance_scroll_step: 4,
             timeout_frames: 4_416,
             timeout_fade_frames: 64,
+            timeout_fade_rate: 8,
+            timeout_fade_register: "wMusicFade".to_string(),
+            timeout_fade_audio: "MUSIC_NONE".to_string(),
             crystal_oam_target: "wShadowOAMSprite00YCoord".to_string(),
             crystal_initial_y: 222,
             suicune_frames: vec![128, 136, 0, 8],

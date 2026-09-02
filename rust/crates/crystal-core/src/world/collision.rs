@@ -525,34 +525,11 @@ pub fn is_permission_passable(
     let attributes = describe_collision(permission);
     match traversal_state {
         PlayerTraversalState::Walk => attributes.terrain == Terrain::Land,
-        PlayerTraversalState::Surf => {
-            // Crystal permits a surfer to travel down a waterfall without
-            // using the field move. Upward and sideways entry still require
-            // the dedicated Waterfall path.
-            if facing == Direction::Down
-                && matches!(
-                    permission,
-                    permissions::WATERFALL
-                        | permissions::WATERFALL_RIGHT
-                        | permissions::WATERFALL_LEFT
-                        | permissions::WATERFALL_UP
-                        | permissions::CURRENT_DOWN
-                )
-            {
-                return attributes.terrain != Terrain::Wall;
-            }
-            attributes.terrain != Terrain::Wall
-                && permission != permissions::WHIRLPOOL
-                && permission != permissions::WHIRLPOOL_2C
-                && !matches!(
-                    permission,
-                    permissions::WATERFALL
-                        | permissions::WATERFALL_RIGHT
-                        | permissions::WATERFALL_LEFT
-                        | permissions::WATERFALL_UP
-                        | permissions::CURRENT_DOWN
-                )
-        }
+        // CheckSurfPerms consults CollisionPermissionTable after applying
+        // only the independent directional wall mask. Every `$30..$3f`
+        // current is WATER_TILE from every approach; CheckTile forces its
+        // low-two-bit direction on the following overworld pass.
+        PlayerTraversalState::Surf => attributes.terrain != Terrain::Wall,
     }
 }
 
@@ -667,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn passability_respects_walk_surf_wall_and_whirlpool_rules() {
+    fn passability_respects_walk_and_complete_surf_water_rules() {
         assert!(is_permission_passable(
             permissions::FLOOR,
             Direction::Down,
@@ -683,9 +660,14 @@ mod tests {
             Direction::Down,
             PlayerTraversalState::Surf
         ));
-        assert!(!is_permission_passable(
+        assert!(is_permission_passable(
             permissions::WHIRLPOOL,
             Direction::Down,
+            PlayerTraversalState::Surf
+        ));
+        assert!(is_permission_passable(
+            permissions::WHIRLPOOL_2C,
+            Direction::Left,
             PlayerTraversalState::Surf
         ));
         assert!(is_permission_passable(
@@ -698,6 +680,23 @@ mod tests {
             Direction::Right,
             PlayerTraversalState::Walk
         ));
+    }
+
+    #[test]
+    fn every_current_permission_is_surfable_from_every_direction_before_forcing_motion() {
+        for permission in 0x30..=0x3f {
+            for direction in [
+                Direction::Down,
+                Direction::Up,
+                Direction::Left,
+                Direction::Right,
+            ] {
+                assert!(
+                    is_permission_passable(permission, direction, PlayerTraversalState::Surf),
+                    "current permission {permission:#04x} must admit {direction:?} before CheckTile forces its low-two-bit direction"
+                );
+            }
+        }
     }
 
     #[test]

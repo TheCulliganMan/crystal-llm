@@ -189,6 +189,154 @@ fn same_map_redraw_retains_only_the_player_not_grass_rustle_frames() {
 }
 
 #[test]
+fn ledge_grass_rustle_tracks_the_players_grounded_base_sprite_position() {
+    let player_x = 120.0;
+    let player_ground_y = 80.0;
+    let player_height = 64.0;
+    let rustle_size = Vec2::new(72.0, 36.0);
+
+    assert_eq!(
+        grass_rustle_position_from_player_ground(
+            player_x,
+            player_ground_y,
+            player_height,
+            rustle_size,
+        ),
+        (120.0, 62.0),
+        "StepFunction_TrackingObject copies base sprite X/Y; the player's jump-height offset must not lift the grass"
+    );
+}
+
+#[test]
+fn grass_rustle_frames_use_the_exact_two_piece_facing_oam_layout() {
+    assert_eq!(GRASS_RUSTLE_CANVAS_SOURCE_SIZE, UVec2::new(18, 9));
+    assert_eq!(
+        GRASS_RUSTLE_OAM_LAYOUTS,
+        [
+            [
+                GrassRustleOamPiece::new(1, 0, false),
+                GrassRustleOamPiece::new(9, 0, true),
+            ],
+            [
+                GrassRustleOamPiece::new(0, 1, false),
+                GrassRustleOamPiece::new(10, 1, true),
+            ],
+        ],
+        "FacingGrass1/2 share a canvas rooted at source offset (-1, 8)"
+    );
+}
+
+#[test]
+fn grass_rustle_art_composes_the_complete_source_oam_canvas() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+    let frames = grass_rustle_frames_for_art(
+        &mut rendered_art,
+        &asset_root,
+        "day",
+        &mut images,
+    )
+    .expect("compose grass rustle source OAM");
+
+    for frame in frames {
+        assert_eq!(frame.size, Vec2::new(72.0, 36.0));
+        let image = images.get(&frame.handle).expect("composed rustle image");
+        assert_eq!(
+            image.texture_descriptor.size,
+            Extent3d {
+                width: 18,
+                height: 9,
+                depth_or_array_layers: 1,
+            }
+        );
+    }
+}
+
+#[test]
+fn jump_shadow_art_composes_the_complete_source_oam_canvas() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let mut rendered_art = RenderedTilesetArt::default();
+    let mut images = Assets::<Image>::default();
+    let frame = ledge_shadow_frame_for_art(&mut rendered_art, &asset_root, &mut images)
+        .expect("compose jump shadow source OAM");
+
+    assert_eq!(
+        frame.size,
+        Vec2::new(64.0, 32.0),
+        "FacingShadow places its two 8x8 pieces at x=0 and x=8"
+    );
+    let image = images.get(&frame.handle).expect("composed shadow image");
+    assert_eq!(
+        image.texture_descriptor.size,
+        Extent3d {
+            width: 16,
+            height: 8,
+            depth_or_array_layers: 1,
+        }
+    );
+}
+
+#[test]
+fn jump_shadow_position_uses_the_directional_movement_function_offset() {
+    let actor_x = 120.0;
+    let actor_ground_y = 80.0;
+    let actor_height = 64.0;
+    let shadow_size = Vec2::new(64.0, 32.0);
+
+    for direction in [Direction::Down, Direction::Up] {
+        assert_eq!(
+            jump_shadow_position_from_actor_ground(
+                actor_x,
+                actor_ground_y,
+                actor_height,
+                shadow_size,
+                direction,
+            ),
+            (120.0, 40.0),
+            "MovementFunction_Shadow uses a 14-source-pixel Y offset for vertical jumps"
+        );
+    }
+    for direction in [Direction::Left, Direction::Right] {
+        assert_eq!(
+            jump_shadow_position_from_actor_ground(
+                actor_x,
+                actor_ground_y,
+                actor_height,
+                shadow_size,
+                direction,
+            ),
+            (120.0, 48.0),
+            "MovementFunction_Shadow uses a 12-source-pixel Y offset for horizontal jumps"
+        );
+    }
+}
+
+#[test]
+fn ledge_shadow_deletes_before_the_final_landing_frame_is_drawn() {
+    let jump = |frame| {
+        Some(VisibleLedgeJump {
+            from: TilePosition::new(2, 2),
+            to: TilePosition::new(2, 6),
+            frame,
+        })
+    };
+
+    assert!(ledge_jump_has_active_shadow(jump(0)));
+    assert!(ledge_jump_has_active_shadow(jump(14)));
+    assert!(!ledge_jump_has_active_shadow(jump(15)));
+    assert!(!ledge_jump_has_active_shadow(None));
+}
+
+#[test]
 fn overworld_emotes_center_above_the_object_oam_footprint() {
     let base = runtime_tile_playfield_position(TilePosition::new(0, 0), 0, 0)
         .expect("visible origin tile");
@@ -196,6 +344,102 @@ fn overworld_emotes_center_above_the_object_oam_footprint() {
         overworld_emote_position_from_base(base.0, base.1, Vec2::splat(TILE_SIZE * 2.0)),
         (base.0 + TILE_SIZE * 0.5, base.1 + TILE_SIZE * 1.5),
         "a 16x16 emote must be centered immediately above the 16x16 object sprite"
+    );
+}
+
+#[test]
+fn overworld_emotes_track_the_live_stride_and_camera_position() {
+    let from = TilePosition::new(2, 4);
+    let target = TilePosition::new(4, 4);
+    let camera_offset = Vec2::new(7.0, -9.0);
+    let position = visible_tracking_object_playfield_position(
+        target,
+        Some(from),
+        2,
+        4,
+        0.5,
+        0,
+        0,
+        camera_offset,
+    )
+    .expect("tracked stride stays in the retained viewport");
+    let from = runtime_tile_playfield_position(from, 0, 0).expect("visible origin");
+    let target = runtime_tile_playfield_position(target, 0, 0).expect("visible target");
+    let progress = 0.625;
+
+    assert_eq!(
+        position,
+        (
+            from.0 + (target.0 - from.0) * progress + camera_offset.x,
+            from.1 + (target.1 - from.1) * progress + camera_offset.y,
+        ),
+        "tracking objects copy the actor's live base sprite coordinates before applying their own offset"
+    );
+}
+
+#[test]
+fn overworld_emote_targets_use_each_actors_independent_live_stride() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repository root");
+    let asset_root = AssetRoot::new(repo_root);
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let mut runtime_shell = initialize_bevy_runtime_shell(
+        asset_root,
+        runtime,
+        BevyShellStart::NewGameAtRuntimeTile {
+            spawn_identifier: 14,
+            map_name: "ElmsLab".to_string(),
+            tile_x: 4,
+            tile_y: 4,
+        },
+        BevyShellConfig::default(),
+    )
+    .expect("initialize emote tracking fixture");
+    let snapshot = runtime_shell.shell.snapshot().expect("fixture snapshot");
+
+    let player_from = TilePosition::new(2, 4);
+    runtime_shell.player_walk_from = Some(player_from);
+    runtime_shell.player_walk_frame_ticks = 3;
+    runtime_shell.player_walk_total_ticks = 8;
+    assert_eq!(
+        visible_emote_target_movement(&snapshot, &runtime_shell, "PLAYER")
+            .expect("resolve player emote")
+            .map(|movement| (
+                movement.target,
+                movement.from,
+                movement.frames_remaining,
+                movement.total_frames,
+            )),
+        Some((snapshot.overworld.tile, Some(player_from), 3, 8))
+    );
+
+    let (object_id, object_target) = snapshot
+        .visible_object_runtime_tiles
+        .iter()
+        .next()
+        .map(|(object_id, tile)| (object_id.clone(), *tile))
+        .expect("Elm's Lab has a loaded object");
+    let object_from = TilePosition::new(object_target.x, object_target.y + 2);
+    runtime_shell.trainer_walk_from = Some((object_id.clone(), object_from));
+    runtime_shell.object_walk_frame_ticks = 11;
+    runtime_shell.object_walk_total_ticks = 16;
+    assert_eq!(
+        visible_emote_target_movement(&snapshot, &runtime_shell, &object_id)
+            .expect("resolve NPC emote")
+            .map(|movement| (
+                movement.target,
+                movement.from,
+                movement.frames_remaining,
+                movement.total_frames,
+            )),
+        Some((object_target, Some(object_from), 11, 16))
+    );
+    assert!(
+        visible_emote_target_movement(&snapshot, &runtime_shell, "NOT_A_LOADED_OBJECT")
+            .expect("missing targets delete tracking objects")
+            .is_none()
     );
 }
 
@@ -1179,6 +1423,50 @@ fn follow_command_jump_arc_uses_the_advanced_movement_frame() {
         landed, 0.0,
         "the final moving frame must land on the map tile"
     );
+}
+
+#[test]
+fn scripted_jump_shadows_cover_the_active_actor_and_follower_only() {
+    let movement = VisibleScriptMovement {
+        object_id: "LEADER".to_string(),
+        phases: VecDeque::new(),
+        pending_programs: VecDeque::new(),
+        hold_frames_remaining: 0,
+        active_jump_duration: Some(WALK_FRAME_HOLD_TICKS),
+        active_uses_standing_frame: false,
+        active_tree_shake_duration: None,
+        active_stationary_effect: None,
+        active_stationary_duration: 0,
+        stationary_y_offset: 0,
+        stationary_initial_facing: Direction::Down,
+        follower_object_id: Some("FOLLOWER".to_string()),
+        follower_queued_step: None,
+        follower_active_jump_duration: Some(WALK_FRAME_HOLD_TICKS * 2),
+        follower_active_uses_standing_frame: false,
+    };
+
+    assert!(scripted_actor_has_active_jump(Some(&movement), "LEADER", 8));
+    assert!(scripted_actor_has_active_jump(Some(&movement), "LEADER", 2));
+    assert!(
+        !scripted_actor_has_active_jump(Some(&movement), "LEADER", 1),
+        "StepFunction_TrackingObject deletes the shadow on the actor's final landing update"
+    );
+    assert!(scripted_actor_has_active_jump(
+        Some(&movement),
+        "FOLLOWER",
+        16
+    ));
+    assert!(!scripted_actor_has_active_jump(
+        Some(&movement),
+        "FOLLOWER",
+        0
+    ));
+    assert!(!scripted_actor_has_active_jump(
+        Some(&movement),
+        "BYSTANDER",
+        8
+    ));
+    assert!(!scripted_actor_has_active_jump(None, "LEADER", 8));
 }
 
 #[test]

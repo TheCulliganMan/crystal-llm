@@ -310,7 +310,10 @@ fn sync_visible_ledge_jump(
     runtime_shell: Res<BevyRuntimeShell>,
     rendered: Res<RenderedViewport>,
     mut players: Query<(&mut Transform, &Sprite), With<PlayerMarker>>,
-    mut shadows: Query<&mut Transform, (With<LedgeShadowMarker>, Without<PlayerMarker>)>,
+    mut shadows: Query<
+        (&mut Transform, &Sprite, &mut Visibility),
+        (With<JumpShadowMarker>, Without<PlayerMarker>),
+    >,
 ) {
     const OFFSETS: [i16; 16] = [
         -4, -6, -8, -10, -11, -12, -12, -12, -11, -10, -9, -8, -6, -4, 0, 0,
@@ -345,9 +348,24 @@ fn sync_visible_ledge_jump(
     transform.translation.x = sprite_x + camera_offset.x;
     transform.translation.y =
         sprite_y + camera_offset.y - f32::from(OFFSETS[usize::from(jump.frame)]) * BATTLE_HUD_SCALE;
-    if let Ok(mut shadow) = shadows.get_single_mut() {
-        shadow.translation.x = sprite_x + camera_offset.x;
-        shadow.translation.y = sprite_y + camera_offset.y - size.y * 0.5;
+    if let Ok((mut shadow, shadow_sprite, mut shadow_visibility)) = shadows.get_single_mut()
+        && let Some(shadow_size) = shadow_sprite.custom_size
+        && let Some(direction) = visible_jump_direction(jump.from, jump.to)
+    {
+        *shadow_visibility = if ledge_jump_has_active_shadow(Some(jump)) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        let (shadow_x, shadow_y) = jump_shadow_position_from_actor_ground(
+            sprite_x,
+            sprite_y,
+            size.y,
+            shadow_size,
+            direction,
+        );
+        shadow.translation.x = shadow_x + camera_offset.x;
+        shadow.translation.y = shadow_y + camera_offset.y;
     }
 }
 
@@ -355,6 +373,14 @@ fn sync_visible_script_jump(
     runtime_shell: Res<BevyRuntimeShell>,
     mut players: Query<&mut Transform, (With<PlayerMarker>, Without<ObjectMarker>)>,
     mut objects: Query<(&VisibleObjectSprite, &mut Transform), With<ObjectMarker>>,
+    mut shadows: Query<
+        (&JumpShadowMarker, &mut Visibility),
+        (
+            With<JumpShadowMarker>,
+            Without<PlayerMarker>,
+            Without<ObjectMarker>,
+        ),
+    >,
 ) {
     const OFFSETS: [i16; 16] = [
         -4, -6, -8, -10, -11, -12, -12, -12, -11, -10, -9, -8, -6, -4, 0, 0,
@@ -362,6 +388,28 @@ fn sync_visible_script_jump(
     let Some(movement) = runtime_shell.visible_script_movement.as_ref() else {
         return;
     };
+    for (shadow, mut visibility) in &mut shadows {
+        let frames_remaining = if shadow.actor_id == "PLAYER" {
+            runtime_shell.player_walk_frame_ticks
+        } else if shadow.actor_id == movement.object_id {
+            runtime_shell.object_walk_frame_ticks
+        } else {
+            runtime_shell
+                .object_walk_frame_ticks_by_id
+                .get(&shadow.actor_id)
+                .copied()
+                .unwrap_or(0)
+        };
+        *visibility = if scripted_actor_has_active_jump(
+            Some(movement),
+            &shadow.actor_id,
+            frames_remaining,
+        ) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
     let jump_offset =
         |total: u8, remaining: u8| visible_script_jump_y_offset(&OFFSETS, total, remaining);
     if let Some(total) = movement.active_jump_duration {
@@ -592,12 +640,33 @@ fn render_screen_fade_overlay(
 fn render_poison_flash_overlay(
     runtime_shell: Res<BevyRuntimeShell>,
     mut overlays: Query<&mut Sprite, With<PoisonFlashOverlay>>,
+    mut priority_backgrounds: Query<
+        &mut Visibility,
+        Or<(
+            With<PlayfieldPriorityTile>,
+            With<MapNameSignMarker>,
+            With<FieldPromptMarker>,
+        )>,
+    >,
 ) {
     let Ok(mut sprite) = overlays.get_single_mut() else {
         return;
     };
-    let alpha = (176.0 * f32::from(runtime_shell.poison_flash_frames_remaining) / 4.0) / 255.0;
-    sprite.color = Color::srgba(230.0 / 255.0, 173.0 / 255.0, 1.0, alpha);
+    let [r, g, b, a] = visible_poison_bg_palette_rgba(runtime_shell.poison_flash_frames_remaining)
+        .unwrap_or([230.0 / 255.0, 173.0 / 255.0, 1.0, 0.0]);
+    sprite.color = Color::srgba(r, g, b, a);
+    let background_visibility = if a > 0.0 {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in priority_backgrounds.iter_mut() {
+        *visibility = background_visibility;
+    }
+}
+
+fn visible_poison_bg_palette_rgba(frames_remaining: u8) -> Option<[f32; 4]> {
+    (frames_remaining >= 2).then_some([230.0 / 255.0, 173.0 / 255.0, 1.0, 1.0])
 }
 
 fn take_visible_pending_shop_request(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
