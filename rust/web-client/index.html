@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
     <link rel="icon" href="data:,">
     <style>
       * {
@@ -83,16 +84,22 @@
   </head>
   <body>
     <canvas id="crystal-canvas" tabindex="0"></canvas>
+    <dialog id="startup-error" aria-label="Unable to start game">
+      <p id="startup-error-message"></p>
+      <button id="retry-start" type="button">Reload</button>
+    </dialog>
     <nav id="controls" aria-label="Display controls">
       <button id="fullscreen" type="button" aria-label="Fullscreen">⛶</button>
       <button id="help" type="button" aria-label="Controls">?</button>
     </nav>
     <dialog id="help-dialog">
+      <p id="webmcp-status" role="status">Agent tools: checking WebMCP support.</p>
       <p>Arrow keys — move<br>Z — interact<br>Enter — menu<br>X — back</p>
       <button id="close-help" type="button">Close</button>
     </dialog>
     <script type="module">
-      import init from './crystal-bevy.js';
+      import { createGameBridge, registerGameTools } from './webmcp.js';
+      import { startOnlineSession, runWithPlayerLock } from './browser-session.js';
       import {
         initializeCrystalAudioSynth,
         synthesizeCrystalMidi,
@@ -112,15 +119,52 @@
       document.querySelector('#close-help').addEventListener('click', () => helpDialog.close());
       canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }));
 
+      const isEventLoopHandoff = error => String(error).includes('Using exceptions for control flow');
+      const showStartupError = error => {
+        if (isEventLoopHandoff(error)) return;
+        document.querySelector('#startup-error-message').textContent = String(error?.message ?? error);
+        const dialog = document.querySelector('#startup-error');
+        if (!dialog.open) dialog.showModal();
+      };
+      document.querySelector('#retry-start').addEventListener('click', () => location.reload());
+      window.addEventListener('unhandledrejection', event => showStartupError(event.reason));
       try {
-        initializeCrystalAudioSynth(audioSynthContext);
-        globalThis.__crystalSynthesizeMidi = synthesizeCrystalMidi;
-        await init();
-        canvas.focus({ preventScroll: true });
+        const session = await startOnlineSession({ url: location.href, localStorage, sessionStorage, crypto, fetch });
+        history.replaceState(null, '', session.url);
+        await runWithPlayerLock(navigator.locks, session.playerId, async () => {
+          initializeCrystalAudioSynth(audioSynthContext);
+          globalThis.__crystalSynthesizeMidi = synthesizeCrystalMidi;
+          const wasm = await import('./crystal-bevy.js');
+          const { default: init } = wasm;
+          try {
+            await init();
+          } catch (error) {
+            if (!isEventLoopHandoff(error)) throw error;
+          }
+          const bridge = createGameBridge(wasm);
+          let lifetime = new AbortController();
+          window.addEventListener('pagehide', () => { bridge.cancel(); lifetime.abort(); });
+          window.addEventListener('keydown', event => { if (event.isTrusted) bridge.cancel(); }, { capture: true });
+          window.addEventListener('blur', () => bridge.cancel());
+          document.addEventListener('visibilitychange', () => { if (document.hidden) bridge.cancel(); });
+          const enableAgentTools = async () => {
+            try {
+              const registration = await registerGameTools(document, bridge, { signal: lifetime.signal });
+              document.querySelector('#webmcp-status').textContent = registration.supported
+                ? 'Agent tools ready: observe the game and press Game Boy buttons through WebMCP.'
+                : 'This browser does not support the current WebMCP API. Keyboard play is available.';
+            } catch (error) {
+              document.querySelector('#webmcp-status').textContent = `Agent tools unavailable: ${error.message}`;
+            }
+          };
+          window.addEventListener('pageshow', event => {
+            if (event.persisted) { lifetime = new AbortController(); void enableAgentTools(); }
+          });
+          await enableAgentTools();
+          canvas.focus({ preventScroll: true });
+        });
       } catch (error) {
-        if (!String(error).includes('Using exceptions for control flow')) {
-          console.error(error);
-        }
+        showStartupError(error);
       }
     </script>
   </body>

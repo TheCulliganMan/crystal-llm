@@ -12,7 +12,7 @@ use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crystal_web_server::hub::{
@@ -23,7 +23,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::{Instant, timeout};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -33,6 +33,15 @@ use uuid::Uuid;
 const DEFAULT_PORT: u16 = 8080;
 const OUTBOUND_CAPACITY: usize = 256;
 const MAX_MESSAGES_PER_SECOND: u32 = 120;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(test)]
+const IDLE_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -95,6 +104,11 @@ impl Config {
         if auth_secret.as_ref().is_some_and(|secret| secret.len() < 32) {
             bail!("CRYSTAL_AUTH_SECRET must contain at least 32 bytes");
         }
+        validate_public_auth(
+            host,
+            auth_secret.as_deref(),
+            env::var("CRYSTAL_ALLOW_ANONYMOUS").as_deref() == Ok("true"),
+        )?;
         let allowed_modpacks = parse_modpacks(&env::var("CRYSTAL_MODPACKS").unwrap_or_default())?;
         let max_clients = env::var("CRYSTAL_MAX_CLIENTS")
             .ok()
@@ -102,8 +116,8 @@ impl Config {
             .transpose()
             .context("CRYSTAL_MAX_CLIENTS must be a positive integer")?
             .unwrap_or(20_000);
-        if max_clients == 0 {
-            bail!("CRYSTAL_MAX_CLIENTS must be greater than zero");
+        if max_clients == 0 || max_clients > u32::MAX as usize {
+            bail!("CRYSTAL_MAX_CLIENTS must be between 1 and 4294967295");
         }
         Ok(Self {
             root,
@@ -122,10 +136,17 @@ impl Config {
 #[derive(Clone)]
 struct AppState {
     hub: Arc<Mutex<Hub>>,
-    senders: Arc<Mutex<HashMap<Uuid, mpsc::Sender<OutboundMessage>>>>,
+    senders: Arc<Mutex<HashMap<Uuid, ClientSender>>>,
     config: Arc<Config>,
     ratings_dirty: mpsc::Sender<()>,
     connection_slots: Arc<Semaphore>,
+    shutdown: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct ClientSender {
+    tx: mpsc::Sender<OutboundMessage>,
+    disconnect: Arc<Notify>,
 }
 
 enum OutboundMessage {
@@ -208,6 +229,7 @@ async fn main() -> Result<()> {
         config: Arc::clone(&config),
         ratings_dirty,
         connection_slots: Arc::new(Semaphore::new(config.max_clients)),
+        shutdown: watch::channel(false).0,
     };
     let static_files = ServeDir::new(&config.root)
         .precompressed_gzip()
@@ -215,6 +237,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/v1/status", get(status))
+        .route("/v1/session", post(create_session))
         .route("/v1/ws", get(websocket))
         .nest_service("/packs", ServeDir::new(&config.pack_dir))
         .fallback_service(static_files)
@@ -226,9 +249,24 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind http://{address}"))?;
     info!(%address, web_root=%config.root.display(), pack_dir=%config.pack_dir.display(), "Rust multiplayer server ready");
+    let shutdown = state.shutdown.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.send_replace(true);
+        })
         .await?;
+    // Upgraded WebSockets outlive Axum's HTTP connection drain. Wait for their
+    // cleanup (including pending rating notifications) before stopping persistence.
+    let _drained = timeout(
+        Duration::from_secs(10),
+        state
+            .connection_slots
+            .acquire_many(config.max_clients as u32),
+    )
+    .await
+    .context("WebSocket shutdown timed out")??;
+    drop(_drained);
     drop(state);
     timeout(Duration::from_secs(2), persistence_task)
         .await
@@ -270,6 +308,8 @@ async fn cache_policy_headers(request: Request, next: Next) -> Response {
             .headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
     }
+    response.headers_mut().insert("origin-agent-cluster", HeaderValue::from_static("?1"));
+    response.headers_mut().insert("permissions-policy", HeaderValue::from_static("tools=(self)"));
     response
 }
 
@@ -279,6 +319,23 @@ fn cache_policy(path: &str) -> &'static str {
     } else {
         "public, max-age=0, must-revalidate"
     }
+}
+
+#[derive(Serialize)]
+struct BrowserSession {
+    token: String,
+}
+
+async fn create_session(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let secret = state.config.auth_secret.as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // The server chooses the identity; callers cannot claim another player's save.
+    let player_id = (Uuid::new_v4().as_u128() as u64) | 1;
+    let token = issue_user_token(secret, &format!("player-{player_id}"), 10 * 365 * 24 * 60 * 60)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(([(CACHE_CONTROL, "no-store")], Json(BrowserSession { token })))
 }
 
 async fn status(State(state): State<AppState>) -> Json<StatusBody> {
@@ -343,12 +400,21 @@ async fn handle_socket(
     _permit: OwnedSemaphorePermit,
 ) {
     let connection_id = Uuid::new_v4();
+    let mut shutdown = state.shutdown.subscribe();
+    if *shutdown.borrow() {
+        return;
+    }
+    let disconnect = Arc::new(Notify::new());
     let (mut writer, mut reader) = socket.split();
     let (tx, mut rx) = mpsc::channel(OUTBOUND_CAPACITY);
-    let first = match timeout(Duration::from_secs(10), reader.next()).await {
+    let first_result = tokio::select! {
+        _ = shutdown.changed() => return,
+        first = timeout(Duration::from_secs(10), reader.next()) => first,
+    };
+    let first = match first_result {
         Ok(Some(Ok(Message::Text(text)))) => text,
         _ => {
-            let _ = writer.send(Message::Close(None)).await;
+            let _ = timeout(WRITE_TIMEOUT, writer.send(Message::Close(None))).await;
             return;
         }
     };
@@ -358,12 +424,14 @@ async fn handle_socket(
             identity,
         }) if protocol_version == PROTOCOL_VERSION => identity,
         _ => {
-            let _ = writer
-                .send(json_message(&ServerMessage::Error {
+            let _ = timeout(
+                WRITE_TIMEOUT,
+                writer.send(json_message(&ServerMessage::Error {
                     code: "invalid_hello".into(),
                     message: "first message must be a compatible hello".into(),
-                }))
-                .await;
+                })),
+            )
+            .await;
             return;
         }
     };
@@ -371,52 +439,80 @@ async fn handle_socket(
         .as_ref()
         .is_some_and(|user_id| user_id != &hello.user_id)
     {
-        let _ = writer
-            .send(json_message(&ServerMessage::Error {
+        let _ = timeout(
+            WRITE_TIMEOUT,
+            writer.send(json_message(&ServerMessage::Error {
                 code: "identity_mismatch".into(),
                 message: "authenticated token does not belong to hello user id".into(),
-            }))
-            .await;
+            })),
+        )
+        .await;
         return;
     }
     if !modpack_allowed(&state.config, &hello.world.modpack) {
-        let _ = writer
-            .send(json_message(&ServerMessage::Error {
+        let _ = timeout(
+            WRITE_TIMEOUT,
+            writer.send(json_message(&ServerMessage::Error {
                 code: "unsupported_modpack".into(),
                 message: "server does not host this exact modpack hash".into(),
-            }))
-            .await;
+            })),
+        )
+        .await;
         return;
     }
-    state.senders.lock().await.insert(connection_id, tx);
-    let deliveries = match state.hub.lock().await.connect(connection_id, hello) {
+    state.senders.lock().await.insert(
+        connection_id,
+        ClientSender {
+            tx,
+            disconnect: Arc::clone(&disconnect),
+        },
+    );
+    let connected = state.hub.lock().await.connect(connection_id, hello);
+    let deliveries = match connected {
         Ok(value) => value,
         Err(message) => {
             state.senders.lock().await.remove(&connection_id);
-            let _ = writer
-                .send(json_message(&ServerMessage::Error {
+            let _ = timeout(
+                WRITE_TIMEOUT,
+                writer.send(json_message(&ServerMessage::Error {
                     code: "invalid_identity".into(),
                     message,
-                }))
-                .await;
+                })),
+            )
+            .await;
             return;
         }
     };
     dispatch(&state, deliveries).await;
-    let write_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            let message = match message {
-                OutboundMessage::Protocol(message) => json_message(&message),
-                OutboundMessage::Binary(bytes) => Message::Binary(bytes.into()),
-            };
-            if writer.send(message).await.is_err() {
-                break;
-            }
-        }
-    });
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_received = Instant::now();
     let mut window = Instant::now();
     let mut message_count = 0_u32;
-    while let Some(result) = reader.next().await {
+    loop {
+        let result = tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = disconnect.notified() => break,
+            _ = tokio::time::sleep_until(last_received + IDLE_TIMEOUT) => break,
+            _ = heartbeat.tick() => {
+                if !matches!(timeout(WRITE_TIMEOUT, writer.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(()))) { break; }
+                continue;
+            }
+            message = rx.recv() => {
+                let Some(message) = message else { break; };
+                let message = match message {
+                    OutboundMessage::Protocol(message) => json_message(&message),
+                    OutboundMessage::Binary(bytes) => Message::Binary(bytes.into()),
+                };
+                if !matches!(timeout(WRITE_TIMEOUT, writer.send(message)).await, Ok(Ok(()))) { break; }
+                continue;
+            }
+            result = reader.next() => {
+                let Some(result) = result else { break; };
+                result
+            }
+        };
+        last_received = Instant::now();
         let message = match result {
             Ok(value) => value,
             Err(error) => {
@@ -466,10 +562,11 @@ async fn handle_socket(
             }
             Message::Close(_) => break,
             Message::Ping(payload) => {
-                if let Some(sender) = state.senders.lock().await.get(&connection_id) {
-                    let _ = sender.try_send(OutboundMessage::Protocol(ServerMessage::Pong {
-                        nonce: payload.len() as u64,
-                    }));
+                if !matches!(
+                    timeout(WRITE_TIMEOUT, writer.send(Message::Pong(payload))).await,
+                    Ok(Ok(()))
+                ) {
+                    break;
                 }
             }
             _ => {}
@@ -478,7 +575,7 @@ async fn handle_socket(
     let deliveries = state.hub.lock().await.disconnect(connection_id);
     state.senders.lock().await.remove(&connection_id);
     dispatch(&state, deliveries).await;
-    write_task.abort();
+    let _ = timeout(WRITE_TIMEOUT, writer.send(Message::Close(None))).await;
 }
 
 async fn load_ratings(data_dir: &PathBuf) -> Result<HashMap<String, i32>> {
@@ -534,6 +631,12 @@ async fn persist_ratings(hub: &Arc<Mutex<Hub>>, data_dir: &PathBuf) -> Result<()
     Ok(())
 }
 
+async fn disconnect_sender(state: &AppState, connection_id: Uuid) {
+    if let Some(sender) = state.senders.lock().await.remove(&connection_id) {
+        sender.disconnect.notify_one();
+    }
+}
+
 async fn dispatch(state: &AppState, deliveries: Vec<Delivery>) {
     for delivery in deliveries {
         let sender = state
@@ -543,22 +646,19 @@ async fn dispatch(state: &AppState, deliveries: Vec<Delivery>) {
             .get(&delivery.connection_id)
             .cloned();
         if let Some(sender) = sender {
-            if protocol_message_is_lossy(&delivery.message) {
-                if sender
-                    .try_send(OutboundMessage::Protocol(delivery.message))
-                    .is_err()
-                {
-                    warn!(connection_id=%delivery.connection_id, "dropping presence update for slow client");
+            let lossy = protocol_message_is_lossy(&delivery.message);
+            match sender
+                .tx
+                .try_send(OutboundMessage::Protocol(delivery.message))
+            {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) if lossy => {}
+                Err(_) => {
+                    // Never continue a session after losing a control message.
+                    // The connection loop removes the player and cancels its match.
+                    warn!(connection_id=%delivery.connection_id, "disconnecting client after failed delivery");
+                    disconnect_sender(state, delivery.connection_id).await;
                 }
-            } else if !matches!(
-                timeout(
-                    Duration::from_secs(2),
-                    sender.send(OutboundMessage::Protocol(delivery.message)),
-                )
-                .await,
-                Ok(Ok(()))
-            ) {
-                warn!(connection_id=%delivery.connection_id, "critical multiplayer delivery timed out");
             }
         }
     }
@@ -567,9 +667,7 @@ async fn dispatch(state: &AppState, deliveries: Vec<Delivery>) {
 fn protocol_message_is_lossy(message: &ServerMessage) -> bool {
     matches!(
         message,
-        ServerMessage::Presence { .. }
-            | ServerMessage::PresenceLeft { .. }
-            | ServerMessage::Pong { .. }
+        ServerMessage::Presence { .. } | ServerMessage::Pong { .. }
     )
 }
 
@@ -599,8 +697,14 @@ async fn relay_binary(state: &AppState, connection_id: Uuid, envelope: Vec<u8>) 
         Ok(value) => value,
         Err(message) => return vec![protocol_error(connection_id, message)],
     };
-    if let Some(sender) = state.senders.lock().await.get(&target) {
-        if sender.try_send(OutboundMessage::Binary(envelope)).is_err() {
+    let sender = state.senders.lock().await.get(&target).cloned();
+    if let Some(sender) = sender {
+        if sender
+            .tx
+            .try_send(OutboundMessage::Binary(envelope))
+            .is_err()
+        {
+            disconnect_sender(state, target).await;
             return vec![protocol_error(
                 connection_id,
                 "matched peer is not accepting relay frames",
@@ -650,6 +754,15 @@ fn authenticate(
         .filter(|actual| constant_time_equal(actual.as_bytes(), expected.as_bytes()))
         .map(|_| None)
         .ok_or(())
+}
+
+fn validate_public_auth(host: IpAddr, secret: Option<&str>, allow_anonymous: bool) -> Result<()> {
+    if !host.is_loopback() && secret.is_none() && !allow_anonymous {
+        bail!(
+            "public listeners require CRYSTAL_AUTH_SECRET; use CRYSTAL_ALLOW_ANONYMOUS=true only for an explicitly unauthenticated test server"
+        );
+    }
+    Ok(())
 }
 
 fn issue_user_token(secret: &str, user_id: &str, ttl_seconds: u64) -> Result<String> {
@@ -761,6 +874,222 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> AppState {
+        let (ratings_dirty, _) = mpsc::channel(1);
+        AppState {
+            hub: Arc::new(Mutex::new(Hub::default())),
+            senders: Arc::new(Mutex::new(HashMap::new())),
+            config: Arc::new(Config {
+                root: PathBuf::new(),
+                pack_dir: PathBuf::new(),
+                data_dir: PathBuf::new(),
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 0,
+                auth_token: None,
+                auth_secret: None,
+                allowed_modpacks: HashMap::new(),
+                max_clients: 2,
+            }),
+            ratings_dirty,
+            connection_slots: Arc::new(Semaphore::new(2)),
+            shutdown: watch::channel(false).0,
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_can_create_an_online_identity_without_an_invite() {
+        let mut state = test_state();
+        let secret = "0123456789abcdef0123456789abcdef";
+        Arc::make_mut(&mut state.config).auth_secret = Some(secret.into());
+        let mut identities = Vec::new();
+        for _ in 0..2 {
+            let response = create_session(State(state.clone())).await.unwrap().into_response();
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let identity = verify_user_token(secret, body["token"].as_str().unwrap()).unwrap();
+            assert!(identity.strip_prefix("player-").unwrap().parse::<u64>().unwrap() > 0);
+            identities.push(identity);
+        }
+        assert_ne!(identities[0], identities[1]);
+    }
+
+    #[tokio::test]
+    async fn stalled_critical_delivery_removes_connection_sender() {
+        let state = test_state();
+        let id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(OutboundMessage::Binary(vec![1])).unwrap();
+        state.senders.lock().await.insert(
+            id,
+            ClientSender {
+                tx,
+                disconnect: Arc::new(Notify::new()),
+            },
+        );
+        dispatch(
+            &state,
+            vec![Delivery {
+                connection_id: id,
+                message: ServerMessage::ResultPending {
+                    session_id: Uuid::new_v4(),
+                },
+            }],
+        )
+        .await;
+        assert!(!state.senders.lock().await.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_socket_releases_player_and_capacity() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/v1/ws", get(websocket))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws"))
+            .await
+            .unwrap();
+        let hello = ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            identity: crystal_net::hosted::ClientIdentity {
+                user_id: "player-1".into(),
+                display_name: "CHRIS".into(),
+                world: crystal_net::hosted::WorldIdentity {
+                    world_id: "main".into(),
+                    modpack: ModpackIdentity {
+                        id: "core".into(),
+                        content_hash: "hash".into(),
+                    },
+                },
+            },
+        };
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&hello).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        socket.next().await.unwrap().unwrap();
+        assert_eq!(state.hub.lock().await.client_count(), 1);
+        // Do not poll or pong: simulate a network connection that stopped responding.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let count = state.hub.lock().await.client_count();
+        let capacity = state.connection_slots.available_permits();
+        drop(socket);
+        server.abort();
+        assert_eq!(count, 0);
+        assert_eq!(capacity, 2);
+    }
+
+    #[tokio::test]
+    async fn authenticated_socket_heartbeats_and_shutdown_release_identity() {
+        use tokio_tungstenite::tungstenite::Message as WireMessage;
+        let mut state = test_state();
+        let secret = "0123456789abcdef0123456789abcdef";
+        Arc::make_mut(&mut state.config).auth_secret = Some(secret.into());
+        let app = Router::new()
+            .route("/v1/ws", get(websocket))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws"))
+                .await
+                .is_err()
+        );
+        let token = issue_user_token(secret, "player-1", 60).unwrap();
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws?token={token}"))
+                .await
+                .unwrap();
+        let mut hello = ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            identity: crystal_net::hosted::ClientIdentity {
+                user_id: "player-2".into(),
+                display_name: "CHRIS".into(),
+                world: crystal_net::hosted::WorldIdentity {
+                    world_id: "main".into(),
+                    modpack: ModpackIdentity {
+                        id: "core".into(),
+                        content_hash: "hash".into(),
+                    },
+                },
+            },
+        };
+        socket
+            .send(WireMessage::Text(
+                serde_json::to_string(&hello).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let rejected = socket.next().await.unwrap().unwrap();
+        assert!(rejected.to_text().unwrap().contains("identity_mismatch"));
+        drop(socket);
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/v1/ws?token={token}"))
+                .await
+                .unwrap();
+        if let ClientMessage::Hello { identity, .. } = &mut hello {
+            identity.user_id = "player-1".into();
+        }
+        socket
+            .send(WireMessage::Text(
+                serde_json::to_string(&hello).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let deadline = tokio::time::sleep(IDLE_TIMEOUT * 2);
+        tokio::pin!(deadline);
+        let mut welcomed = false;
+        let mut pings = 0;
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                message = socket.next() => match message.unwrap().unwrap() {
+                    WireMessage::Ping(payload) => { pings += 1; socket.send(WireMessage::Pong(payload)).await.unwrap(); }
+                    WireMessage::Text(text) => { assert!(text.contains("welcome")); welcomed = true; }
+                    other => panic!("unexpected heartbeat response: {other:?}"),
+                }
+            }
+        }
+        assert!(welcomed && pings > 1);
+        assert_eq!(state.hub.lock().await.client_count(), 1);
+        state.shutdown.send_replace(true);
+        timeout(Duration::from_secs(1), async {
+            while state.connection_slots.available_permits() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.hub.lock().await.client_count(), 0);
+        assert!(state.senders.lock().await.is_empty());
+        drop(socket);
+        server.abort();
+    }
+
+    #[test]
+    fn public_listener_requires_identity_authentication() {
+        let public = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        assert!(validate_public_auth(public, None, false).is_err());
+        assert!(
+            validate_public_auth(public, Some("0123456789abcdef0123456789abcdef"), false).is_ok()
+        );
+        assert!(validate_public_auth(IpAddr::V4(Ipv4Addr::LOCALHOST), None, false).is_ok());
+        assert!(validate_public_auth(public, None, true).is_ok());
+    }
+
+    #[test]
+    fn player_departure_must_not_be_dropped() {
+        assert!(!protocol_message_is_lossy(&ServerMessage::PresenceLeft {
+            user_id: "player-1".into()
+        }));
+    }
 
     #[test]
     fn parses_exact_modpack_allowlist() {

@@ -9,8 +9,7 @@ services:
     ports:
       - "${POKECRYSTAL_PORT:-3003}:8080"
     environment:
-      CRYSTAL_SERVER_TOKEN: ${CRYSTAL_SERVER_TOKEN:-}
-      CRYSTAL_AUTH_SECRET: ${CRYSTAL_AUTH_SECRET:-}
+      CRYSTAL_AUTH_SECRET: ${CRYSTAL_AUTH_SECRET:?Set a signing secret of at least 32 bytes}
       CRYSTAL_MODPACKS: ${CRYSTAL_MODPACKS:-}
       CRYSTAL_DATA_DIR: /srv/crystal/data
       CRYSTAL_MAX_CLIENTS: ${CRYSTAL_MAX_CLIENTS:-20000}

@@ -1634,8 +1634,8 @@ fn game_window_uses_a_single_frame_low_latency_swapchain() {
     let window = low_latency_game_window("test".to_string());
 
     assert!(
-        !window.resizable,
-        "native play must retain the fixed integer-scaled LCD window"
+        window.resizable == cfg!(feature = "fullscreen-scaling"),
+        "only the fullscreen presentation mod enables native window resizing"
     );
     assert_eq!(window.present_mode, PresentMode::AutoVsync);
     assert_eq!(
@@ -2417,6 +2417,7 @@ fn inactive_voxel_view_uses_only_the_classic_scroll_grid() {
             VISUAL_WORLD_TILES_Y,
         )
     );
+    #[cfg(not(feature = "fullscreen-scaling"))]
     assert!(
         i32::from(VISUAL_WORLD_TILES_X) * i32::from(VISUAL_WORLD_TILES_Y)
             > 10 * i32::from(CLASSIC_SCROLL_TILES_X) * i32::from(CLASSIC_SCROLL_TILES_Y)

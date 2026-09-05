@@ -1620,3 +1620,31 @@ fn transparent_tileset_color_zero_is_opaque_on_base_and_clear_on_priority() {
         "the separately composed priority layer must still clear color-zero pixels"
     );
 }
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_name_choices_separate_portrait_text_and_controls() {
+    let mut shell = core_modular_title_shell_for_test();
+    shell.intro_screen = None;
+    shell.title_menu = None;
+    open_visible_name_choice(&mut shell).unwrap();
+    for _ in 0..40 { tick_visible_player_name_choice(&mut shell).unwrap(); }
+    mark_runtime_snapshot_dirty(&mut shell);
+    let mut app = integrated_shell_test_app(shell);
+    app.world_mut().spawn((Window { resolution: WindowResolution::new(1920.0, 1080.0).with_scale_factor_override(1.0), ..default() }, bevy::window::PrimaryWindow));
+    app.add_systems(Startup, setup_fullscreen_scene).add_systems(PostUpdate,
+        (sync_fullscreen_scaling, sync_fullscreen_scene_layout, sync_fullscreen_world_layout).chain());
+    app.update();
+    let world = app.world_mut();
+    let (sprite, transform) = world.query_filtered::<(&Sprite, &Transform), With<VisibleIntroSurface>>().single(world);
+    assert_eq!(sprite.rect.unwrap().size(), Vec2::splat(56.0));
+    assert!(sprite.custom_size.unwrap().y > 800.0);
+    assert!(transform.translation.x < 0.0);
+    let (sprite, transform, visibility) = world.query_filtered::<(&Sprite, &Transform, &Visibility), With<FullscreenBootDialogue>>().single(world);
+    assert_eq!(*visibility, Visibility::Inherited);
+    assert_eq!(sprite.custom_size, Some(Vec2::new(640.0, 192.0)));
+    assert!(transform.translation.y < -500.0);
+    let controls = world.query_filtered::<&Transform, With<FullscreenDialogRoot>>().single(world);
+    assert_eq!(controls.scale, Vec3::ONE);
+    assert!(controls.translation.x > 500.0);
+}

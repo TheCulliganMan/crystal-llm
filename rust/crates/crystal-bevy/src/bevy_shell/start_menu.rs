@@ -7432,17 +7432,8 @@ fn load_battle_anim_palette(asset_root: &AssetRoot, requested: &str) -> Result<[
     })
 }
 
-fn spawn_battle_command_menu(
-    commands: &mut Commands,
-    snapshot: &RuntimeShellSnapshot,
-    runtime_shell: &BevyRuntimeShell,
-    battle: &crate::RuntimeBattleSnapshot,
-    rendered_art: &mut RenderedTilesetArt,
-    asset_root: &AssetRoot,
-    images: &mut Assets<Image>,
-) -> Result<()> {
-    require_bitmap_font_art(rendered_art, asset_root, images)?;
-    if runtime_shell.visible_capture_animation.is_some()
+fn visible_battle_command_animation_active(runtime_shell: &BevyRuntimeShell) -> bool {
+    runtime_shell.visible_capture_animation.is_some()
         || runtime_shell.visible_frontpic_animation.is_some()
         || runtime_shell
             .visible_move_animations
@@ -7458,7 +7449,19 @@ fn spawn_battle_command_menu(
             .battle_exp_tween
             .as_ref()
             .is_some_and(|tween| tween.started)
-    {
+}
+
+fn spawn_battle_command_menu(
+    commands: &mut Commands,
+    snapshot: &RuntimeShellSnapshot,
+    runtime_shell: &BevyRuntimeShell,
+    battle: &crate::RuntimeBattleSnapshot,
+    rendered_art: &mut RenderedTilesetArt,
+    asset_root: &AssetRoot,
+    images: &mut Assets<Image>,
+) -> Result<()> {
+    require_bitmap_font_art(rendered_art, asset_root, images)?;
+    if visible_battle_command_animation_active(runtime_shell) {
         return Ok(());
     }
     if battle_window_frame_art(rendered_art, asset_root, images).is_none() {

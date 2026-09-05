@@ -391,7 +391,12 @@ fn runtime_tile_playfield_position(
     start_y: i16,
 ) -> Option<(f32, f32)> {
     let (view_x, view_y) = runtime_event_view_tile(tile, start_x, start_y)?;
+    #[cfg(not(feature = "fullscreen-scaling"))]
     if !(0..VIEWPORT_TILES_X).contains(&view_x) || !(0..VIEWPORT_TILES_Y).contains(&view_y) {
+        return None;
+    }
+    #[cfg(feature = "fullscreen-scaling")]
+    if !overworld_object_in_scroll_region(view_x, view_y) {
         return None;
     }
     Some(render_tile_playfield_position(view_x, view_y))

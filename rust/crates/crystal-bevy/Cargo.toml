@@ -59,6 +59,7 @@ web-sys = { version = "0.3", features = [
 [features]
 default = ["bevy-shell"]
 bevy-shell = ["dep:bevy", "dep:crystal-render-api"]
+fullscreen-scaling = ["bevy-shell"]
 voxel-view = ["bevy-shell", "dep:crystal-voxel-view"]
 location-tester = ["voxel-view", "crystal-assets/test-fixtures"]
 

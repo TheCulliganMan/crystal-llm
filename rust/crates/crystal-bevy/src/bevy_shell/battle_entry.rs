@@ -9431,15 +9431,31 @@ fn overworld_entity_depth(
         .map(|index| OBJECT_SLOT_LIMIT.saturating_sub(index.min(OBJECT_SLOT_LIMIT)) as f32)
         .unwrap_or(0.0)
         * OBJECT_PRIORITY_UNIT;
-    // Only relative on-LCD position participates in OAM sorting. Absolute map
-    // rows made ordinary actors on tall stock maps exceed the priority-layer
-    // z=2.4 and draw through roofs. Clamp to the one-tile movement margin so
-    // even an entering/leaving actor remains strictly below priority tiles.
-    let column =
-        (i32::from(tile.x) - i32::from(viewport_origin.0)).clamp(-1, i32::from(VIEWPORT_TILES_X));
-    let row =
-        (i32::from(tile.y) - i32::from(viewport_origin.1)).clamp(-1, i32::from(VIEWPORT_TILES_Y));
-    1.0 + row as f32 * Y_UNIT + column as f32 * X_UNIT + object_priority
+    #[cfg(feature = "fullscreen-scaling")]
+    let (column, row) = {
+        // The viewport origin is in render tiles; actors are in runtime tiles.
+        // Normalize the entire expanded grid into the original OAM depth band
+        // so distant actors remain ordered and always stay below roof tiles.
+        let halo = i32::from(CLASSIC_SCROLL_HALO_TILES);
+        let x = i32::from(tile.x) * i32::from(RENDER_TILES_PER_RUNTIME_TILE)
+            - i32::from(viewport_origin.0);
+        let y = i32::from(tile.y) * i32::from(RENDER_TILES_PER_RUNTIME_TILE)
+            - i32::from(viewport_origin.1);
+        (
+            (x + halo).clamp(0, i32::from(CLASSIC_SCROLL_TILES_X)) as f32
+                * f32::from(VIEWPORT_TILES_X) / f32::from(CLASSIC_SCROLL_TILES_X),
+            (y + halo).clamp(0, i32::from(CLASSIC_SCROLL_TILES_Y)) as f32
+                * f32::from(VIEWPORT_TILES_Y) / f32::from(CLASSIC_SCROLL_TILES_Y),
+        )
+    };
+    #[cfg(not(feature = "fullscreen-scaling"))]
+    let (column, row) = (
+        (i32::from(tile.x) - i32::from(viewport_origin.0))
+            .clamp(-1, i32::from(VIEWPORT_TILES_X)) as f32,
+        (i32::from(tile.y) - i32::from(viewport_origin.1))
+            .clamp(-1, i32::from(VIEWPORT_TILES_Y)) as f32,
+    );
+    1.0 + row * Y_UNIT + column * X_UNIT + object_priority
 }
 
 fn connection_composite_viewport_origin(
@@ -9887,7 +9903,7 @@ fn spawn_title_screen(
     }
     if visible_title_main_menu_active(title) {
         let frame = load_visible_title_main_menu_frame(runtime_shell, title, rendered_art, images)?;
-        commit_presented_fullscreen_frame(
+        let presented = commit_presented_fullscreen_frame(
             commands,
             rendered_art,
             &frame,
@@ -9895,6 +9911,12 @@ fn spawn_title_screen(
             PRESENTED_FULLSCREEN_BASE_Z,
             images,
         )?;
+        #[cfg(feature = "fullscreen-scaling")]
+        spawn_fullscreen_title_artwork(
+            commands, runtime_shell, title, &presented, rendered_art, images,
+        )?;
+        #[cfg(not(feature = "fullscreen-scaling"))]
+        let _ = presented;
         return Ok(());
     }
     let frame = title_screen_frame_for_art(rendered_art, &runtime_shell.asset_root, title, images)

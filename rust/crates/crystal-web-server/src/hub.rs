@@ -599,7 +599,13 @@ impl Hub {
                 .get(&id)
                 .map(|client| client.identity.user_id.clone())
         });
-        if session.ranked && session.mode == MatchMode::Battle {
+        if session.ranked
+            && session.mode == MatchMode::Battle
+            && !session
+                .reports
+                .values()
+                .any(|outcome| *outcome == MatchOutcome::Cancelled)
+        {
             let first = self
                 .clients
                 .get(&session.players[0])
@@ -854,6 +860,46 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn cancelling_ranked_match_preserves_unequal_ratings() {
+        let mut hub = Hub::default();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        hub.connect(a, identity("a", "core")).unwrap();
+        hub.connect(b, identity("b", "core")).unwrap();
+        let ratings = HashMap::from([("a".into(), 1100), ("b".into(), 1000)]);
+        hub.replace_ratings(ratings.clone()).unwrap();
+        hub.handle(
+            a,
+            ClientMessage::QueueJoin {
+                mode: MatchMode::Battle,
+                rating: 1100,
+                rating_range: 200,
+            },
+        );
+        let found = hub.handle(
+            b,
+            ClientMessage::QueueJoin {
+                mode: MatchMode::Battle,
+                rating: 1000,
+                rating_range: 200,
+            },
+        );
+        let ServerMessage::MatchFound { session_id, .. } = found[0].message else {
+            panic!("match");
+        };
+        let settled = hub.handle(
+            a,
+            ClientMessage::Result {
+                session_id,
+                outcome: MatchOutcome::Cancelled,
+            },
+        );
+        assert_eq!(settled.len(), 2);
+        assert_eq!(hub.session_count(), 0);
+        assert_eq!(hub.ratings_snapshot(), ratings);
     }
 
     #[test]

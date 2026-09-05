@@ -132,37 +132,27 @@ fn browser_multiplayer_config() -> Result<Option<BevyMultiplayerConfig>> {
             format!("{scheme}://{}/v1/ws", location.host().unwrap_or_default())
         }
     };
-    let storage = window.local_storage().ok().flatten();
-    let player_id = params
-        .get("player_id")
-        .and_then(|value| value.parse::<u64>().ok())
-        .or_else(|| {
-            storage
-                .as_ref()
-                .and_then(|storage| {
-                    storage
-                        .get_item("crystal.multiplayer.player_id")
-                        .ok()
-                        .flatten()
-                })
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            let time = js_sys::Date::now() as u64;
-            let random = (js_sys::Math::random() * f64::from(u32::MAX)) as u64;
-            ((time << 20) ^ random) & ((1_u64 << 53) - 1)
-        })
-        .max(1);
-    if let Some(storage) = &storage {
-        let _ = storage.set_item("crystal.multiplayer.player_id", &player_id.to_string());
-    }
+    // The page selects and locks this tab's identity before starting WASM.
+    let storage = window
+        .session_storage()
+        .map_err(|error| anyhow::anyhow!("access browser session storage: {error:?}"))?
+        .context("browser session storage is unavailable")?;
+    let player_id = storage
+        .get_item("crystal.multiplayer.player_id")
+        .map_err(|error| anyhow::anyhow!("read browser player identity: {error:?}"))?
+        .context("browser player identity was not initialized")?
+        .parse::<u64>()
+        .context("browser player identity is invalid")?;
+    anyhow::ensure!(player_id > 0, "browser player identity must be nonzero");
+    let server_token = storage
+        .get_item("crystal.multiplayer.token")
+        .map_err(|error| anyhow::anyhow!("read browser authentication: {error:?}"))?;
     let display_name = params
         .get("player_name")
         .unwrap_or_else(|| format!("PLAYER{:04}", player_id % 10_000));
     Ok(Some(BevyMultiplayerConfig {
         server_url,
-        server_token: params.get("token"),
+        server_token,
         world_id: params.get("world").unwrap_or_else(|| "main".into()),
         player_id,
         display_name,

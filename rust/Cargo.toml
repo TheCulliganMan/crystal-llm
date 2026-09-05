@@ -28,7 +28,10 @@ strip = "symbols"
 [profile.web-release]
 inherits = "release"
 opt-level = "z"
-lto = "fat"
+# Whole-program LTO exceeds an 8 GiB Docker builder on the complete game.
+# Keep size optimization within crates and bound individual codegen units.
+lto = false
+codegen-units = 8
 
 # Bevy's default dev profile (opt-level 0) makes the renderer and ECS spend
 # most of their time in bounds checks and unoptimized scheduling code.  That

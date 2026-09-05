@@ -156,6 +156,7 @@ fn runtime_tile_playfield_position_preserves_runtime_tile_offsets() {
             PLAYFIELD_TOP - TILE_SIZE * 0.5,
         ))
     );
+    #[cfg(not(feature = "fullscreen-scaling"))]
     assert_eq!(
         runtime_tile_playfield_position(TilePosition::new(-1, 0), 0, 0),
         None
@@ -654,9 +655,15 @@ fn scrolling_map_composite_carries_one_runtime_tile_beyond_every_lcd_edge() {
         .texture_descriptor
         .size;
 
-    assert_eq!(size.width, 192);
-    assert_eq!(size.height, 176);
-    assert_eq!(CLASSIC_SCROLL_HALO_TILES, METATILE_WIDTH);
+    assert_eq!(
+        size.width,
+        CLASSIC_SCROLL_TILES_X as u32 * SOURCE_TILE_SIZE as u32
+    );
+    assert_eq!(
+        size.height,
+        CLASSIC_SCROLL_TILES_Y as u32 * SOURCE_TILE_SIZE as u32
+    );
+    assert!(CLASSIC_SCROLL_HALO_TILES >= METATILE_WIDTH);
 }
 
 #[test]
@@ -1473,7 +1480,11 @@ fn scripted_jump_shadows_cover_the_active_actor_and_follower_only() {
 fn overworld_actor_depth_is_viewport_relative_bounded_and_stably_ordered() {
     let near_origin = overworld_entity_depth(TilePosition { x: 5, y: 7 }, Some(4), (0, 0));
     let tall_map_same_relative =
-        overworld_entity_depth(TilePosition { x: 1005, y: 2007 }, Some(4), (1000, 2000));
+        overworld_entity_depth(
+            TilePosition { x: 1005, y: 2007 },
+            Some(4),
+            if cfg!(feature = "fullscreen-scaling") { (2000, 4000) } else { (1000, 2000) },
+        );
     assert_eq!(
         near_origin, tall_map_same_relative,
         "absolute tall-map coordinates must not alter on-LCD actor priority"
@@ -2259,4 +2270,34 @@ fn overworld_colorkey_preserves_enclosed_white_character_pixels() {
     );
     let center_alpha = target[(2 * 5 + 2) * 4 + 3];
     assert_eq!(center_alpha, 255, "enclosed white artwork remains opaque");
+}
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_room_and_dialogue_resize_independently() {
+    let asset_root = AssetRoot::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap());
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let shell = initialize_bevy_runtime_shell(asset_root, runtime,
+        BevyShellStart::NewGameAtRuntimeTile { spawn_identifier: 14, map_name: "PlayersHouse1F".into(), tile_x: 7, tile_y: 4 },
+        BevyShellConfig::default()).unwrap();
+    let mut app = integrated_shell_test_app(shell);
+    app.world_mut().spawn((Window { resolution: WindowResolution::new(1920.0, 1080.0).with_scale_factor_override(1.0), ..default() }, bevy::window::PrimaryWindow));
+    app.add_systems(Startup, setup_fullscreen_scene).add_systems(PostUpdate,
+        (sync_fullscreen_scaling, sync_fullscreen_scene_layout, sync_fullscreen_world_layout).chain());
+    app.update();
+    app.update();
+    let world = app.world_mut();
+    let root = *world.query_filtered::<&Transform, With<FullscreenWorldRoot>>().single(world);
+    assert!(root.scale.x > 1.5, "small rooms must use the viewport height");
+    let dialogue = world.query_filtered::<&Transform, With<FullscreenDialogRoot>>().single(world);
+    assert_eq!(dialogue.scale, Vec3::ONE);
+    assert!(dialogue.translation.y < -400.0, "dialogue belongs at the viewport bottom");
+    assert!(world.query_filtered::<&Parent, With<PlayerMarker>>().iter(world).count() > 0);
+    world.query::<&mut Window>().single_mut(world).resolution.set(800.0, 1000.0);
+    app.update();
+    let world = app.world_mut();
+    let resized = world.query_filtered::<&Transform, With<FullscreenWorldRoot>>().single(world);
+    assert!(resized.scale.x < root.scale.x);
+    let dialogue = world.query_filtered::<&Transform, With<FullscreenDialogRoot>>().single(world);
+    assert_eq!(dialogue.scale, Vec3::ONE);
 }

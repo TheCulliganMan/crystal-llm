@@ -108,7 +108,12 @@ const VIEWPORT_TILES_Y: i16 = 18;
 // A normal collision step spans two 8x8 render tiles. Camera interpolation
 // can therefore expose almost that much source art beyond any LCD edge. Keep
 // one complete runtime-tile halo attached to the moving destination surface.
+#[cfg(not(feature = "fullscreen-scaling"))]
 const CLASSIC_SCROLL_HALO_TILES: i16 = METATILE_WIDTH;
+// Presentation-only terrain margin: the camera fits inside this surface with
+// one full metatile left over for scroll interpolation at every display size.
+#[cfg(feature = "fullscreen-scaling")]
+const CLASSIC_SCROLL_HALO_TILES: i16 = 48;
 const CLASSIC_SCROLL_TILES_X: i16 = VIEWPORT_TILES_X + CLASSIC_SCROLL_HALO_TILES * 2;
 const CLASSIC_SCROLL_TILES_Y: i16 = VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES * 2;
 #[cfg(feature = "voxel-view")]
@@ -117,7 +122,11 @@ const CLASSIC_SCROLL_TILES_Y: i16 = VIEWPORT_TILES_Y + CLASSIC_SCROLL_HALO_TILES
 // deliberately publishes a broad map halo so pitched views can keep drawing
 // streets, trees, landmarks, and connected-map terrain far beyond the LCD
 // window instead of exposing a clipped background edge.
-const VISUAL_WORLD_HALO_TILES: i16 = 32;
+const VISUAL_WORLD_HALO_TILES: i16 = if CLASSIC_SCROLL_HALO_TILES > 32 {
+    CLASSIC_SCROLL_HALO_TILES
+} else {
+    32
+};
 #[cfg(not(feature = "voxel-view"))]
 const VISUAL_WORLD_HALO_TILES: i16 = CLASSIC_SCROLL_HALO_TILES;
 const VISUAL_WORLD_TILES_X: i16 = VIEWPORT_TILES_X + VISUAL_WORLD_HALO_TILES * 2;
@@ -1502,7 +1511,11 @@ fn low_power_unfocused_game_winit_settings() -> WinitSettings {
 fn low_latency_game_window(title: String) -> Window {
     Window {
         title,
-        resolution: WindowResolution::new(640.0, 576.0),
+        resolution: if cfg!(feature = "fullscreen-scaling") {
+            WindowResolution::new(1280.0, 720.0)
+        } else {
+            WindowResolution::new(640.0, 576.0)
+        },
         // Let the backend select its best synchronized presentation mode
         // instead of forcing the roughly three-frame FIFO queue. Limit the
         // swapchain to one queued frame so input and interpolated transforms
@@ -1510,11 +1523,9 @@ fn low_latency_game_window(title: String) -> Window {
         // later.
         present_mode: PresentMode::AutoVsync,
         desired_maximum_frame_latency: NonZeroU32::new(1),
-        // Native play keeps the fixed 4x LCD window. The browser surface is
-        // resizable so Bevy receives the actual CSS/fullscreen dimensions and
-        // can scale the complete presentation instead of retaining a centered
-        // 640x576 surface inside a larger canvas.
-        resizable: cfg!(target_arch = "wasm32"),
+        // Fullscreen scaling and browser play follow the host dimensions.
+        // The unmodded native client retains the fixed 4x LCD window.
+        resizable: cfg!(any(target_arch = "wasm32", feature = "fullscreen-scaling")),
         #[cfg(target_arch = "wasm32")]
         canvas: Some("#crystal-canvas".to_string()),
         #[cfg(target_arch = "wasm32")]
@@ -4979,6 +4990,18 @@ pub fn run_bevy_shell(
                 .after(apply_visible_battle_screen_offset)
                 .in_set(crystal_render_api::WorldRenderSet::PresentationExtract),
         );
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Update, apply_webmcp_input.before(poll_multiplayer).before(apply_keyboard_input))
+        .add_systems(PostUpdate, finish_webmcp_request);
+    #[cfg(feature = "fullscreen-scaling")]
+    app.add_systems(Startup, setup_fullscreen_scene)
+        .add_systems(
+            PostUpdate,
+            (sync_fullscreen_scaling, sync_fullscreen_scene_layout, sync_fullscreen_world_layout)
+                .chain()
+                .before(bevy::render::camera::CameraUpdateSystem)
+                .before(bevy::transform::TransformSystem::TransformPropagate),
+        );
     #[cfg(feature = "voxel-view")]
     app.insert_resource(crystal_voxel_view::VoxelViewSettings {
         enabled: voxel_view_enabled,
@@ -7218,3 +7241,9 @@ include!("bevy_shell/field_pack.rs");
 #[path = "bevy_shell/tests.rs"]
 mod tests;
 use crystal_assets::{DecorationActionOutcome, DecorationCategory, DecorationSide};
+
+#[cfg(feature = "fullscreen-scaling")]
+include!("bevy_shell/fullscreen_scaling.rs");
+
+#[cfg(any(target_arch = "wasm32", test))]
+include!("bevy_shell/webmcp.rs");

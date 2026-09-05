@@ -3118,3 +3118,43 @@ fn integrated_shell_test_app(runtime_shell: BevyRuntimeShell) -> App {
         .add_systems(Update, refresh_shell_panels.after(refresh_battle_text));
     app
 }
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_main_menu_is_a_panel_not_an_entire_lcd() {
+    let mut app = integrated_shell_test_app(core_modular_title_shell_for_test());
+    app.world_mut().spawn((
+        Window {
+            resolution: WindowResolution::new(1920.0, 1080.0).with_scale_factor_override(1.0),
+            ..default()
+        },
+        bevy::window::PrimaryWindow,
+    ));
+    app.add_systems(Startup, setup_fullscreen_scene)
+        .add_systems(PostUpdate, (sync_fullscreen_scaling, sync_fullscreen_scene_layout, sync_fullscreen_world_layout).chain());
+    open_title_main_menu_for_test(&mut app);
+    let world = app.world_mut();
+    let sprite = world.query_filtered::<&Sprite, With<VisibleIntroSurface>>().single(world);
+    assert!(sprite.rect.is_some(), "the menu must exclude the unused white LCD canvas");
+    assert!(sprite.custom_size.unwrap().y < PLAYFIELD_HEIGHT);
+    let (art_entity, art, transform) = world
+        .query_filtered::<(Entity, &Sprite, &Transform), With<FullscreenTitlePiece>>()
+        .single(world);
+    assert!(art.custom_size.unwrap().y > 1200.0, "artwork must use the viewport height");
+    assert!(transform.translation.x < 0.0, "landscape artwork sits beside the controls");
+    let background = world.query_filtered::<&Sprite, With<FullscreenSceneBackdrop>>().single(world);
+    assert_eq!(background.custom_size, Some(Vec2::new(2560.0, 1440.0)));
+
+    app.world_mut().query::<&mut Window>().single_mut(app.world_mut()).resolution.set(800.0, 1000.0);
+    app.update();
+    let world = app.world_mut();
+    let (resized_entity, _, transform) = world
+        .query_filtered::<(Entity, &Sprite, &Transform), With<FullscreenTitlePiece>>()
+        .single(world);
+    assert_eq!(art_entity, resized_entity, "resize must reuse the artwork entity");
+    assert!(transform.translation.y > 0.0, "portrait artwork sits above the controls");
+    let (sprite, transform) = world.query_filtered::<(&Sprite, &Transform), With<VisibleIntroSurface>>().single(world);
+    assert!(sprite.rect.is_some());
+    assert!(transform.translation.y < 0.0);
+
+}

@@ -1,0 +1,14 @@
+[    1602ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_winit-0.14.2/src/system.rs:58%c Creating new window "Pokemon Crystal Rust" (Entity { index: 0, generation: 1 }) color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://127.0.0.1:18375/crystal-bevy.js:1016
+[    1605ms] Error: Using exceptions for control flow, don't mind me. This isn't actually an error!
+    at __wbg___wbindgen_throw_344f42d3211c4765 (http://127.0.0.1:18375/crystal-bevy.js:56:19)
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[112923]:0x12af73b
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[110237]:0x12a894f
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[106593]:0x129bc2a
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[34787]:0xf27c4d
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[1828]:0x595456
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[66073]:0x118db19
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[48496]:0x10714a0
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[30450]:0xea198c
+    at http://127.0.0.1:18375/crystal-bevy_bg.wasm:wasm-function[655]:0x2a0167
+[    1616ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.14.2/src/renderer/mod.rs:189%c AdapterInfo { name: "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)", vendor: 4203, device: 0, device_type: IntegratedGpu, driver: "WebGL 2.0 (OpenGL ES", driver_info: "3.0 Chromium)", backend: Gl } color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://127.0.0.1:18375/crystal-bevy.js:1016
+[    1676ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_core_pipeline-0.14.2/src/dof/mod.rs:799%c Disabling depth of field on this platform because depth textures aren't supported correctly color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://127.0.0.1:18375/crystal-bevy.js:1016
