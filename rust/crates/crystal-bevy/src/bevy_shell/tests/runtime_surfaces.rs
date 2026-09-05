@@ -1491,6 +1491,17 @@ fn new_game_name_choice_uses_source_menu_over_player_portrait_lcd() {
         "preset-name menu must use the exact menu_coords 0,0,10,11 extent; sizes={menu_sizes:?}"
     );
 
+    let header_backing = world
+        .query_filtered::<(&Sprite, &Transform), With<SceneDialogMarker>>()
+        .iter(world)
+        .any(|(sprite, transform)| {
+            sprite.color == Color::WHITE
+                && sprite.custom_size.is_some_and(|size| size.y == TILE_SIZE && size.x >= 4.0 * TILE_SIZE)
+                && transform.translation.z > 6.0
+                && transform.translation.z < 6.1
+        });
+    assert!(header_backing, "NAME must replace the border tiles with an opaque white text backing");
+
     let retained = retained_fullscreen_surface(app.world_mut());
     let images = app.world().resource::<Assets<Image>>();
     let image = images

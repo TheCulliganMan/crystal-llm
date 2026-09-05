@@ -64,6 +64,13 @@ fn elms_lab_heal_script_retains_its_authored_machine_animation() {
     );
 
     let mut app = integrated_shell_test_app(runtime_shell);
+    #[cfg(feature = "fullscreen-scaling")]
+    {
+        app.world_mut().spawn((Window { resolution: WindowResolution::new(1920.0, 1080.0).with_scale_factor_override(1.0), ..default() }, bevy::window::PrimaryWindow));
+        app.add_systems(Startup, setup_fullscreen_scene).add_systems(PostUpdate,
+            (sync_fullscreen_scaling, sync_fullscreen_scene_layout, sync_fullscreen_world_layout).chain());
+    }
+    app.update();
     app.update();
     let (ball_handle, lamp_handle) = {
         let rendered = app.world().resource::<RenderedTilesetArt>();
@@ -92,4 +99,27 @@ fn elms_lab_heal_script_retains_its_authored_machine_animation() {
         rendered_heal_sprites, 3,
         "Elm's one-Pokemon heal must render one ball and both machine lamps"
     );
+    let mut positioned = world.query_filtered::<(&Handle<Image>, &Transform), With<FieldCommandMarker>>();
+    for (handle, transform) in positioned.iter(world) {
+        let position = transform.translation.truncate();
+        if *handle == ball_handle {
+            let (x, y) = battle_hud_tile_origin(40.0 / 8.0, 54.0 / 8.0);
+            assert_eq!(position, Vec2::new(x, y), "dbsprite x/y and pixel offsets must match the source macro");
+        } else if *handle == lamp_handle {
+            let expected = [42.0, 46.0].map(|x| { let (x, y) = battle_hud_tile_origin(x / 8.0, 48.0 / 8.0); Vec2::new(x, y) });
+            assert!(expected.contains(&position), "lamp offsets must match the source macro");
+        }
+    }
+    #[cfg(feature = "fullscreen-scaling")]
+    {
+        let world_root = world.query_filtered::<Entity, With<FullscreenWorldRoot>>().single(world);
+        let mut sprites = world.query_filtered::<(&Handle<Image>, Option<&Parent>), With<FieldCommandMarker>>();
+        for (handle, parent) in sprites.iter(world) {
+            if *handle == ball_handle || *handle == lamp_handle {
+                assert_eq!(parent.map(Parent::get), Some(world_root),
+                    "healing balls and lamps must follow the machine's world scale and position");
+            }
+        }
+    }
+
 }

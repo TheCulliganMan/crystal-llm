@@ -6795,6 +6795,9 @@ fn claim_visible_battle_rewards(runtime_shell: &mut BevyRuntimeShell) -> Result<
         } => format!("battle:claim_rewards:trainer:{source_script}:{trainer_class}:{trainer_id}"),
     };
     record_visible_runtime_action(runtime_shell, reward_action)?;
+    if !trainer_battle {
+        queue_visible_victory_music(runtime_shell, &snapshot)?;
+    }
     let message = match battle.kind {
         crate::RuntimeBattleKind::Wild { .. } => {
             let rewards = runtime_shell.shell.claim_active_wild_battle_rewards()?;
@@ -7338,6 +7341,7 @@ fn advance_visible_trainer_battle(runtime_shell: &mut BevyRuntimeShell) -> Resul
     );
     trim_event_log(&mut runtime_shell.last_audio_events);
     if advance.trainer_defeated {
+        queue_visible_victory_music(runtime_shell, &snapshot)?;
         queue_visible_trainer_result_text(runtime_shell, &snapshot, &win_text)?;
         reset_visible_battle_exit_state(runtime_shell);
         complete_visible_scripted_trainer_battle(

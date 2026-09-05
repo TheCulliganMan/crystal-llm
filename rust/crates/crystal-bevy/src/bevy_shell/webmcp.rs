@@ -148,6 +148,12 @@ fn webmcp_observation(
     multiplayer: Option<&MultiplayerRuntime>,
 ) -> Result<serde_json::Value> {
     let snapshot = runtime.shell.snapshot()?;
+    #[cfg(feature = "fullscreen-scaling")]
+    let snapshot = {
+        let mut snapshot = snapshot;
+        expand_fullscreen_object_presentation(&mut snapshot, runtime)?;
+        snapshot
+    };
     let (screen, text) = if runtime.intro_screen.is_some() {
         ("intro", format_intro_dialog(runtime))
     } else if runtime.title_menu.is_some() {

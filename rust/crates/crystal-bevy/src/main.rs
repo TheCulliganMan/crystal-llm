@@ -97,9 +97,9 @@ async fn run_browser() -> Result<()> {
     crystal_bevy::run_bevy_shell(
         asset_root,
         runtime,
-        BevyShellStart::Title {
-            spawn_identifier,
-            save_path: continue_save_path,
+        match continue_save_path {
+            Some(save_path) => BevyShellStart::LoadSave { save_path },
+            None => BevyShellStart::Title { spawn_identifier, save_path: None },
         },
         config,
     )

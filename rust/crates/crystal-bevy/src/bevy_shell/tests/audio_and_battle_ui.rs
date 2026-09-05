@@ -1,4 +1,113 @@
 #[test]
+fn victory_music_survives_retained_battle_text_until_overworld_return() {
+    let mut shell = core_modular_title_shell_for_test();
+    shell.title_menu = None;
+    shell.active_music = Some("MUSIC_WILD_VICTORY".into());
+    shell.battle_message_scene = Some(Box::new(shell.shell.snapshot().unwrap()));
+    shell
+        .battle_messages
+        .push_back("Gained EXP. Points!".into());
+    queue_visible_current_music(&mut shell).unwrap();
+    assert_eq!(shell.active_music.as_deref(), Some("MUSIC_WILD_VICTORY"));
+    shell.battle_message_scene = None;
+    shell.battle_messages.clear();
+    queue_visible_current_music(&mut shell).unwrap();
+    assert_eq!(
+        shell.active_music.as_deref(),
+        shell.shell.current_music_id()
+    );
+}
+
+#[test]
+fn victory_music_matches_asm_classes_and_wild_reward_gates() {
+    let shell = route36_battle_shell_for_render_regression();
+    let mut state = shell.shell.session().state().clone();
+    for class in ["FALKNER", "WILL", "CHAMPION", "RED", "BLUE"] {
+        assert_eq!(
+            visible_victory_music_id(&state, Some(class)),
+            Some("MUSIC_GYM_VICTORY")
+        );
+    }
+    assert_eq!(
+        visible_victory_music_id(&state, Some("YOUNGSTER")),
+        Some("MUSIC_TRAINER_VICTORY")
+    );
+    state.link_session.link_mode = 1;
+    assert_eq!(visible_victory_music_id(&state, Some("YOUNGSTER")), None);
+    state.link_session.link_mode = 0;
+    state.battle_pay_day_money = 0;
+    for pokemon in state.storage.party.pokemon.iter_mut().flatten() {
+        pokemon.turns_in_battle = 0;
+        pokemon.item = None;
+    }
+    assert_eq!(visible_victory_music_id(&state, None), Some("MUSIC_NONE"));
+    state.battle_pay_day_money = 1;
+    assert_eq!(
+        visible_victory_music_id(&state, None),
+        Some("MUSIC_WILD_VICTORY")
+    );
+    state.battle_pay_day_money = 0;
+    let index = state
+        .storage
+        .party
+        .pokemon
+        .iter()
+        .position(Option::is_some)
+        .unwrap();
+    state.storage.party.pokemon[index].as_mut().unwrap().item = Some("EXP_SHARE".into());
+    assert_eq!(
+        visible_victory_music_id(&state, None),
+        Some("MUSIC_WILD_VICTORY")
+    );
+    state.storage.party.pokemon[index].as_mut().unwrap().hp = 0;
+    assert_eq!(visible_victory_music_id(&state, None), Some("MUSIC_NONE"));
+    let pokemon = state.storage.party.pokemon[index].as_mut().unwrap();
+    pokemon.hp = 1;
+    pokemon.item = None;
+    pokemon.turns_in_battle = 1;
+    assert_eq!(
+        visible_victory_music_id(&state, None),
+        Some("MUSIC_WILD_VICTORY")
+    );
+}
+
+#[test]
+fn victory_music_is_queued_and_not_replaced_by_live_battle_music() {
+    let mut shell = route36_battle_shell_for_render_regression();
+    let snapshot = shell.shell.snapshot().unwrap();
+    shell.pending_audio.clear();
+    queue_visible_victory_music(&mut shell, &snapshot).unwrap();
+    assert_eq!(shell.active_music.as_deref(), Some("MUSIC_WILD_VICTORY"));
+    assert!(shell.pending_music_stop);
+    assert!(shell.pending_full_audio_reset);
+    assert!(pending_music_command_is(
+        &shell.pending_audio,
+        "MUSIC_WILD_VICTORY"
+    ));
+    shell.battle_message_scene = Some(Box::new(snapshot));
+    let mut app = App::new();
+    app.insert_resource(shell).add_systems(
+        Update,
+        (sync_runtime_battle_music, sync_runtime_current_music, play_pending_audio).chain(),
+    );
+    app.update();
+    let shell = app.world().resource::<BevyRuntimeShell>();
+    assert!(!shell.pending_music_stop);
+    assert!(pending_music_command_is(&shell.pending_audio, "MUSIC_WILD_VICTORY"));
+    assert!(shell.audio_source_cache.is_empty(), "ASM DelayFrame precedes playback");
+    app.update();
+    assert!(app.world().resource::<BevyRuntimeShell>().pending_audio.is_empty());
+    assert_audio_cache_contains_non_silent_pcm(app.world(), 1);
+    assert_eq!(
+        app.world()
+            .resource::<BevyRuntimeShell>()
+            .active_music
+            .as_deref(),
+        Some("MUSIC_WILD_VICTORY")
+    );
+}
+
+#[test]
 fn battle_animation_cry_selectors_choose_exact_species_variants() {
     assert_eq!(
         visible_pokemon_animation_cry_id("SANDSHREW", 0),

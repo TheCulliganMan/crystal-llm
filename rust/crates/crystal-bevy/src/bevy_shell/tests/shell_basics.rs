@@ -2485,3 +2485,25 @@ fn renderer_readiness_cannot_switch_the_manually_selected_world_view_to_2d() {
         "manual 2D selection must restore the classic overworld to layer 0"
     );
 }
+
+#[test]
+fn browser_autosave_preserves_safe_progress_and_skips_title() {
+    let mut shell = core_modular_title_shell_for_test();
+    let path = std::env::temp_dir().join(format!("crystal-browser-resume-{}.crystalsave", uuid::Uuid::new_v4()));
+    shell.quick_save_path = Some(path.clone());
+    assert!(!save_browser_checkpoint(&mut shell).unwrap());
+    assert!(!path.exists());
+    shell = initialized_mail_reader_shell("FLOWER_MAIL");
+    shell.quick_save_path = Some(path.clone());
+    shell.shell.session_mut().state_mut().player_name = "CHRIS".to_string();
+    assert!(save_browser_checkpoint(&mut shell).unwrap());
+    let saved = shell.shell.runtime().load_save(&path).unwrap();
+    assert_eq!(saved.player_name, "CHRIS");
+    let resumed = RuntimeGameShell::resume_from_save(shell.asset_root.clone(), shell.shell.runtime().clone(), &path).unwrap();
+    assert_eq!(resumed.snapshot().unwrap().trainer.player_name, "CHRIS");
+    assert_eq!(resumed.snapshot().unwrap().overworld.map_name, shell.shell.snapshot().unwrap().overworld.map_name);
+    shell.pending_name_input = None;
+    shell.start_menu_cursor = Some(MenuCursor { surface_id: "start".into(), option_index: 0 });
+    assert!(!save_browser_checkpoint(&mut shell).unwrap());
+    std::fs::remove_file(path).unwrap();
+}

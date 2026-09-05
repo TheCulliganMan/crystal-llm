@@ -672,6 +672,7 @@ struct BevyRuntimeShell {
     audio_source_cache: HashMap<BevyAudioCacheKey, CachedPcmAudio>,
     pending_music_stop: bool,
     pending_full_audio_reset: bool,
+    pending_victory_music_delay: bool,
     transient_audio_playing: bool,
     active_transient_kind: Option<ModpackAudioKind>,
     current_sfx_priority: u8,
@@ -1354,6 +1355,7 @@ struct BrowserAudioBackend {
     context: Option<web_sys::AudioContext>,
     music: Option<(web_sys::AudioBufferSourceNode, web_sys::GainNode)>,
     music_volume: f32,
+    master_gain: Option<web_sys::GainNode>,
     transient: Option<(web_sys::AudioBufferSourceNode, f64)>,
 }
 
@@ -1364,6 +1366,7 @@ impl BrowserAudioBackend {
             context: None,
             music: None,
             music_volume: 1.0,
+            master_gain: None,
             transient: None,
         }
     }
@@ -1422,6 +1425,14 @@ impl BrowserAudioBackend {
             .context
             .as_ref()
             .expect("browser audio context initialized");
+        if self.master_gain.is_none() {
+            let gain = context.create_gain().map_err(|error| anyhow::anyhow!("create master gain: {error:?}"))?;
+            gain.connect_with_audio_node(&context.destination()).map_err(|error| anyhow::anyhow!("connect master gain: {error:?}"))?;
+            BROWSER_MASTER_GAIN.with(|master| *master.borrow_mut() = Some(gain.clone()));
+            gain.gain().set_value(BROWSER_MUTED.with(|muted| if muted.get() { 0.0 } else { 1.0 }));
+            self.master_gain = Some(gain);
+        }
+        let destination = self.master_gain.as_ref().expect("master gain initialized");
         context
             .resume()
             .map_err(|error| anyhow::anyhow!("resume browser AudioContext: {error:?}"))?;
@@ -1466,12 +1477,12 @@ impl BrowserAudioBackend {
             source
                 .connect_with_audio_node(&gain)
                 .map_err(|error| anyhow::anyhow!("connect browser music source: {error:?}"))?;
-            gain.connect_with_audio_node(&context.destination())
+            gain.connect_with_audio_node(destination)
                 .map_err(|error| anyhow::anyhow!("connect browser music gain: {error:?}"))?;
             Some(gain)
         } else {
             source
-                .connect_with_audio_node(&context.destination())
+                .connect_with_audio_node(destination)
                 .map_err(|error| anyhow::anyhow!("connect browser PCM source: {error:?}"))?;
             None
         };
@@ -4992,7 +5003,8 @@ pub fn run_bevy_shell(
         );
     #[cfg(target_arch = "wasm32")]
     app.add_systems(Update, apply_webmcp_input.before(poll_multiplayer).before(apply_keyboard_input))
-        .add_systems(PostUpdate, finish_webmcp_request);
+        .add_systems(PostUpdate, finish_webmcp_request)
+        .add_systems(PostUpdate, autosave_browser_progress);
     #[cfg(feature = "fullscreen-scaling")]
     app.add_systems(Startup, setup_fullscreen_scene)
         .add_systems(
@@ -6887,6 +6899,7 @@ fn initialize_bevy_runtime_shell(
         audio_source_cache: HashMap::new(),
         pending_music_stop: false,
         pending_full_audio_reset: false,
+        pending_victory_music_delay: false,
         transient_audio_playing: false,
         active_transient_kind: None,
         current_sfx_priority: 0,
@@ -7247,3 +7260,6 @@ include!("bevy_shell/fullscreen_scaling.rs");
 
 #[cfg(any(target_arch = "wasm32", test))]
 include!("bevy_shell/webmcp.rs");
+
+#[cfg(any(target_arch = "wasm32", test))]
+include!("bevy_shell/browser_preferences.rs");

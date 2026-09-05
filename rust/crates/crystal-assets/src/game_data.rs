@@ -24,7 +24,8 @@ fn item_happiness_change_code(item: &Item) -> Option<&'static str> {
     }
 }
 
-fn is_gym_leader_class(trainer_class: &str) -> bool {
+/// ASM `data/trainers/leaders.asm`: battle/victory music and happiness classes.
+pub fn is_gym_leader_class(trainer_class: &str) -> bool {
     matches!(
         trainer_class,
         "FALKNER"

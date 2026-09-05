@@ -6052,6 +6052,9 @@ fn composite_visible_magnet_train_player(
     }
 }
 
+#[derive(Component)]
+struct HealMachineWorldSprite;
+
 fn spawn_visible_heal_machine(
     commands: &mut Commands,
     runtime_shell: &BevyRuntimeShell,
@@ -6092,32 +6095,32 @@ fn spawn_visible_heal_machine(
     } else {
         0
     };
-    // dbsprite stores (tile y, tile x, pixel y, pixel x), then hardware OAM
+    // dbsprite takes (tile x, tile y, pixel x, pixel y), then hardware OAM
     // applies the usual x-8/y-16 origin. Keep these as exact source-screen
     // pixels rather than approximate tile centers.
     let positions: &[(f32, f32, bool)] = if animation.kind == 2 {
         &[
-            (52.0, 65.0, false),
-            (52.0, 70.0, false),
-            (51.0, 61.0, false),
-            (51.0, 74.0, false),
-            (49.0, 57.0, false),
-            (49.0, 77.0, false),
+            (73.0, 44.0, false),
+            (78.0, 44.0, false),
+            (69.0, 43.0, false),
+            (82.0, 43.0, false),
+            (65.0, 41.0, false),
+            (85.0, 41.0, false),
         ]
     } else {
         &[
-            (30.0, 16.0, false),
-            (30.0, 24.0, true),
-            (35.0, 16.0, false),
-            (35.0, 24.0, true),
-            (40.0, 16.0, false),
-            (40.0, 24.0, true),
+            (24.0, 22.0, false),
+            (32.0, 22.0, true),
+            (24.0, 27.0, false),
+            (32.0, 27.0, true),
+            (24.0, 32.0, false),
+            (32.0, 32.0, true),
         ]
     };
     if animation.kind != 2 {
         let elm_x = if animation.kind == 1 { 16.0 } else { 0.0 };
         let elm_y = if animation.kind == 1 { 32.0 } else { 0.0 };
-        for (source_x, source_y) in [(24.0, 18.0), (24.0, 22.0)] {
+        for (source_x, source_y) in [(26.0, 16.0), (30.0, 16.0)] {
             let (x, y) = battle_hud_tile_origin(
                 (source_x + elm_x) / SOURCE_TILE_SIZE as f32,
                 (source_y + elm_y) / SOURCE_TILE_SIZE as f32,
@@ -6133,6 +6136,7 @@ fn spawn_visible_heal_machine(
                     ..default()
                 },
                 FieldCommandMarker,
+                HealMachineWorldSprite,
             ));
         }
     }
@@ -6155,6 +6159,7 @@ fn spawn_visible_heal_machine(
                 ..default()
             },
             FieldCommandMarker,
+                HealMachineWorldSprite,
         ));
     }
     Ok(())
@@ -9078,6 +9083,27 @@ fn spawn_visible_name_choice_screen(
             6.0,
         );
     }
+    // The source tilemap replaces the frame tiles with the menu title.
+    // Bitmap glyphs are transparent, so erase that span before drawing them.
+    let title_width = menu.title.chars().count() as f32;
+    let (title_x, title_y) = field_window_center(
+        left_tile + menu.title_indent as f32,
+        top_tile,
+        title_width,
+        1.0,
+    );
+    commands.spawn((
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::WHITE,
+                custom_size: Some(Vec2::new(title_width * TILE_SIZE, TILE_SIZE)),
+                ..default()
+            },
+            transform: Transform::from_xyz(title_x, title_y, 6.05),
+            ..default()
+        },
+        SceneDialogMarker,
+    ));
     spawn_scene_dialog_bitmap_text(
         commands,
         rendered_art,

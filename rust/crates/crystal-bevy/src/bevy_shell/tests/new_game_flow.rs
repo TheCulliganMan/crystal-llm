@@ -1424,7 +1424,7 @@ fn name_entry_replaces_the_visible_overworld_with_one_complete_lcd() {
     {
         let mut runtime_shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
         runtime_shell.pending_name_input = Some(PendingNameInput {
-            label: "YOUR NAME?".to_string(),
+            label: visible_pokemon_nickname_label("CYNDAQUIL"),
             value: String::new(),
             max_length: 7,
             cursor_column: 0,
@@ -1476,6 +1476,16 @@ fn name_entry_replaces_the_visible_overworld_with_one_complete_lcd() {
             "a visible full-window sprite above name entry would make Bevy present a blank/black screen"
         );
     }
+    {
+        let mut shell = app.world_mut().resource_mut::<BevyRuntimeShell>();
+        shell.pending_name_input = None;
+        shell.field_notice = Some("CHRIS got ELM's\nphone number.".to_string());
+        mark_runtime_snapshot_dirty(&mut shell);
+    }
+    app.update();
+    assert!(app.world().get_entity(presenter.entity).is_none(),
+        "finished naming must release its retained keyboard when field dialogue resumes");
+
 }
 
 #[test]

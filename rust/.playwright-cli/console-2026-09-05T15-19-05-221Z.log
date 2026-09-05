@@ -1,0 +1,47 @@
+[      25ms] [WARNING] Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'tools'. @ :0
+[    2814ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_winit-0.14.2/src/system.rs:58%c Creating new window "Pokemon Crystal Rust" (Entity { index: 0, generation: 1 }) color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1066
+[    2834ms] Error: Using exceptions for control flow, don't mind me. This isn't actually an error!
+    at __wbg___wbindgen_throw_344f42d3211c4765 (http://localhost:3003/crystal-bevy.js:106:19)
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[113710]:0x12d55f1
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[111006]:0x12ce74c
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[107355]:0x12c19c7
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[35051]:0xf46bd3
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[1839]:0x5a167c
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[66618]:0x11b20dc
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[48864]:0x1092bf7
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[30683]:0xebf9a2
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[657]:0x2a7232
+[    2836ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.14.2/src/renderer/mod.rs:189%c AdapterInfo { name: "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)", vendor: 4203, device: 0, device_type: IntegratedGpu, driver: "WebGL 2.0 (OpenGL ES", driver_info: "3.0 Chromium)", backend: Gl } color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1066
+[    2926ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_core_pipeline-0.14.2/src/dof/mod.rs:799%c Disabling depth of field on this platform because depth textures aren't supported correctly color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1066
+[  140499ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3003/crystal-bevy.js:1444
+[  140501ms] [LOG] %cERROR%c crates/crystal-bevy/src/bevy_shell.rs:1797%c visible runtime error error = advance hosted multiplayer; color: red; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1066
+[  148314ms] [WARNING] Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'tools'. @ :0
+[  150822ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_winit-0.14.2/src/system.rs:58%c Creating new window "Pokemon Crystal Rust" (Entity { index: 0, generation: 1 }) color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073
+[  150827ms] Error: Using exceptions for control flow, don't mind me. This isn't actually an error!
+    at __wbg___wbindgen_throw_344f42d3211c4765 (http://localhost:3003/crystal-bevy.js:113:19)
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[113734]:0x12d606f
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[111031]:0x12cf1d5
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[107380]:0x12c2450
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[35057]:0xf4738f
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[1838]:0x5a0eeb
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[66625]:0x11b28fd
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[48871]:0x1093414
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[30686]:0xebfff6
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[657]:0x2a73b6
+[  150840ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.14.2/src/renderer/mod.rs:189%c AdapterInfo { name: "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)", vendor: 4203, device: 0, device_type: IntegratedGpu, driver: "WebGL 2.0 (OpenGL ES", driver_info: "3.0 Chromium)", backend: Gl } color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073
+[  150919ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_core_pipeline-0.14.2/src/dof/mod.rs:799%c Disabling depth of field on this platform because depth textures aren't supported correctly color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073
+[  437004ms] [WARNING] Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'tools'. @ :0
+[  438232ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_winit-0.14.2/src/system.rs:58%c Creating new window "Pokemon Crystal Rust" (Entity { index: 0, generation: 1 }) color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073
+[  438233ms] Error: Using exceptions for control flow, don't mind me. This isn't actually an error!
+    at __wbg___wbindgen_throw_344f42d3211c4765 (http://localhost:3003/crystal-bevy.js:113:19)
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[113734]:0x12d606f
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[111031]:0x12cf1d5
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[107380]:0x12c2450
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[35057]:0xf4738f
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[1838]:0x5a0eeb
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[66625]:0x11b28fd
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[48871]:0x1093414
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[30686]:0xebfff6
+    at http://localhost:3003/crystal-bevy_bg.wasm:wasm-function[657]:0x2a73b6
+[  438239ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_render-0.14.2/src/renderer/mod.rs:189%c AdapterInfo { name: "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)", vendor: 4203, device: 0, device_type: IntegratedGpu, driver: "WebGL 2.0 (OpenGL ES", driver_info: "3.0 Chromium)", backend: Gl } color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073
+[  438263ms] [LOG] %cINFO%c /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bevy_core_pipeline-0.14.2/src/dof/mod.rs:799%c Disabling depth of field on this platform because depth textures aren't supported correctly color: whitesmoke; background: #444 color: gray; font-style: italic color: inherit @ http://localhost:3003/crystal-bevy.js:1073

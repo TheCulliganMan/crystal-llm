@@ -137,6 +137,9 @@ pub struct OverworldSession {
     /// map is reloaded and therefore must never enter map object memory.
     #[serde(skip)]
     loaded_roster_hidden_object_identifiers: BTreeSet<String>,
+    /// Map-entry eligibility for expanded rendering; never allocates gameplay objects.
+    #[serde(skip)]
+    presentation_object_slots: BTreeSet<usize>,
     #[serde(skip)]
     loaded_roster_shown_object_identifiers: BTreeSet<String>,
     /// Fresh map sessions apply event/time visibility once; later flag
@@ -638,6 +641,7 @@ impl OverworldSession {
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            presentation_object_slots: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             hour: 12,
@@ -1355,6 +1359,17 @@ impl OverworldSession {
             return true;
         }
         self.is_object_visible_without_identifier_override(object)
+    }
+
+    /// Expanded views retain map-entry eligibility across ordinary flag/time
+    /// changes, while explicit appear/disappear commands still take effect.
+    pub fn object_is_eligible_for_expanded_view(&self, index: usize) -> bool {
+        let Some(object) = self.objects.get(index) else { return false; };
+        if let Some(id) = object.object_identifier.as_ref() {
+            if self.hidden_object_identifiers.contains(id) { return false; }
+            if self.shown_object_identifiers.contains(id) { return true; }
+        }
+        self.presentation_object_slots.contains(&index)
     }
 
     pub fn object_has_loaded_struct(&self, index: usize) -> bool {
@@ -2573,6 +2588,9 @@ impl OverworldSession {
     }
 
     fn initialize_loaded_object_struct_roster(&mut self) {
+        self.presentation_object_slots = self.objects.iter().enumerate()
+            .filter(|(_, object)| self.is_object_visible(object))
+            .map(|(index, _)| index).collect();
         self.loaded_object_struct_slots.clear();
         self.loaded_object_struct_initial_tiles.clear();
         self.object_struct_roster_player_tile = Some(self.player.tile);
@@ -3996,6 +4014,7 @@ impl WarpTransition {
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            presentation_object_slots: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             hour: 12,
@@ -4052,6 +4071,7 @@ impl ConnectionTransition {
             hidden_object_identifiers: BTreeSet::new(),
             shown_object_identifiers: BTreeSet::new(),
             loaded_roster_hidden_object_identifiers: BTreeSet::new(),
+            presentation_object_slots: BTreeSet::new(),
             loaded_roster_shown_object_identifiers: BTreeSet::new(),
             object_visibility_initialized: false,
             hour: 12,
@@ -6083,6 +6103,9 @@ mod tests {
             session.is_object_visible(&first),
             "setevent must not despawn a live object before map reload"
         );
+        assert!(session.object_is_eligible_for_expanded_view(0));
+        assert!(!session.object_is_eligible_for_expanded_view(1),
+            "expanded rendering must not show the next-load replacement");
         assert!(session.is_object_visible(&second));
         assert!(
             !session.object_has_loaded_struct(1),

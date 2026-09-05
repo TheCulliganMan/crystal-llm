@@ -7807,6 +7807,7 @@ fn stop_visible_silent_music_with_checksum(
 }
 
 fn set_visible_stopped_music_state(runtime_shell: &mut BevyRuntimeShell, marker: Option<&str>) {
+    runtime_shell.pending_victory_music_delay = false;
     runtime_shell.music_fade = None;
     runtime_shell.music_volume = 7;
     runtime_shell.pending_music_stop = true;
@@ -7859,6 +7860,7 @@ fn queue_runtime_title_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()>
 
 fn queue_visible_current_music(runtime_shell: &mut BevyRuntimeShell) -> Result<()> {
     if visible_non_overworld_screen_active(runtime_shell)
+        || runtime_shell.battle_message_scene.is_some()
         || runtime_shell.visible_heal_machine.is_some()
         || runtime_shell.visible_magnet_train.is_some()
         || runtime_shell.visible_unown_words.is_some()
@@ -7968,6 +7970,11 @@ fn visible_non_overworld_screen_active(runtime_shell: &BevyRuntimeShell) -> bool
 
 fn sync_runtime_battle_music(mut runtime_shell: ResMut<BevyRuntimeShell>) {
     if visible_non_overworld_screen_active(&runtime_shell)
+        || (runtime_shell.battle_message_scene.is_some()
+            && matches!(
+                runtime_shell.active_music.as_deref(),
+                Some("MUSIC_WILD_VICTORY" | "MUSIC_TRAINER_VICTORY" | "MUSIC_GYM_VICTORY")
+            ))
         || runtime_shell.visible_fishing_animation.is_some()
         || matches!(
             runtime_shell.pending_overworld_step_boundary,
@@ -8064,6 +8071,80 @@ fn sync_runtime_battle_music(mut runtime_shell: ResMut<BevyRuntimeShell>) {
 
 fn battle_music_id(snapshot: &RuntimeShellSnapshot) -> Option<String> {
     Some(snapshot.battle.as_ref()?.battle_music.clone())
+}
+
+fn visible_victory_music_id(
+    state: &crate::core::state::GameState,
+    trainer_class: Option<&str>,
+) -> Option<&'static str> {
+    // engine/battle/core.asm: WinTrainerBattle and PlayVictoryMusic.
+    if let Some(class) = trainer_class {
+        return (state.link_session.link_mode == 0).then_some(
+            if crystal_assets::is_gym_leader_class(class) {
+                "MUSIC_GYM_VICTORY"
+            } else {
+                "MUSIC_TRAINER_VICTORY"
+            },
+        );
+    }
+    let receives_rewards = state.battle_pay_day_money > 0
+        || state.storage.party.pokemon.iter().flatten().any(|pokemon| {
+            pokemon.hp > 0
+                && (pokemon.turns_in_battle > 0 || pokemon.item.as_deref() == Some("EXP_SHARE"))
+        });
+    Some(if receives_rewards {
+        "MUSIC_WILD_VICTORY"
+    } else {
+        "MUSIC_NONE"
+    })
+}
+
+fn queue_visible_victory_music(
+    runtime_shell: &mut BevyRuntimeShell,
+    snapshot: &RuntimeShellSnapshot,
+) -> Result<()> {
+    let battle = snapshot
+        .battle
+        .as_ref()
+        .context("victory requires a battle")?;
+    let trainer_class = match &battle.kind {
+        RuntimeBattleKind::Trainer { trainer_class, .. } => Some(trainer_class.as_str()),
+        _ => None,
+    };
+    let Some(music_id) =
+        visible_victory_music_id(runtime_shell.shell.session().state(), trainer_class)
+    else {
+        return Ok(());
+    };
+    if is_silent_music_id(music_id) {
+        return stop_visible_silent_music(runtime_shell, music_id, "audio:music:victory:stop");
+    }
+    // PlayVictoryMusic calls PlayMusic(MUSIC_NONE), then DelayFrame before
+    // starting the selected track. Reset all audio channels at this boundary.
+    set_visible_stopped_music_state(runtime_shell, Some("MUSIC_NONE"));
+    runtime_shell.pending_victory_music_delay = true;
+    let playback = runtime_shell
+        .shell
+        .runtime()
+        .audio()
+        .require_playback_entry(AudioKind::Music, music_id)?;
+    enqueue_bevy_audio_command(
+        &mut runtime_shell.pending_audio,
+        BevyAudioCommand {
+            audio_id: music_id.to_owned(),
+            kind: ModpackAudioKind::Music,
+            mode: playback.mode,
+            looped: matches!(
+                playback.loop_policy,
+                crate::assets::ModpackAudioLoopPolicy::Loop
+            ),
+        },
+    );
+    runtime_shell.pending_music_stop = true;
+    runtime_shell.active_music = Some(music_id.to_owned());
+    runtime_shell.faded_music = None;
+    record_visible_runtime_action(runtime_shell, format!("audio:music:victory:{music_id}"))?;
+    Ok(())
 }
 
 fn queue_battle_intro_cry(mut runtime_shell: ResMut<BevyRuntimeShell>) {

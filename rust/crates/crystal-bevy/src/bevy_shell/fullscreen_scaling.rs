@@ -479,6 +479,7 @@ fn sync_fullscreen_world_layout(
                 With<ObjectMarker>,
                 With<JumpShadowMarker>,
                 With<GrassRustleMarker>,
+                With<HealMachineWorldSprite>,
             )>,
         ),
     >,
@@ -562,4 +563,46 @@ fn sync_fullscreen_world_layout(
             dialog_transform
         };
     }
+}
+
+// The engine's loaded object structs intentionally cover the original LCD and
+// govern movement, interaction and RNG. The expanded camera also presents map
+// objects outside that simulation range, using their source-initialized state.
+// Never insert these extra actors into the authoritative object roster.
+fn expand_fullscreen_object_presentation(
+    snapshot: &mut RuntimeShellSnapshot,
+    runtime: &BevyRuntimeShell,
+) -> Result<()> {
+    let world = runtime.shell.session().overworld();
+    if snapshot.battle.is_some() || snapshot.overworld.map_name != world.map.name {
+        return Ok(());
+    }
+    for (index, object) in world.objects.iter().enumerate() {
+        if snapshot.visible_object_slots.contains(&index)
+            || world.object_has_loaded_struct(index)
+            || !world.object_is_eligible_for_expanded_view(index)
+            || object
+                .object_identifier
+                .as_ref()
+                .is_some_and(|id| world.invisible_object_struct_identifiers.contains(id))
+        {
+            continue;
+        }
+        let tile = world
+            .object_runtime_tile_checked(index, object)
+            .context("resolve distant fullscreen NPC coordinates")?;
+        if let Some(id) = object.object_identifier.as_ref() {
+            let facing =
+                world.object_facings.get(id).copied().with_context(|| {
+                    format!("fullscreen NPC {id} has no source-initialized facing")
+                })?;
+            snapshot
+                .visible_object_runtime_tiles
+                .insert(id.clone(), tile);
+            snapshot.visible_object_facings.insert(id.clone(), facing);
+        }
+        snapshot.visible_objects.push(object.clone());
+        snapshot.visible_object_slots.push(index);
+    }
+    Ok(())
 }

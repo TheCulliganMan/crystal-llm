@@ -659,6 +659,9 @@ fn play_pending_audio(
         runtime_shell.pending_music_stop = false;
     }
 
+    if std::mem::take(&mut runtime_shell.pending_victory_music_delay) {
+        return;
+    }
     let queued = std::mem::take(&mut runtime_shell.pending_audio);
     let pending = match source_ordered_pending_audio(
         queued,

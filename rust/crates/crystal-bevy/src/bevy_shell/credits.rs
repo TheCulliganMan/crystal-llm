@@ -2133,6 +2133,7 @@ fn apply_visible_player_name(
 }
 
 fn reset_visible_music_state(runtime_shell: &mut BevyRuntimeShell) {
+    runtime_shell.pending_victory_music_delay = false;
     runtime_shell.active_music = None;
     runtime_shell.faded_music = None;
     runtime_shell.music_fade = None;

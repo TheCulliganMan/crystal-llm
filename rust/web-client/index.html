@@ -89,6 +89,7 @@
       <button id="retry-start" type="button">Reload</button>
     </dialog>
     <nav id="controls" aria-label="Display controls">
+      <button id="mute" type="button" aria-label="Mute audio" aria-pressed="false" title="Mute audio">🔊</button>
       <button id="fullscreen" type="button" aria-label="Fullscreen">⛶</button>
       <button id="help" type="button" aria-label="Controls">?</button>
     </nav>
@@ -141,6 +142,22 @@
           } catch (error) {
             if (!isEventLoopHandoff(error)) throw error;
           }
+          const muteButton = document.querySelector('#mute');
+          let muted = localStorage.getItem('crystal.audio.muted') === 'true';
+          const updateMute = () => {
+            wasm.crystal_set_muted(muted);
+            muteButton.textContent = muted ? '🔇' : '🔊';
+            muteButton.setAttribute('aria-pressed', String(muted));
+            muteButton.setAttribute('aria-label', muted ? 'Unmute audio' : 'Mute audio');
+            muteButton.title = muted ? 'Unmute audio' : 'Mute audio';
+          };
+          updateMute();
+          muteButton.addEventListener('click', () => {
+            muted = !muted;
+            updateMute();
+            localStorage.setItem('crystal.audio.muted', String(muted));
+            canvas.focus({ preventScroll: true });
+          });
           const bridge = createGameBridge(wasm);
           let lifetime = new AbortController();
           window.addEventListener('pagehide', () => { bridge.cancel(); lifetime.abort(); });

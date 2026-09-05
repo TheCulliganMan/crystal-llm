@@ -4976,7 +4976,13 @@ fn render_playfield(
     // field extraction, then retire it on the next update once both layers
     // are independently query-visible. This check precedes the idle fast path
     // so a visually stable field cannot strand the pending presenter.
-    if tileset_art.presented_fullscreen_release_pending
+    // A closed field screen can resume directly into a dialogue-only fast
+    // path. Retire its presenter here too: that path never reaches the full
+    // compositor's release step. A different map still waits for staging.
+    let returning_to_staged_field = rendered.map_name.as_deref()
+            == Some(runtime_shell.shell.session().overworld().map.name.as_str());
+    if tileset_art.presented_fullscreen_entity.is_some()
+        && (tileset_art.presented_fullscreen_release_pending || returning_to_staged_field)
         && !retained_field_fullscreen_active(&runtime_shell)
         && map_base_surfaces.iter().next().is_some()
         && map_priority_surfaces.iter().next().is_some()
@@ -5059,6 +5065,11 @@ fn render_playfield(
     } else {
         field_snapshot
     };
+    #[cfg(feature = "fullscreen-scaling")]
+    if let Err(error) = expand_fullscreen_object_presentation(Arc::make_mut(&mut snapshot), &runtime_shell) {
+        record_visible_render_error(&mut commands, &mut runtime_shell, error);
+        return;
+    }
     if !runtime_shell.follower_visible_tile_overrides.is_empty() {
         let snapshot = Arc::make_mut(&mut snapshot);
         for (object_id, tile) in &runtime_shell.follower_visible_tile_overrides {

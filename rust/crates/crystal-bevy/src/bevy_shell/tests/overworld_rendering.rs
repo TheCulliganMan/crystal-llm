@@ -2301,3 +2301,85 @@ fn fullscreen_room_and_dialogue_resize_independently() {
     let dialogue = world.query_filtered::<&Transform, With<FullscreenDialogRoot>>().single(world);
     assert_eq!(dialogue.scale, Vec3::ONE);
 }
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_npcs_exist_beyond_the_game_boy_object_loading_range() {
+    let asset_root = AssetRoot::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap());
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let shell = initialize_bevy_runtime_shell(asset_root, runtime,
+        BevyShellStart::NewGameAtRuntimeTile { spawn_identifier: 14, map_name: "GoldenrodCity".into(), tile_x: 14, tile_y: 8 }, BevyShellConfig::default()).unwrap();
+    let core = shell.shell.session().overworld();
+    let distant = core.objects.iter().enumerate().filter(|(index, object)| {
+        core.is_object_visible(object) && !core.object_has_loaded_struct(*index)
+    }).filter_map(|(index, object)| {
+        let tile = core.object_runtime_tile_checked(index, object).unwrap();
+        ((tile.x - 14).abs() <= 16 && (tile.y - 8).abs() <= 9).then(|| object.object_identifier.clone()).flatten()
+    }).collect::<Vec<_>>();
+    assert!(!distant.is_empty(), "fixture requires distant NPCs inside the widescreen view");
+    let checksum = shell.shell.snapshot().unwrap().state_checksum;
+    let mut app = integrated_shell_test_app(shell);
+    app.update();
+    let world = app.world_mut();
+    let rendered_ids = world.query::<&VisibleObjectSprite>().iter(world)
+        .filter_map(|sprite| sprite.object_identifier.clone()).collect::<Vec<_>>();
+    for id in &distant { assert!(rendered_ids.contains(id), "distant NPC {id} pops in only at the old LCD edge"); }
+    // Presentation expansion must not add actors to the gameplay object roster.
+    let runtime = world.resource::<BevyRuntimeShell>();
+    let snapshot = runtime.shell.snapshot().unwrap();
+    for id in distant { assert!(!snapshot.visible_object_runtime_tiles.contains_key(&id)); }
+    assert!(snapshot.state_checksum.frame() >= checksum.frame());
+}
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_distant_npcs_respect_hidden_flags_without_mutating_gameplay() {
+    let asset_root = AssetRoot::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap());
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let mut shell = initialize_bevy_runtime_shell(asset_root, runtime,
+        BevyShellStart::NewGameAtRuntimeTile { spawn_identifier: 14, map_name: "GoldenrodCity".into(), tile_x: 14, tile_y: 8 }, BevyShellConfig::default()).unwrap();
+    let index = shell.shell.session.overworld.objects.iter().enumerate().find(|(index, object)| {
+        !shell.shell.session.overworld.object_has_loaded_struct(*index) && shell.shell.session.overworld.is_object_visible(object) && object.object_identifier.is_some()
+    }).map(|(index, _)| index).unwrap();
+    let id = shell.shell.session.overworld.objects[index].object_identifier.clone().unwrap();
+    let before = shell.shell.snapshot().unwrap();
+    let mut expanded = before.clone();
+    expand_fullscreen_object_presentation(&mut expanded, &shell).unwrap();
+    assert!(expanded.visible_object_runtime_tiles.contains_key(&id));
+    let count = expanded.visible_objects.len();
+    expand_fullscreen_object_presentation(&mut expanded, &shell).unwrap();
+    assert_eq!(expanded.visible_objects.len(), count);
+    assert_eq!(before.state_checksum, shell.shell.snapshot().unwrap().state_checksum);
+    assert!(!shell.shell.session.overworld.object_has_loaded_struct(index));
+    shell.shell.session.overworld.hidden_object_identifiers.insert(id.clone());
+    let mut hidden = before.clone();
+    expand_fullscreen_object_presentation(&mut hidden, &shell).unwrap();
+    assert!(!hidden.visible_object_runtime_tiles.contains_key(&id));
+    shell.shell.session.overworld.hidden_object_identifiers.remove(&id);
+    shell.shell.session.overworld.invisible_object_struct_identifiers.insert(id.clone());
+    let mut invisible = before;
+    expand_fullscreen_object_presentation(&mut invisible, &shell).unwrap();
+    assert!(!invisible.visible_object_runtime_tiles.contains_key(&id));
+}
+
+#[cfg(feature = "fullscreen-scaling")]
+#[test]
+fn fullscreen_does_not_spawn_moms_next_map_load_replacement() {
+    let asset_root = AssetRoot::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap());
+    let runtime = workspace_desktop_runtime(&asset_root);
+    let mut shell = initialize_bevy_runtime_shell(asset_root, runtime,
+        BevyShellStart::NewGameAtRuntimeTile { spawn_identifier: 14, map_name: "PlayersHouse1F".into(), tile_x: 9, tile_y: 4 }, BevyShellConfig::default()).unwrap();
+    let mut flags = crystal_core::state::EventFlagMemory::default();
+    flags.set_event_flag("EVENT_PLAYERS_HOUSE_MOM_2", true).unwrap();
+    let world = &mut shell.shell.session.overworld;
+    *world = world.clone().with_event_flag_memory(&flags);
+    flags.set_event_flag("EVENT_PLAYERS_HOUSE_MOM_1", true).unwrap();
+    flags.set_event_flag("EVENT_PLAYERS_HOUSE_MOM_2", false).unwrap();
+    world.sync_event_flag_memory(&flags);
+    let mut snapshot = shell.shell.snapshot().unwrap();
+    let original = snapshot.visible_object_slots.clone();
+    assert!(original.contains(&0));
+    assert!(!original.iter().any(|slot| (1..=3).contains(slot)));
+    expand_fullscreen_object_presentation(&mut snapshot, &shell).unwrap();
+    assert_eq!(snapshot.visible_object_slots, original, "fullscreen must not materialize Mom's replacement while the original is still talking");
+}

@@ -1,0 +1,4 @@
+- navigation "Display controls" [ref=f1e3]:
+  - button "Unmute audio" [pressed] [ref=f1e7] [cursor=pointer]: 🔇
+  - button "Fullscreen" [ref=f1e5] [cursor=pointer]: ⛶
+  - button "Controls" [ref=f1e6] [cursor=pointer]: "?"
